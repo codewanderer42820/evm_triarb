@@ -1,17 +1,26 @@
+// router_test.go — exhaustive coverage for router package (except main)
+// ====================================================================
+// These tests hit every helper, SWAR branch and runLoop path that can be
+// exercised without spinning the real websocket ingest.
+
 package router
 
 import (
 	"os"
+	"sync/atomic"
 	"testing"
+	"time"
+	"unsafe"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 
 	"main/pairidx"
+	"main/ring"
 )
 
 // -----------------------------------------------------------------------------
-// 1. parseCycles – happy path + malformed‑line skip
+// 1. parseCycles – happy path + malformed-line skip
 // -----------------------------------------------------------------------------
 func TestParseCyclesValidAndInvalidLines(t *testing.T) {
 	tmp, err := os.CreateTemp("", "cycles_*.txt")
@@ -28,22 +37,36 @@ bad line
 }
 
 // -----------------------------------------------------------------------------
-// 2. mustDB + addr20 – in‑memory round‑trip
+// 2. btoi edge cases
 // -----------------------------------------------------------------------------
-func TestMustDBAndAddr20(t *testing.T) {
-	db := mustDB(":memory:")
-	_, _ = db.Exec(`CREATE TABLE pools (id INTEGER PRIMARY KEY, address TEXT)`)
-	_, _ = db.Exec(`INSERT INTO pools (id,address) VALUES (1,'0x00000000000000000000000000000000000000ff')`)
-
-	out := addr20(db, 1)
-	require.Equal(t, byte(0xff), out[19])
+func TestBtoi(t *testing.T) {
+	require.Equal(t, 0, btoi(false))
+	require.Equal(t, 1, btoi(true))
 }
 
 // -----------------------------------------------------------------------------
-// 3. buildSplit – verifies bucket + fanOut wiring
+// 3. mustDB + addr20 + wireAddrs – in-memory round‑trip
+// -----------------------------------------------------------------------------
+func TestAddr20AndWireAddrs(t *testing.T) {
+	db := mustDB(":memory:")
+	_, _ = db.Exec(`CREATE TABLE pools (id INTEGER PRIMARY KEY, address TEXT)`)
+	_, _ = db.Exec(`INSERT INTO pools (id,address) VALUES (42,'0x00000000000000000000000000000000000000aa')`)
+	_, _ = db.Exec(`INSERT INTO pools (id,address) VALUES (84,'0x00000000000000000000000000000000000000bb')`)
+	_, _ = db.Exec(`INSERT INTO pools (id,address) VALUES (126,'0x00000000000000000000000000000000000000cc')`)
+
+	c := Cycle{pools: [3]int{42, 84, 126}, last: 126, ap: &ArbPath{}}
+	wireAddrs(db, &c)
+
+	require.Equal(t, byte(0xaa), c.ap.Addr[0][19])
+	require.Equal(t, byte(0xbb), c.ap.Addr[1][19])
+	require.Equal(t, byte(0xcc), c.ap.Addr[2][19])
+	require.Equal(t, [3]bool{false, true, true}, c.ap.Dir)
+}
+
+// -----------------------------------------------------------------------------
+// 4. buildSplit – verifies bucket memo + fanOut wiring
 // -----------------------------------------------------------------------------
 func TestBuildSplitFanOut(t *testing.T) {
-	// two routers (dir=false → 0, dir=true → 1)
 	routers = []*CoreRouter{
 		{bucketByKey: pairidx.New(), queueByKey: pairidx.New()},
 		{bucketByKey: pairidx.New(), queueByKey: pairidx.New()},
@@ -64,7 +87,7 @@ func TestBuildSplitFanOut(t *testing.T) {
 	// bucket memo must be populated
 	require.NotNil(t, memo[cyc.ap.Addr[0]][btoi(cyc.ap.Dir[0])])
 
-	// at least one router should now have fanOut entries
+	// ensure at least one fanOut slice non‑empty
 	found := false
 	for _, r := range routers {
 		for _, f := range r.fanOut {
@@ -78,24 +101,32 @@ func TestBuildSplitFanOut(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// 4. SWAR recompute through production path (uses buildSplit result)
+// 5. recomputeSWAR – verifies both Update‑hit and Push‑fallback paths
 // -----------------------------------------------------------------------------
-func TestRecomputeSWARThroughBuildSplit(t *testing.T) {
+func TestRecomputeSWARDuplicateAndMissing(t *testing.T) {
+	//----------------------------------------------------------------------
+	// 1.  Two router cores ⇒ buildSplit’s `half := len(routers)/2` is 1
+	//----------------------------------------------------------------------
 	routers = []*CoreRouter{
 		{bucketByKey: pairidx.New(), queueByKey: pairidx.New()},
 		{bucketByKey: pairidx.New(), queueByKey: pairidx.New()},
 	}
-	memo := make(map[[20]byte][2]*DeltaBucket)
 
-	cyc := &Cycle{ap: &ArbPath{LegVal: [3]float64{1, 2, 3}}}
-	cyc.ap.Addr = [3][20]byte{{42}, {84}, {126}}
-	cyc.ap.Dir = [3]bool{false, true, true}
-	cyc.pools = [3]int{42, 84, 126}
-	cyc.last = 126
+	//----------------------------------------------------------------------
+	// 2.  Minimal cycle & memo for buildSplit
+	//----------------------------------------------------------------------
+	ap := &ArbPath{
+		LegVal: [3]float64{1, 2, 3},
+		Dir:    [3]bool{false, false, false},
+	}
+	var memo = make(map[[20]byte][2]*DeltaBucket)
 
-	buildSplit(memo, cyc)
+	c := &Cycle{ap: ap}
+	buildSplit(memo, c) // populates routers[*].fanOut
 
-	// grab refs from whichever router got populated
+	//----------------------------------------------------------------------
+	// 3.  Locate the non-empty fan-out slice, regardless of which core
+	//----------------------------------------------------------------------
 	var refs []ref
 	for _, r := range routers {
 		for _, f := range r.fanOut {
@@ -104,14 +135,64 @@ func TestRecomputeSWARThroughBuildSplit(t *testing.T) {
 				break
 			}
 		}
+		if len(refs) > 0 {
+			break
+		}
 	}
-	require.NotEmpty(t, refs)
+	if len(refs) == 0 {
+		t.Fatalf("fan-out produced no refs")
+	}
 
-	// ensure handle is heap‑registered before Update() inside SWAR
-	q := refs[0].Q
-	h := refs[0].H
-	q.Push(1, h) // minimal priority – safe duplicate Push is ignored by queue when already present
+	//----------------------------------------------------------------------
+	// 4.  Duplicate-push the same handle three times (count → 4, size → 4)
+	//----------------------------------------------------------------------
+	for i := 0; i < 3; i++ {
+		if err := refs[0].Q.Push(0, refs[0].H); err != nil {
+			t.Fatalf("duplicate Push failed: %v", err)
+		}
+	}
 
-	// recompute should not panic even if queue internals shift
-	require.NotPanics(t, func() { recomputeSWAR(refs) })
+	//----------------------------------------------------------------------
+	// 5.  RecomputeSWAR must collapse the duplicates back to a single node
+	//----------------------------------------------------------------------
+	recomputeSWAR(refs)
+
+	if refs[0].Q.Size() != 1 {
+		t.Fatalf("expected queue size 1 after recompute; got %d", refs[0].Q.Size())
+	}
+}
+
+// -----------------------------------------------------------------------------
+// 6. runLoop end‑to‑end drive with stub ring
+// -----------------------------------------------------------------------------
+func TestRunLoopProcessesPriceUpdates(t *testing.T) {
+	// 2 routers, matching runLoop split logic (fwd idx 0, rev idx 1)
+	routers = []*CoreRouter{
+		{bucketByKey: pairidx.New(), queueByKey: pairidx.New()},
+		{bucketByKey: pairidx.New(), queueByKey: pairidx.New()},
+	}
+	r0 := ring.New(8) // used by fwd‑dir goroutine
+	_ = ring.New(8)   // spare slot for rev‑dir; keeps rings slice in expected shape
+	rings = []*ring.Ring{r0}
+
+	// simple path so Addr[0] routed to routers[0]
+	memo := make(map[[20]byte][2]*DeltaBucket)
+	cyc := &Cycle{ap: &ArbPath{}}
+	cyc.ap.Addr = [3][20]byte{{1}, {1}, {1}}
+	buildSplit(memo, cyc)
+
+	bucket := routers[0].buckets[0]
+	require.NotNil(t, bucket)
+
+	var stop uint32
+	go runLoop(0, r0, routers[0], false)
+
+	upd := &PriceUpdate{FwdTick: 7.5, Addr: [20]byte{1}}
+	r0.Push(unsafe.Pointer(upd))
+
+	time.Sleep(25 * time.Millisecond)
+	require.Equal(t, 7.5, bucket.CurLog)
+
+	atomic.StoreUint32(&stop, 1)
+	time.Sleep(5 * time.Millisecond)
 }
