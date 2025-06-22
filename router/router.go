@@ -1,9 +1,4 @@
-// ✅ Tuned for max performance: zero alloc, cache-aligned, L1-friendly
-// ✅ Core identity (Fwd or Rev) is now configurable per runLoop instance
-// ✅ SWAR-style recompute loop added
-// ✅ Fully implemented: mustDB, parseCycles, wireAddrs, buildSplit
-
-package main
+package router
 
 import (
 	"bufio"
@@ -22,6 +17,87 @@ import (
 	"main/pairidx"
 	"main/ring"
 )
+
+const (
+	Fwd = 0
+	Rev = 1
+)
+
+var keyCache = make(map[[21]byte]string)
+
+func buildKeys(addr [20]byte) {
+	for _, dir := range []int{Fwd, Rev} {
+		var key [21]byte
+		copy(key[:20], addr[:])
+		key[20] = byte(dir)
+		keyCache[key] = string(key[:])
+	}
+}
+
+func keyOf(addr *[20]byte, dir int) string {
+	var key [21]byte
+	copy(key[:20], addr[:])
+	key[20] = byte(dir)
+	if v, ok := keyCache[key]; ok {
+		return v
+	}
+	return string(key[:]) // fallback if not cached
+}
+
+func build(workers int, memo map[[21]byte]*DeltaBucket, rtr []*CoreRouter, p struct {
+	pools [3]int
+	last  int
+	ap    *ArbPath
+}) {
+	// Fill dummy ap if nil
+	if p.ap == nil {
+		p.ap = &ArbPath{}
+		for i := 0; i < 3; i++ {
+			p.ap.Addr[i][19] = byte(p.pools[i])
+			p.ap.Dir[i] = (i == 1 || i == 2)
+		}
+	}
+
+	// Build 3 buckets per address+dir combo
+	for i := 0; i < 3; i++ {
+		key := p.ap.Addr[i]
+		dir := p.ap.Dir[i]
+		idx := btoi(dir)
+		k := [21]byte{}
+		copy(k[:20], key[:])
+		k[20] = byte(idx)
+
+		if memo[k] == nil {
+			memo[k] = &DeltaBucket{Queue: bucketqueue.New()}
+			core := 0
+			r := rtr[core]
+			r.bucketByKey.Put(string(key[:]), uint16(len(r.buckets)))
+			r.buckets = append(r.buckets, memo[k])
+		}
+	}
+
+	// Push ArbPath into Arena, update queue
+	ap := *p.ap
+	k := [21]byte{}
+	copy(k[:20], ap.Addr[0][:])
+	k[20] = byte(btoi(ap.Dir[0]))
+	q := memo[k].Queue
+	h, _ := q.Borrow()
+	*(*ArbPath)(unsafe.Pointer(&q.Arena[h])) = ap
+	q.Push(0, h)
+
+	// Set fanOut for other legs
+	for _, i := range []int{1, 2} {
+		r := rtr[0]
+		j, ok := r.queueByKey.Get(string(ap.Addr[i][:]))
+		if !ok {
+			j = uint16(len(r.fanOut))
+			r.queueByKey.Put(string(ap.Addr[i][:]), j)
+			r.fanOut = append(r.fanOut, nil)
+		}
+		r.fanOut[j] = append(r.fanOut[j], ref{Q: q, H: h})
+	}
+}
 
 var (
 	routers []*CoreRouter
@@ -152,33 +228,37 @@ func parseCycles(path string) []Cycle {
 
 	var out []Cycle
 	sc := bufio.NewScanner(f)
-	var buf [64]byte
 
 	for sc.Scan() {
 		line := sc.Bytes()
-		n := 0
-		var tmp [4]int
-		i := 0
-		for _, c := range line {
-			if c >= '0' && c <= '9' {
-				buf[n] = c
-				n++
-				continue
-			}
-			if n > 0 && i < 4 {
-				tmp[i] = fastAtoi(buf[:n])
-				n = 0
-				i++
-			}
-			if i == 4 {
-				break
+		var pools [3]int
+		idx := 0
+		num := 0
+		inParens := false
+
+		for _, b := range line {
+			switch {
+			case b == '(':
+				inParens = true
+				num = 0
+			case b == ')' && inParens:
+				if idx < 3 {
+					pools[idx] = num
+					idx++
+				}
+				inParens = false
+			case inParens && b >= '0' && b <= '9':
+				num = num*10 + int(b-'0')
 			}
 		}
-		if i < 3 {
-			continue
+
+		if idx == 3 {
+			out = append(out, Cycle{
+				pools: pools,
+				last:  pools[2], // dummy fallback if you want
+				ap:    &ArbPath{},
+			})
 		}
-		c := Cycle{pools: [3]int{tmp[0], tmp[1], tmp[2]}, last: tmp[3], ap: &ArbPath{}}
-		out = append(out, c)
 	}
 	return out
 }
@@ -256,4 +336,34 @@ func addr20(db *sql.DB, id int) (out [20]byte) {
 		log.Fatalf("addr20 decode: %v", err)
 	}
 	return
+}
+
+func parseLine(line []byte) [3]int {
+	var out [3]int
+	n := 0
+	insideParens := false
+	num := 0
+	capturing := false
+
+	for _, b := range line {
+		switch b {
+		case '(':
+			insideParens = true
+			num = 0
+			capturing = false
+		case ')':
+			if insideParens && capturing && n < len(out) {
+				out[n] = num
+				n++
+			}
+			insideParens = false
+		default:
+			if insideParens && b >= '0' && b <= '9' {
+				num = num*10 + int(b-'0')
+				capturing = true
+			}
+		}
+	}
+
+	return out
 }
