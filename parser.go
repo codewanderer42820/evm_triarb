@@ -44,6 +44,11 @@ func handleFrame(p []byte) {
 		case keyTopics:
 			if missing&wantTopics != 0 {
 				v.Topics = sliceJSONArray(p, i+8+findBracket(p[i+8:]))
+				// ── fast 8-byte Uniswap-V2 Sync filter (skip 0x) ──
+				if len(v.Topics) < 11 || // need '"0x' + 8 hex chars
+					*(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
+					return // not a Sync event → drop early
+				}
 				missing &^= wantTopics
 			}
 		case keyBlockNumber:

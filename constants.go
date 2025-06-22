@@ -34,4 +34,6 @@ var (
 	keyBlockNumber      = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'N', 'u'}
 	keyTransactionIndex = [8]byte{'"', 't', 'r', 'a', 'n', 's', 'a', 'c'}
 	keyLogIndex         = [8]byte{'"', 'l', 'o', 'g', 'I', 'n', 'd', 'e'}
+
+	sigSyncPrefix = [8]byte{'1', 'c', '4', '1', '1', 'e', '9', 'a'}
 )
