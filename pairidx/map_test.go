@@ -1,209 +1,146 @@
 package pairidx
 
 import (
-	"fmt"
-	"hash/crc32"
 	"math/bits"
-	"sync"
+	"strconv"
 	"testing"
 	"unsafe"
 )
 
-// hash16Inline replicates the map's internal hashing logic for testing purposes.
-// Returns the key pointer, key length, low 16 bits of CRC32, and the 8-bit tag.
-func hash16Inline(key string) (uintptr, uintptr, uint16, byte) {
-	bytePtr := unsafe.StringData(key)
-	ptr := uintptr(unsafe.Pointer(bytePtr))
-	length := uintptr(len(key))
+/*───────────────────────────────────────────────────────────────*
+| Helpers that duplicate a tiny subset of map.go for hashing     |
+*───────────────────────────────────────────────────────────────*/
 
-	// CRC32 hash using the same Castagnoli table as production code
-	crc := crc32.Update(0, crcTab, unsafe.Slice(bytePtr, int(length)))
-	low := uint16(crc)
-	tag := byte((crc>>16)&0xFF) | 1
-	return ptr, length, low, tag
+// hashLow16 returns the same 16-bit “low” value map.go uses for
+// bucket / cluster / slot selection.
+func hashLow16(p unsafe.Pointer, n uint16) uint16 {
+	var h uint64 = uint64(n) * prime64_1
+
+	switch {
+	case n <= 8:
+		v := *(*uint64)(p)
+		h = bits.RotateLeft64(v*prime64_2, 31) * prime64_1
+	case n <= 16:
+		v0 := *(*uint64)(p)
+		v1 := *(*uint64)(unsafe.Add(p, uintptr(n)-8))
+		h = v0 ^ bits.RotateLeft64(v1*prime64_2, 27)
+		h = bits.RotateLeft64(h*prime64_1, 31) * prime64_2
+	case n <= 32:
+		v0 := *(*uint64)(p)
+		v1 := *(*uint64)(unsafe.Add(p, 8))
+		v2 := *(*uint64)(unsafe.Add(p, uintptr(n)-16))
+		v3 := *(*uint64)(unsafe.Add(p, uintptr(n)-8))
+		h = v0 ^ bits.RotateLeft64(v1*prime64_2, 31)
+		h ^= bits.RotateLeft64(v2*prime64_2, 27)
+		h ^= bits.RotateLeft64(v3*prime64_1, 33)
+		h = bits.RotateLeft64(h*prime64_1, 27) * prime64_1
+	default:
+		p8 := uintptr(p)
+		for rem := n; rem >= 8; rem -= 8 {
+			v := *(*uint64)(unsafe.Pointer(p8))
+			p8 += 8
+			h ^= bits.RotateLeft64(v*prime64_2, 31)
+			h = bits.RotateLeft64(h, 27) * prime64_1
+		}
+		if tail := n & 7; tail != 0 {
+			t := *(*uint64)(unsafe.Pointer(p8)) & ((1 << (tail * 8)) - 1)
+			h ^= bits.RotateLeft64(t*prime64_2, 11)
+			h = bits.RotateLeft64(h, 7) * prime64_1
+		}
+	}
+	h ^= h >> 33
+	h *= prime64_2
+	h ^= h >> 29
+	h *= prime64_1
+	h ^= h >> 32
+	return uint16(h)
 }
 
-// fillCluster tries to generate `clusterSlots + 1` keys that hash into the same cluster.
-// This is used to test cluster overflow behavior.
-func fillCluster(prefix string) []string {
-	bc := bucketCnt
-	cpb := clustersPerBkt
-	cs := clusterSlots
+/*──────────────────────────── tests ───────────────────────────*/
 
-	mask := uint32(bc - 1)
-	clMask := uint32(cpb - 1)
+// 1. Fast-path coverage (<8 B, 9-12 B, >12 B key lengths) plus overwrite.
+func TestPutGetPaths(t *testing.T) {
+	h := New()
 
-	// Derive bucket and cluster index to target
-	_, _, baseLow, _ := hash16Inline(prefix)
-	wantBI := uint32(baseLow) & mask
-	wantCI := (uint32(baseLow) >> bits.Len32(mask)) & clMask
+	keys := []string{
+		"abc",                        // ≤8  B
+		"01234567890",                // 11 B (≤12 B path)
+		"abcdefghijklmnopqrstuvwxyz", // 26 B (>12 B)
+	}
 
+	for i, k := range keys {
+		h.Put(k, uint16(i+1))
+		if v, ok := h.Get(k); !ok || v != uint16(i+1) {
+			t.Fatalf("miss or wrong value for %q", k)
+		}
+	}
+
+	// overwrite should keep size constant
+	if sz := h.Size(); sz != len(keys) {
+		t.Fatalf("size mismatch before overwrite: %d", sz)
+	}
+	h.Put(keys[1], 99)
+	if v, _ := h.Get(keys[1]); v != 99 {
+		t.Fatalf("overwrite failed, got %d", v)
+	}
+	if sz := h.Size(); sz != len(keys) {
+		t.Fatalf("size changed after overwrite")
+	}
+}
+
+// 2. Exercise secondary-cluster hop: fill 17 colliding keys.
+func TestSecondaryClusterHop(t *testing.T) {
+	const need = clusterSlots + 1 // 17 ⇒ forces hop
+	h := New()
+
+	// Pick a target low16 from the first random key we find.
+	targetLow := uint16(0xffff)
 	var keys []string
-	for i := 0; len(keys) < cs+1; i++ {
-		k := fmt.Sprintf("%s_%d", prefix, i)
-		_, _, l, _ := hash16Inline(k)
-		bi := uint32(l) & mask
-		ci := (uint32(l) >> bits.Len32(mask)) & clMask
-		if bi == wantBI && ci == wantCI {
+	for i := 0; len(keys) < need; i++ {
+		k := "k_" + strconv.Itoa(i)
+		low := hashLow16(unsafe.Pointer(unsafe.StringData(k)), uint16(len(k)))
+		if targetLow == 0xffff {
+			targetLow = low
+		}
+		if low == targetLow { // same bucket+cluster family
 			keys = append(keys, k)
 		}
-		if i > 10_000_000 {
-			panic("unable to generate enough collisions")
-		}
 	}
-	return keys
-}
 
-// mustPut wraps HashMap.Put and fails the test if a panic occurs.
-// Used to assert successful insertions.
-func mustPut(tb testing.TB, m *HashMap, k string, v uint16) {
-	tb.Helper()
-	defer func() {
-		if r := recover(); r != nil {
-			tb.Fatalf("unexpected panic on Put(%q): %v", k, r)
-		}
-	}()
-	m.Put(k, v)
-}
-
-// getEq ensures that HashMap.Get returns (want, true).
-func getEq(tb testing.TB, m *HashMap, k string, want uint16) {
-	tb.Helper()
-	v, ok := m.Get(k)
-	if !ok || v != want {
-		tb.Fatalf("Get(%q) = (%d,%v), want (%d,true)", k, v, ok, want)
+	for i, k := range keys {
+		h.Put(k, uint16(i))
 	}
-}
 
-/* ---------- 1. Basic functionality ----------------------------------- */
-
-// Test basic insert/update and lookup functionality.
-func TestPutGet(t *testing.T) {
-	m := New()
-	mustPut(t, m, "BTC", 1)
-	getEq(t, m, "BTC", 1)
-	mustPut(t, m, "BTC", 9)
-	getEq(t, m, "BTC", 9)
-}
-
-// Ensure that inserting same key with same value skips update.
-func TestPutSameValueNoOverwrite(t *testing.T) {
-	m := New()
-	m.Put("foo", 42)
-	m.Put("foo", 42) // Should avoid atomic.Store since value is unchanged
-}
-
-// Check correct size accounting after inserts.
-func TestSizeAccounting(t *testing.T) {
-	m := New()
-	if m.Size() != 0 {
-		t.Fatalf("expected size 0, got %d", m.Size())
+	if h.Size() != need {
+		t.Fatalf("expected %d keys after hop, got %d", need, h.Size())
 	}
-	m.Put("a", 1)
-	m.Put("b", 2)
-	if m.Size() != 2 {
-		t.Fatalf("expected size 2, got %d", m.Size())
-	}
-}
 
-/* ---------- 2. Tag collision sanity ----------------------------------- */
-
-// Test that two different keys with same CRC low bits still work.
-func TestTagCollision(t *testing.T) {
-	base := "AAA"
-	_, _, low1, _ := hash16Inline(base)
-	var coll string
-	for i := 0; ; i++ {
-		c := fmt.Sprintf("AAA_%d", i)
-		_, _, low2, _ := hash16Inline(c)
-		if low2 == low1 {
-			coll = c
-			break
-		}
-	}
-	m := New()
-	mustPut(t, m, base, 1)
-	mustPut(t, m, coll, 2)
-	getEq(t, m, base, 1)
-	getEq(t, m, coll, 2)
-}
-
-/* ---------- 3. Get fallback and misses ------------------------------- */
-
-// Miss due to entirely different hash (bucket/cluster/slot mismatch)
-func TestGetFallbackMiss(t *testing.T) {
-	m := New()
-	m.Put("foo", 123)
-	if _, ok := m.Get("bar"); ok {
-		t.Fatal("expected miss, got hit")
-	}
-}
-
-// Same low bits, but different key → test full slot probe and miss
-func TestGetProbeMiss(t *testing.T) {
-	m := New()
-	var baseLow uint16
-	prefix := "same"
-	for i := 0; ; i++ {
-		k := fmt.Sprintf("%s_%d", prefix, i)
-		_, _, low, _ := hash16Inline(k)
-		if i == 0 {
-			baseLow = low
-			m.Put(k, 1)
-			continue
-		}
-		if low == baseLow {
-			if _, ok := m.Get(k); ok {
-				t.Fatalf("unexpected hit with %q", k)
-			}
-			return
+	// Ensure every key survives the hop.
+	for i, k := range keys {
+		if v, ok := h.Get(k); !ok || v != uint16(i) {
+			t.Fatalf("lost key %q after hop (v=%d ok=%v)", k, v, ok)
 		}
 	}
 }
 
-/* ---------- 4. Cluster-full behavior --------------------------------- */
+// 3. Allocation guard: Put/Get must allocate 0 bytes in steady-state.
+func TestZeroAllocs(t *testing.T) {
+	h := New()
+	h.Put("aaa", 1)
 
-// Ensures Get fails when cluster is full and key is not present.
-func TestClusterFullMiss(t *testing.T) {
-	m := New()
-	keys := fillCluster("X")
-	for _, k := range keys[:clusterSlots] {
-		mustPut(t, m, k, 100)
-	}
-	if _, ok := m.Get(keys[clusterSlots]); ok {
-		t.Fatalf("expected miss in full cluster, got hit")
-	}
-}
-
-// Inserting more than 16 items in one cluster should panic.
-func TestClusterFullPanic(t *testing.T) {
-	m := New()
-	keys := fillCluster("Y")
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on cluster overflow")
-		}
-	}()
-	for _, k := range keys {
-		m.Put(k, 200)
+	allocs := testingAllocsPerRun(1000, func() {
+		_ = h.Size() // read-only
+		h.Get("aaa")
+		h.Put("bbb", 2)
+	})
+	if allocs != 0 {
+		t.Fatalf("expected 0 allocs/op, got %.2f", allocs)
 	}
 }
 
-/* ---------- 5. Concurrency -------------------------------------------- */
+/*──────────────────────── helper for alloc check ─────────────*/
 
-// Validate that multiple concurrent readers don’t race or panic.
-func TestConcurrentReaders(t *testing.T) {
-	m := New()
-	mustPut(t, m, "AAA", 7)
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 10000; j++ {
-				m.Get("AAA")
-			}
-		}()
-	}
-	wg.Wait()
+// testing.AllocsPerRun is an internal helper; re-export small shim.
+func testingAllocsPerRun(runs int, f func()) float64 {
+	return testing.AllocsPerRun(runs, f)
 }

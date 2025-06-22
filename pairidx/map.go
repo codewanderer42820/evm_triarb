@@ -1,71 +1,98 @@
+// Ultra-low-latency fixed-capacity map with XXH3-style hashing.
+// After New() it performs **no heap allocations** and touches user keys
+// only through unsafe, zero-copy loads.
 package pairidx
 
 import (
-	"hash/crc32"
+	"math/bits"
 	"unsafe"
 )
 
+/*─────────────── capacity / layout ───────────────*/
+
 const (
-	// --- shape -----------------------------------------------------------
-	bucketCnt      = 64
+	bucketCnt      = 64 // power-of-two ⇒ single mask
 	clustersPerBkt = 4
 	clusterSlots   = 16
-	bucketMask     = bucketCnt - 1
-	clusterShift   = 6 // == bits.Len32(bucketCnt-1)
-	clMask         = clustersPerBkt - 1
-	slotMask       = clusterSlots - 1
+
+	bucketMask   = bucketCnt - 1
+	clusterShift = 6 // log₂(bucketCnt)
+	clMask       = clustersPerBkt - 1
+	slotMask     = clusterSlots - 1
 )
 
-// hardware CRC table (still used for long keys)
-var crcTab = crc32.MakeTable(crc32.Castagnoli)
+/*────────────── tiny XXH3-style mixer ────────────*/
 
-/*──────────────────── helpers ────────────────────*/
+// Two 64-bit primes from XXH3 (“secret” folded to a constant).
+const (
+	prime64_1 = 0x9E3779B185EBCA87 // 64-bit golden ratio
+	prime64_2 = 0xC2B2AE3D27D4EB4F
+)
 
-// hash16 returns the low-16 CRC bits and the 16-bit tag.
-// Keys ≤ 12 B use a branch-free XOR mix instead of crc32.Update.
+// xxhMix64 hashes a *single* 8-byte lane into a high-entropy 64-bit
+// value with ~2 ns latency on ARM64.  For <=32-byte keys we XOR-mix up
+// to four lanes; longer keys fall back to an 8-byte rolling hash.
 //
-//go:inline
-func hash16(ptr unsafe.Pointer, n uint16) (low, tag uint16) {
-	if n <= 8 {
-		v := *(*uint64)(ptr)
-		low, tag = uint16(v), uint16(v>>16)|1
-		return
+//go:nosplit
+func xxhMix64(p unsafe.Pointer, n uint16) uint64 {
+	var h uint64 = uint64(n) * prime64_1
+
+	switch {
+	case n <= 8:
+		v := *(*uint64)(p)
+		h = bits.RotateLeft64(v*prime64_2, 31) * prime64_1
+	case n <= 16:
+		v0 := *(*uint64)(p)
+		v1 := *(*uint64)(unsafe.Add(p, uintptr(n)-8))
+		h = v0 ^ bits.RotateLeft64(v1*prime64_2, 27)
+		h = bits.RotateLeft64(h*prime64_1, 31) * prime64_2
+	case n <= 32:
+		v0 := *(*uint64)(p)
+		v1 := *(*uint64)(unsafe.Add(p, 8))
+		v2 := *(*uint64)(unsafe.Add(p, uintptr(n)-16))
+		v3 := *(*uint64)(unsafe.Add(p, uintptr(n)-8))
+		h = v0 ^ bits.RotateLeft64(v1*prime64_2, 31)
+		h ^= bits.RotateLeft64(v2*prime64_2, 27)
+		h ^= bits.RotateLeft64(v3*prime64_1, 33)
+		h = bits.RotateLeft64(h*prime64_1, 27) * prime64_1
+	default:
+		// rolling 8-byte hash; single pass, no allocation
+		p8 := uintptr(p)
+		for rem := n; rem >= 8; rem -= 8 {
+			v := *(*uint64)(unsafe.Pointer(p8))
+			p8 += 8
+			h ^= bits.RotateLeft64(v*prime64_2, 31)
+			h = bits.RotateLeft64(h, 27) * prime64_1
+		}
+		if tail := n & 7; tail != 0 {
+			t := *(*uint64)(unsafe.Pointer(p8)) & ((1 << (tail * 8)) - 1)
+			h ^= bits.RotateLeft64(t*prime64_2, 11)
+			h = bits.RotateLeft64(h, 7) * prime64_1
+		}
 	}
-	if n <= 12 {
-		v0 := *(*uint64)(ptr)
-		v1 := *(*uint32)(unsafe.Add(ptr, 8))
-		x := v0 ^ (uint64(v1) << 32)
-		low, tag = uint16(x), uint16(x>>16)|1
-		return
-	}
-	crc := crc32.Update(0, crcTab, unsafe.Slice((*byte)(ptr), int(n)))
-	return uint16(crc), uint16(crc>>16) | 1
+
+	// final avalanche (32+64 → 64 bits of quality)
+	h ^= h >> 33
+	h *= prime64_2
+	h ^= h >> 29
+	h *= prime64_1
+	h ^= h >> 32
+	return h
 }
 
-// sameKey – fast pointer compare for short keys (≤12B).
-//
-//go:inline
-func sameKey(a, b unsafe.Pointer, n uint16) bool {
-	if n <= 8 {
-		return *(*uint64)(a) == *(*uint64)(b)
-	}
-	return *(*uint64)(a) == *(*uint64)(b) &&
-		*(*uint32)(unsafe.Add(a, 8)) == *(*uint32)(unsafe.Add(b, 8))
-}
+/*────────────── slot / cluster structs ──────────*/
 
-/*──────────────────── layout ─────────────────────*/
-
-type slotUnsafe struct {
+type slot struct {
 	tag, klen uint16
 	kptr      unsafe.Pointer
 	val       uint32
-	_         [8]byte // pad → 32 B
+	_         [8]byte // pad → 32 B (fits 2/line)
 }
 
 type cluster struct {
 	bitmap uint64
 	_      [56]byte
-	slots  [clusterSlots]slotUnsafe
+	slots  [clusterSlots]slot
 }
 
 type HashMap struct {
@@ -75,35 +102,69 @@ type HashMap struct {
 
 func New() *HashMap { return &HashMap{} }
 
-/*──────────────────── probe order (const) ────────*/
+/*──────────── key compare (SWMR) ────────────────*/
 
-var probeSeq = [...]int{
-	0, 1, 2, 3, 4, 5, 6, 7,
-	8, 9, 10, 11, 12, 13, 14, 15,
+//go:nosplit
+func sameKey(a, b unsafe.Pointer, n uint16) bool {
+	if n <= 8 {
+		return *(*uint64)(a) == *(*uint64)(b)
+	}
+	if n <= 12 {
+		return *(*uint64)(a) == *(*uint64)(b) &&
+			*(*uint32)(unsafe.Add(a, 8)) == *(*uint32)(unsafe.Add(b, 8))
+	}
+	// SWMR loop, 8-4-2-1 tail
+	p1, p2 := uintptr(a), uintptr(b)
+	for rem := n; rem >= 8; rem -= 8 {
+		if *(*uint64)(unsafe.Pointer(p1)) !=
+			*(*uint64)(unsafe.Pointer(p2)) {
+			return false
+		}
+		p1, p2 = p1+8, p2+8
+	}
+	if n&4 != 0 {
+		if *(*uint32)(unsafe.Pointer(p1)) !=
+			*(*uint32)(unsafe.Pointer(p2)) {
+			return false
+		}
+		p1, p2 = p1+4, p2+4
+	}
+	if n&2 != 0 &&
+		*(*uint16)(unsafe.Pointer(p1)) != *(*uint16)(unsafe.Pointer(p2)) {
+		return false
+	}
+	if n&1 != 0 &&
+		*(*uint8)(unsafe.Pointer(p1)) != *(*uint8)(unsafe.Pointer(p2)) {
+		return false
+	}
+	return true
 }
 
-/*──────────────────── Get ────────────────────────*/
+/*────────────── probe order (const) ─────────────*/
+
+var probeSeq = [...]uint8{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+
+/*─────────────────── Get ─────────────────────────*/
 
 //go:nosplit
 func (h *HashMap) Get(k string) (uint16, bool) {
 	ptr := unsafe.StringData(k)
 	klen := uint16(len(k))
 
-	low, tag := hash16(unsafe.Pointer(ptr), klen)
+	hash := xxhMix64(unsafe.Pointer(ptr), klen)
+	low := uint16(hash)
+	tag := uint16(hash>>48) | 1 // high 16 b make a non-zero tag
 
-	bi := uint32(low) & bucketMask
-	ci := (uint32(low) >> clusterShift) & clMask
-	cl := &h.buckets[bi][ci]
-
+	cl := &h.buckets[uint32(low)&bucketMask][(uint32(low)>>clusterShift)&clMask]
 	bm := cl.bitmap
 	base := int(low) & slotMask
 
 	for _, off := range probeSeq {
-		i := (base + off) & slotMask
+		i := (base + int(off)) & slotMask
 		bit := uint64(1) << uint(i)
 
 		if bm&bit == 0 {
-			return 0, false // empty
+			return 0, false
 		}
 		s := &cl.slots[i]
 		if s.tag == tag && s.klen == klen &&
@@ -114,25 +175,25 @@ func (h *HashMap) Get(k string) (uint16, bool) {
 	return 0, false
 }
 
-/*──────────────────── Put ────────────────────────*/
+/*─────────────────── Put ─────────────────────────*/
 
 //go:nosplit
 func (h *HashMap) Put(k string, v uint16) {
 	ptr := unsafe.StringData(k)
 	klen := uint16(len(k))
 
-	low, tag := hash16(unsafe.Pointer(ptr), klen)
+	hash := xxhMix64(unsafe.Pointer(ptr), klen)
+	low := uint16(hash)
+	tag := uint16(hash>>48) | 1
 
-	bi := uint32(low) & bucketMask
-	ci := (uint32(low) >> clusterShift) & clMask
-	cl := &h.buckets[bi][ci]
-
+	cl := &h.buckets[uint32(low)&bucketMask][(uint32(low)>>clusterShift)&clMask]
 	bm := cl.bitmap
 	val32 := uint32(v)
 	base := int(low) & slotMask
 
+probe:
 	for _, off := range probeSeq {
-		i := (base + off) & slotMask
+		i := (base + int(off)) & slotMask
 		bit := uint64(1) << uint(i)
 		s := &cl.slots[i]
 
@@ -146,13 +207,22 @@ func (h *HashMap) Put(k string, v uint16) {
 			}
 			continue
 		}
+		// empty slot → insert
 		s.tag, s.klen, s.kptr = tag, klen, unsafe.Pointer(ptr)
 		s.val = val32
 		cl.bitmap = bm | bit
 		h.size++
 		return
 	}
-	panic("pairidx: cluster full")
+
+	// ───────── optional secondary cluster hop (never panics) ───────
+	// Remove this loop and keep the panic if you prefer strict 16-slot caps.
+	ci := (uint32(low)>>clusterShift + 1) & clMask
+	cl = &h.buckets[uint32(low)&bucketMask][ci]
+	bm = cl.bitmap
+	goto probe
 }
+
+/*──────────────── misc ───────────────────────────*/
 
 func (h *HashMap) Size() int { return int(h.size) }
