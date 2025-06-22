@@ -10,6 +10,7 @@ package bucketqueue
 
 import (
 	"errors"
+	"fmt"
 	"math/bits"
 )
 
@@ -34,7 +35,7 @@ var (
 type Handle = int32
 
 // ───── internal node and arena ─────────────────────────────────────────
-// node holds pointers for a doubly-linked list, bucket assignment, and
+// Node holds pointers for a doubly-linked list, bucket assignment, and
 // a duplicate-push ref-count.
 type Node struct {
 	next, prev int32 // indices in the arena array, nilIdx for none
@@ -42,13 +43,7 @@ type Node struct {
 	count      int32 // number of duplicate pushes
 }
 
-// Queue encapsulates the sliding-window priority queue state:
-//   - arena: fixed-size pool of nodes
-//   - buckets: ring buffer of heads per tick bucket
-//   - bitmaps: for fast min-bucket lookup via two-level bitmasks
-//   - freelist: linked-list of unused handle indices
-//   - baseTick/gen: track absolute tick origin and lazy bucket clearing
-//   - size: current logical number of enqueued items
+// Queue encapsulates the sliding-window priority queue state.
 type Queue struct {
 	Arena    [capItems]Node // node pool
 	freeHead int32          // head of free-list
@@ -65,7 +60,6 @@ type Queue struct {
 }
 
 // New constructs and returns an initialized Queue.
-// All buckets start empty; the arena's freelist links all handles.
 func New() *Queue {
 	q := &Queue{freeHead: 0}
 	// Build freelist through arena.next pointers
@@ -83,94 +77,51 @@ func New() *Queue {
 	return q
 }
 
-// ───── freelist helpers ─────────────────────────────────────────────────
-// borrow pops an index from the freelist or returns ErrFull.
-func (q *Queue) borrow() (int32, error) {
-	if q.freeHead == nilIdx {
-		return nilIdx, ErrFull
-	}
-	idx := q.freeHead
-	q.freeHead = q.Arena[idx].next
-	return idx, nil
-}
-
-// release returns a node index to the freelist, zeroing its node.
-func (q *Queue) release(idx int32) {
-	n := &q.Arena[idx]
-	*n = Node{}         // reset fields
-	n.next = q.freeHead // push onto freelist
-	n.bucketIdx = nilIdx
-	q.freeHead = idx
-}
-
-// ───── public API: Borrow & Return handles ─────────────────────────────
-
-// Borrow yields a fresh handle for subsequent Push calls.
-func (q *Queue) Borrow() (Handle, error) {
-	return q.borrow()
-}
-
-// Return recycles an unused handle back into the freelist.
-// Fails if the handle is invalid or still enqueued.
-func (q *Queue) Return(h Handle) error {
-	idx := int32(h)
-	if idx < 0 || idx >= capItems {
-		return ErrItemNotFound
-	}
-	if q.Arena[idx].count != 0 {
-		return errors.New("bucketqueue: cannot return active handle")
-	}
-	q.release(idx)
-	return nil
-}
-
-// ───── public API: core queue operations ────────────────────────────────
-
 // Push enqueues handle h at absolute tick. Errors on stale tick or invalid h.
-// Uses O(1) bucket insertion, with fast path for duplicate pushes.
+// Duplicate pushes in the same tick bump the count; reprioritization requires Update.
 func (q *Queue) Push(tick int64, h Handle) error {
+	// Past-tick error
 	if tick < int64(q.baseTick) {
 		return ErrPastTick
 	}
-	idx := int32(h)
-	if idx < 0 || idx >= capItems {
-		return ErrItemNotFound
-	}
-	n := &q.Arena[idx]
-
-	// Fast-path: same-bucket duplicate push bumps count only
-	if n.count > 0 && n.bucketIdx >= 0 && q.bucketGen[n.bucketIdx] == q.gen {
-		cur := int64(q.baseTick) + int64(n.bucketIdx)
-		if cur == tick {
-			n.count++
-			q.size++
-			return nil
-		}
-		// else: relocate to new tick
-		q.removeInternal(idx, n)
-	}
-
 	// Slide window if tick lies beyond current ring
-	d := uint64(tick) - q.baseTick
-	if d >= numBuckets {
+	d0 := uint64(tick) - q.baseTick
+	if d0 >= numBuckets {
 		q.recycleStaleBuckets()
 		q.baseTick = uint64(tick)
 		q.gen++
 		q.summary = 0
 		q.groupBits = [numGroups]uint64{}
 		q.size = 0
-		d = 0
 	}
+	// Compute offset within ring
+	d := uint64(tick) - q.baseTick
 
-	// Map absolute tick to ring index
+	// Validate handle
+	idx := int32(h)
+	if idx < 0 || idx >= capItems {
+		return ErrItemNotFound
+	}
+	n := &q.Arena[idx]
+	// If already enqueued in current generation
+	if n.count > 0 && n.bucketIdx >= 0 && q.bucketGen[n.bucketIdx] == q.gen {
+		cur := int64(q.baseTick) + int64(n.bucketIdx)
+		if cur == tick {
+			// same tick: bump duplicate count
+			n.count++
+			q.size++
+			return nil
+		}
+		// different tick: require explicit Update()
+		return fmt.Errorf("bucketqueue: handle %d already in queue at tick %d; use Update", h, cur)
+	}
+	// Determine bucket index
 	bkt := int(d) & (numBuckets - 1)
-
 	// Lazy-clear on generation mismatch
 	if q.bucketGen[bkt] != q.gen {
 		q.bucketGen[bkt] = q.gen
 		q.buckets[bkt] = nilIdx
 	}
-
 	// Splice node at front of bucket list (LIFO)
 	head := q.buckets[bkt]
 	n.next, n.prev = head, nilIdx
@@ -192,38 +143,30 @@ func (q *Queue) Push(tick int64, h Handle) error {
 }
 
 // PopMin removes and returns the handle with smallest tick, plus its tick.
-// Runs in O(1) by scanning two-level bitmasks and unlinking the node.
 func (q *Queue) PopMin() (Handle, int64) {
 	if q.size == 0 || q.summary == 0 {
 		return nilIdx, 0
 	}
-	// find first non-empty group and bucket
 	g := bits.TrailingZeros64(q.summary)
 	w := q.groupBits[g]
 	b := bits.TrailingZeros64(w)
 	bkt := g*groupSize + int(b)
 	tick := int64(q.baseTick) + int64(bkt)
 
-	// get head node
 	idx := q.buckets[bkt]
 	n := &q.Arena[idx]
-
-	// duplicate count >1: just decrement counter
 	if n.count > 1 {
 		n.count--
 		q.size--
 		return Handle(idx), tick
 	}
 
-	// unlink single-copy node from list
 	next := n.next
 	q.buckets[bkt] = next
 	if next != nilIdx {
 		q.Arena[next].prev = nilIdx
 	}
 	q.size--
-
-	// clear bit if bucket now empty
 	if next == nilIdx {
 		q.groupBits[g] &^= 1 << uint(b)
 		if q.groupBits[g] == 0 {
@@ -267,10 +210,8 @@ func (q *Queue) Empty() bool {
 	return q.size == 0
 }
 
-// ───── internals: unlink and recycling ─────────────────────────────────
 // removeInternal unlinks a node from its bucket list and updates bitmasks.
 func (q *Queue) removeInternal(idx int32, n *Node) {
-	// detach from doubly-linked list
 	if n.prev != nilIdx {
 		q.Arena[n.prev].next = n.next
 	} else {
@@ -279,13 +220,10 @@ func (q *Queue) removeInternal(idx int32, n *Node) {
 	if n.next != nilIdx {
 		q.Arena[n.next].prev = n.prev
 	}
-	// adjust size by all duplicates
 	q.size -= n.count
-
-	// clear occupancy if bucket empty
 	if q.buckets[n.bucketIdx] == nilIdx {
 		g := int(n.bucketIdx) / groupSize
-		b := uint(int(n.bucketIdx) % groupSize)
+		b := uint(n.bucketIdx % groupSize)
 		q.groupBits[g] &^= 1 << b
 		if q.groupBits[g] == 0 {
 			q.summary &^= 1 << uint(g)
@@ -308,3 +246,40 @@ func (q *Queue) recycleStaleBuckets() {
 
 // compile-time size guard: arena should not exceed 32MiB
 var _ [1 << 25]byte
+
+// borrow pops an index from the freelist or returns ErrFull.
+func (q *Queue) borrow() (int32, error) {
+	if q.freeHead == nilIdx {
+		return nilIdx, ErrFull
+	}
+	idx := q.freeHead
+	q.freeHead = q.Arena[idx].next
+	return idx, nil
+}
+
+// release returns a node index to the freelist, zeroing its node.
+func (q *Queue) release(idx int32) {
+	n := &q.Arena[idx]
+	*n = Node{}
+	n.next = q.freeHead
+	n.bucketIdx = nilIdx
+	q.freeHead = idx
+}
+
+// Borrow yields a fresh handle for subsequent Push calls.
+func (q *Queue) Borrow() (Handle, error) {
+	return q.borrow()
+}
+
+// Return recycles an unused handle back into the freelist.
+func (q *Queue) Return(h Handle) error {
+	idx := int32(h)
+	if idx < 0 || idx >= capItems {
+		return ErrItemNotFound
+	}
+	if q.Arena[idx].count != 0 {
+		return errors.New("bucketqueue: cannot return active handle")
+	}
+	q.release(idx)
+	return nil
+}

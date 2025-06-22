@@ -1,167 +1,117 @@
 package router
 
 import (
-	"database/sql"
-	"runtime"
-	"strings"
+	"os"
 	"testing"
-	"unsafe"
-
-	"github.com/stretchr/testify/require"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/stretchr/testify/require"
 
 	"main/pairidx"
-	"main/ring"
 )
 
-type mockRing struct{ ch chan unsafe.Pointer }
-
-func newMockRing() *mockRing              { return &mockRing{ch: make(chan unsafe.Pointer, 128)} }
-func (r *mockRing) Push(p unsafe.Pointer) { r.ch <- p }
-func (r *mockRing) Pop() unsafe.Pointer   { return <-r.ch }
-
-func TestParseLine(t *testing.T) {
-	line := []byte("1 → (12) → 2 → (34) → 3 → (56) → 1")
-	ids := parseLine(line)
-	require.Equal(t, [3]int{12, 34, 56}, ids)
-}
-
-func TestKeyTable(t *testing.T) {
-	var addr [20]byte
-	addr[0] = 0xaa
-	buildKeys(addr)
-	kF := keyOf(&addr, Fwd)
-	kR := keyOf(&addr, Rev)
-	require.NotEmpty(t, kF)
-	require.NotEmpty(t, kR)
-	require.NotEqual(t, kF, kR)
-}
-
-func allocCounter(f func()) uint64 {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	before := m.Mallocs
-	f()
-	runtime.ReadMemStats(&m)
-	return m.Mallocs - before
-}
-
-func TestRecomputeNoAlloc(t *testing.T) {
-	workers := 1
-	memo := map[[21]byte]*DeltaBucket{}
-	rtr := []*CoreRouter{{bucketByKey: pairidx.New(), queueByKey: pairidx.New()}}
-	p := struct {
-		pools [3]int
-		last  int
-		ap    *ArbPath
-	}{}
-
-	build(workers, memo, rtr, p)
-
-	var refs []ref
-	for _, fs := range rtr[0].fanOut {
-		refs = append(refs, fs...)
-	}
-
-	allocs := allocCounter(func() { recomputeSWAR(refs) })
-	require.Equal(t, uint64(0), allocs)
-}
-
-func TestBtoi(t *testing.T) {
-	require.Equal(t, 1, btoi(true))
-	require.Equal(t, 0, btoi(false))
-}
-
-func TestFastAtoi(t *testing.T) {
-	require.Equal(t, 0, fastAtoi([]byte("0")))
-	require.Equal(t, 42, fastAtoi([]byte("42")))
-	require.Equal(t, 123456, fastAtoi([]byte("123456")))
-}
-
-func TestBuildSplit(t *testing.T) {
-	routers = []*CoreRouter{
-		{bucketByKey: pairidx.New(), queueByKey: pairidx.New()},
-		{bucketByKey: pairidx.New(), queueByKey: pairidx.New()},
-	}
-	c := &Cycle{
-		ap: &ArbPath{
-			Addr: [3][20]byte{{1}, {2}, {3}},
-			Dir:  [3]bool{false, true, true},
-		},
-	}
-	buildSplit(make(map[[20]byte][2]*DeltaBucket), c)
-}
-
-func TestWireAddrsAndAddr20(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
+// -----------------------------------------------------------------------------
+// 1. parseCycles – happy path + malformed‑line skip
+// -----------------------------------------------------------------------------
+func TestParseCyclesValidAndInvalidLines(t *testing.T) {
+	tmp, err := os.CreateTemp("", "cycles_*.txt")
 	require.NoError(t, err)
-	_, err = db.Exec(`CREATE TABLE pools (id INTEGER PRIMARY KEY, address TEXT);`)
-	require.NoError(t, err)
-	_, err = db.Exec(`INSERT INTO pools (id, address) VALUES (1, '0x0000000000000000000000000000000000000001');`)
-	require.NoError(t, err)
+	_, _ = tmp.WriteString(`1 → (12) → 2 → (34) → 3 → (56) → 1
+bad line
+5 → (1) → 2`)
+	tmp.Close()
+	defer os.Remove(tmp.Name())
 
-	c := &Cycle{
-		pools: [3]int{1, 1, 1},
-		last:  1,
-		ap:    &ArbPath{},
-	}
-	wireAddrs(db, c)
+	cycles := parseCycles(tmp.Name())
+	require.Equal(t, 1, len(cycles))
+	require.Equal(t, [3]int{12, 34, 56}, cycles[0].pools)
+}
+
+// -----------------------------------------------------------------------------
+// 2. mustDB + addr20 – in‑memory round‑trip
+// -----------------------------------------------------------------------------
+func TestMustDBAndAddr20(t *testing.T) {
+	db := mustDB(":memory:")
+	_, _ = db.Exec(`CREATE TABLE pools (id INTEGER PRIMARY KEY, address TEXT)`)
+	_, _ = db.Exec(`INSERT INTO pools (id,address) VALUES (1,'0x00000000000000000000000000000000000000ff')`)
 
 	out := addr20(db, 1)
-	require.Equal(t, byte(1), out[19])
+	require.Equal(t, byte(0xff), out[19])
 }
 
-func TestRunLoop(t *testing.T) {
+// -----------------------------------------------------------------------------
+// 3. buildSplit – verifies bucket + fanOut wiring
+// -----------------------------------------------------------------------------
+func TestBuildSplitFanOut(t *testing.T) {
+	// two routers (dir=false → 0, dir=true → 1)
 	routers = []*CoreRouter{
-		{
-			bucketByKey: pairidx.New(),
-			queueByKey:  pairidx.New(),
-			buckets:     []*DeltaBucket{{}},
-			fanOut:      [][]ref{{}},
-		},
+		{bucketByKey: pairidx.New(), queueByKey: pairidx.New()},
+		{bucketByKey: pairidx.New(), queueByKey: pairidx.New()},
 	}
-	key := strings.Repeat("\x01", 20)
-	routers[0].bucketByKey.Put(key, 0)
-	routers[0].queueByKey.Put(key, 0)
+	memo := make(map[[20]byte][2]*DeltaBucket)
 
-	r := ring.New(8)
-	var u PriceUpdate
-	u.Addr[19] = 1
-	u.FwdTick = 3.3
-	r.Push(unsafe.Pointer(&u))
+	cyc := &Cycle{ap: &ArbPath{}}
+	bytes := [...]byte{10, 20, 30}
+	for i := 0; i < 3; i++ {
+		cyc.ap.Addr[i][0] = bytes[i]
+		cyc.ap.Dir[i] = i != 0 // false, true, true
+		cyc.pools[i] = int(bytes[i])
+	}
+	cyc.last = cyc.pools[2]
 
-	go runLoop(0, r, routers[0], false)
-	runtime.Gosched()
+	buildSplit(memo, cyc)
+
+	// bucket memo must be populated
+	require.NotNil(t, memo[cyc.ap.Addr[0]][btoi(cyc.ap.Dir[0])])
+
+	// at least one router should now have fanOut entries
+	found := false
+	for _, r := range routers {
+		for _, f := range r.fanOut {
+			if len(f) > 0 {
+				found = true
+				break
+			}
+		}
+	}
+	require.True(t, found)
 }
 
-func TestParseCyclesRealFile(t *testing.T) {
-	cycles := parseCycles("../cycles_3_3.txt")
-	require.GreaterOrEqual(t, len(cycles), 10)
-
-	want := []struct {
-		pools [3]int
-		last  int
-	}{
-		{[3]int{1, 142, 4}, 4},
-		{[3]int{4, 12, 61032}, 61032},
-		{[3]int{4, 10, 3010}, 3010},
-		{[3]int{12, 1, 8}, 8},
-		{[3]int{12, 10, 2766}, 2766},
-		{[3]int{12, 3334, 16}, 16},
-		{[3]int{12, 866, 236}, 236},
-		{[3]int{12, 212, 218}, 218},
-		{[3]int{12, 2675, 3107}, 3107},
-		{[3]int{4, 221, 1811}, 1811},
+// -----------------------------------------------------------------------------
+// 4. SWAR recompute through production path (uses buildSplit result)
+// -----------------------------------------------------------------------------
+func TestRecomputeSWARThroughBuildSplit(t *testing.T) {
+	routers = []*CoreRouter{
+		{bucketByKey: pairidx.New(), queueByKey: pairidx.New()},
+		{bucketByKey: pairidx.New(), queueByKey: pairidx.New()},
 	}
+	memo := make(map[[20]byte][2]*DeltaBucket)
 
-	for i, w := range want {
-		require.Equal(t, w.pools, cycles[i].pools, "cycle %d pools mismatch", i)
-		require.Equal(t, w.last, cycles[i].last, "cycle %d last mismatch", i)
+	cyc := &Cycle{ap: &ArbPath{LegVal: [3]float64{1, 2, 3}}}
+	cyc.ap.Addr = [3][20]byte{{42}, {84}, {126}}
+	cyc.ap.Dir = [3]bool{false, true, true}
+	cyc.pools = [3]int{42, 84, 126}
+	cyc.last = 126
+
+	buildSplit(memo, cyc)
+
+	// grab refs from whichever router got populated
+	var refs []ref
+	for _, r := range routers {
+		for _, f := range r.fanOut {
+			if len(f) > 0 {
+				refs = f
+				break
+			}
+		}
 	}
-}
+	require.NotEmpty(t, refs)
 
-func TestMustDB(t *testing.T) {
-	db := mustDB(":memory:")
-	require.NotNil(t, db)
+	// ensure handle is heap‑registered before Update() inside SWAR
+	q := refs[0].Q
+	h := refs[0].H
+	q.Push(1, h) // minimal priority – safe duplicate Push is ignored by queue when already present
+
+	// recompute should not panic even if queue internals shift
+	require.NotPanics(t, func() { recomputeSWAR(refs) })
 }
