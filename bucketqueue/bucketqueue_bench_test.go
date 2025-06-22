@@ -34,17 +34,18 @@ func BenchmarkPush(b *testing.B) {
 }
 
 // BenchmarkPopMin measures the cost of popping the minimum element when
-// the handle has count==b.N. We preload the arena so PopMin can run
-// in a tight loop, decrementing the internal ref‑counter each time.
+// the handle has count==b.N. We preload the arena through legitimate
+// duplicate-pushes so PopMin can run in a tight loop.
 func BenchmarkPopMin(b *testing.B) {
 	q, h := seededQueue()
-	// simulate b.N duplicates by bumping count and size directly
-	q.Arena[h].count = int32(b.N)
-	q.size = int32(b.N)
+	// Push (b.N-1) additional duplicates into tick 0
+	for i := 1; i < b.N; i++ {
+		_ = q.Push(0, h) // fast-path: just bumps ref-counter
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = q.PopMin() // each PopMin decrements count or unlinks
+		_, _ = q.PopMin()
 	}
 }
 

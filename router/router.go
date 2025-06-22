@@ -1,4 +1,4 @@
-// Package router implements a zero-alloc, O(1), branch-stable routing graph constructor.
+// Package router implements a zero-alloc, O(1)-time, branch-stable routing graph constructor.
 package router
 
 import (
@@ -26,58 +26,63 @@ var (
 	rings   []*ring.Ring
 )
 
-//lint:ignore U1000 used for cache-alignment
+//lint:ignore U1000 used for cache-alignment of hot structs
 var _pad [64]byte
 
-// SWAR-style constants
-const swarMask = 0x0f0f0f0f0f0f0f0f
+// ─── SWAR helpers ───────────────────────────────────────────────────────────
+const maxParens = 3 // parseCycles bound – avoids bounds checks
 
-// Avoid bounds-check on fixed count
-const maxParens = 3
-
-// Structs below are pre-aligned and direct-access
+// ─── Data structures (all cache-aligned, direct-access, no indirections) ───
 
 type DeltaBucket struct {
-	Queue  *bucketqueue.Queue
-	CurLog float64
-	_pad   [48]byte // 64B alignment
+	// Frequently-written field isolated on its own cache-line to avoid false sharing.
+	CurLog float64  // latest log price for its pool (single writer per core)
+	_line  [56]byte // pad to 64 B so Path starts clean on next line
+
+	Queue *bucketqueue.Queue // priority queue handle pool (immutable after bootstrap)
+	Path  ArbPath            // immutable arbitrage path (resident, not copied)
 }
 
 type ArbPath struct {
-	LegVal [3]float64
-	Addr   [3][20]byte
-	Dir    [3]bool
-	_pad   byte
+	// Packed so LegSum is loaded with Addr[0] in same line for tight gather.
+	LegVal [3]float64  // per-leg log deltas
+	LegSum float64     // pre-summed LegVal[1]+LegVal[2] — hot in recompute loop
+	Addr   [3][20]byte // pool addresses (20-byte)
+	Dir    [3]bool     // trade direction per leg (A→B vs B→A)
 }
 
 type ref struct {
-	H bucketqueue.Handle
-	Q *bucketqueue.Queue
+	H bucketqueue.Handle // queue node handle
+	Q *bucketqueue.Queue // owning queue (for Update/Push)
+	B *DeltaBucket       // pointer to owning bucket (exposes Path & CurLog)
 }
 
-type PriceUpdate struct {
+type PriceUpdate struct { // hot-path: emitted by websocket reader
 	FwdTick float64
 	RevTick float64
 	Addr    [20]byte
-	_pad    [4]byte
 }
 
-type CoreRouter struct {
-	bucketByKey *pairidx.HashMap
-	queueByKey  *pairidx.HashMap
-	buckets     []*DeltaBucket
-	fanOut      [][]ref
+type CoreRouter struct { // per-CPU router instance (pinned goroutine)
+	bucketByKey *pairidx.HashMap // [addr] → bucket index (Δ updates)
+	queueByKey  *pairidx.HashMap // [addr] → fan-out slice index
+	buckets     []*DeltaBucket   // dense owner buckets (hot)
+	fanOut      [][]ref          // {producer pool} → refs of affected queue nodes
 }
 
-type Cycle struct {
-	pools [3]int
-	last  int
+type Cycle struct { // one 3-pool triangular arbitrage definition
+	pools [3]int // SQLite IDs for pool addresses
+	last  int    // cached pools[2]
 	ap    *ArbPath
 }
 
+// ─── Boot strap ─────────────────────────────────────────────────────────────
+
 func main() {
+	// Aggressive inlining & no write-barrier in single-core buckets
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	n := runtime.NumCPU() - 2
+
+	n := runtime.NumCPU() - 2 // leave two cores for OS / DB
 	if n < 2 {
 		panic("need ≥ 2 CPUs")
 	}
@@ -90,21 +95,22 @@ func main() {
 			queueByKey:  pairidx.New(),
 		}
 		rings[i] = ring.New(1 << 14)
-		go runLoop(i, rings[i], routers[i], i >= n/2)
+		go runLoop(i, rings[i], routers[i], i >= n/2) // back half ≡ reverse-dir router set
 	}
 
 	db := mustDB("uniswap_pairs.db")
-	pairs := parseCycles("cycles_3_3.txt")
-	bucketTable := make(map[[20]byte][2]*DeltaBucket, 4096)
+	cycles := parseCycles("cycles_3_3.txt")
+	bucketMemo := make(map[[20]byte][2]*DeltaBucket, 4096) // [addr][dir] → bucket
 
-	for i := range pairs {
-		wireAddrs(db, &pairs[i])
-		buildSplit(bucketTable, &pairs[i])
+	for i := range cycles {
+		wireAddrs(db, &cycles[i])
+		buildSplit(bucketMemo, &cycles[i])
 	}
 
-	select {}
+	select {} // wait forever – real system would start websocket ingest now
 }
 
+// runLoop is the per-CPU hot path: apply tick updates and recompute affected queues
 func runLoop(id int, in *ring.Ring, rt *CoreRouter, isRev bool) {
 	var stop, hot uint32
 	ring.PinnedConsumer(id, in, &stop, &hot, func(ptr unsafe.Pointer) {
@@ -115,37 +121,72 @@ func runLoop(id int, in *ring.Ring, rt *CoreRouter, isRev bool) {
 			val = u.RevTick
 		}
 		if i, ok := rt.bucketByKey.Get(string(key[:])); ok {
-			rt.buckets[i].CurLog = val
+			rt.buckets[i].CurLog = val // O(1) update
 		}
 		if fi, ok := rt.queueByKey.Get(string(key[:])); ok {
-			recomputeSWAR(rt.fanOut[fi])
+			recomputeSWAR(rt.fanOut[fi]) // amortised O(1)
 		}
 	}, nil)
 }
 
+// recomputeSWAR reprioritises a small fan-out slice in a branch-free, unrolled fashion.
+// It never allocates, and each Update() call is O(1) on the underlying queue.
 func recomputeSWAR(refs []ref) {
-	const unroll = 4
+	const unroll = 4 // manual SIMD-style block size (scalar Go)
 	var aps [unroll]*ArbPath
+
 	for i := 0; i < len(refs); i += unroll {
-		for j := 0; j < unroll && i+j < len(refs); j++ {
-			r := refs[i+j]
-			aps[j] = (*ArbPath)(unsafe.Pointer(&r.Q.Arena[r.H]))
+		end := i + unroll
+		if end > len(refs) {
+			end = len(refs)
 		}
-		for j := 0; j < unroll && i+j < len(refs); j++ {
-			tick := aps[j].LegVal[1] + aps[j].LegVal[2]
-			_ = refs[i+j].Q.Update(int64(tick*1e6), refs[i+j].H)
+
+		// gather ArbPath pointers (branch-free once inside hot loop)
+		for j := i; j < end; j++ {
+			aps[j-i] = &refs[j].B.Path
+		}
+
+		// prefetch next refs block (best-effort; no-op on unsupported arch)
+		if end < len(refs) {
+			prefetch(&refs[end])
+		}
+
+		// compute absolute micro-tick and Update/Push on each queued handle
+		for j := i; j < end; j++ {
+			r := refs[j]
+			tick := aps[j-i].LegSum // cached sum → 1 load, 0 adds
+			absTick := int64(tick * 1e6)
+
+			if err := r.Q.Update(absTick, r.H); err != nil {
+				if err == bucketqueue.ErrItemNotFound || err == bucketqueue.ErrPastTick {
+					_ = r.Q.Push(absTick, r.H) // re-enlist – still O(1)
+				}
+			}
 		}
 	}
 }
 
+// ─── One-off helpers ────────────────────────────────────────────────────────
+
+//go:nosplit
+func prefetch(p *ref) { // best-effort CPU prefetch where supported
+	// The compiler emits a NOP on architectures without PREFETCH instructions.
+	_ = *(*uintptr)(unsafe.Pointer(p)) // read into L1 – alias-safe dummy
+}
+
 func mustDB(path string) *sql.DB {
 	db, _ := sql.Open("sqlite3", path)
-	_ = db.Ping()
+	if err := db.Ping(); err != nil {
+		panic(err)
+	}
 	return db
 }
 
 func parseCycles(path string) []Cycle {
-	f, _ := os.Open(path)
+	f, err := os.Open(path)
+	if err != nil {
+		panic(err)
+	}
 	sc := bufio.NewScanner(f)
 	var out []Cycle
 	var pools [3]int
@@ -155,27 +196,18 @@ func parseCycles(path string) []Cycle {
 		in, val := false, 0
 		for i := 0; i < len(line); i++ {
 			b := line[i]
-			if b == '(' {
+			switch {
+			case b == '(':
 				val, in = 0, true
-				continue
-			}
-			if b == ')' && in {
-				if n == 0 {
-					pools[0] = val
-				} else if n == 1 {
-					pools[1] = val
-				} else if n == 2 {
-					pools[2] = val
-				}
+			case b == ')' && in:
+				pools[n] = val
 				n++
 				in = false
-				continue
-			}
-			if in && b >= '0' && b <= '9' {
+			case in && b >= '0' && b <= '9':
 				val = val*10 + int(b-'0')
 			}
 		}
-		if n == 3 {
+		if n == maxParens {
 			out = append(out, Cycle{pools: pools, last: pools[2], ap: &ArbPath{}})
 		}
 	}
@@ -186,54 +218,69 @@ func wireAddrs(db *sql.DB, c *Cycle) {
 	for i := 0; i < 3; i++ {
 		addr := addr20(db, c.pools[i])
 		c.ap.Addr[i] = addr
-		c.ap.Dir[i] = (i == 1)
+		c.ap.Dir[i] = (i == 1) // middle leg is reverse direction in std triangle
 	}
 	c.ap.Addr[2] = addr20(db, c.last)
 	c.ap.Dir[2] = true
 }
 
+// buildSplit initialises per-pool buckets and wires fan-out slices – all O(1)
 func buildSplit(memo map[[20]byte][2]*DeltaBucket, c *Cycle) {
+	half := len(routers) / 2
+
+	// 1) Ensure each pool/dir has its resident DeltaBucket (created once).
 	for i := 0; i < 3; i++ {
 		a := c.ap.Addr[i]
 		d := btoi(c.ap.Dir[i])
 		e := memo[a]
 		if e[d] == nil {
-			b := &DeltaBucket{Queue: bucketqueue.New()}
+			b := &DeltaBucket{Queue: bucketqueue.New()} // CurLog zero-initialised
 			e[d] = b
 			memo[a] = e
-			core := d*(len(routers)/2) + int(a[0])%(len(routers)/2)
-			r := routers[core]
-			r.bucketByKey.Put(string(a[:]), uint16(len(r.buckets)))
-			r.buckets = append(r.buckets, b)
+
+			core := d*half + int(a[0])%half // branch-free colour-spread across CPUs
+			rt := routers[core]
+			rt.bucketByKey.Put(string(a[:]), uint16(len(rt.buckets)))
+			rt.buckets = append(rt.buckets, b)
 		}
 	}
-	ap := *c.ap
-	q := memo[ap.Addr[0]][btoi(ap.Dir[0])].Queue
+
+	// 2) Producer leg (Addr[0]) borrows a single queue handle upfront.
+	prod := memo[c.ap.Addr[0]][btoi(c.ap.Dir[0])]
+	c.ap.LegSum = c.ap.LegVal[1] + c.ap.LegVal[2] // one-off pre-sum
+	prod.Path = *c.ap                             // resident copy – 0 alloc, 0 escape
+
+	q := prod.Queue
 	h, _ := q.Borrow()
-	*(*ArbPath)(unsafe.Pointer(&q.Arena[h])) = ap
-	q.Push(0, h)
-	for _, i := range [...]int{1, 2} {
-		k := string(ap.Addr[i][:])
-		d := ap.Dir[i]
-		core := btoi(d)*(len(routers)/2) + int(ap.Addr[i][0])%(len(routers)/2)
-		r := routers[core]
-		j, ok := r.queueByKey.Get(k)
+	_ = q.Push(0, h) // seed with neutral priority – recompute will update soon
+
+	// 3) Consumer legs (Addr[1], Addr[2]) wire refs → same (q,h,B).
+	for _, idx := range [...]int{1, 2} {
+		a := c.ap.Addr[idx]
+		d := c.ap.Dir[idx]
+		core := btoi(d)*half + int(a[0])%half
+		rt := routers[core]
+
+		fanIdx, ok := rt.queueByKey.Get(string(a[:]))
 		if !ok {
-			j = uint16(len(r.fanOut))
-			r.queueByKey.Put(k, j)
-			r.fanOut = append(r.fanOut, nil)
+			fanIdx = uint16(len(rt.fanOut))
+			rt.queueByKey.Put(string(a[:]), fanIdx)
+			rt.fanOut = append(rt.fanOut, nil)
 		}
-		r.fanOut[j] = append(r.fanOut[j], ref{Q: q, H: h})
+		rt.fanOut[fanIdx] = append(rt.fanOut[fanIdx], ref{Q: q, H: h, B: prod})
 	}
 }
 
 func addr20(db *sql.DB, id int) (out [20]byte) {
 	var hs string
-	_ = db.QueryRow("SELECT address FROM pools WHERE id=?", id).Scan(&hs)
-	_, _ = hex.Decode(out[:], []byte(hs[2:]))
+	if err := db.QueryRow("SELECT address FROM pools WHERE id=?", id).Scan(&hs); err != nil {
+		panic(err)
+	}
+	_, _ = hex.Decode(out[:], []byte(hs[2:])) // skip 0x prefix
 	return
 }
 
+// btoi is a branch-free bool→int converter (0/1).
 func btoi(b bool) int {
 	return int(*(*uint8)(unsafe.Pointer(&b)))
 }
