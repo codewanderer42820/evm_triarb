@@ -1,4 +1,4 @@
-// bucketqueue_bench_test.go — 1micro-benchmarks for the arena-backed bucketqueue
+// bucketqueue_bench_test.go — micro-benchmarks for the arena-backed bucketqueue
 package bucketqueue
 
 import (
@@ -6,7 +6,6 @@ import (
 	"testing"
 )
 
-// seededQueue returns a Queue with one handle pushed at tick=0 and nil data.
 func seededQueue() (*Queue, Handle) {
 	q := New()
 	h, _ := q.Borrow()
@@ -14,7 +13,7 @@ func seededQueue() (*Queue, Handle) {
 	return q, h
 }
 
-// BenchmarkPush exercises the duplicate-push fast path for count bumping.
+// ─── Push (duplicate-count fast path) ──────────────────────────────────────────
 func BenchmarkPush(b *testing.B) {
 	q, h := seededQueue()
 	b.ResetTimer()
@@ -23,7 +22,7 @@ func BenchmarkPush(b *testing.B) {
 	}
 }
 
-// BenchmarkPopMin tests minimal-cost popping of the same handle repeatedly.
+// ─── PopMin minimal cost ──────────────────────────────────────────────────────
 func BenchmarkPopMin(b *testing.B) {
 	q, h := seededQueue()
 	for i := 1; i < b.N; i++ {
@@ -35,7 +34,7 @@ func BenchmarkPopMin(b *testing.B) {
 	}
 }
 
-// BenchmarkPeepMin measures non-mutating read of the current minimum.
+// ─── PeepMin (read-only) ──────────────────────────────────────────────────────
 func BenchmarkPeepMin(b *testing.B) {
 	q, h := seededQueue()
 	for i := 0; i < 7; i++ {
@@ -47,7 +46,7 @@ func BenchmarkPeepMin(b *testing.B) {
 	}
 }
 
-// BenchmarkPushPopCycle tests end-to-end cost of a full push+pop.
+// ─── Push+Pop cycle ───────────────────────────────────────────────────────────
 func BenchmarkPushPopCycle(b *testing.B) {
 	q := New()
 	handles := make([]Handle, 1024)
@@ -65,7 +64,7 @@ func BenchmarkPushPopCycle(b *testing.B) {
 	}
 }
 
-// BenchmarkUpdate tests cost of Update when the node is in queue.
+// ─── Update while active ──────────────────────────────────────────────────────
 func BenchmarkUpdate(b *testing.B) {
 	q, h := seededQueue()
 	b.ResetTimer()
@@ -74,7 +73,7 @@ func BenchmarkUpdate(b *testing.B) {
 	}
 }
 
-// BenchmarkMixedHeavy tests a random workload: 50% Push, 40% PopMin, 10% Update.
+// ─── Mixed workload (50 % Push, 40 % Pop, 10 % Update) ────────────────────────
 func BenchmarkMixedHeavy(b *testing.B) {
 	q := New()
 	handles := make([]Handle, 1024)
@@ -87,8 +86,7 @@ func BenchmarkMixedHeavy(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		n := rng.Intn(10)
-		switch {
+		switch n := rng.Intn(10); {
 		case n < 5:
 			h := handles[idx]
 			idx = (idx + 1) % len(handles)
