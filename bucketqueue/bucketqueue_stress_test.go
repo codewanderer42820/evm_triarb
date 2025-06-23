@@ -197,7 +197,7 @@ func TestPushNegativeTickStress(t *testing.T) {
 func TestPopEmptyStress(t *testing.T) {
 	q := New()
 	h, tick := q.PopMin()
-	if h != nilIdx || tick != 0 {
+	if h != Handle(nilIdx) || tick != 0 {
 		t.Fatalf("Expected nilIdx,0 on empty PopMin; got %v,%d", h, tick)
 	}
 }
