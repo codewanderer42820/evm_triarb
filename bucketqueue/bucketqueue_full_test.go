@@ -170,13 +170,10 @@ func TestRemoveEdgeCases(t *testing.T) {
 
 func TestBorrowExhaustion(t *testing.T) {
 	q := New()
-	handles := make([]Handle, 0, capItems)
 	for i := 0; i < capItems; i++ {
-		h, err := q.Borrow()
-		if err != nil {
-			t.Fatalf("unexpected borrow fail: %v", err)
+		if _, err := q.Borrow(); err != nil {
+			t.Fatalf("unexpected borrow fail at i=%d: %v", i, err)
 		}
-		handles = append(handles, h)
 	}
 	_, err := q.Borrow()
 	expectError(t, err, ErrFull)
