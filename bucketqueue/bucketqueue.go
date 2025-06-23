@@ -1,9 +1,7 @@
-// bucketqueue_generic.go — arena-backed, generic pointer-value priority queue
-// ============================================================================
-// High-performance, fixed-capacity, zero-allocation min-priority queue that
-// allows arbitrary `unsafe.Pointer` payloads per handle. Value lifetime is
-// caller-managed. The queue does not copy, move, or free pointer contents.
-
+// bucketqueue.go — arena‑backed, zero‑alloc min‑priority queue (fixed window)
+// Fully patched per 2025‑06‑24 review: size accounting bug, error consistency,
+// unused parameter removal, 32‑bit generation counter, and wrap‑around guard.
+// -----------------------------------------------------------------------------
 package bucketqueue
 
 import (
@@ -13,17 +11,18 @@ import (
 )
 
 const (
-	numBuckets = 1 << 12
-	groupSize  = 64
+	numBuckets = 1 << 12 // ring size (4096)
+	groupSize  = 64      // bits per summary word
 	numGroups  = numBuckets / groupSize
-	capItems   = 4 * numBuckets
+	capItems   = 4 * numBuckets // arena capacity (16 384)
 )
 
 type idx32 = int32
 
 const nilIdx idx32 = -1
 
-// Handle is an opaque handle identifying a slot in the arena.
+// Handle is an opaque index into the arena returned by Borrow() and accepted by
+// all queue operations. It is *not* goroutine‑safe.
 type Handle = int
 
 var (
@@ -33,23 +32,24 @@ var (
 )
 
 // node stores arena metadata and user pointer.
+// Callers own the pointed‑to value’s lifetime; the queue never frees it.
 type node struct {
 	next, prev idx32
 	bucketIdx  int32
 	count      int32
-	data       unsafe.Pointer // user-defined pointer
+	data       unsafe.Pointer
 }
 
+// Queue is a fixed‑capacity, zero‑allocation, sliding‑window min‑priority queue keyed by tick.
 type Queue struct {
-	arena    [capItems]node
-	freeHead idx32
-
+	arena     [capItems]node
+	freeHead  idx32
 	buckets   [numBuckets]idx32
-	bucketGen [numBuckets]uint16
+	bucketGen [numBuckets]uint32
 	groupBits [numGroups]uint64
 	summary   uint64
 	baseTick  uint64
-	gen       uint16
+	gen       uint32
 	size      int
 }
 
@@ -90,6 +90,7 @@ func (q *Queue) Return(h Handle) error {
 	return nil
 }
 
+// Push inserts (or increments) a handle at a given tick.
 func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	if tick < int64(q.baseTick) {
 		return ErrPastTick
@@ -105,14 +106,19 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 			q.size++
 			return nil
 		}
-		q.detach(idx32(h), n)
 		q.size -= int(n.count)
+		q.detach(n)
 	}
 
 	if d := uint64(tick) - q.baseTick; d >= numBuckets {
 		q.recycleStaleBuckets()
 		q.baseTick = uint64(tick)
 		q.gen++
+		if q.gen == 0 {
+			for i := range q.bucketGen {
+				q.bucketGen[i] = 0
+			}
+		}
 		q.summary = 0
 		q.groupBits = [numGroups]uint64{}
 	}
@@ -145,7 +151,10 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 }
 
 func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
-	if tick < int64(q.baseTick) || h < 0 || h >= capItems {
+	if h < 0 || h >= capItems {
+		return ErrItemNotFound
+	}
+	if tick < int64(q.baseTick) {
 		return ErrPastTick
 	}
 	n := &q.arena[h]
@@ -155,7 +164,8 @@ func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 	if int64(q.baseTick)+int64(n.bucketIdx) == tick {
 		return nil
 	}
-	q.detach(idx32(h), n)
+	q.size -= int(n.count)
+	q.detach(n)
 	return q.Push(tick, h, val)
 }
 
@@ -167,7 +177,7 @@ func (q *Queue) Remove(h Handle) error {
 	if n.count == 0 || n.bucketIdx < 0 || q.bucketGen[n.bucketIdx] != q.gen {
 		return ErrItemNotFound
 	}
-	q.detach(idx32(h), n)
+	q.detach(n)
 	q.size -= int(n.count)
 	n.prev, n.bucketIdx, n.count = nilIdx, -1, 0
 	n.next = q.freeHead
@@ -227,10 +237,12 @@ func (q *Queue) PeepMin() (Handle, int64, unsafe.Pointer) {
 	return Handle(idx), tick, q.arena[idx].data
 }
 
-func (q *Queue) Size() int   { return q.size }
+func (q *Queue) Size() int { return q.size }
+
 func (q *Queue) Empty() bool { return q.size == 0 }
 
-func (q *Queue) detach(i idx32, n *node) {
+// internal helpers
+func (q *Queue) detach(n *node) {
 	if n.prev != nilIdx {
 		q.arena[n.prev].next = n.next
 	} else {
@@ -268,9 +280,6 @@ func (q *Queue) recycleStaleBuckets() {
 			q.buckets[bkt] = nilIdx
 			q.bucketGen[bkt] = 0
 			w &^= 1 << uint(b)
-			if w == 0 {
-				break
-			}
 		}
 		q.groupBits[g] = 0
 		q.summary &^= 1 << uint(g)
