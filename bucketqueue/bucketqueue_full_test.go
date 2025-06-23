@@ -131,3 +131,62 @@ func TestReuseHandle(t *testing.T) {
 		expectHandle(t, got, h)
 	}
 }
+
+func TestReturnErrors(t *testing.T) {
+	q := New()
+
+	err := q.Return(-1)
+	expectError(t, err, ErrItemNotFound)
+
+	h := borrowOrPanic(t, q)
+	pushOrPanic(t, q, 1, h)
+	err = q.Return(h)
+	expectErrorContains(t, err, "cannot return active handle")
+
+	_, _, _ = q.PopMin() // make it inactive
+	err = q.Return(h)
+	expectError(t, err, nil)
+}
+
+func TestRemoveEdgeCases(t *testing.T) {
+	q := New()
+	err := q.Remove(-1)
+	expectError(t, err, ErrItemNotFound)
+
+	h := borrowOrPanic(t, q)
+	expectError(t, q.Remove(h), ErrItemNotFound)
+
+	pushOrPanic(t, q, 1, h)
+	err = q.Remove(h)
+	expectError(t, err, nil)
+	expectEmpty(t, q)
+
+	// Make sure it's reusable
+	pushOrPanic(t, q, 2, h)
+	got, tick, _ := q.PopMin()
+	expectTick(t, tick, 2)
+	expectHandle(t, got, h)
+}
+
+func TestBorrowExhaustion(t *testing.T) {
+	q := New()
+	handles := make([]Handle, 0, capItems)
+	for i := 0; i < capItems; i++ {
+		h, err := q.Borrow()
+		if err != nil {
+			t.Fatalf("unexpected borrow fail: %v", err)
+		}
+		handles = append(handles, h)
+	}
+	_, err := q.Borrow()
+	expectError(t, err, ErrFull)
+}
+
+func TestPushBadHandle(t *testing.T) {
+	q := New()
+	err := q.Push(1, -1, nil)
+	expectError(t, err, ErrItemNotFound)
+
+	err = q.Push(1, capItems, nil)
+	expectError(t, err, ErrItemNotFound)
+}
