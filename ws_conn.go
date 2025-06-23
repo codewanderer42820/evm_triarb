@@ -20,7 +20,7 @@ var (
 	subscribePacket []byte
 
 	// wsBuf / wsStart / wsLen: circular buffer holding TCP stream bytes.
-	wsBuf          [maxFrameSize]byte // max 64 KiB in this build
+	wsBuf          [maxFrameSize]byte // max 512 KiB in this build
 	wsStart, wsLen int                // unread window [start : start+len)
 
 	// Decoded data-frames (views into wsBuf) live in this ring.
@@ -28,7 +28,7 @@ var (
 	wsHead   uint32
 )
 
-// wsFrame is a light view into wsBuf — NO copies or allocations.
+// wsFrame is a light view into wsBuf — **NO** copies or allocations.
 type wsFrame struct {
 	Payload []byte // valid until the next readFrame()
 	Len     int
@@ -37,7 +37,7 @@ type wsFrame struct {
 
 // init builds the upgrade request and a single subscribe frame.
 func init() {
-	// ── 1. build HTTP upgrade request ──
+	// 1. build HTTP upgrade request
 	key := make([]byte, 16)
 	_, _ = rand.Read(key)
 
@@ -48,7 +48,7 @@ func init() {
 		"Sec-WebSocket-Key: " + base64.StdEncoding.EncodeToString(key) + "\r\n" +
 		"Sec-WebSocket-Version: 13\r\n\r\n")
 
-	// ── 2. pre-mask the subscribe payload ──
+	// 2. pre-mask the subscribe payload
 	const payload = `{"id":1,"method":"eth_subscribe","params":["logs",{}],"jsonrpc":"2.0"}`
 	hdr := []byte{0x81, 0x80 | byte(len(payload))} // FIN | MASK | len≤125
 

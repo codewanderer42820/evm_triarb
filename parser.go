@@ -1,3 +1,4 @@
+// parser.go — zero-alloc JSON scanner that feeds deduper & printer.
 package main
 
 import (
@@ -14,19 +15,19 @@ var (
 
 // handleFrame scans a full WebSocket payload (result JSON) once, in 8-byte
 // aligned strides, extracting only the six fields we care about.
-// All slices point *into* wsBuf, so this is 100 % allocation-free.
 func handleFrame(p []byte) {
 	var v logView
 
 	const (
-		wantAddr   = 1 << iota // 1 << 0 = 0x01
-		wantData               // 1 << 1 = 0x02
-		wantTopics             // 1 << 2 = 0x04
-		wantBlk                // 1 << 3 = 0x08
-		wantTx                 // 1 << 4 = 0x10
-		wantLog                // 1 << 5 = 0x20
+		wantAddr = 1 << iota
+		wantData
+		wantTopics
+		wantBlk
+		wantTx
+		wantLog
 	)
 	missing := wantAddr | wantData | wantTopics | wantBlk | wantTx | wantLog
+
 	for i := 0; i <= len(p)-8 && missing != 0; i++ {
 		tag := *(*[8]byte)(unsafe.Pointer(&p[i]))
 
@@ -44,8 +45,8 @@ func handleFrame(p []byte) {
 		case keyTopics:
 			if missing&wantTopics != 0 {
 				v.Topics = sliceJSONArray(p, i+8+findBracket(p[i+8:]))
-				// ── fast 8-byte Uniswap-V2 Sync filter (skip 0x) ──
-				if len(v.Topics) < 11 || // need '"0x' + 8 hex chars
+				// quick Uniswap-V2 Sync filter
+				if len(v.Topics) < 11 ||
 					*(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
 					return // not a Sync event → drop early
 				}
@@ -69,6 +70,12 @@ func handleFrame(p []byte) {
 		}
 	}
 
+	// all three numeric fields must be present – otherwise discard
+	if len(v.BlkNum) == 0 || len(v.TxIndex) == 0 || len(v.LogIdx) == 0 {
+		return
+	}
+
+	// fast 128-bit fingerprint for dedup
 	switch {
 	case len(v.Topics) >= 16:
 		v.TagHi, v.TagLo = load128(v.Topics)
@@ -77,7 +84,7 @@ func handleFrame(p []byte) {
 	case len(v.Data) >= 8:
 		v.TagLo = load64(v.Data)
 	default:
-		return // insufficient tag entropy – drop
+		return // insufficient entropy
 	}
 
 	blk32 := uint32(parseHexU64(v.BlkNum))

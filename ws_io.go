@@ -23,8 +23,9 @@ func readHandshake(c net.Conn) ([]byte, error) {
 	n := 0
 	for {
 		if n == len(hsBuf) {
-			dropError("handshake overflow", nil)
-			return nil, nil
+			err := fmt.Errorf("handshake overflow: header exceeds %d bytes", len(hsBuf))
+			dropError("handshake overflow", err)
+			return nil, err
 		}
 		m, err := c.Read(hsBuf[n:])
 		if err != nil {
@@ -43,6 +44,10 @@ func readHandshake(c net.Conn) ([]byte, error) {
 // ensureRoom guarantees wsLen ≥ need by reading from the socket, compacting
 // the circular buffer when necessary.
 func ensureRoom(conn net.Conn, need int) error {
+	// hard cap — reject frames bigger than the buffer itself
+	if need > len(wsBuf) {
+		return fmt.Errorf("frame %d exceeds wsBuf capacity %d", need, len(wsBuf))
+	}
 	for wsLen < need {
 		// out of capacity? — compact in-place
 		if wsStart+wsLen == len(wsBuf) {

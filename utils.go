@@ -116,14 +116,14 @@ func parseHexU64(b []byte) uint64 {
 		j = 2
 	}
 	var u uint64
-	for ; j < len(b) && j < 18; j++ { // 64-bit = max 16 nibbles
+	for ; j < len(b) && j < 18; j++ { // max 16 nibbles = 64 bits
 		c := b[j] | 0x20
 		if c < '0' || c > 'f' || (c > '9' && c < 'a') {
 			break
 		}
 		v := uint64(c - '0')
 		if c > '9' {
-			v -= 39 // 'a'-'0' = 49, want 10
+			v -= 39 // 'a' → 10
 		}
 		u = (u << 4) | v
 	}
