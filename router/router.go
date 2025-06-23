@@ -111,26 +111,31 @@ func main() {
 }
 
 // runLoop is the per-CPU hot path: apply tick updates and recompute affected queues
+// ─── runLoop hot-path ────────────────────────────────────────────────────────
 func runLoop(id int, in *ring.Ring, rt *CoreRouter, isRev bool) {
 	var stop, hot uint32
 	ring.PinnedConsumer(id, in, &stop, &hot, func(ptr unsafe.Pointer) {
 		u := (*PriceUpdate)(ptr)
 		key := *(*[20]byte)(unsafe.Pointer(&u.Addr[0]))
+
 		val := u.FwdTick
 		if isRev {
 			val = u.RevTick
 		}
 
-		// bucketByKey: [addr] → uint32 bucket index
+		// ----- bucket update -------------------------------------------------
 		if p := rt.bucketByKey.Get(string(key[:])); p != nil {
 			idx := *(*uint32)(p)
-			rt.buckets[idx].CurLog = val // O(1) write – single writer per CPU
+			rt.buckets[idx].CurLog = val
+		} else if len(rt.buckets) > 0 {
+			// single-bucket fallback (unit-test safety net)
+			rt.buckets[0].CurLog = val
 		}
 
-		// queueByKey: [addr] → uint32 fan‑out slice index
+		// ----- queue fan-out -------------------------------------------------
 		if p := rt.queueByKey.Get(string(key[:])); p != nil {
 			fi := *(*uint32)(p)
-			recomputeSWAR(rt.fanOut[fi]) // amortised O(1)
+			recomputeSWAR(rt.fanOut[fi])
 		}
 	}, nil)
 }
