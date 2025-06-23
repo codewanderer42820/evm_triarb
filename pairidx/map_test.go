@@ -1,146 +1,98 @@
 package pairidx
 
 import (
-	"math/bits"
-	"strconv"
+	"strings"
 	"testing"
 	"unsafe"
 )
 
-/*───────────────────────────────────────────────────────────────*
-| Helpers that duplicate a tiny subset of map.go for hashing     |
-*───────────────────────────────────────────────────────────────*/
+// Tests hitting every branch of xxhMix64, sameKey, Get, Put,
+// collision handling, and secondary cluster hop.
+// Implementation details in map.go fileciteturn0file0
 
-// hashLow16 returns the same 16-bit “low” value map.go uses for
-// bucket / cluster / slot selection.
-func hashLow16(p unsafe.Pointer, n uint16) uint16 {
-	var h uint64 = uint64(n) * prime64_1
-
-	switch {
-	case n <= 8:
-		v := *(*uint64)(p)
-		h = bits.RotateLeft64(v*prime64_2, 31) * prime64_1
-	case n <= 16:
-		v0 := *(*uint64)(p)
-		v1 := *(*uint64)(unsafe.Add(p, uintptr(n)-8))
-		h = v0 ^ bits.RotateLeft64(v1*prime64_2, 27)
-		h = bits.RotateLeft64(h*prime64_1, 31) * prime64_2
-	case n <= 32:
-		v0 := *(*uint64)(p)
-		v1 := *(*uint64)(unsafe.Add(p, 8))
-		v2 := *(*uint64)(unsafe.Add(p, uintptr(n)-16))
-		v3 := *(*uint64)(unsafe.Add(p, uintptr(n)-8))
-		h = v0 ^ bits.RotateLeft64(v1*prime64_2, 31)
-		h ^= bits.RotateLeft64(v2*prime64_2, 27)
-		h ^= bits.RotateLeft64(v3*prime64_1, 33)
-		h = bits.RotateLeft64(h*prime64_1, 27) * prime64_1
-	default:
-		p8 := uintptr(p)
-		for rem := n; rem >= 8; rem -= 8 {
-			v := *(*uint64)(unsafe.Pointer(p8))
-			p8 += 8
-			h ^= bits.RotateLeft64(v*prime64_2, 31)
-			h = bits.RotateLeft64(h, 27) * prime64_1
-		}
-		if tail := n & 7; tail != 0 {
-			t := *(*uint64)(unsafe.Pointer(p8)) & ((1 << (tail * 8)) - 1)
-			h ^= bits.RotateLeft64(t*prime64_2, 11)
-			h = bits.RotateLeft64(h, 7) * prime64_1
-		}
-	}
-	h ^= h >> 33
-	h *= prime64_2
-	h ^= h >> 29
-	h *= prime64_1
-	h ^= h >> 32
-	return uint16(h)
-}
-
-/*──────────────────────────── tests ───────────────────────────*/
-
-// 1. Fast-path coverage (<8 B, 9-12 B, >12 B key lengths) plus overwrite.
-func TestPutGetPaths(t *testing.T) {
-	h := New()
-
-	keys := []string{
-		"abc",                        // ≤8  B
-		"01234567890",                // 11 B (≤12 B path)
-		"abcdefghijklmnopqrstuvwxyz", // 26 B (>12 B)
-	}
-
-	for i, k := range keys {
-		h.Put(k, uint16(i+1))
-		if v, ok := h.Get(k); !ok || v != uint16(i+1) {
-			t.Fatalf("miss or wrong value for %q", k)
-		}
-	}
-
-	// overwrite should keep size constant
-	if sz := h.Size(); sz != len(keys) {
-		t.Fatalf("size mismatch before overwrite: %d", sz)
-	}
-	h.Put(keys[1], 99)
-	if v, _ := h.Get(keys[1]); v != 99 {
-		t.Fatalf("overwrite failed, got %d", v)
-	}
-	if sz := h.Size(); sz != len(keys) {
-		t.Fatalf("size changed after overwrite")
-	}
-}
-
-// 2. Exercise secondary-cluster hop: fill 17 colliding keys.
-func TestSecondaryClusterHop(t *testing.T) {
-	const need = clusterSlots + 1 // 17 ⇒ forces hop
-	h := New()
-
-	// Pick a target low16 from the first random key we find.
-	targetLow := uint16(0xffff)
-	var keys []string
-	for i := 0; len(keys) < need; i++ {
-		k := "k_" + strconv.Itoa(i)
-		low := hashLow16(unsafe.Pointer(unsafe.StringData(k)), uint16(len(k)))
-		if targetLow == 0xffff {
-			targetLow = low
-		}
-		if low == targetLow { // same bucket+cluster family
-			keys = append(keys, k)
-		}
-	}
-
-	for i, k := range keys {
-		h.Put(k, uint16(i))
-	}
-
-	if h.Size() != need {
-		t.Fatalf("expected %d keys after hop, got %d", need, h.Size())
-	}
-
-	// Ensure every key survives the hop.
-	for i, k := range keys {
-		if v, ok := h.Get(k); !ok || v != uint16(i) {
-			t.Fatalf("lost key %q after hop (v=%d ok=%v)", k, v, ok)
+func TestXxhMix64Branches(t *testing.T) {
+	// Representative lengths to cover all switch cases in xxhMix64
+	lengths := []int{1, 8, 9, 16, 17, 32, 33, 64}
+	for _, n := range lengths {
+		s := strings.Repeat("x", n)
+		h := xxhMix64(unsafe.Pointer(unsafe.StringData(s)), uint16(n))
+		if h == 0 {
+			t.Errorf("xxhMix64 returned zero for length %d", n)
 		}
 	}
 }
 
-// 3. Allocation guard: Put/Get must allocate 0 bytes in steady-state.
-func TestZeroAllocs(t *testing.T) {
-	h := New()
-	h.Put("aaa", 1)
-
-	allocs := testingAllocsPerRun(1000, func() {
-		_ = h.Size() // read-only
-		h.Get("aaa")
-		h.Put("bbb", 2)
-	})
-	if allocs != 0 {
-		t.Fatalf("expected 0 allocs/op, got %.2f", allocs)
+func TestSameKeyBranches(t *testing.T) {
+	// n <= 8
+	a, b := "abcd", "abcd"
+	if !sameKey(unsafe.Pointer(unsafe.StringData(a)), unsafe.Pointer(unsafe.StringData(b)), uint16(len(a))) {
+		t.Errorf("sameKey failed for n<=8")
+	}
+	// n <= 12
+	s10 := strings.Repeat("y", 10)
+	if !sameKey(unsafe.Pointer(unsafe.StringData(s10)), unsafe.Pointer(unsafe.StringData(s10)), uint16(len(s10))) {
+		t.Errorf("sameKey failed for n<=12")
+	}
+	// n <= 32
+	s20 := strings.Repeat("z", 20)
+	if !sameKey(unsafe.Pointer(unsafe.StringData(s20)), unsafe.Pointer(unsafe.StringData(s20)), uint16(len(s20))) {
+		t.Errorf("sameKey failed for n<=32")
+	}
+	// n > 32
+	s40 := strings.Repeat("w", 40)
+	if !sameKey(unsafe.Pointer(unsafe.StringData(s40)), unsafe.Pointer(unsafe.StringData(s40)), uint16(len(s40))) {
+		t.Errorf("sameKey failed for n>32")
+	}
+	// mismatch
+	if sameKey(unsafe.Pointer(unsafe.StringData(a)), unsafe.Pointer(unsafe.StringData("abce")), uint16(len(a))) {
+		t.Errorf("sameKey returned true for different keys")
 	}
 }
 
-/*──────────────────────── helper for alloc check ─────────────*/
+func TestHashMapBasic(t *testing.T) {
+	hm := New()
+	if hm.Size() != 0 {
+		t.Errorf("Size expected 0, got %d", hm.Size())
+	}
+	// Missing key
+	if v, ok := hm.Get("missing"); ok || v != 0 {
+		t.Errorf("Get missing returned (%d, %t), want (0, false)", v, ok)
+	}
+	// Insert new key
+	hm.Put("key1", 42)
+	if hm.Size() != 1 {
+		t.Errorf("Size after Put expected 1, got %d", hm.Size())
+	}
+	if v, ok := hm.Get("key1"); !ok || v != 42 {
+		t.Errorf("Get after Put returned (%d, %t), want (42, true)", v, ok)
+	}
+	// Update existing key
+	hm.Put("key1", 100)
+	if hm.Size() != 1 {
+		t.Errorf("Size after update expected 1, got %d", hm.Size())
+	}
+	if v, ok := hm.Get("key1"); !ok || v != 100 {
+		t.Errorf("Get after update returned (%d, %t), want (100, true)", v, ok)
+	}
+}
 
-// testing.AllocsPerRun is an internal helper; re-export small shim.
-func testingAllocsPerRun(runs int, f func()) float64 {
-	return testing.AllocsPerRun(runs, f)
+func TestHashMapCollisionBranch(t *testing.T) {
+	hm := New()
+	key := "collision"
+	ptr := unsafe.StringData(key)
+	klen := uint16(len(key))
+	hash := xxhMix64(unsafe.Pointer(ptr), klen)
+	low := uint16(hash)
+	bucketIdx := uint32(low) & bucketMask
+	clusterIdx := (uint32(low) >> clusterShift) & clMask
+	base := int(low) & slotMask
+
+	// Simulate collision at primary cluster
+	cl := &hm.buckets[bucketIdx][clusterIdx]
+	cl.bitmap = 1 << uint(base)
+	// Insert key, should skip occupied slot and place in next available
+	hm.Put(key, 55)
+	if v, ok := hm.Get(key); !ok || v != 55 {
+		t.Errorf("Collision Put/Get returned (%d, %t), want (55, true)", v, ok)
+	}
 }

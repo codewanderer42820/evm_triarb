@@ -4,6 +4,7 @@
 package pairidx
 
 import (
+	"fmt"
 	"math/bits"
 	"unsafe"
 )
@@ -178,49 +179,39 @@ func (h *HashMap) Get(k string) (uint16, bool) {
 /*─────────────────── Put ─────────────────────────*/
 
 //go:nosplit
-func (h *HashMap) Put(k string, v uint16) {
+func (h *HashMap) Put(k string, v uint32) {
 	ptr := unsafe.StringData(k)
 	klen := uint16(len(k))
-
 	hash := xxhMix64(unsafe.Pointer(ptr), klen)
-	low := uint16(hash)
-	tag := uint16(hash>>48) | 1
+	bucket := uint32(hash) & bucketMask
+	ci := (uint32(hash) >> clusterShift) & clMask
+	base := int(hash) & slotMask
 
-	cl := &h.buckets[uint32(low)&bucketMask][(uint32(low)>>clusterShift)&clMask]
-	bm := cl.bitmap
-	val32 := uint32(v)
-	base := int(low) & slotMask
-
-probe:
+	cl := &h.buckets[bucket][ci]
 	for _, off := range probeSeq {
 		i := (base + int(off)) & slotMask
-		bit := uint64(1) << uint(i)
-		s := &cl.slots[i]
-
-		if bm&bit != 0 {
-			if s.tag == tag && s.klen == klen &&
-				sameKey(s.kptr, unsafe.Pointer(ptr), klen) {
-				if s.val != val32 {
-					s.val = val32
-				}
-				return
-			}
-			continue
+		if cl.bitmap&(1<<uint(i)) == 0 {
+			// empty slot
+			cl.bitmap |= 1 << uint(i)
+			slot := &cl.slots[i]
+			slot.tag = uint16(hash>>48) | 1
+			slot.klen = klen
+			slot.kptr = unsafe.Pointer(ptr)
+			slot.val = v
+			h.size++
+			return
 		}
-		// empty slot → insert
-		s.tag, s.klen, s.kptr = tag, klen, unsafe.Pointer(ptr)
-		s.val = val32
-		cl.bitmap = bm | bit
-		h.size++
-		return
+		// if same key, update and return
+		slot := &cl.slots[i]
+		if slot.tag == (uint16(hash>>48)|1) && slot.klen == klen &&
+			sameKey(slot.kptr, unsafe.Pointer(ptr), klen) {
+			slot.val = v
+			return
+		}
 	}
 
-	// ───────── optional secondary cluster hop (never panics) ───────
-	// Remove this loop and keep the panic if you prefer strict 16-slot caps.
-	ci := (uint32(low)>>clusterShift + 1) & clMask
-	cl = &h.buckets[uint32(low)&bucketMask][ci]
-	bm = cl.bitmap
-	goto probe
+	// Primary cluster full: no secondary hop
+	panic(fmt.Sprintf("cluster %d full for key %s", ci, k))
 }
 
 /*──────────────── misc ───────────────────────────*/

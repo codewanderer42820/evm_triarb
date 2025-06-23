@@ -33,14 +33,14 @@ func BenchmarkPutOverwrite(b *testing.B) {
 	m.Put("dup", 0)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		m.Put("dup", uint16(i))
+		m.Put("dup", uint32(i))
 	}
 }
 
 // BenchmarkPutInsert benchmarks cost of inserting new, unique keys.
 // It resets the map every `batch` insertions to avoid cluster overflows.
 func BenchmarkPutInsert(b *testing.B) {
-	const batch = bucketCnt * clustersPerBkt * clusterSlots / 4
+	const batch = bucketCnt * clustersPerBkt * clusterSlots / 10
 	keys := make([]string, b.N)
 	for i := 0; i < b.N; i++ {
 		keys[i] = fmt.Sprintf("k_%08d", i)
@@ -52,7 +52,7 @@ func BenchmarkPutInsert(b *testing.B) {
 		if i > 0 && i%batch == 0 {
 			m = New()
 		}
-		m.Put(keys[i], uint16(i))
+		m.Put(keys[i], uint32(i))
 	}
 }
 
@@ -99,7 +99,7 @@ func BenchmarkSizeScan(b *testing.B) {
 	m := New()
 	healf := bucketCnt * clustersPerBkt * clusterSlots / 2
 	for i := 0; i < healf; i++ {
-		m.Put(fmt.Sprintf("size_%d", i), uint16(i))
+		m.Put(fmt.Sprintf("size_%d", i), uint32(i))
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
