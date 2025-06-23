@@ -114,11 +114,6 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 		q.recycleStaleBuckets()
 		q.baseTick = uint64(tick)
 		q.gen++
-		if q.gen == 0 {
-			for i := range q.bucketGen {
-				q.bucketGen[i] = 0
-			}
-		}
 		q.summary = 0
 		q.groupBits = [numGroups]uint64{}
 	}
