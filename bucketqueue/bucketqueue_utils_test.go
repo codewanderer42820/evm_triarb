@@ -1,4 +1,4 @@
-// bucketqueue_test_utils.go — shared helpers for bucketqueue tests
+// bucketqueue_utils_test.go — shared helpers for bucketqueue tests
 package bucketqueue
 
 import (
