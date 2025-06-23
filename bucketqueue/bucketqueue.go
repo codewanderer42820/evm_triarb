@@ -140,7 +140,7 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 
 	// ---------- first insertion or bucket-move ---------------------------------------
 	if n.count != 0 {
-		q.detach(idx, n)
+		q.detach(n)
 		q.size -= int(n.count)
 
 		// -------- clear bitmap bit if the OLD bucket became empty --------------------
@@ -186,7 +186,7 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 }
 
 // detach removes node n (idx) from its current bucket list without changing bitmaps.
-func (q *Queue) detach(idx idx32, n *node) {
+func (q *Queue) detach(n *node) {
 	if n.prev != nilIdx {
 		q.arena[n.prev].next = n.next
 	} else { // n is head
@@ -210,7 +210,7 @@ func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 		return ErrItemNotFound
 	}
 	q.size -= int(n.count)
-	q.detach(idx, n)
+	q.detach(n)
 	// clear bitmaps for emptied bucket when necessary
 	bkt := uint64(n.tick) - q.baseTick
 	if q.buckets[bkt] == nilIdx {
@@ -313,7 +313,7 @@ func (q *Queue) Remove(h Handle) error {
 	if n.count == 0 {
 		return ErrItemNotFound
 	}
-	q.detach(idx32(h), n)
+	q.detach(n)
 	q.size -= int(n.count)
 	bkt := uint64(n.tick) - q.baseTick
 	if q.buckets[bkt] == nilIdx {
