@@ -1,7 +1,4 @@
 // bucketqueue_test_utils.go — shared helpers for bucketqueue tests
-// ===============================================================
-// Centralizes boilerplate for borrowing, pushing, and asserting behavior.
-
 package bucketqueue
 
 import (
@@ -20,7 +17,7 @@ func borrowOrPanic(t *testing.T, q *Queue) Handle {
 
 // pushOrPanic attempts q.Push and fails the test on error.
 func pushOrPanic(t *testing.T, q *Queue, tick int64, h Handle) {
-	if err := q.Push(tick, h); err != nil {
+	if err := q.Push(tick, h, nil); err != nil {
 		t.Fatalf("Push failed: %v", err)
 	}
 }
@@ -69,7 +66,7 @@ func expectErrorContains(t *testing.T, err error, wantSubstring string) {
 
 // expectPeep asserts PeepMin returns the expected handle and tick.
 func expectPeep(t *testing.T, q *Queue, want Handle, wantTick int64) {
-	got, tick := q.PeepMin()
+	got, tick, _ := q.PeepMin()
 	if got != want || tick != wantTick {
 		t.Fatalf("PeepMin mismatch: got %v@%d, want %v@%d", got, tick, want, wantTick)
 	}

@@ -1,8 +1,4 @@
-// bucketqueue_bench_test.go — micro‑benchmarks for the arena‑backed bucketqueue
-// ==================================================================
-// Isolates the cost of each core queue operation in tight loops.
-// All benchmarks are designed to remain allocation-free under stable conditions.
-
+// bucketqueue_bench_test.go — micro-benchmarks for the arena-backed bucketqueue
 package bucketqueue
 
 import (
@@ -10,12 +6,11 @@ import (
 	"testing"
 )
 
-// seededQueue returns a Queue with one handle pushed at tick=0.
-// The handle starts with count==1, ready for repeated fast-path reuse.
+// seededQueue returns a Queue with one handle pushed at tick=0 and nil data.
 func seededQueue() (*Queue, Handle) {
 	q := New()
 	h, _ := q.Borrow()
-	_ = q.Push(0, h)
+	_ = q.Push(0, h, nil)
 	return q, h
 }
 
@@ -24,33 +19,31 @@ func BenchmarkPush(b *testing.B) {
 	q, h := seededQueue()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = q.Push(0, h)
+		_ = q.Push(0, h, nil)
 	}
 }
 
 // BenchmarkPopMin tests minimal-cost popping of the same handle repeatedly.
 func BenchmarkPopMin(b *testing.B) {
 	q, h := seededQueue()
-	// Preload with (N-1) more refs to match expected pop count.
 	for i := 1; i < b.N; i++ {
-		_ = q.Push(0, h)
+		_ = q.Push(0, h, nil)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = q.PopMin()
+		_, _, _ = q.PopMin()
 	}
 }
 
 // BenchmarkPeepMin measures non-mutating read of the current minimum.
 func BenchmarkPeepMin(b *testing.B) {
 	q, h := seededQueue()
-	// Push a few extra to simulate small bucket load.
 	for i := 0; i < 7; i++ {
-		_ = q.Push(0, h)
+		_ = q.Push(0, h, nil)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = q.PeepMin()
+		_, _, _ = q.PeepMin()
 	}
 }
 
@@ -67,8 +60,8 @@ func BenchmarkPushPopCycle(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		h := handles[idx]
 		idx = (idx + 1) % len(handles)
-		_ = q.Push(0, h)
-		_, _ = q.PopMin()
+		_ = q.Push(0, h, nil)
+		_, _, _ = q.PopMin()
 	}
 }
 
@@ -77,7 +70,7 @@ func BenchmarkUpdate(b *testing.B) {
 	q, h := seededQueue()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = q.Update(1, h)
+		_ = q.Update(1, h, nil)
 	}
 }
 
@@ -99,14 +92,14 @@ func BenchmarkMixedHeavy(b *testing.B) {
 		case n < 5:
 			h := handles[idx]
 			idx = (idx + 1) % len(handles)
-			_ = q.Push(0, h)
+			_ = q.Push(0, h, nil)
 		case n < 9:
 			if !q.Empty() {
-				_, _ = q.PopMin()
+				_, _, _ = q.PopMin()
 			}
 		default:
 			h := handles[idx]
-			_ = q.Update(0, h)
+			_ = q.Update(0, h, nil)
 		}
 	}
 }
