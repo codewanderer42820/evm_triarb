@@ -1,26 +1,25 @@
-// bucketqueue.go — arena-backed, zero-alloc min-priority queue (fixed window)
-// 2025-06-24: 64-bit edition (cast-free)
-
+// bucketqueue.go — fully uint64-purified, cast-free, zero-alloc min-priority queue
 package bucketqueue
 
 import (
 	"errors"
+	"math"
 	"math/bits"
 	"unsafe"
 )
 
 const (
-	numBuckets = 1 << 12 // ring size (4096)
-	groupSize  = 64      // bits per summary word
-	numGroups  = numBuckets / groupSize
-	capItems   = 4 * numBuckets // arena capacity (16 384)
+	numBuckets uint64 = 1 << 12 // ring size (4096)
+	groupSize  uint64 = 64      // bits per summary word
+	numGroups         = numBuckets / groupSize
+	capItems   uint64 = 4 * numBuckets // arena capacity (16 384)
 )
 
-type idx = int64
+type idx = uint64
 
-const nilIdx idx = -1
+const nilIdx idx = math.MaxUint64
 
-type Handle = int64
+type Handle = uint64
 
 var (
 	ErrPastTick     = errors.New("bucketqueue: tick is before window")
@@ -28,38 +27,35 @@ var (
 	ErrFull         = errors.New("bucketqueue: arena exhausted")
 )
 
-// node is exactly one cache-line (64 B) on 64-bit builds.
-// The trailing padding avoids false sharing without relying on
-// unsupported alignment directives.
 type node struct {
 	next, prev idx            // 16 B
-	bucketIdx  idx            //  8 B  (24)
-	count      int            //  8 B  (32)
-	data       unsafe.Pointer // 8 B  (40)
-	_          [24]byte       // pad → 64 B
+	bucketIdx  idx            //  8 B
+	count      uint64         //  8 B
+	data       unsafe.Pointer //  8 B
+	_          [24]byte       // padding to 64 B
 }
 
 type Queue struct {
 	arena     [capItems]node
 	freeHead  idx
 	buckets   [numBuckets]idx
-	bucketGen [numBuckets]uint32
+	bucketGen [numBuckets]uint64
 	groupBits [numGroups]uint64
 	summary   uint64
 	baseTick  uint64
-	gen       uint32
-	size      int
+	gen       uint64
+	size      uint64
 }
 
 func New() *Queue {
 	q := &Queue{freeHead: 0}
-	for i := 0; i < capItems-1; i++ {
-		q.arena[i].next = int64(i + 1)
+	for i := uint64(0); i < capItems-1; i++ {
+		q.arena[i].next = i + 1
 		q.arena[i].bucketIdx = nilIdx
 	}
 	q.arena[capItems-1].next = nilIdx
 	q.arena[capItems-1].bucketIdx = nilIdx
-	for i := range q.buckets {
+	for i := uint64(0); i < numBuckets; i++ {
 		q.buckets[i] = nilIdx
 	}
 	return q
@@ -75,7 +71,7 @@ func (q *Queue) Borrow() (Handle, error) {
 }
 
 func (q *Queue) Return(h Handle) error {
-	if h < 0 || h >= capItems {
+	if h >= capItems {
 		return ErrItemNotFound
 	}
 	n := &q.arena[h]
@@ -88,17 +84,17 @@ func (q *Queue) Return(h Handle) error {
 	return nil
 }
 
-func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
-	if tick < int64(q.baseTick) {
+func (q *Queue) Push(tick uint64, h Handle, val unsafe.Pointer) error {
+	if tick < q.baseTick {
 		return ErrPastTick
 	}
-	if h < 0 || h >= capItems {
+	if h >= capItems {
 		return ErrItemNotFound
 	}
 	n := &q.arena[h]
 
 	if n.count > 0 && n.bucketIdx != nilIdx && q.bucketGen[n.bucketIdx] == q.gen {
-		if int64(q.baseTick)+int64(n.bucketIdx) == tick {
+		if q.baseTick+n.bucketIdx == tick {
 			n.count++
 			q.size++
 			return nil
@@ -107,23 +103,24 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 		q.detach(n)
 	}
 
-	if delta := uint64(tick) - q.baseTick; delta >= numBuckets {
+	if delta := tick - q.baseTick; delta >= numBuckets {
 		q.recycleStaleBuckets()
-		q.baseTick = uint64(tick)
+		q.baseTick = tick
 		if q.gen++; q.gen == 0 {
-			q.bucketGen = [numBuckets]uint32{}
+			q.bucketGen = [numBuckets]uint64{}
 		}
-		q.summary, q.groupBits = 0, [numGroups]uint64{}
+		q.summary = 0
+		q.groupBits = [numGroups]uint64{}
 	}
 
-	bkt := int((uint64(tick) - q.baseTick) & (numBuckets - 1))
+	bkt := (tick - q.baseTick) & (numBuckets - 1)
 	if q.bucketGen[bkt] != q.gen {
 		q.bucketGen[bkt] = q.gen
 		q.buckets[bkt] = nilIdx
 	}
 	head := q.buckets[bkt]
 	n.next, n.prev = head, nilIdx
-	n.bucketIdx = int64(bkt)
+	n.bucketIdx = bkt
 	if n.count == 0 {
 		n.count = 1
 	}
@@ -134,26 +131,26 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	q.buckets[bkt] = h
 
 	g := bkt / groupSize
-	bit := uint(bkt % groupSize)
+	bit := bkt % groupSize
 	q.groupBits[g] |= 1 << bit
-	q.summary |= 1 << uint(g)
+	q.summary |= 1 << g
 
 	q.size += n.count
 	return nil
 }
 
-func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
-	if h < 0 || h >= capItems {
+func (q *Queue) Update(tick uint64, h Handle, val unsafe.Pointer) error {
+	if h >= capItems {
 		return ErrItemNotFound
 	}
-	if tick < int64(q.baseTick) {
+	if tick < q.baseTick {
 		return ErrPastTick
 	}
 	n := &q.arena[h]
-	if n.count == 0 || n.bucketIdx < 0 || q.bucketGen[n.bucketIdx] != q.gen {
+	if n.count == 0 || n.bucketIdx == nilIdx || q.bucketGen[n.bucketIdx] != q.gen {
 		return ErrItemNotFound
 	}
-	if int64(q.baseTick)+int64(n.bucketIdx) == tick {
+	if q.baseTick+n.bucketIdx == tick {
 		return nil
 	}
 	q.size -= n.count
@@ -162,11 +159,11 @@ func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 }
 
 func (q *Queue) Remove(h Handle) error {
-	if h < 0 || h >= capItems {
+	if h >= capItems {
 		return ErrItemNotFound
 	}
 	n := &q.arena[h]
-	if n.count == 0 || n.bucketIdx < 0 || q.bucketGen[n.bucketIdx] != q.gen {
+	if n.count == 0 || n.bucketIdx == nilIdx || q.bucketGen[n.bucketIdx] != q.gen {
 		return ErrItemNotFound
 	}
 	q.detach(n)
@@ -177,15 +174,15 @@ func (q *Queue) Remove(h Handle) error {
 	return nil
 }
 
-func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
+func (q *Queue) PopMin() (Handle, uint64, unsafe.Pointer) {
 	if q.size == 0 || q.summary == 0 {
 		return nilIdx, 0, nil
 	}
-	g := bits.TrailingZeros64(q.summary)
+	g := uint64(bits.TrailingZeros64(q.summary))
 	w := q.groupBits[g]
-	b := bits.TrailingZeros64(w)
-	bkt := g*groupSize + int(b)
-	tick := int64(q.baseTick) + int64(bkt)
+	b := uint64(bits.TrailingZeros64(w))
+	bkt := g*groupSize + b
+	tick := q.baseTick + bkt
 
 	i := q.buckets[bkt]
 	n := &q.arena[i]
@@ -203,9 +200,10 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	}
 	if next == nilIdx {
 		g2 := bkt / groupSize
-		q.groupBits[g2] &^= 1 << uint(b)
+		bit := bkt % groupSize
+		q.groupBits[g2] &^= 1 << bit
 		if q.groupBits[g2] == 0 {
-			q.summary &^= 1 << uint(g2)
+			q.summary &^= 1 << g2
 		}
 	}
 
@@ -217,21 +215,21 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	return i, tick, data
 }
 
-func (q *Queue) PeepMin() (Handle, int64, unsafe.Pointer) {
+func (q *Queue) PeepMin() (Handle, uint64, unsafe.Pointer) {
 	if q.size == 0 || q.summary == 0 {
 		return nilIdx, 0, nil
 	}
-	g := bits.TrailingZeros64(q.summary)
+	g := uint64(bits.TrailingZeros64(q.summary))
 	w := q.groupBits[g]
-	b := bits.TrailingZeros64(w)
-	bkt := g*groupSize + int(b)
-	tick := int64(q.baseTick) + int64(bkt)
+	b := uint64(bits.TrailingZeros64(w))
+	bkt := g*groupSize + b
+	tick := q.baseTick + bkt
 	i := q.buckets[bkt]
 	return i, tick, q.arena[i].data
 }
 
-func (q *Queue) Size() int   { return q.size }
-func (q *Queue) Empty() bool { return q.size == 0 }
+func (q *Queue) Size() uint64 { return q.size }
+func (q *Queue) Empty() bool  { return q.size == 0 }
 
 func (q *Queue) detach(n *node) {
 	if n.prev != nilIdx {
@@ -243,13 +241,12 @@ func (q *Queue) detach(n *node) {
 		q.arena[n.next].prev = n.prev
 	}
 	if q.buckets[n.bucketIdx] == nilIdx {
-		g := int(n.bucketIdx) / groupSize
-		bit := uint(int(n.bucketIdx) % groupSize)
-
+		g := n.bucketIdx / groupSize
+		bit := n.bucketIdx % groupSize
 		tmp := q.groupBits[g] &^ (1 << bit)
 		q.groupBits[g] = tmp
 		if tmp == 0 {
-			q.summary &^= 1 << uint(g)
+			q.summary &^= 1 << g
 		}
 	}
 	n.next, n.prev, n.bucketIdx = nilIdx, nilIdx, nilIdx
@@ -261,14 +258,14 @@ func (q *Queue) recycleStaleBuckets() {
 	}
 	summary := q.summary
 	for summary != 0 {
-		g := bits.TrailingZeros64(summary)
-		summary &^= 1 << uint(g)
+		g := uint64(bits.TrailingZeros64(summary))
+		summary &^= 1 << g
 		w := q.groupBits[g]
 		q.groupBits[g] = 0
 		for w != 0 {
-			b := bits.TrailingZeros64(w)
-			w &^= 1 << uint(b)
-			bkt := g*groupSize + int(b)
+			b := uint64(bits.TrailingZeros64(w))
+			w &^= 1 << b
+			bkt := g*groupSize + b
 			for i := q.buckets[bkt]; i != nilIdx; {
 				nxt := q.arena[i].next
 				q.release(i)
