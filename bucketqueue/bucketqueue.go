@@ -1,11 +1,6 @@
 // bucketqueue.go — arena-backed, zero-alloc min-priority queue (fixed window)
-// 2025-06-24: 64-bit edition
-//   - All internal indices use int64 (no 32-bit types)
-//   - Handle stays signed int64 so tests can use -1 as “nil”
-//   - Negative-and-out-of-range guards in Return/Push/Update/Remove
-//   - PopMin/PeepMin return Handle(nilIdx) on empty
-//
-// -----------------------------------------------------------------------------
+// 2025-06-24: 64-bit edition (cast-free)
+
 package bucketqueue
 
 import (
@@ -21,14 +16,10 @@ const (
 	capItems   = 4 * numBuckets // arena capacity (16 384)
 )
 
-// idx is our internal slot-index type, fully 64-bit.
 type idx = int64
 
-// nilIdx is the “no-node” sentinel.
 const nilIdx idx = -1
 
-// Handle is an opaque index into the arena.
-// It remains signed so that tests can write `-1` directly.
 type Handle = int64
 
 var (
@@ -60,7 +51,7 @@ type Queue struct {
 func New() *Queue {
 	q := &Queue{freeHead: 0}
 	for i := 0; i < capItems-1; i++ {
-		q.arena[i].next = idx(i + 1)
+		q.arena[i].next = int64(i + 1)
 		q.arena[i].bucketIdx = nilIdx
 	}
 	q.arena[capItems-1].next = nilIdx
@@ -73,25 +64,24 @@ func New() *Queue {
 
 func (q *Queue) Borrow() (Handle, error) {
 	if q.freeHead == nilIdx {
-		return Handle(nilIdx), ErrFull
+		return nilIdx, ErrFull
 	}
 	i := q.freeHead
 	q.freeHead = q.arena[i].next
-	return Handle(i), nil
+	return i, nil
 }
 
 func (q *Queue) Return(h Handle) error {
-	i := idx(h)
-	if i < 0 || i >= capItems {
+	if h < 0 || h >= capItems {
 		return ErrItemNotFound
 	}
-	n := &q.arena[i]
+	n := &q.arena[h]
 	if n.count != 0 {
 		return errors.New("bucketqueue: cannot return active handle")
 	}
 	n.prev, n.bucketIdx, n.count = nilIdx, nilIdx, 0
 	n.next = q.freeHead
-	q.freeHead = i
+	q.freeHead = h
 	return nil
 }
 
@@ -99,25 +89,21 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	if tick < int64(q.baseTick) {
 		return ErrPastTick
 	}
-	i := idx(h)
-	if i < 0 || i >= capItems {
+	if h < 0 || h >= capItems {
 		return ErrItemNotFound
 	}
-	n := &q.arena[i]
+	n := &q.arena[h]
 
-	// If already in current window & bucket, bump count
 	if n.count > 0 && n.bucketIdx != nilIdx && q.bucketGen[n.bucketIdx] == q.gen {
 		if int64(q.baseTick)+int64(n.bucketIdx) == tick {
 			n.count++
 			q.size++
 			return nil
 		}
-		// otherwise remove existing before re-push
 		q.size -= n.count
 		q.detach(n)
 	}
 
-	// Slide window if needed
 	if delta := uint64(tick) - q.baseTick; delta >= numBuckets {
 		q.recycleStaleBuckets()
 		q.baseTick = uint64(tick)
@@ -127,7 +113,6 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 		q.summary, q.groupBits = 0, [numGroups]uint64{}
 	}
 
-	// Insert into bucket
 	bkt := int((uint64(tick) - q.baseTick) & (numBuckets - 1))
 	if q.bucketGen[bkt] != q.gen {
 		q.bucketGen[bkt] = q.gen
@@ -135,17 +120,16 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	}
 	head := q.buckets[bkt]
 	n.next, n.prev = head, nilIdx
-	n.bucketIdx = idx(bkt)
+	n.bucketIdx = int64(bkt)
 	if n.count == 0 {
 		n.count = 1
 	}
 	n.data = val
 	if head != nilIdx {
-		q.arena[head].prev = i
+		q.arena[head].prev = h
 	}
-	q.buckets[bkt] = i
+	q.buckets[bkt] = h
 
-	// Update summary bits
 	g := bkt / groupSize
 	bit := uint(bkt % groupSize)
 	q.groupBits[g] |= 1 << bit
@@ -156,14 +140,13 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 }
 
 func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
-	i := idx(h)
-	if i < 0 || i >= capItems {
+	if h < 0 || h >= capItems {
 		return ErrItemNotFound
 	}
 	if tick < int64(q.baseTick) {
 		return ErrPastTick
 	}
-	n := &q.arena[i]
+	n := &q.arena[h]
 	if n.count == 0 || n.bucketIdx < 0 || q.bucketGen[n.bucketIdx] != q.gen {
 		return ErrItemNotFound
 	}
@@ -176,11 +159,10 @@ func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 }
 
 func (q *Queue) Remove(h Handle) error {
-	i := idx(h)
-	if i < 0 || i >= capItems {
+	if h < 0 || h >= capItems {
 		return ErrItemNotFound
 	}
-	n := &q.arena[i]
+	n := &q.arena[h]
 	if n.count == 0 || n.bucketIdx < 0 || q.bucketGen[n.bucketIdx] != q.gen {
 		return ErrItemNotFound
 	}
@@ -188,13 +170,13 @@ func (q *Queue) Remove(h Handle) error {
 	q.size -= n.count
 	n.prev, n.bucketIdx, n.count = nilIdx, nilIdx, 0
 	n.next = q.freeHead
-	q.freeHead = i
+	q.freeHead = h
 	return nil
 }
 
 func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	if q.size == 0 || q.summary == 0 {
-		return Handle(nilIdx), 0, nil
+		return nilIdx, 0, nil
 	}
 	g := bits.TrailingZeros64(q.summary)
 	w := q.groupBits[g]
@@ -208,7 +190,7 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	if n.count > 1 {
 		n.count--
 		q.size--
-		return Handle(i), tick, n.data
+		return i, tick, n.data
 	}
 
 	next := n.next
@@ -217,7 +199,6 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 		q.arena[next].prev = nilIdx
 	}
 	if next == nilIdx {
-		// clear summary bit if bucket empties
 		g2 := bkt / groupSize
 		q.groupBits[g2] &^= 1 << uint(b)
 		if q.groupBits[g2] == 0 {
@@ -230,12 +211,12 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	n.prev, n.bucketIdx, n.count = nilIdx, nilIdx, 0
 	n.next = q.freeHead
 	q.freeHead = i
-	return Handle(i), tick, data
+	return i, tick, data
 }
 
 func (q *Queue) PeepMin() (Handle, int64, unsafe.Pointer) {
 	if q.size == 0 || q.summary == 0 {
-		return Handle(nilIdx), 0, nil
+		return nilIdx, 0, nil
 	}
 	g := bits.TrailingZeros64(q.summary)
 	w := q.groupBits[g]
@@ -243,13 +224,12 @@ func (q *Queue) PeepMin() (Handle, int64, unsafe.Pointer) {
 	bkt := g*groupSize + int(b)
 	tick := int64(q.baseTick) + int64(bkt)
 	i := q.buckets[bkt]
-	return Handle(i), tick, q.arena[i].data
+	return i, tick, q.arena[i].data
 }
 
 func (q *Queue) Size() int   { return q.size }
 func (q *Queue) Empty() bool { return q.size == 0 }
 
-// detach removes a node from its bucket’s linked list and updates summary.
 func (q *Queue) detach(n *node) {
 	if n.prev != nilIdx {
 		q.arena[n.prev].next = n.next
@@ -272,7 +252,6 @@ func (q *Queue) detach(n *node) {
 	n.next, n.prev, n.bucketIdx = nilIdx, nilIdx, nilIdx
 }
 
-// recycleStaleBuckets clears every live bucket by walking only set bits.
 func (q *Queue) recycleStaleBuckets() {
 	if q.size == 0 || q.summary == 0 {
 		return
@@ -299,7 +278,6 @@ func (q *Queue) recycleStaleBuckets() {
 	q.size = 0
 }
 
-//go:inline
 func (q *Queue) release(i idx) {
 	n := &q.arena[i]
 	n.prev, n.bucketIdx, n.count = nilIdx, nilIdx, 0
