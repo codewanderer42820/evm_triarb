@@ -269,3 +269,66 @@ func TestDirectRelease(t *testing.T) {
 	// Make sure h reusable
 	pushOrPanic(t, q, 2, h)
 }
+
+// TestPopMinMultiCount exercises the fast “count– –” path and the
+// final-removal path of PopMin.
+func TestPopMinMultiCount(t *testing.T) {
+	q := New()
+	h := borrowOrPanic(t, q)
+
+	const dup = 5 // push the same handle 5 times
+	for i := 0; i < dup; i++ {
+		pushOrPanic(t, q, 0, h)
+	}
+	expectSize(t, q, dup)
+
+	// First dup-1 pops go through the n.count>1 fast path,
+	// the last pop removes the node entirely.
+	for i := 0; i < dup; i++ {
+		got, tick, _ := q.PopMin()
+		expectHandle(t, got, h)
+		expectTick(t, tick, 0)
+		expectSize(t, q, dup-i-1)
+	}
+	expectEmpty(t, q)
+}
+
+// TestGenWrapClearsBucketGen hits the for-range zeroing loop in Push.
+// It pre-poisons bucketGen, forces q.gen to overflow to 0, then verifies
+// that every entry was cleared back to zero.
+func TestGenWrapClearsBucketGen(t *testing.T) {
+	q := New()
+
+	// Poison bucketGen so we can detect the reset.
+	for i := range q.bucketGen {
+		q.bucketGen[i] = 123
+	}
+
+	// Force the next Push() to wrap the generation counter.
+	q.gen = ^uint32(0) // 0xFFFFFFFF
+
+	h := borrowOrPanic(t, q)
+	wrapTick := int64(q.baseTick) + int64(numBuckets) // d ≥ numBuckets → window shift
+	if err := q.Push(wrapTick, h, nil); err != nil {
+		t.Fatalf("Push failed: %v", err)
+	}
+
+	// After wrap every bucketGen entry must be zero.
+	for i, g := range q.bucketGen {
+		if g != 0 {
+			t.Fatalf("bucketGen[%d] not cleared (got %d)", i, g)
+		}
+	}
+}
+
+// TestUpdateBadHandle exercises the out-of-range guard in Update.
+func TestUpdateBadHandle(t *testing.T) {
+	q := New()
+	tick := int64(q.baseTick)
+
+	err := q.Update(tick, -1, nil)
+	expectError(t, err, ErrItemNotFound)
+
+	err = q.Update(tick, capItems, nil)
+	expectError(t, err, ErrItemNotFound)
+}
