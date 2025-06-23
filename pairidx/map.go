@@ -37,6 +37,10 @@ func hashPtrLen(ptr unsafe.Pointer, klen uint16) (h32 uint32, tag uint16) {
 // Key compare – zero‑alloc, branch‑cheap
 // -----------------------------------------------------------------------------
 func sameKey(a, b unsafe.Pointer, n uint16) bool {
+	// Zero‑length keys are equal by definition and require no dereference.
+	if n == 0 {
+		return true
+	}
 	if n <= 8 {
 		return *(*uint64)(a) == *(*uint64)(b)
 	}

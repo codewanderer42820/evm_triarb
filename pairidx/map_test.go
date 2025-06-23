@@ -1,6 +1,8 @@
 package pairidx
 
 import (
+	"bytes"
+	"fmt"
 	"sync"
 	"testing"
 	"unsafe"
@@ -132,5 +134,101 @@ func TestKeyBytesNotMoved(t *testing.T) {
 	_ = k + "world" // create another string, ensure GC not confused
 	if ptrAfter := unsafe.StringData(k); ptrBefore != ptrAfter {
 		t.Fatalf("unexpected key bytes relocation")
+	}
+}
+
+// ---------- 6. rbm scan / return-nil path ------------------------------
+
+// meta returns (bucket, cluster, slot) derived from the map's hash.
+func meta(k string) (bucket, cluster, slot uint32) {
+	kptr := unsafe.StringData(k)
+	h32, _ := hashPtrLen(unsafe.Pointer(kptr), uint16(len(k)))
+	return h32 & bucketMask,
+		(h32 >> bucketShift) & clMask,
+		uint32(h32) & slotMask
+}
+
+// craftKeysSameCluster returns N distinct keys that fall into the same bucket+cluster.
+func craftKeysSameCluster(seed string, n int) []string {
+	b0, c0, _ := meta(seed)
+	keys := []string{seed}
+	for i := 0; len(keys) < n; i++ {
+		k := fmt.Sprintf("%s_%d", seed, i)
+		if b, c, _ := meta(k); b == b0 && c == c0 {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// The first two keys occupy different slots; the third is absent.
+func TestGetScanExhaustNil(t *testing.T) {
+	keys := craftKeysSameCluster("scanSeed", 3)
+	m := New()
+	m.Put(keys[0], 0) // fills 1st bit
+	m.Put(keys[1], 1) // fills 2nd bit
+
+	// Lookup of the 3rd key must iterate twice (rbm &= rbm-1 executed ≥1 time)
+	// then return nil after the mask is cleared.
+	if m.Get(keys[2]) != nil {
+		t.Fatalf("expected miss after full bitmap scan")
+	}
+}
+
+// ---------- 7. sameKey multi-length sanity -----------------------------
+
+func TestSameKeyWideLengths(t *testing.T) {
+	lengths := []int{0, 1, 2, 7, 8, 9, 15, 16, 31, 64}
+	for _, n := range lengths {
+		b1 := bytes.Repeat([]byte{'A'}, n)
+		b2 := append([]byte(nil), b1...) // deep copy
+		var p1, p2 unsafe.Pointer
+		if n > 0 {
+			p1, p2 = unsafe.Pointer(&b1[0]), unsafe.Pointer(&b2[0])
+		} else { // empty slice – use nil (valid, never dereferenced)
+			p1, p2 = nil, nil
+		}
+		if !sameKey(p1, p2, uint16(n)) {
+			t.Fatalf("sameKey failed at len=%d", n)
+		}
+	}
+}
+
+// ---------- 8. sameKey false-branch coverage --------------------------
+
+func p(b []byte) unsafe.Pointer {
+	if len(b) == 0 {
+		return nil
+	}
+	return unsafe.Pointer(&b[0])
+}
+
+// Each case tweaks exactly one compare stage to fail.
+func TestSameKeyFalseBranches(t *testing.T) {
+	cases := []struct {
+		name string
+		a    []byte
+		b    []byte
+	}{
+		// Case 1: first 8 bytes differ
+		{"first8", bytes.Repeat([]byte{'X'}, 12), append([]byte{'Y'}, bytes.Repeat([]byte{'X'}, 11)...)},
+
+		// Case 2: second 8-byte block differs (first equal)
+		{"mid8", append(bytes.Repeat([]byte{'A'}, 8), bytes.Repeat([]byte{'B'}, 8)...),
+			append(bytes.Repeat([]byte{'A'}, 8), bytes.Repeat([]byte{'C'}, 8)...)},
+
+		// Case 3: 4-byte tail differs
+		{"tail4", append(bytes.Repeat([]byte{'A'}, 8), []byte("1234")...),
+			append(bytes.Repeat([]byte{'A'}, 8), []byte("zz34")...)},
+
+		// Case 4: 2-byte tail differs
+		{"tail2", append(bytes.Repeat([]byte{'A'}, 8), []byte("XY")...),
+			append(bytes.Repeat([]byte{'A'}, 8), []byte("XZ")...)},
+	}
+
+	for _, tc := range cases {
+		if sameKey(p(tc.a), p(tc.b), uint16(len(tc.a))) {
+			t.Fatalf("%s: expected false", tc.name)
+		}
 	}
 }
