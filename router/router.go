@@ -120,10 +120,16 @@ func runLoop(id int, in *ring.Ring, rt *CoreRouter, isRev bool) {
 		if isRev {
 			val = u.RevTick
 		}
-		if i, ok := rt.bucketByKey.Get(string(key[:])); ok {
-			rt.buckets[i].CurLog = val // O(1) update
+
+		// bucketByKey: [addr] → uint32 bucket index
+		if p := rt.bucketByKey.Get(string(key[:])); p != nil {
+			idx := *(*uint32)(p)
+			rt.buckets[idx].CurLog = val // O(1) write – single writer per CPU
 		}
-		if fi, ok := rt.queueByKey.Get(string(key[:])); ok {
+
+		// queueByKey: [addr] → uint32 fan‑out slice index
+		if p := rt.queueByKey.Get(string(key[:])); p != nil {
+			fi := *(*uint32)(p)
 			recomputeSWAR(rt.fanOut[fi]) // amortised O(1)
 		}
 	}, nil)
@@ -228,45 +234,49 @@ func wireAddrs(db *sql.DB, c *Cycle) {
 func buildSplit(memo map[[20]byte][2]*DeltaBucket, c *Cycle) {
 	half := len(routers) / 2
 
-	// 1) Ensure each pool/dir has its resident DeltaBucket (created once).
+	// 1) Ensure each pool/dir has its resident DeltaBucket.
 	for i := 0; i < 3; i++ {
 		a := c.ap.Addr[i]
 		d := btoi(c.ap.Dir[i])
 		e := memo[a]
 		if e[d] == nil {
-			b := &DeltaBucket{Queue: bucketqueue.New()} // CurLog zero-initialised
+			b := &DeltaBucket{Queue: bucketqueue.New()}
 			e[d] = b
 			memo[a] = e
 
-			core := d*half + int(a[0])%half // branch-free colour-spread across CPUs
+			core := d*half + int(a[0])%half
 			rt := routers[core]
-			rt.bucketByKey.Put(string(a[:]), uint16(len(rt.buckets)))
+			idx := uint32(len(rt.buckets))
+			rt.bucketByKey.Put(string(a[:]), idx)
 			rt.buckets = append(rt.buckets, b)
 		}
 	}
 
-	// 2) Producer leg (Addr[0]) borrows a single queue handle upfront.
+	// 2) Producer leg borrows a queue handle once.
 	prod := memo[c.ap.Addr[0]][btoi(c.ap.Dir[0])]
-	c.ap.LegSum = c.ap.LegVal[1] + c.ap.LegVal[2] // one-off pre-sum
-	prod.Path = *c.ap                             // resident copy – 0 alloc, 0 escape
+	c.ap.LegSum = c.ap.LegVal[1] + c.ap.LegVal[2]
+	prod.Path = *c.ap
 
 	q := prod.Queue
 	h, _ := q.Borrow()
-	_ = q.Push(0, h) // seed with neutral priority – recompute will update soon
+	_ = q.Push(0, h)
 
-	// 3) Consumer legs (Addr[1], Addr[2]) wire refs → same (q,h,B).
+	// 3) Consumer legs wire refs → (q,h,B).
 	for _, idx := range [...]int{1, 2} {
 		a := c.ap.Addr[idx]
 		d := c.ap.Dir[idx]
 		core := btoi(d)*half + int(a[0])%half
 		rt := routers[core]
 
-		fanIdx, ok := rt.queueByKey.Get(string(a[:]))
-		if !ok {
-			fanIdx = uint16(len(rt.fanOut))
+		var fanIdx uint32
+		if p := rt.queueByKey.Get(string(a[:])); p == nil {
+			fanIdx = uint32(len(rt.fanOut))
 			rt.queueByKey.Put(string(a[:]), fanIdx)
 			rt.fanOut = append(rt.fanOut, nil)
+		} else {
+			fanIdx = *(*uint32)(p)
 		}
+
 		rt.fanOut[fanIdx] = append(rt.fanOut[fanIdx], ref{Q: q, H: h, B: prod})
 	}
 }
