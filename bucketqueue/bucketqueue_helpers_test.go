@@ -1,68 +1,60 @@
-// bucketqueue_helpers_test.go — shared helpers for bucketqueue tests (uint64-edition)
 package bucketqueue
 
 import (
-	"strings"
-	"testing"
+    "strings"
+    "testing"
+    "unsafe"
 )
 
-// borrowOrPanic grabs a new handle or aborts the test.
-func borrowOrPanic(t *testing.T, q *Queue) Handle {
-	h, err := q.Borrow()
-	if err != nil {
-		t.Fatalf("Borrow failed: %v", err)
-	}
-	return h
-}
-
-// pushOrPanic queues (tick,h) or aborts the test.
-func pushOrPanic(t *testing.T, q *Queue, tick uint64, h Handle) {
-	if err := q.Push(tick, h, nil); err != nil {
-		t.Fatalf("Push failed: %v", err)
-	}
-}
-
-// ─── tiny assertion helpers ────────────────────────────────────────────────────
-
-func expectTick(t *testing.T, got, want uint64) {
-	if got != want {
-		t.Fatalf("Unexpected tick: got %d, want %d", got, want)
-	}
-}
-
-func expectHandle(t *testing.T, got, want Handle) {
-	if got != want {
-		t.Fatalf("Unexpected handle: got %v, want %v", got, want)
-	}
-}
-
-func expectEmpty(t *testing.T, q *Queue) {
-	if !q.Empty() || q.Size() != 0 {
-		t.Fatalf("Expected empty queue; got size=%d, empty=%v", q.Size(), q.Empty())
-	}
-}
-
-func expectSize(t *testing.T, q *Queue, want uint64) {
-	if q.Size() != want {
-		t.Fatalf("Expected size=%d; got %d", want, q.Size())
-	}
-}
-
-func expectError(t *testing.T, err, want error) {
-	if err != want {
-		t.Fatalf("Expected error %v; got %v", want, err)
-	}
+// -----------------------------------------------------------------------------
+// tiny helpers shared by tests
+func expectError(t *testing.T, got, want error) {
+    t.Helper()
+    if got != want {
+        t.Fatalf("want err %v, got %v", want, got)
+    }
 }
 
 func expectErrorContains(t *testing.T, err error, sub string) {
-	if err == nil || !strings.Contains(err.Error(), sub) {
-		t.Fatalf("Expected error containing %q; got %v", sub, err)
-	}
+    t.Helper()
+    if err == nil || !strings.Contains(err.Error(), sub) {
+        t.Fatalf("expected error containing %q; got %v", sub, err)
+    }
 }
 
-func expectPeep(t *testing.T, q *Queue, want Handle, wantTick uint64) {
-	got, tick, _ := q.PeepMin()
-	if got != want || tick != wantTick {
-		t.Fatalf("PeepMin mismatch: got %v@%d, want %v@%d", got, tick, want, wantTick)
-	}
+func expectTick(t *testing.T, tick, want int64) {
+    t.Helper()
+    if tick != want {
+        t.Fatalf("tick want %d got %d", want, tick)
+    }
+}
+
+func borrowOrPanic(t *testing.T, q *Queue) Handle {
+    t.Helper()
+    h, err := q.Borrow()
+    if err != nil {
+        t.Fatalf("Borrow failed: %v", err)
+    }
+    return h
+}
+
+func pushOrFatal(t *testing.T, q *Queue, tick int64, h Handle) {
+    t.Helper()
+    if err := q.Push(tick, h, unsafe.Pointer(uintptr(h))); err != nil {
+        t.Fatalf("Push failed: %v", err)
+    }
+}
+
+func expectSize(t *testing.T, q *Queue, want int) {
+    t.Helper()
+    if q.Size() != want {
+        t.Fatalf("expected size=%d; got %d", want, q.Size())
+    }
+}
+
+func expectEmpty(t *testing.T, q *Queue) {
+    t.Helper()
+    if !q.Empty() {
+        t.Fatalf("expected empty; size=%d", q.Size())
+    }
 }

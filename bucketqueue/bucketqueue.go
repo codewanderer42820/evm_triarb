@@ -1,313 +1,318 @@
-// bucketqueue.go — minimal-loop edition
+// Package bucketqueue is an ultra-low-latency, zero-alloc time-bucket priority queue.
+// One cache-line-padded node per item; O(1) min-pop via 2-level bitmaps.
 package bucketqueue
 
 import (
-	"errors"
-	"math"
-	"math/bits"
-	"unsafe"
+    "errors"
+    "math/bits"
+    "unsafe"
 )
 
 const (
-	numBuckets uint64 = 1 << 12 // ring size (4096) — must stay power-of-two
-	groupSize  uint64 = 64
-	numGroups         = numBuckets / groupSize
-	capItems   uint64 = 4 * numBuckets
+    // queue parameters – all powers of two
+    numBuckets  = 4096          // window width
+    groupSize   = 64            // buckets per summary bit
+    numGroups   = numBuckets / groupSize
+    capItems    = 1 << 16       // max concurrent items
+    nilIdx idx32 = ^idx32(0)    // 0xffffffff – invalid handle
 )
 
-// ─── compile-time guards ──────────────────────────────────────────────────────
-// compile-time invariants (build will fail if violated)
+// -----------------------------------------------------------------------------
+// compile-time invariants (build fails if hacked)
+//
+// 1. numBuckets must be a power-of-two.
+//    numBuckets & (numBuckets-1) == 0   → OK  → -0  → length 0 (legal)
+//    otherwise it’s >0                  → negative length → compile error
+var _ [ -int(numBuckets&(numBuckets-1)) ]byte
 
-//  1. numBuckets must be a power-of-two.
-//     If numBuckets is NOT pow-2,  (numBuckets & (numBuckets-1))  is non-zero.
-//     The unary minus then yields a negative length → compile error.
-var _ [-(int(numBuckets & (numBuckets - 1)))]struct{}
+// 2. capItems must be an integer multiple of numBuckets.
+//    capItems % numBuckets == 0  → -0  → length 0 (legal)
+//    otherwise non-zero          → negative length → compile error
+var _ [ -int(capItems%numBuckets) ]byte
+// -----------------------------------------------------------------------------
 
-//  2. capItems must be an exact multiple of numBuckets.
-//     Remainder ≠ 0  ⇒  negative length ⇒ compile error.
-var _ [-(int(capItems % numBuckets))]struct{}
-
-type idx = uint64
-
-const nilIdx idx = math.MaxUint64
-
-type Handle = uint64
-
-var (
-	ErrPastTick     = errors.New("bucketqueue: tick is before window")
-	ErrItemNotFound = errors.New("bucketqueue: handle not in queue")
-	ErrFull         = errors.New("bucketqueue: arena exhausted")
-)
+// internal types
+type idx32 uint32
 
 type node struct {
-	next, prev idx
-	bucketIdx  idx
-	count      uint64
-	data       unsafe.Pointer
-	_          [24]byte // align to 64-bytes
+    next, prev idx32
+    bucketGen  uint32
+    tick       int64
+    count      uint32
+    data       unsafe.Pointer
+    _          [64 - 4*4 - 8 - unsafe.Sizeof(unsafe.Pointer(nil))]byte // pad to 64 B
 }
 
 type Queue struct {
-	arena     [capItems]node
-	freeHead  idx
-	buckets   [numBuckets]idx
-	bucketGen [numBuckets]uint64
-	groupBits [numGroups]uint64
-	summary   uint64
-	baseTick  uint64
-	gen       uint64
-	size      uint64
+    arena      [capItems]node
+    freeHead   idx32
+    buckets    [numBuckets]idx32
+    bucketGen  [numBuckets]uint32
+    baseTick   uint64
+    gen        uint32
+    size       int
+    summary    uint64          // coarse bitmap – one bit per group
+    groupBits  [numGroups]uint64
 }
 
-// New returns an empty queue.
+// exported errors
+var (
+    ErrFull          = errors.New("bucketqueue: no free handles")
+    ErrEmpty         = errors.New("bucketqueue: empty queue")
+    ErrPastWindow    = errors.New("bucketqueue: tick too far in the past")
+    ErrBeyondWindow  = errors.New("bucketqueue: tick too far in the future")
+    ErrItemNotFound  = errors.New("bucketqueue: invalid handle")
+)
+
+// constructor
 func New() *Queue {
-	q := &Queue{freeHead: 0}
-	for i := uint64(0); i < capItems-1; i++ {
-		q.arena[i].next = i + 1
-		q.arena[i].bucketIdx = nilIdx
-	}
-	q.arena[capItems-1].next = nilIdx
-	q.arena[capItems-1].bucketIdx = nilIdx
-	for i := range q.buckets {
-		q.buckets[i] = nilIdx
-	}
-	return q
+    q := &Queue{}
+    // build freelist
+    for i := capItems - 1; i > 0; i-- {
+        q.arena[i-1].next = idx32(i)
+    }
+    q.freeHead = 0
+    for i := range q.buckets {
+        q.buckets[i] = nilIdx
+    }
+    return q
 }
 
-// Borrow allocates a handle.
+// allocation helpers
 func (q *Queue) Borrow() (Handle, error) {
-	if q.freeHead == nilIdx {
-		return nilIdx, ErrFull
-	}
-	i := q.freeHead
-	q.freeHead = q.arena[i].next
-	return i, nil
+    if q.freeHead == nilIdx {
+        return Handle(nilIdx), ErrFull
+    }
+    h := q.freeHead
+    n := &q.arena[h]
+    q.freeHead = n.next
+    n.next, n.prev, n.count = nilIdx, nilIdx, 0
+    return Handle(h), nil
 }
 
-// Return releases a handle.
 func (q *Queue) Return(h Handle) error {
-	if h >= capItems {
-		return ErrItemNotFound
-	}
-	n := &q.arena[h]
-	if n.count != 0 {
-		return errors.New("bucketqueue: cannot return active handle")
-	}
-	n.prev, n.bucketIdx, n.count = nilIdx, nilIdx, 0
-	n.next = q.freeHead
-	q.freeHead = h
-	return nil
+    if idx32(h) >= capItems {
+        return ErrItemNotFound
+    }
+    n := &q.arena[idx32(h)]
+    n.next = q.freeHead
+    q.freeHead = idx32(h)
+    // GC hygiene: drop user payload
+    n.data = nil
+    return nil
 }
 
-// Push inserts (tick,h).
-func (q *Queue) Push(tick uint64, h Handle, val unsafe.Pointer) error {
-	if tick < q.baseTick && q.baseTick-tick < (1<<63) {
-		return ErrPastTick
-	}
-	if h >= capItems {
-		return ErrItemNotFound
-	}
-	n := &q.arena[h]
-
-	// fast path – same bucket, same generation
-	if n.count > 0 && n.bucketIdx != nilIdx && q.bucketGen[n.bucketIdx] == q.gen {
-		if q.baseTick+n.bucketIdx == tick {
-			n.count++
-			n.data = val // refresh payload
-			q.size++
-			return nil
-		}
-		q.size -= n.count
-		q.detach(n)
-	}
-
-	// slide window if necessary
-	if delta := tick - q.baseTick; delta >= numBuckets {
-		q.recycleStaleBuckets()
-		q.baseTick = tick
-
-		if q.gen++; q.gen == 0 {
-			q.bucketGen = [numBuckets]uint64{}
-			/* hygiene-loop removed — stale heads stay until reused */
-		}
-		q.summary = 0
-		q.groupBits = [numGroups]uint64{}
-	}
-
-	bkt := (tick - q.baseTick) & (numBuckets - 1)
-	if q.bucketGen[bkt] != q.gen {
-		q.bucketGen[bkt] = q.gen
-		q.buckets[bkt] = nilIdx
-	}
-	head := q.buckets[bkt]
-
-	n.next, n.prev = head, nilIdx
-	n.bucketIdx = bkt
-	if n.count == 0 {
-		n.count = 1
-	}
-	n.data = val
-	if head != nilIdx {
-		q.arena[head].prev = h
-	}
-	q.buckets[bkt] = h
-
-	g := bkt / groupSize
-	bit := bkt % groupSize
-	q.groupBits[g] |= 1 << bit
-	q.summary |= 1 << g
-
-	q.size += n.count
-	return nil
+// internal release used by PopMin & stale-bucket recycle
+func (q *Queue) release(h idx32) {
+    n := &q.arena[h]
+    n.next = q.freeHead
+    q.freeHead = h
+    // GC hygiene
+    n.data = nil
 }
 
-// Update moves an active handle.
-func (q *Queue) Update(tick uint64, h Handle, val unsafe.Pointer) error {
-	if h >= capItems {
-		return ErrItemNotFound
-	}
-	if tick < q.baseTick && q.baseTick-tick < (1<<63) {
-		return ErrPastTick
-	}
-	n := &q.arena[h]
-	if n.count == 0 || n.bucketIdx == nilIdx || q.bucketGen[n.bucketIdx] != q.gen {
-		return ErrItemNotFound
-	}
-	if q.baseTick+n.bucketIdx == tick {
-		if val != nil {
-			n.data = val
-		}
-		return nil
-	}
-	q.size -= n.count
-	q.detach(n)
-	return q.Push(tick, h, val)
+// Push
+func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
+    if h >= Handle(capItems) {
+        return ErrItemNotFound
+    }
+    bkt := uint64(tick) - q.baseTick
+    if bkt >= 1<<63 { // too far in the past (wrap-safe)
+        return ErrPastWindow
+    }
+    if bkt >= numBuckets {
+        return ErrBeyondWindow
+    }
+    idx := idx32(h)
+    n := &q.arena[idx]
+
+    // fast-path: same bucket → just bump count
+    if n.count != 0 && n.bucketGen == q.gen && n.tick == tick {
+        n.count++
+        q.size++
+        return nil
+    }
+
+    // first insertion or move: detach, adjust size
+    if n.count != 0 {
+        q.detach(idx, n)
+        q.size -= int(n.count)
+    }
+
+    // window slide if needed
+    if d := uint64(tick) - q.baseTick; d >= numBuckets {
+        q.recycleStaleBuckets()
+        q.baseTick = uint64(tick)
+        q.gen++
+        if q.gen == 0 { // wrap → clear generation stamps cheap
+            q.bucketGen = [numBuckets]uint32{}
+        }
+        q.summary = 0
+        q.groupBits = [numGroups]uint64{}
+    }
+
+    // link into bucket
+    bktIdx := uint64(tick) - q.baseTick
+    head := q.buckets[bktIdx]
+    n.next, n.prev = head, nilIdx
+    if head != nilIdx {
+        q.arena[head].prev = idx
+    }
+    q.buckets[bktIdx] = idx
+    n.bucketGen, n.tick, n.count, n.data = q.gen, tick, 1, val
+
+    // set bitmaps
+    group := bktIdx >> 6 // == / groupSize
+    q.groupBits[group] |= 1 << (bktIdx & (groupSize - 1))
+    q.summary |= 1 << group
+    q.size++
+    return nil
 }
 
-// Remove deletes an active handle.
-func (q *Queue) Remove(h Handle) error {
-	if h >= capItems {
-		return ErrItemNotFound
-	}
-	n := &q.arena[h]
-	if n.count == 0 || n.bucketIdx == nilIdx || q.bucketGen[n.bucketIdx] != q.gen {
-		return ErrItemNotFound
-	}
-	q.detach(n)
-	q.size -= n.count
-
-	n.prev, n.bucketIdx, n.count = nilIdx, nilIdx, 0
-	n.next = q.freeHead
-	q.freeHead = h
-	return nil
+// detach removes node n (idx) from its current bucket list without changing bitmaps.
+func (q *Queue) detach(idx idx32, n *node) {
+    if n.prev != nilIdx {
+        q.arena[n.prev].next = n.next
+    } else { // n is head
+        bktIdx := uint64(n.tick) - q.baseTick
+        q.buckets[bktIdx] = n.next
+    }
+    if n.next != nilIdx {
+        q.arena[n.next].prev = n.prev
+    }
+    n.next, n.prev = nilIdx, nilIdx
 }
 
-// PopMin pops the earliest tick.
-func (q *Queue) PopMin() (Handle, uint64, unsafe.Pointer) {
-	if q.size == 0 || q.summary == 0 {
-		return nilIdx, 0, nil
-	}
-	g := uint64(bits.TrailingZeros64(q.summary))
-	w := q.groupBits[g]
-	b := uint64(bits.TrailingZeros64(w))
-	bkt := g*groupSize + b
-	tick := q.baseTick + bkt
-
-	i := q.buckets[bkt]
-	n := &q.arena[i]
-
-	if n.count > 1 {
-		n.count--
-		q.size--
-		return i, tick, n.data
-	}
-
-	next := n.next
-	q.buckets[bkt] = next
-	if next != nilIdx {
-		q.arena[next].prev = nilIdx
-	}
-	if next == nilIdx {
-		g2 := bkt / groupSize
-		bit := bkt % groupSize
-		q.groupBits[g2] &^= 1 << bit
-		if q.groupBits[g2] == 0 {
-			q.summary &^= 1 << g2
-		}
-	}
-
-	q.size--
-	data := n.data
-	n.prev, n.bucketIdx, n.count = nilIdx, nilIdx, 0
-	n.next = q.freeHead
-	q.freeHead = i
-	return i, tick, data
+// Update – detach & re-push
+func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
+    if h >= Handle(capItems) {
+        return ErrItemNotFound
+    }
+    idx := idx32(h)
+    n := &q.arena[idx]
+    if n.count == 0 {
+        return ErrItemNotFound
+    }
+    q.size -= int(n.count)
+    q.detach(idx, n)
+    // clear bitmaps for emptied bucket when necessary
+    bkt := uint64(n.tick) - q.baseTick
+    if q.buckets[bkt] == nilIdx {
+        group := bkt >> 6
+        q.groupBits[group] &^= 1 << (bkt & (groupSize - 1))
+        if q.groupBits[group] == 0 {
+            q.summary &^= 1 << group
+        }
+    }
+    return q.Push(tick, h, val)
 }
 
-// PeepMin returns (but does not pop) the earliest tick.
-func (q *Queue) PeepMin() (Handle, uint64, unsafe.Pointer) {
-	if q.size == 0 || q.summary == 0 {
-		return nilIdx, 0, nil
-	}
-	g := uint64(bits.TrailingZeros64(q.summary))
-	bkt := g*groupSize + uint64(bits.TrailingZeros64(q.groupBits[g]))
-	return q.buckets[bkt], q.baseTick + bkt, q.arena[q.buckets[bkt]].data
+// PeepMin – non-destructive
+func (q *Queue) PeepMin() (Handle, int64, unsafe.Pointer) {
+    if q.size == 0 || q.summary == 0 {
+        return Handle(nilIdx), 0, nil
+    }
+    group := bits.TrailingZeros64(q.summary)
+    bucketBits := q.groupBits[group]
+    bktOffset := bits.TrailingZeros64(bucketBits)
+    bktIdx := uint64(group<<6 | bktOffset)
+    head := q.buckets[bktIdx]
+    n := &q.arena[head]
+    return Handle(head), n.tick, n.data
 }
 
-func (q *Queue) Size() uint64 { return q.size }
-func (q *Queue) Empty() bool  { return q.size == 0 }
+// PopMin – destructive O(1)
+func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
+    if q.size == 0 {
+        return Handle(nilIdx), 0, nil
+    }
+    group := bits.TrailingZeros64(q.summary)
+    bucketBits := q.groupBits[group]
+    bktOffset := bits.TrailingZeros64(bucketBits)
+    bktIdx := uint64(group<<6 | bktOffset)
 
-// ─── helpers ─────────────────────────────────────────────────────────────────
-func (q *Queue) detach(n *node) {
-	if n.prev != nilIdx {
-		q.arena[n.prev].next = n.next
-	} else {
-		q.buckets[n.bucketIdx] = n.next
-	}
-	if n.next != nilIdx {
-		q.arena[n.next].prev = n.prev
-	}
-	if q.buckets[n.bucketIdx] == nilIdx {
-		g := n.bucketIdx / groupSize
-		bit := n.bucketIdx % groupSize
-		tmp := q.groupBits[g] &^ (1 << bit)
-		q.groupBits[g] = tmp
-		if tmp == 0 {
-			q.summary &^= 1 << g
-		}
-	}
-	n.next, n.prev, n.bucketIdx = nilIdx, nilIdx, nilIdx
+    head := q.buckets[bktIdx]
+    n := &q.arena[head]
+    h := Handle(head)
+    tick := n.tick
+    val := n.data
+
+    if n.count > 1 { // multi-count fast path
+        n.count--
+        q.size--
+        return h, tick, val
+    }
+
+    // unlink single node
+    q.buckets[bktIdx] = n.next
+    if n.next != nilIdx {
+        q.arena[n.next].prev = nilIdx
+    }
+    q.size--
+
+    // clear bitmaps if bucket empty
+    if q.buckets[bktIdx] == nilIdx {
+        q.groupBits[group] &^= 1 << (bktIdx & (groupSize - 1))
+        if q.groupBits[group] == 0 {
+            q.summary &^= 1 << group
+        }
+    }
+
+    // recycle handle
+    q.release(head)
+    return h, tick, val
 }
 
+// internal helpers
 func (q *Queue) recycleStaleBuckets() {
-	if q.size == 0 || q.summary == 0 {
-		return
-	}
-	summary := q.summary
-	for summary != 0 {
-		g := uint64(bits.TrailingZeros64(summary))
-		summary &^= 1 << g
-		w := q.groupBits[g]
-		q.groupBits[g] = 0
-		for w != 0 {
-			b := uint64(bits.TrailingZeros64(w))
-			w &^= 1 << b
-			bkt := g*groupSize + b
-			for i := q.buckets[bkt]; i != nilIdx; {
-				nxt := q.arena[i].next
-				q.release(i)
-				i = nxt
-			}
-			q.buckets[bkt] = nilIdx
-		}
-	}
-	q.summary = 0
-	q.size = 0
+    for group, bits64 := range q.groupBits {
+        for bits64 != 0 {
+            bktOff := bits.TrailingZeros64(bits64)
+            bktIdx := uint64(group<<6 | bktOff)
+            idx := q.buckets[bktIdx]
+            for idx != nilIdx {
+                next := q.arena[idx].next
+                q.release(idx)
+                idx = next
+            }
+            q.buckets[bktIdx] = nilIdx
+            bits64 &^= 1 << bktOff
+        }
+        q.groupBits[group] = 0
+    }
+    q.summary = 0
+    q.size = 0
 }
 
-func (q *Queue) release(i idx) {
-	n := &q.arena[i]
-	n.prev, n.bucketIdx, n.count = nilIdx, nilIdx, 0
-	n.next = q.freeHead
-	q.freeHead = i
+// Public helpers for legacy tests
+func (q *Queue) Size() int      { return q.size }
+func (q *Queue) Empty() bool    { return q.size == 0 }
+
+// Remove deletes an item when its handle is already known.
+func (q *Queue) Remove(h Handle) error {
+    if idx32(h) >= capItems {
+        return ErrItemNotFound
+    }
+    n := &q.arena[idx32(h)]
+    if n.count == 0 {
+        return ErrItemNotFound
+    }
+    q.detach(idx32(h), n)
+    q.size -= int(n.count)
+    bkt := uint64(n.tick) - q.baseTick
+    if q.buckets[bkt] == nilIdx {
+        g := bkt >> 6
+        q.groupBits[g] &^= 1 << (bkt & (groupSize - 1))
+        if q.groupBits[g] == 0 {
+            q.summary &^= 1 << g
+        }
+    }
+    q.release(idx32(h))
+    return nil
 }
+
+// ErrPastTick is an alias for ErrPastWindow for legacy tests
+var ErrPastTick = ErrPastWindow
+
+// exported opaque handle type
+type Handle idx32
