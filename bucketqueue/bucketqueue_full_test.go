@@ -332,3 +332,33 @@ func TestUpdateBadHandle(t *testing.T) {
 	err = q.Update(tick, capItems, nil)
 	expectError(t, err, ErrItemNotFound)
 }
+
+func TestDetachClearsGroupBitsElse(t *testing.T) {
+	q := New()
+	// Grab two handles
+	h1 := borrowOrPanic(t, q)
+	h2 := borrowOrPanic(t, q)
+
+	// Push into two neighboring ticks → same group (group 0: buckets 0 and 1)
+	pushOrPanic(t, q, 0, h1)
+	pushOrPanic(t, q, 1, h2)
+
+	g := 0 / groupSize
+	before := q.groupBits[g]
+	// Sanity: both bucket‐bits must be set
+	if before&(uint64(1)<<0) == 0 || before&(uint64(1)<<1) == 0 {
+		t.Fatalf("expected bits 0 and 1 set in groupBits[0]; got %b", before)
+	}
+
+	// Remove only the tick‐1 element → bucket 1 empties but bucket 0 remains
+	if err := q.Remove(h2); err != nil {
+		t.Fatalf("unexpected Remove error: %v", err)
+	}
+
+	after := q.groupBits[g]
+	// Expect only bit 1 cleared, bit 0 still set
+	want := before & ^(uint64(1) << 1)
+	if after != want {
+		t.Errorf("groupBits after Remove: got %b; want %b", after, want)
+	}
+}
