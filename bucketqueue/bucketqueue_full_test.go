@@ -215,4 +215,34 @@ func TestFullQueue_AllSituations(t *testing.T) {
 			t.Fatalf("Expected re-borrow of same handle; got %v, %v", h2, err)
 		}
 	})
+
+	t.Run("UpdatePastTickError", func(t *testing.T) {
+		q := New()
+		h := borrowOrPanic(t, q)
+		q.baseTick += 10
+		expectError(t, q.Update(int64(q.baseTick-1), h), ErrPastTick)
+	})
+
+	t.Run("UpdateInvalidHandleState", func(t *testing.T) {
+		q := New()
+		h := borrowOrPanic(t, q)
+
+		// Never pushed ⇒ count==0, bucketIdx==-1
+		expectError(t, q.Update(10, h), ErrItemNotFound)
+
+		// Stale generation
+		pushOrPanic(t, q, int64(q.baseTick), h)
+		q.baseTick += numBuckets + 5
+		q.gen++
+		q.recycleStaleBuckets()
+		expectError(t, q.Update(int64(q.baseTick), h), ErrItemNotFound)
+	})
+
+	t.Run("UpdateNoOpSameTick", func(t *testing.T) {
+		q := New()
+		h := borrowOrPanic(t, q)
+		tick := int64(q.baseTick + 3)
+		pushOrPanic(t, q, tick, h)
+		expectError(t, q.Update(tick, h), nil) // should return nil
+	})
 }
