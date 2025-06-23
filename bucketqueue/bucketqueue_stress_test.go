@@ -25,26 +25,38 @@ func TestPushPopStress(t *testing.T) {
 }
 
 func TestPushOutOfOrderStress(t *testing.T) {
-	const total = 1 << 12
-
+	const total = 1 << 12 // 4096
 	q := New()
+
+	// Allocate handles
 	all := make([]Handle, total)
 	for i := range all {
-		all[i], _ = q.Borrow()
+		h, _ := q.Borrow()
+		all[i] = h
 	}
 
-	perm := rand.New(rand.NewSource(1)).Perm(total)
+	// Create random permutation of ticks
+	rng := rand.New(rand.NewSource(1))
+	perm := rng.Perm(total)
+
+	// Build inverse map from tick → handle index
+	inv := make([]int, total)
+	for i, v := range perm {
+		inv[v] = i
+	}
+
+	// Push handles at permuted tick values
 	for i := 0; i < total; i++ {
-		h := all[i]
-		tick := perm[i]
-		if err := q.Push(int64(tick), h, nil); err != nil {
-			t.Fatalf("Push failed: %v", err)
+		if err := q.Push(int64(perm[i]), all[i], nil); err != nil {
+			t.Fatalf("Push failed at i=%d: %v", i, err)
 		}
 	}
+
+	// Pop in order and verify tick and handle match
 	for i := 0; i < total; i++ {
 		h, tick, _ := q.PopMin()
 		expectTick(t, tick, int64(i))
-		expectHandle(t, h, all[tick])
+		expectHandle(t, h, all[inv[i]])
 	}
 }
 
