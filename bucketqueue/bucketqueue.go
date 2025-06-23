@@ -110,12 +110,17 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 		q.detach(n)
 	}
 
-	if d := uint64(tick) - q.baseTick; d >= numBuckets {
+	// Slide window if tick has fallen completely outside the current ring.
+	if delta := uint64(tick) - q.baseTick; delta >= numBuckets {
 		q.recycleStaleBuckets()
 		q.baseTick = uint64(tick)
-		q.gen++
-		q.summary = 0
-		q.groupBits = [numGroups]uint64{}
+
+		if q.gen++; q.gen == 0 { // wrap-around: clear generation stamps
+			q.bucketGen = [numBuckets]uint32{}
+		}
+
+		// Fresh window → no active buckets yet.
+		q.summary, q.groupBits = 0, [numGroups]uint64{}
 	}
 
 	bkt := int(uint64(tick)-q.baseTick) & (numBuckets - 1)
