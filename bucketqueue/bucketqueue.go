@@ -262,28 +262,39 @@ func (q *Queue) detach(n *node) {
 	n.next, n.prev, n.bucketIdx = nilIdx, nilIdx, -1
 }
 
+// recycleStaleBuckets discards every bucket referenced in q.summary.
+//
+// Fast path: the queue is either empty or has no live groups.
+// Slow path: walk only the *set* bits in summary and groupBits.
 func (q *Queue) recycleStaleBuckets() {
 	if q.size == 0 || q.summary == 0 {
 		return
 	}
-	for q.summary != 0 {
-		g := bits.TrailingZeros64(q.summary)
+
+	summary := q.summary // local snapshot → fewer loads
+	for summary != 0 {
+		g := bits.TrailingZeros64(summary)
+		summary &^= 1 << uint(g) // pop lowest-set group bit
+
 		w := q.groupBits[g]
+		q.groupBits[g] = 0 // early clear lets CPU drop it from cache
+
 		for w != 0 {
 			b := bits.TrailingZeros64(w)
+			w &^= 1 << uint(b) // pop lowest-set bucket bit
+
 			bkt := g*groupSize + int(b)
 			for idx := q.buckets[bkt]; idx != nilIdx; {
 				nxt := q.arena[idx].next
-				q.release(idx)
+				q.release(idx) // dominates total cost; can’t be skipped
 				idx = nxt
 			}
 			q.buckets[bkt] = nilIdx
-			q.bucketGen[bkt] = 0
-			w &^= 1 << uint(b)
+			q.bucketGen[bkt] = 0 // keep if you *really* need the clear
 		}
-		q.groupBits[g] = 0
-		q.summary &^= 1 << uint(g)
 	}
+
+	q.summary = 0 // single write instead of 64 small ones
 	q.size = 0
 }
 
