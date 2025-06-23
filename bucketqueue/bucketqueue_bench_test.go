@@ -1,8 +1,7 @@
 // bucketqueue_bench_test.go — micro‑benchmarks for the arena‑backed bucketqueue
 // ==================================================================
-// This file defines benchmarks isolating the cost of each core operation
-// in the bucketqueue implementation. All benchmarks are allocation‑free
-// and focus on a single hot path under controlled preconditions.
+// Isolates the cost of each core queue operation in tight loops.
+// All benchmarks are designed to remain allocation-free under stable conditions.
 
 package bucketqueue
 
@@ -11,90 +10,84 @@ import (
 	"testing"
 )
 
-// seededQueue returns a Queue with one borrowed handle already pushed at tick=0.
-// The handle `h` has its internal count==1, ready for duplicate‑push tests.
+// seededQueue returns a Queue with one handle pushed at tick=0.
+// The handle starts with count==1, ready for repeated fast-path reuse.
 func seededQueue() (*Queue, Handle) {
-	q := New()         // create a fresh queue
-	h, _ := q.Borrow() // borrow one handle from the arena
-	_ = q.Push(0, h)   // push it at tick=0; count becomes 1
-	return q, h        // return queue and handle for reuse
+	q := New()
+	h, _ := q.Borrow()
+	_ = q.Push(0, h)
+	return q, h
 }
 
-// BenchmarkPush measures the cost of repeatedly pushing the same handle
-// into the same tick bucket. We exercise the duplicate‑push fast path,
-// which increments the ref‑counter and does minimal work. No allocations
-// occur, and no arena pressure.
+// BenchmarkPush exercises the duplicate-push fast path for count bumping.
 func BenchmarkPush(b *testing.B) {
-	q, h := seededQueue() // prepare queue and handle (count==1)
+	q, h := seededQueue()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = q.Push(0, h) // duplicate‑push path: just bump count
+		_ = q.Push(0, h)
 	}
-	b.StopTimer()
 }
 
-// BenchmarkPopMin measures the cost of popping the minimum element when
-// the handle has count==b.N. We preload the arena through legitimate
-// duplicate-pushes so PopMin can run in a tight loop.
+// BenchmarkPopMin tests minimal-cost popping of the same handle repeatedly.
 func BenchmarkPopMin(b *testing.B) {
 	q, h := seededQueue()
-	// Push (b.N-1) additional duplicates into tick 0
+	// Preload with (N-1) more refs to match expected pop count.
 	for i := 1; i < b.N; i++ {
-		_ = q.Push(0, h) // fast-path: just bumps ref-counter
+		_ = q.Push(0, h)
 	}
-
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = q.PopMin()
 	}
 }
 
-// BenchmarkPushPopCycle alternates Push and PopMin on a small working set
-// of borrowed handles. This mimics a steady‑state load without arena
-// exhaustion, measuring combined cost of each cycle.
+// BenchmarkPeepMin measures non-mutating read of the current minimum.
+func BenchmarkPeepMin(b *testing.B) {
+	q, h := seededQueue()
+	// Push a few extra to simulate small bucket load.
+	for i := 0; i < 7; i++ {
+		_ = q.Push(0, h)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = q.PeepMin()
+	}
+}
+
+// BenchmarkPushPopCycle tests end-to-end cost of a full push+pop.
 func BenchmarkPushPopCycle(b *testing.B) {
 	q := New()
-	// pre‑borrow a set of handles to avoid arena operations in the loop
-	handles := make([]Handle, 0, 1024)
-	for i := 0; i < 1024; i++ {
+	handles := make([]Handle, 1024)
+	for i := range handles {
 		h, _ := q.Borrow()
-		handles = append(handles, h)
+		handles[i] = h
 	}
 	idx := 0
-
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		h := handles[idx]
-		idx++
-		if idx == len(handles) {
-			idx = 0
-		}
-		_ = q.Push(0, h)  // push at tick=0
-		_, _ = q.PopMin() // pop the smallest tick
+		idx = (idx + 1) % len(handles)
+		_ = q.Push(0, h)
+		_, _ = q.PopMin()
 	}
 }
 
-// BenchmarkUpdate measures the cost of calling Update(), which is
-// equivalent to Remove+Push under the hot path when the node is
-// already in the queue. We exercise the duplicate‑push removal path.
+// BenchmarkUpdate tests cost of Update when the node is in queue.
 func BenchmarkUpdate(b *testing.B) {
 	q, h := seededQueue()
-
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = q.Update(1, h) // move handle from tick=0 to tick=1
+		_ = q.Update(1, h)
 	}
 }
 
-// BenchmarkMixedHeavy simulates a random mix: 50% Push, 40% Pop, 10% Update.
-// We use a fixed‑seed RNG for reproducibility. Operations on an empty queue
-// skip pops. This measures realistic workloads with branching.
+// BenchmarkMixedHeavy tests a random workload: 50% Push, 40% PopMin, 10% Update.
 func BenchmarkMixedHeavy(b *testing.B) {
 	q := New()
-	handles := make([]Handle, 0, 1024)
-	for i := 0; i < 1024; i++ {
+	handles := make([]Handle, 1024)
+	for i := range handles {
 		h, _ := q.Borrow()
-		handles = append(handles, h)
+		handles[i] = h
 	}
 	rng := rand.New(rand.NewSource(1))
 	idx := 0
@@ -103,17 +96,15 @@ func BenchmarkMixedHeavy(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		n := rng.Intn(10)
 		switch {
-		case n < 5: // 50% pushes: reuse handles in circular buffer
+		case n < 5:
 			h := handles[idx]
 			idx = (idx + 1) % len(handles)
 			_ = q.Push(0, h)
-
-		case n < 9: // 40% pops: only when non‑empty
+		case n < 9:
 			if !q.Empty() {
 				_, _ = q.PopMin()
 			}
-
-		default: // 10% updates: bump existing handle
+		default:
 			h := handles[idx]
 			_ = q.Update(0, h)
 		}
