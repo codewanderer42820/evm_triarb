@@ -190,3 +190,85 @@ func TestPushBadHandle(t *testing.T) {
 	err = q.Push(1, capItems, nil)
 	expectError(t, err, ErrItemNotFound)
 }
+
+func TestPushTriggersDetachAndLink(t *testing.T) {
+	q := New()
+	h1 := borrowOrPanic(t, q)
+	h2 := borrowOrPanic(t, q)
+
+	// h1 into tick 1
+	pushOrPanic(t, q, 1, h1)
+	// h2 into same bucket to ensure h1.prev gets updated
+	pushOrPanic(t, q, 1, h2)
+
+	// Move h1 to a different tick to trigger detach + prev patch
+	pushOrPanic(t, q, 2, h1)
+}
+
+func TestPopMinWithNext(t *testing.T) {
+	q := New()
+	h1 := borrowOrPanic(t, q)
+	h2 := borrowOrPanic(t, q)
+
+	// Push two handles to same tick to build a list
+	pushOrPanic(t, q, 5, h1)
+	pushOrPanic(t, q, 5, h2)
+
+	// One pop leaves the other in the list, hitting `next != nilIdx`
+	got, tick, _ := q.PopMin()
+	if got != h2 && got != h1 {
+		t.Fatalf("Unexpected handle from PopMin with next")
+	}
+	expectTick(t, tick, 5)
+}
+
+func TestPeepMinEmpty(t *testing.T) {
+	q := New()
+	h, tick, data := q.PeepMin()
+	expectHandle(t, h, Handle(nilIdx))
+	expectTick(t, tick, 0)
+	if data != nil {
+		t.Fatalf("Expected nil data from empty PeepMin")
+	}
+}
+
+func TestDetachBothPrevNext(t *testing.T) {
+	q := New()
+	h1 := borrowOrPanic(t, q)
+	h2 := borrowOrPanic(t, q)
+	h3 := borrowOrPanic(t, q)
+
+	// Chain three handles in the same bucket
+	pushOrPanic(t, q, 5, h1)
+	pushOrPanic(t, q, 5, h2)
+	pushOrPanic(t, q, 5, h3)
+
+	// Remove h2, which is in the middle — triggers both prev/next logic
+	expectError(t, q.Remove(h2), nil)
+}
+
+func TestRecycleStaleBuckets(t *testing.T) {
+	q := New()
+	h1 := borrowOrPanic(t, q)
+
+	// Push at baseTick + 5 (within window)
+	pushOrPanic(t, q, int64(q.baseTick+5), h1)
+
+	// Trigger stale bucket cleanup (shift baseTick by numBuckets)
+	h2 := borrowOrPanic(t, q)
+	pushOrPanic(t, q, int64(q.baseTick)+numBuckets+1, h2)
+
+	// Ensure q is still valid
+	got, tick, _ := q.PopMin()
+	expectHandle(t, got, h2)
+	expectTick(t, tick, int64(q.baseTick))
+}
+
+func TestDirectRelease(t *testing.T) {
+	q := New()
+	h := borrowOrPanic(t, q)
+	pushOrPanic(t, q, 1, h)
+	expectError(t, q.Remove(h), nil) // hits `release`
+	// Make sure h reusable
+	pushOrPanic(t, q, 2, h)
+}
