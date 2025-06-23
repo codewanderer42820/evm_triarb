@@ -28,12 +28,15 @@ var (
 	ErrFull         = errors.New("bucketqueue: arena exhausted")
 )
 
-//go:align 64
+// node is exactly one cache-line (64 B) on 64-bit builds.
+// The trailing padding avoids false sharing without relying on
+// unsupported alignment directives.
 type node struct {
-	next, prev idx
-	bucketIdx  idx
-	count      int
-	data       unsafe.Pointer
+	next, prev idx            // 16 B
+	bucketIdx  idx            //  8 B  (24)
+	count      int            //  8 B  (32)
+	data       unsafe.Pointer // 8 B  (40)
+	_          [24]byte       // pad → 64 B
 }
 
 type Queue struct {
@@ -242,11 +245,11 @@ func (q *Queue) detach(n *node) {
 	if q.buckets[n.bucketIdx] == nilIdx {
 		g := int(n.bucketIdx) / groupSize
 		bit := uint(int(n.bucketIdx) % groupSize)
-		if q.groupBits[g]&^(1<<bit) == 0 {
-			q.groupBits[g] = 0
+
+		tmp := q.groupBits[g] &^ (1 << bit)
+		q.groupBits[g] = tmp
+		if tmp == 0 {
 			q.summary &^= 1 << uint(g)
-		} else {
-			q.groupBits[g] &^= 1 << bit
 		}
 	}
 	n.next, n.prev, n.bucketIdx = nilIdx, nilIdx, nilIdx
