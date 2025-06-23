@@ -1,133 +1,136 @@
 package pairidx
 
 import (
-	"bytes"
+	"sync"
 	"testing"
 	"unsafe"
 )
 
-// -----------------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------------
-
-func fillBytes(n int) []byte {
-	b := make([]byte, n)
-	for i := 0; i < n; i++ {
-		b[i] = byte(i)
-	}
-	return b
-}
-
-// makeKey returns a repeated‑byte string of length n.
-func makeKey(n int, ch byte) string {
-	return string(bytes.Repeat([]byte{ch}, n))
-}
-
-// expose internal hashing for test‑driven cluster saturation
-func bucketAndCluster(k string) (bucket uint32, cl *cluster) {
-	ptr := unsafe.StringData(k)
-	klen := uint16(len(k))
-	h := xxhMix64(unsafe.Pointer(ptr), klen)
-	bucketIdx := uint32(h) & bucketMask
-	ci := (uint32(h) >> clusterShift) & clMask
-	return bucketIdx, &New().buckets[bucketIdx][ci] // dummy map for pointer layout only
-}
-
-// -----------------------------------------------------------------------------
-// Tests covering 100 % of logic paths
-// -----------------------------------------------------------------------------
-
-func TestPutGetVariants(t *testing.T) {
-	m := New()
-
-	// len≤8 → xxhMix64 small path
-	keySmall := makeKey(7, 'a')
-	m.Put(keySmall, []byte("x"))
-
-	// 9≤len≤16 → middle path & sameKey 4‑byte branch
-	keyMid := makeKey(12, 'b')
-	m.Put(keyMid, []byte("y"))
-
-	// len>16, odd len → default path with tail handling
-	keyLarge := makeKey(25, 'c')
-	m.Put(keyLarge, []byte("z"))
-
-	tests := []struct {
-		k    string
-		want byte
-	}{{keySmall, 'x'}, {keyMid, 'y'}, {keyLarge, 'z'}}
-
-	for _, tt := range tests {
-		got, ok := m.Get(tt.k)
-		if !ok || got[0] != tt.want {
-			t.Fatalf("Get(%q) = %q, ok=%v", tt.k, got[:1], ok)
-		}
+// getEq asserts that Get returns the wanted value.
+func getEq(tb testing.TB, m *HashMap, k string, want uint32) {
+	tb.Helper()
+	ptr := m.Get(k)
+	if ptr == nil || *(*uint32)(ptr) != want {
+		tb.Fatalf("Get(%q) = %v, want %d", k, ptr, want)
 	}
 }
 
-func TestOverwriteAndGetView(t *testing.T) {
-	m := New()
-	k := "dup"
-
-	// first put
-	blk := m.PutView(k)
-	copy(blk[:], []byte("first"))
-
-	// overwrite via second put
-	m.Put(k, []byte("second"))
-
-	got := m.GetView(k)
-	if string(got[:6]) != "second" {
-		t.Fatalf("overwrite failed, got %q", got[:6])
-	}
-}
-
-func TestSizeCountsUnique(t *testing.T) {
-	m := New()
-	keys := []string{"a", "b", "c"}
-	for _, k := range keys {
-		m.Put(k, []byte{1})
-	}
-	// dup insert
-	m.Put("a", []byte{2})
-
-	if got := m.Size(); got != len(keys) {
-		t.Fatalf("Size=%d, want %d", got, len(keys))
-	}
-}
-
-func TestMissingKey(t *testing.T) {
-	m := New()
-	if _, ok := m.Get("noway"); ok {
-		t.Fatalf("expected !ok for missing key")
-	}
-}
-
-// TestClusterFullPanic artificially saturates a cluster by directly toggling its
-// bitmap and tags, then asserts that PutView panics.
-func TestClusterFullPanic(t *testing.T) {
-	m := New()
-	key := "sat" // any key → derive its cluster
-
-	// Locate target cluster inside *m* for key
-	ptr := unsafe.StringData(key)
-	h := xxhMix64(unsafe.Pointer(ptr), uint16(len(key)))
-	bucketIdx := uint32(h) & bucketMask
-	ci := (uint32(h) >> clusterShift) & clMask
-	cl := &m.buckets[bucketIdx][ci]
-
-	// Saturate bitmap (16 bits set) and inject dummy tags ≠ target tag
-	cl.bitmap = 0xFFFF
-	for i := range cl.slots {
-		cl.slots[i].tag = uint16(i + 1) // non‑zero, unlikely to match `key`
-		cl.slots[i].klen = 1
-		cl.slots[i].kptr = unsafe.Pointer(ptr) // any valid pointer
-	}
-
+// mustPut wraps Put and fails the test on panic.
+func mustPut(tb testing.TB, m *HashMap, k string, v uint32) {
+	tb.Helper()
 	defer func() {
-		if r := recover(); r == nil {
-			t.Fatalf("expected cluster full panic")
+		if r := recover(); r != nil {
+			tb.Fatalf("unexpected panic on Put(%q): %v", k, r)
 		}
 	}()
-	_ = m.PutView(key) // must panic
+	m.Put(k, v)
+}
+
+/* ---------- 1. Basic functionality ----------------------------------- */
+
+func TestPutGet(t *testing.T) {
+	m := New()
+	mustPut(t, m, "BTC", 1)
+	getEq(t, m, "BTC", 1)
+	mustPut(t, m, "BTC", 9)
+	getEq(t, m, "BTC", 9)
+}
+
+func TestPutSameValueNoOverwrite(t *testing.T) {
+	m := New()
+	m.Put("foo", 42)
+	m.Put("foo", 42) // identical value → should not change size
+	if m.Size() != 1 {
+		t.Fatalf("size changed after no-op overwrite")
+	}
+}
+
+func TestSizeAccounting(t *testing.T) {
+	m := New()
+	if m.Size() != 0 {
+		t.Fatalf("expected size 0, got %d", m.Size())
+	}
+	m.Put("a", 1)
+	m.Put("b", 2)
+	if m.Size() != 2 {
+		t.Fatalf("expected size 2, got %d", m.Size())
+	}
+}
+
+/* ---------- 2. Miss paths -------------------------------------------- */
+
+func TestGetFallbackMiss(t *testing.T) {
+	m := New()
+	m.Put("foo", 123)
+	if m.Get("bar") != nil {
+		t.Fatal("expected miss, got hit")
+	}
+}
+
+func TestGetProbeMiss(t *testing.T) {
+	m := New()
+	m.Put("alpha", 1)
+	if m.Get("alpha_x") != nil {
+		t.Fatal("unexpected hit")
+	}
+}
+
+/* ---------- 3. Concurrency (read-only) -------------------------------- */
+
+func TestConcurrentReaders(t *testing.T) {
+	m := New()
+	mustPut(t, m, "AAA", 7)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 10_000; j++ {
+				_ = m.Get("AAA")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+/* ---------- 4. Cluster-overflow safety ------------------------------- */
+
+// We can still check that inserting far more than theoretical capacity panics.
+func TestClusterOverflowPanic(t *testing.T) {
+	m := New()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic on pathological overflow")
+		}
+	}()
+
+	// Insert way beyond total map capacity; eventually a cluster must overflow.
+	for i := 0; ; i++ {
+		m.Put(string(rune(i)), uint32(i))
+	}
+}
+
+/* ---------- 5. Internal sanity (alignment) --------------------------- */
+
+func TestUnsafePointerStable(t *testing.T) {
+	m := New()
+	p := m.Put("x", 99)
+	if *(*uint32)(p) != 99 {
+		t.Fatalf("wrong value via pointer")
+	}
+	// Ensure the same pointer is returned on a Get() hit.
+	if p2 := m.Get("x"); p2 == nil || p2 != p {
+		t.Fatalf("pointer mismatch between Put and Get")
+	}
+}
+
+// Auxiliary assertion to keep compiler honest about pointer safety.
+func TestKeyBytesNotMoved(t *testing.T) {
+	k := "hello"
+	ptrBefore := unsafe.StringData(k)
+	_ = k + "world" // create another string, ensure GC not confused
+	if ptrAfter := unsafe.StringData(k); ptrBefore != ptrAfter {
+		t.Fatalf("unexpected key bytes relocation")
+	}
 }

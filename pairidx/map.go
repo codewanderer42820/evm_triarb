@@ -1,197 +1,195 @@
 package pairidx
 
 import (
-	"fmt"
 	"math/bits"
 	"unsafe"
 )
 
 // -----------------------------------------------------------------------------
-// Constants & Layout (keep it ridiculously simple)
+// Constants & layout – cache‑friendly, power‑of‑two everywhere
 // -----------------------------------------------------------------------------
 const (
-	CacheLineSize = 64 // fixed 64‑byte value block
+	bucketCnt      = 64 // primary buckets (must be 2^n)
+	clustersPerBkt = 4  // secondary hash fan‑out
+	clusterSlots   = 16 // slots per cluster – fits in a u64 bitmap
 
-	bucketCnt      = 1 << 17 // 131 072 primary buckets
-	clustersPerBkt = 4       // 4 clusters / bucket
-	clusterSlots   = 16      // 16 slots / cluster (64‑bit bitmap)
+	slotMask   = clusterSlots - 1
+	clMask     = clustersPerBkt - 1
+	bucketMask = bucketCnt - 1
 
-	bucketMask   = bucketCnt - 1      // bucket index mask
-	clusterShift = 17                 // bits for bucket
-	clMask       = clustersPerBkt - 1 // cluster index mask inside bucket
-	slotMask     = clusterSlots - 1   // slot index mask inside cluster
+	bucketShift = 6 // log2(bucketCnt) – compile‑time constant (64 → 6)
 )
 
 // -----------------------------------------------------------------------------
-// Tiny xxHash‑style mix (branch‑cheap, alloc‑free)
+// 64‑bit pointer‑length avalanche (xxh3‑style)
 // -----------------------------------------------------------------------------
-const (
-	prime64_1 = 0x9E3779B185EBCA87
-	prime64_2 = 0xC2B2AE3D27D4EB4F
-)
-
-//go:nosplit
-func xxhMix64(p unsafe.Pointer, n uint16) uint64 {
-	h := uint64(n) * prime64_1
-	switch {
-	case n <= 8:
-		v := *(*uint64)(p)
-		h = bits.RotateLeft64(v*prime64_2, 31) * prime64_1
-	case n <= 16:
-		v0 := *(*uint64)(p)
-		v1 := *(*uint64)(unsafe.Add(p, uintptr(n)-8))
-		h = bits.RotateLeft64(v0^bits.RotateLeft64(v1*prime64_2, 27), 31) * prime64_1
-	default:
-		p8 := uintptr(p)
-		for rem := n; rem >= 8; rem -= 8 {
-			v := *(*uint64)(unsafe.Pointer(p8))
-			p8 += 8
-			h ^= bits.RotateLeft64(v*prime64_2, 31)
-			h = bits.RotateLeft64(h, 27) * prime64_1
-		}
-		if tail := n & 7; tail != 0 {
-			t := *(*uint64)(unsafe.Pointer(p8)) & ((1 << (tail * 8)) - 1)
-			h ^= bits.RotateLeft64(t*prime64_2, 11)
-			h = bits.RotateLeft64(h, 7) * prime64_1
-		}
-	}
-	h ^= h >> 33
-	h *= prime64_2
-	h ^= h >> 29
-	h *= prime64_1
-	h ^= h >> 32
-	return h
+func hashPtrLen(ptr unsafe.Pointer, klen uint16) (h32 uint32, tag uint16) {
+	x := uint64(uintptr(ptr)) ^ (uint64(klen) * 0x9e3779b97f4a7c15)
+	x ^= x >> 33
+	x *= 0xc2b2ae3d27d4eb4f
+	x ^= x >> 29
+	tag = uint16(x>>48) | 1 // never zero
+	h32 = uint32(x)
+	return
 }
 
-//go:nosplit
+// -----------------------------------------------------------------------------
+// Key compare – zero‑alloc, branch‑cheap
+// -----------------------------------------------------------------------------
 func sameKey(a, b unsafe.Pointer, n uint16) bool {
-	p1, p2 := uintptr(a), uintptr(b)
-	for rem := n; rem >= 8; rem -= 8 {
-		if *(*uint64)(unsafe.Pointer(p1)) != *(*uint64)(unsafe.Pointer(p2)) {
-			return false
-		}
-		p1 += 8
-		p2 += 8
+	if n <= 8 {
+		return *(*uint64)(a) == *(*uint64)(b)
 	}
-	if n&4 != 0 {
-		if *(*uint32)(unsafe.Pointer(p1)) != *(*uint32)(unsafe.Pointer(p2)) {
-			return false
-		}
-		p1 += 4
-		p2 += 4
-	}
-	if n&2 != 0 && *(*uint16)(unsafe.Pointer(p1)) != *(*uint16)(unsafe.Pointer(p2)) {
+	if *(*uint64)(a) != *(*uint64)(b) {
 		return false
 	}
-	if n&1 != 0 && *(*uint8)(unsafe.Pointer(p1)) != *(*uint8)(unsafe.Pointer(p2)) {
-		return false
+	off := uintptr(8)
+	rem := uintptr(n) - 8
+	for rem >= 8 {
+		if *(*uint64)(unsafe.Add(a, off)) != *(*uint64)(unsafe.Add(b, off)) {
+			return false
+		}
+		off += 8
+		rem -= 8
+	}
+	if rem >= 4 {
+		if *(*uint32)(unsafe.Add(a, off)) != *(*uint32)(unsafe.Add(b, off)) {
+			return false
+		}
+		off += 4
+		rem -= 4
+	}
+	if rem >= 2 {
+		if *(*uint16)(unsafe.Add(a, off)) != *(*uint16)(unsafe.Add(b, off)) {
+			return false
+		}
+		off += 2
+		rem -= 2
+	}
+	if rem == 1 {
+		return *(*uint8)(unsafe.Add(a, off)) == *(*uint8)(unsafe.Add(b, off))
 	}
 	return true
 }
 
-var probeSeq = [...]uint8{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
-
 // -----------------------------------------------------------------------------
-// Data layout (packed, alignment‑friendly)
+// Slot / cluster layout
 // -----------------------------------------------------------------------------
 
 type slot struct {
-	tag  uint16         // upper 16 bits of hash | 1 (0 → empty)
-	klen uint16         // key length (≤ 65 535)
-	kptr unsafe.Pointer // key bytes (caller keeps alive)
-	_    [4]byte        // align to 16B
-	data [CacheLineSize]byte
+	tag  uint16         // 16‑bit collision tag
+	klen uint16         // key length
+	kptr unsafe.Pointer // raw pointer to key bytes
+	val  uint32         // user value
+	_    [8]byte        // pad to 32 B
 }
 
 type cluster struct {
-	bitmap uint64
-	_      [56]byte
-	slots  [clusterSlots]slot
+	bitmap uint64             // occupancy bitmap (LSB ⇒ slot0)
+	_      [56]byte           // keep metadata away from slot array
+	slots  [clusterSlots]slot // 512 B
 }
+
+// -----------------------------------------------------------------------------
+// HashMap – SWMR, zero alloc
+// -----------------------------------------------------------------------------
 
 type HashMap struct {
 	buckets [bucketCnt][clustersPerBkt]cluster
-	size    uint32 // purely informational; caller decides load factor
+	size    uint32 // monotonically increasing – no deletes
 }
 
+func New() *HashMap { return &HashMap{} }
+
 // -----------------------------------------------------------------------------
-// Simple public helpers
+// Helpers – bitmap rotations
 // -----------------------------------------------------------------------------
 
-func New() *HashMap          { return &HashMap{} }
-func (h *HashMap) Size() int { return int(h.size) }
+const fullMask16 = uint64(1<<clusterSlots) - 1
 
-func (h *HashMap) Put(k string, v []byte) {
-	if len(v) > CacheLineSize {
-		panic("value exceeds 64 bytes")
-	}
-	copy(h.PutView(k)[:], v)
+func rotateBits16(x uint64, k int) uint64 {
+	// Rotate left by k (0‑15) in the low 16 bits.
+	return ((x >> uint(k)) | (x << uint(clusterSlots-k))) & fullMask16
 }
 
-func (h *HashMap) Get(k string) ([]byte, bool) {
-	if p := h.GetView(k); p != nil {
-		return p[:], true
-	}
-	return nil, false
-}
+func derotateIdx(i, start int) int { return (i + start) & slotMask }
 
 // -----------------------------------------------------------------------------
-// Hot‑path API (zero‑alloc, zero‑copy, single‑bucket logic)
+// Get – branchless bitmap scan
 // -----------------------------------------------------------------------------
 
-func (h *HashMap) GetView(k string) *[CacheLineSize]byte {
-	ptr := unsafe.StringData(k)
+func (h *HashMap) Get(k string) unsafe.Pointer {
+	kptr := unsafe.StringData(k)
 	klen := uint16(len(k))
-	hash := xxhMix64(unsafe.Pointer(ptr), klen)
 
-	bucketIdx := uint32(hash) & bucketMask
-	ci := (uint32(hash) >> clusterShift) & clMask
-	base := int(uint16(hash)) & slotMask
-	tag := uint16(hash>>48) | 1
+	h32, tag := hashPtrLen(unsafe.Pointer(kptr), klen)
+	bi := h32 & bucketMask
+	ci := (h32 >> bucketShift) & clMask
+	cl := &h.buckets[bi][ci]
 
-	cl := &h.buckets[bucketIdx][ci]
 	bm := cl.bitmap
+	if bm == 0 {
+		return nil
+	}
 
-	for _, off := range probeSeq {
-		i := (base + int(off)) & slotMask
-		if bm&(uint64(1)<<uint(i)) == 0 {
-			return nil
+	start := int(h32) & slotMask
+	rbm := rotateBits16(bm, start)
+
+	for rbm != 0 {
+		tz := bits.TrailingZeros64(rbm)
+		idx := derotateIdx(tz, start)
+		s := &cl.slots[idx]
+		if s.tag == tag && s.klen == klen && sameKey(s.kptr, unsafe.Pointer(kptr), klen) {
+			return unsafe.Pointer(&s.val)
 		}
-		s := &cl.slots[i]
-		if s.tag == tag && s.klen == klen && sameKey(s.kptr, unsafe.Pointer(ptr), klen) {
-			return &s.data
-		}
+		rbm &= rbm - 1 // clear lowest set bit
 	}
 	return nil
 }
 
-func (h *HashMap) PutView(k string) *[CacheLineSize]byte {
-	ptr := unsafe.StringData(k)
+// -----------------------------------------------------------------------------
+// Put – scans all 16 probe positions once (branchless), inserts at first hole
+// -----------------------------------------------------------------------------
+
+func (h *HashMap) Put(k string, v uint32) unsafe.Pointer {
+	kptr := unsafe.StringData(k)
 	klen := uint16(len(k))
-	hash := xxhMix64(unsafe.Pointer(ptr), klen)
 
-	bucketIdx := uint32(hash) & bucketMask
-	ci := (uint32(hash) >> clusterShift) & clMask
-	base := int(uint16(hash)) & slotMask
-	tag := uint16(hash>>48) | 1
+	h32, tag := hashPtrLen(unsafe.Pointer(kptr), klen)
+	bi := h32 & bucketMask
+	ci := (h32 >> bucketShift) & clMask
+	cl := &h.buckets[bi][ci]
 
-	cl := &h.buckets[bucketIdx][ci]
 	bm := cl.bitmap
+	start := int(h32) & slotMask
 
-	for _, off := range probeSeq {
-		i := (base + int(off)) & slotMask
-		bit := uint64(1) << uint(i)
-		s := &cl.slots[i]
+	// Pre‑rotated mask that walks every slot exactly once in probe order.
+	scan := rotateBits16(fullMask16, start)
+
+	for scan != 0 {
+		tz := bits.TrailingZeros64(scan)
+		idx := derotateIdx(tz, start)
+		bit := uint64(1) << uint(idx)
+		s := &cl.slots[idx]
 
 		if bm&bit == 0 {
-			s.tag, s.klen, s.kptr = tag, klen, unsafe.Pointer(ptr)
+			// Empty – claim and return.
+			s.tag, s.klen, s.kptr, s.val = tag, klen, unsafe.Pointer(kptr), v
 			cl.bitmap = bm | bit
 			h.size++
-			return &s.data
+			return unsafe.Pointer(&s.val)
 		}
-		if s.tag == tag && s.klen == klen && sameKey(s.kptr, unsafe.Pointer(ptr), klen) {
-			return &s.data
+
+		// Occupied – check for duplicate.
+		if s.tag == tag && s.klen == klen && sameKey(s.kptr, unsafe.Pointer(kptr), klen) {
+			s.val = v // overwrite
+			return unsafe.Pointer(&s.val)
 		}
+		scan &= scan - 1 // clear bit, continue
 	}
-	panic(fmt.Sprintf("cluster full for key %s (caller must keep load factor low)", k))
+
+	panic("pairidx: cluster full – reduce load factor or re‑hash keys")
 }
+
+// Size returns the current entry count.
+func (h *HashMap) Size() int { return int(h.size) }
