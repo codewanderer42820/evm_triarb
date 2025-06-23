@@ -1,4 +1,4 @@
-// bucketqueue_bench_test.go — micro-benchmarks for the arena-backed bucketqueue
+// bucketqueue_bench_test.go — 1micro-benchmarks for the arena-backed bucketqueue
 package bucketqueue
 
 import (
