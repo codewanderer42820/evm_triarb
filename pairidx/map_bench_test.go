@@ -1,12 +1,17 @@
 package pairidx
 
 import (
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"testing"
+	"unsafe"
 )
 
-// BenchmarkGetHit measures successful look-ups.
+// Micro‑benchmarks for the lock‑free HashMap. No functional tests here – see
+// map_test.go for coverage of edge cases and panic paths.
+
+// get‑hit
 func BenchmarkGetHit(b *testing.B) {
 	m := New()
 	m.Put("hit", 1)
@@ -16,7 +21,7 @@ func BenchmarkGetHit(b *testing.B) {
 	}
 }
 
-// BenchmarkGetMiss measures failed look-ups.
+// get‑miss
 func BenchmarkGetMiss(b *testing.B) {
 	m := New()
 	b.ResetTimer()
@@ -25,7 +30,7 @@ func BenchmarkGetMiss(b *testing.B) {
 	}
 }
 
-// BenchmarkPutOverwrite hits the “key already exists” fast-path.
+// put overwrite (key exists)
 func BenchmarkPutOverwrite(b *testing.B) {
 	m := New()
 	m.Put("dup", 0)
@@ -35,7 +40,7 @@ func BenchmarkPutOverwrite(b *testing.B) {
 	}
 }
 
-// Best-case slot locality.
+// hot‑slot locality
 func BenchmarkGetSameSlotHit(b *testing.B) {
 	m := New()
 	m.Put("slot0", 123)
@@ -45,13 +50,12 @@ func BenchmarkGetSameSlotHit(b *testing.B) {
 	}
 }
 
-// Stream of guaranteed misses (each key unique).
+// guaranteed misses (unique keys)
 func BenchmarkGetSlotMiss(b *testing.B) {
 	keys := make([]string, b.N)
 	for i := range keys {
 		keys[i] = fmt.Sprintf("miss_%08d", i)
 	}
-
 	m := New()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -59,7 +63,7 @@ func BenchmarkGetSlotMiss(b *testing.B) {
 	}
 }
 
-// Overwrite with identical value (checks update short-circuit).
+// overwrite with identical value (short‑circuit)
 func BenchmarkPutOverwriteHit(b *testing.B) {
 	m := New()
 	m.Put("hit", 1)
@@ -69,7 +73,7 @@ func BenchmarkPutOverwriteHit(b *testing.B) {
 	}
 }
 
-// Size() hot-path.
+// size fast‑path
 func BenchmarkSizeScan(b *testing.B) {
 	m := New()
 	half := bucketCnt * clustersPerBkt * clusterSlots / 2
@@ -82,70 +86,84 @@ func BenchmarkSizeScan(b *testing.B) {
 	}
 }
 
-// BenchmarkMixedTraffic25 keeps the table ≤25 % full and mixes operations
-// to mimic real traffic: ~50 % inserts, 40 % gets, 10 % overwrites.
-func BenchmarkMixedTraffic25(b *testing.B) {
+// End-to-end throughput: 25 % load, 50 % puts, 40 % gets, 10 % overwrites.
+// No Stop/Start, but ALSO zero heap allocs/op.
+func BenchmarkMixedTraffic25_E2E(b *testing.B) {
 	const (
-		capacity    = bucketCnt * clustersPerBkt * clusterSlots
-		maxLoad     = capacity / 4 // 25 % utilisation
-		getEvery    = 5            // 40 % reads
-		updateEvery = 10           // 10 % overwrites
+		capPerMap = bucketCnt * clustersPerBkt * clusterSlots / 4 // 25 %
+		mapsPool  = 16                                            // pre-built maps
 	)
 
-	// Pre-generate keys so we time only map ops, not fmt.Sprintf.
-	keys := make([]string, b.N)
-	for i := range keys {
-		keys[i] = fmt.Sprintf("k_%08d", i)
+	// ❶ Pre-allocate maps so New() isn’t on the clock.
+	pool := make([]*HashMap, mapsPool)
+	for i := range pool {
+		pool[i] = New()
 	}
 
-	m := New()
-	size := 0 // unique entries currently in the map
+	// ❷ Pre-generate 1 000 unique keys (hex strings, no fmt).
+	const keyCount = 1000
+	keys := make([]string, keyCount)
+	buf := make([]byte, 16)
+	for i := 0; i < keyCount; i++ {
+		hex.Encode(buf, []byte{byte(i >> 8), byte(i)})
+		keys[i] = unsafe.String(&buf[0], 16) // string view, no alloc
+	}
+
+	m, idxMap, size := pool[0], 0, 0
+	reads, overw := 0, 0
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		/* ------------- 40 % Get hits ------------- */
-		if i%getEvery == 0 && size > 0 {
-			_ = m.Get(keys[i%size])
+		if i%5 == 0 && size > 0 { // 40 % reads
+			_ = m.Get(keys[reads%keyCount])
+			reads++
 			continue
 		}
-
-		/* ------------- Put / overwrite ----------- */
-		keyIdx := i
-		if i%updateEvery == 0 && size > 0 { // 10 % overwrite
-			keyIdx = i % size
+		k := keys[i%keyCount]
+		if i%10 == 0 && size > 0 { // 10 % overwrites
+			k = keys[overw%size]
+			overw++
 		}
-		m.Put(keys[keyIdx], uint32(i))
-		if keyIdx == i { // counted only on new insert
+		m.Put(k, uint32(i))
+		if size < capPerMap {
 			size++
 		}
 
-		/* ------------- Reset when hitting 25 % load ------------- */
-		if size >= maxLoad {
-			b.StopTimer()
-			m = New()
-			size = 0
-			b.StartTimer()
+		if size >= capPerMap { // rotate without timing map alloc
+			idxMap = (idxMap + 1) & (mapsPool - 1)
+			m, size = pool[idxMap], 0
 		}
 	}
 }
 
-/* ---------- Reader-contention micro-benchmark ------------------------ */
-
+// 8 reader goroutines pounding Get – zero allocs, pre‑built keys.
 func BenchmarkReaders8Contention(b *testing.B) {
-	m := New()
-	for i := 0; i < 1_000; i++ {
-		m.Put(fmt.Sprintf("k%04d", i), uint32(i))
+	const keyCount = 1000
+	keys := make([]string, keyCount)
+	for i := 0; i < keyCount; i++ {
+		keys[i] = fmt.Sprintf("k%04d", i)
 	}
 
-	var wg sync.WaitGroup
+	m := New()
+	for _, k := range keys {
+		m.Put(k, 1)
+	}
+
 	readers := 8
+	var wg sync.WaitGroup
+	wg.Add(readers)
 	b.ResetTimer()
+
 	for i := 0; i < readers; i++ {
-		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
+			idx := id % keyCount
 			for j := 0; j < b.N/readers; j++ {
-				_ = m.Get(fmt.Sprintf("k%04d", j%1000))
+				_ = m.Get(keys[idx])
+				idx++
+				if idx == keyCount {
+					idx = 0
+				}
 			}
 		}(i)
 	}
