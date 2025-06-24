@@ -8,7 +8,7 @@ import (
 	"unsafe"
 )
 
-// ——— hard constants ————————————————————————————————————————————————
+// ——— hard constants ———
 const (
 	numBuckets       = 4096 // window width (power-of-two)
 	numGroups        = numBuckets / 64
@@ -16,11 +16,11 @@ const (
 	nilIdx     idx32 = ^idx32(0)
 )
 
-// build-time power-of-two checks (compile-time only, no code emitted)
 var _ [-int(numBuckets & (numBuckets - 1))]byte
 var _ [-int(capItems % numBuckets)]byte
 
-// ——— internal types ————————————————————————————————————————————————
+// ——— internal types ———
+
 type idx32 uint32
 
 type node struct {
@@ -30,7 +30,7 @@ type node struct {
 	data       unsafe.Pointer
 }
 
-// ——— public errors ————————————————————————————————————————————————
+// ——— public errors ———
 var (
 	ErrFull         = errors.New("bucketqueue: no free handles")
 	ErrPastWindow   = errors.New("bucketqueue: tick too far in the past")
@@ -38,7 +38,8 @@ var (
 	ErrItemNotFound = errors.New("bucketqueue: invalid handle")
 )
 
-// ——— queue state ————————————————————————————————————————————————
+// ——— queue state ———
+
 type Queue struct {
 	arena     [capItems]node
 	freeHead  idx32
@@ -49,7 +50,6 @@ type Queue struct {
 	groupBits [numGroups]uint64
 }
 
-// ——— ctor & small helpers ——————————————————————————————————————————
 type Handle idx32
 
 func New() *Queue {
@@ -92,7 +92,6 @@ func (q *Queue) release(h idx32) {
 	q.freeHead = h
 }
 
-// ——— primary operations ——————————————————————————————————————————
 func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	if h >= Handle(capItems) {
 		return ErrItemNotFound
@@ -108,14 +107,13 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	idx := idx32(h)
 	n := &q.arena[idx]
 
-	// duplicate-tick fast-path
 	if n.count != 0 && n.tick == tick {
 		n.count++
 		q.size++
+		n.data = val
 		return nil
 	}
 
-	// detach if the handle is already resident elsewhere
 	if n.count != 0 {
 		if n.prev != nilIdx {
 			q.arena[n.prev].next = n.next
@@ -138,7 +136,6 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 		n.next, n.prev = nilIdx, nilIdx
 	}
 
-	// regular insert
 	bkt := delta
 	n.next, n.prev = q.buckets[bkt], nilIdx
 	if n.next != nilIdx {
@@ -154,7 +151,6 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	return nil
 }
 
-//go:nosplit
 func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 	if h >= Handle(capItems) {
 		return ErrItemNotFound
@@ -165,7 +161,6 @@ func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 		return ErrItemNotFound
 	}
 
-	// detach from old bucket
 	old := uint64(n.tick) - q.baseTick
 	q.size -= int(n.count)
 	if n.prev != nilIdx {
@@ -185,11 +180,9 @@ func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 	}
 	n.next, n.prev, n.count = nilIdx, nilIdx, 0
 
-	// re-insert at new tick
 	return q.Push(tick, h, val)
 }
 
-//go:nosplit
 func (q *Queue) PeepMin() (Handle, int64, unsafe.Pointer) {
 	if q.size == 0 || q.summary == 0 {
 		return Handle(nilIdx), 0, nil
@@ -201,7 +194,6 @@ func (q *Queue) PeepMin() (Handle, int64, unsafe.Pointer) {
 	return Handle(q.buckets[bkt]), n.tick, n.data
 }
 
-//go:nosplit
 func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	if q.size == 0 || q.summary == 0 {
 		return Handle(nilIdx), 0, nil
@@ -213,14 +205,12 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	h := q.buckets[bkt]
 	n := &q.arena[h]
 
-	// multi-count fast-path
 	if n.count > 1 {
 		n.count--
 		q.size--
 		return Handle(h), n.tick, n.data
 	}
 
-	// remove head node
 	q.buckets[bkt] = n.next
 	if n.next != nilIdx {
 		q.arena[n.next].prev = nilIdx
@@ -235,6 +225,5 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	return Handle(h), n.tick, n.data
 }
 
-// cheap accessors
 func (q *Queue) Size() int   { return q.size }
 func (q *Queue) Empty() bool { return q.size == 0 }
