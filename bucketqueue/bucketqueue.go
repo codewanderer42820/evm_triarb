@@ -92,6 +92,9 @@ func (q *Queue) release(h idx32) {
 	q.freeHead = h
 }
 
+// Partial fix to bucketqueue.go — ensures summary is properly updated for fast-path reinsertions
+// with pre-released handles that have had their bucket cleared
+
 func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	if h >= Handle(capItems) {
 		return ErrItemNotFound
@@ -120,19 +123,18 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 		} else {
 			old := uint64(n.tick) - q.baseTick
 			q.buckets[old] = n.next
+			if q.buckets[old] == nilIdx {
+				g := old >> 6
+				q.groupBits[g] &^= 1 << (old & 63)
+				if q.groupBits[g] == 0 {
+					q.summary &^= 1 << g
+				}
+			}
 		}
 		if n.next != nilIdx {
 			q.arena[n.next].prev = n.prev
 		}
 		q.size -= int(n.count)
-		old := uint64(n.tick) - q.baseTick
-		if q.buckets[old] == nilIdx {
-			g := old >> 6
-			q.groupBits[g] &^= 1 << (old & 63)
-			if q.groupBits[g] == 0 {
-				q.summary &^= 1 << g
-			}
-		}
 		n.next, n.prev = nilIdx, nilIdx
 	}
 
@@ -145,8 +147,10 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	n.tick, n.count, n.data = tick, 1, val
 
 	g := bkt >> 6
-	q.groupBits[g] |= 1 << (bkt & 63)
-	q.summary |= 1 << g
+	if (q.groupBits[g] & (1 << (bkt & 63))) == 0 {
+		q.groupBits[g] |= 1 << (bkt & 63)
+		q.summary |= 1 << g
+	}
 	q.size++
 	return nil
 }
@@ -167,16 +171,16 @@ func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 		q.arena[n.prev].next = n.next
 	} else {
 		q.buckets[old] = n.next
+		if q.buckets[old] == nilIdx {
+			g := old >> 6
+			q.groupBits[g] &^= 1 << (old & 63)
+			if q.groupBits[g] == 0 {
+				q.summary &^= 1 << g
+			}
+		}
 	}
 	if n.next != nilIdx {
 		q.arena[n.next].prev = n.prev
-	}
-	if q.buckets[old] == nilIdx {
-		g := old >> 6
-		q.groupBits[g] &^= 1 << (old & 63)
-		if q.groupBits[g] == 0 {
-			q.summary &^= 1 << g
-		}
 	}
 	n.next, n.prev, n.count = nilIdx, nilIdx, 0
 
@@ -217,11 +221,16 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	}
 	q.size--
 
-	q.groupBits[g] &^= 1 << (bkt & 63)
-	if q.groupBits[g] == 0 {
-		q.summary &^= 1 << g
+	if q.buckets[bkt] == nilIdx {
+		q.groupBits[g] &^= 1 << (bkt & 63)
+		if q.groupBits[g] == 0 {
+			q.summary &^= 1 << g
+		}
 	}
-	q.release(h)
+
+	n.next, n.prev, n.count, n.data = nilIdx, nilIdx, 0, nil
+	q.freeHead, n.next = h, q.freeHead
+
 	return Handle(h), n.tick, n.data
 }
 
