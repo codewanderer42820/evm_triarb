@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/rand"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -191,7 +190,7 @@ func TestSameKeyWideLengths(t *testing.T) {
 		} else { // empty slice – use nil (valid, never dereferenced)
 			p1, p2 = nil, nil
 		}
-		if !sameKey(p1, p2, uint16(n)) {
+		if !sameKey64(p1, p2, uint16(n)) {
 			t.Fatalf("sameKey failed at len=%d", n)
 		}
 	}
@@ -223,7 +222,7 @@ func TestSameKeyFalseBranches(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		if sameKey(p(tc.a), p(tc.b), uint16(len(tc.a))) {
+		if sameKey64(p(tc.a), p(tc.b), uint16(len(tc.a))) {
 			t.Fatalf("%s: expected false", tc.name)
 		}
 	}
@@ -270,75 +269,12 @@ func TestSameKeyCornerBranches(t *testing.T) {
 	a := []byte("ABCDEFGH")  // 8 bytes
 	b := []byte("ABCDEFGH1") // 9 bytes
 
-	if !sameKey(p(a), p(b), 8) { // identical 8-byte prefix
-		t.Fatal("sameKey failed on identical 8-byte prefix")
+	if !sameKey64(unsafe.Pointer(&a[0]), unsafe.Pointer(&b[0]), 8) {
+		t.Fatal("sameKey64 failed on identical 8-byte prefix")
 	}
-	if sameKey(p(a), p(b), 9) { // different 9-byte strings
-		t.Fatal("sameKey incorrectly matched 9-byte strings")
+	if sameKey64(unsafe.Pointer(&a[0]), unsafe.Pointer(&b[0]), 9) {
+		t.Fatal("sameKey64 incorrectly matched 9-byte strings")
 	}
-}
-
-/* ---------- 11. Reader-contention micro-benchmark ------------------------ */
-
-func BenchmarkReaders8Contention(b *testing.B) {
-	m := New()
-	for i := 0; i < 1_000; i++ {
-		m.Put(fmt.Sprintf("k%04d", i), uint32(i))
-	}
-
-	var wg sync.WaitGroup
-	readers := 8
-	b.ResetTimer()
-	for i := 0; i < readers; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			for j := 0; j < b.N/readers; j++ {
-				_ = m.Get(fmt.Sprintf("k%04d", j%1000))
-			}
-		}(i)
-	}
-	wg.Wait()
-}
-
-/* ---------- 12. Epoch spin‑loop branch coverage ------------------------- */
-
-// This test forces the reader to enter *all* epoch‑retry paths inside Get():
-//  1. early‑spin (snap&1!=0)
-//  2. post‑lookup retry when epoch2!=snap (the comment line "continue // retry …")
-//  3. inner break that restarts lookup.
-//
-// We do that by toggling the epoch odd→even in a tight loop while a reader
-// continuously calls Get on an existing key.
-func TestEpochSpinBranches(t *testing.T) {
-	m := New()
-	key := "spinKey"
-	m.Put(key, 42)
-
-	// Writer goroutine: rapid epoch odd→even toggles without touching data.
-	stop := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				// odd, even – two increments → data unchanged but epoch bumps.
-				atomic.AddUint64(&m.epoch, 1)
-				atomic.AddUint64(&m.epoch, 1)
-			}
-		}
-	}()
-
-	// Reader: loop enough times to guarantee the slow‑path branches execute.
-	// Coverage needs the source lines hit, not a specific assertion.
-	for i := 0; i < 1_000_000; i++ {
-		p := m.Get(key)
-		if p == nil || *(*uint32)(p) != 42 {
-			t.Fatalf("reader lost visibility of key")
-		}
-	}
-	close(stop)
 }
 
 /* helper: []byte → unsafe.Pointer */

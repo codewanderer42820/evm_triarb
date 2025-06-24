@@ -2,6 +2,7 @@ package pairidx
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 )
 
@@ -126,4 +127,27 @@ func BenchmarkMixedTraffic25(b *testing.B) {
 			b.StartTimer()
 		}
 	}
+}
+
+/* ---------- Reader-contention micro-benchmark ------------------------ */
+
+func BenchmarkReaders8Contention(b *testing.B) {
+	m := New()
+	for i := 0; i < 1_000; i++ {
+		m.Put(fmt.Sprintf("k%04d", i), uint32(i))
+	}
+
+	var wg sync.WaitGroup
+	readers := 8
+	b.ResetTimer()
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < b.N/readers; j++ {
+				_ = m.Get(fmt.Sprintf("k%04d", j%1000))
+			}
+		}(i)
+	}
+	wg.Wait()
 }
