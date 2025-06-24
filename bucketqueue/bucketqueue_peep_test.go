@@ -8,8 +8,7 @@
 //
 // Peep‑oriented test‑suite — verifies that PeepMin() behaves exactly like PopMin()
 // in terms of ordering *without* mutating queue state.
-//
-// ──────────────────────────────────────────────────────────────────────────────
+
 package bucketqueue
 
 import "testing"

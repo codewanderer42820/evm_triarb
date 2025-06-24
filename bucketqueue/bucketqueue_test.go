@@ -5,6 +5,7 @@
 // This implementation uses a fixed arena allocator, intrusive linked lists,
 // and compact handle management for high-throughput applications such as
 // schedulers, simulation engines, or event queues.
+
 package bucketqueue
 
 import (
