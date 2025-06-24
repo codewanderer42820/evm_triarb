@@ -239,3 +239,101 @@ func TestUpdateValid(t *testing.T) {
 		t.Error("queue should be empty after final PopMin")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Added tests to cover edge cases for full coverage of removal and detachment
+// ---------------------------------------------------------------------------
+
+// TestPushRemovalHeadNonNil exercises the slow-path Push removal when the node
+// being re-pushed was the head of its bucket list and had a non-nil next.
+func TestPushRemovalHeadNonNil(t *testing.T) {
+	q := New()
+	h1, _ := q.Borrow()
+	h2, _ := q.Borrow()
+	// Push two handles into the same bucket (tick=0)
+	q.Push(0, h1, nil)
+	q.Push(0, h2, nil)
+	// Re-push head (h2) at tick=1, triggering head-detach with next!=nil
+	if err := q.Push(1, h2, nil); err != nil {
+		t.Fatalf("Re-push h2: %v", err)
+	}
+	// Now bucket0 should only contain h1
+	hA, tickA, dataA := q.PopMin()
+	if hA != h1 || tickA != 0 || dataA != nil {
+		t.Errorf("PopMin = (%v,%d,%v); want (%v,0,nil)", hA, tickA, dataA, h1)
+	}
+	// Next PopMin returns h2 at its new tick
+	hB, tickB, dataB := q.PopMin()
+	if hB != h2 || tickB != 1 || dataB != nil {
+		t.Errorf("Second PopMin = (%v,%d,%v); want (%v,1,nil)", hB, tickB, dataB, h2)
+	}
+}
+
+// TestUpdateRemovalPrevNonNil exercises Update slow-path when the node being moved
+// sits at the tail of its bucket list (prev!=nil, next==nil).
+func TestUpdateRemovalPrevNonNil(t *testing.T) {
+	q := New()
+	h1, _ := q.Borrow()
+	h2, _ := q.Borrow()
+	// Push two handles into the same bucket (tick=0)
+	q.Push(0, h1, nil)
+	q.Push(0, h2, nil)
+	// Update tail (h1) to tick=5
+	if err := q.Update(5, h1, nil); err != nil {
+		t.Fatalf("Update h1: %v", err)
+	}
+	// PopMin should return h2@0, then h1@5
+	hA, tickA, _ := q.PopMin()
+	if hA != h2 || tickA != 0 {
+		t.Fatalf("PopMin = (%v,%d); want (%v,0)", hA, tickA, h2)
+	}
+	hB, tickB, _ := q.PopMin()
+	if hB != h1 || tickB != 5 {
+		t.Fatalf("Second PopMin = (%v,%d); want (%v,5)", hB, tickB, h1)
+	}
+}
+
+// TestUpdateRemovalHeadNonNil exercises Update slow-path when the node being moved
+// was the head and had a non-nil next.
+func TestUpdateRemovalHeadNonNil(t *testing.T) {
+	q := New()
+	h1, _ := q.Borrow()
+	h2, _ := q.Borrow()
+	// Push two handles into the same bucket (tick=0)
+	q.Push(0, h1, nil)
+	q.Push(0, h2, nil)
+	// Update head (h2) to tick=3
+	if err := q.Update(3, h2, nil); err != nil {
+		t.Fatalf("Update h2: %v", err)
+	}
+	// PopMin should return h1@0, then h2@3
+	hA, tickA, _ := q.PopMin()
+	if hA != h1 || tickA != 0 {
+		t.Fatalf("PopMin = (%v,%d); want (%v,0)", hA, tickA, h1)
+	}
+	hB, tickB, _ := q.PopMin()
+	if hB != h2 || tickB != 3 {
+		t.Fatalf("Second PopMin = (%v,%d); want (%v,3)", hB, tickB, h2)
+	}
+}
+
+// TestPopMinHeadNonNil exercises PopMin unlink when the head node has a non-nil next.
+// Validates that the new head's prev is correctly set to nilIdx.
+func TestPopMinHeadNonNil(t *testing.T) {
+	q := New()
+	h1, _ := q.Borrow()
+	h2, _ := q.Borrow()
+	// Push two handles into the same bucket (tick=10)
+	q.Push(10, h1, nil)
+	q.Push(10, h2, nil)
+	// PopMin should remove head (h2) and leave h1 as new head
+	hA, tickA, _ := q.PopMin()
+	if hA != h2 || tickA != 10 {
+		t.Fatalf("PopMin = (%v,%d); want (%v,10)", hA, tickA, h2)
+	}
+	// Next PopMin returns the remaining h1@10
+	hB, tickB, _ := q.PopMin()
+	if hB != h1 || tickB != 10 {
+		t.Fatalf("Second PopMin = (%v,%d); want (%v,10)", hB, tickB, h1)
+	}
+}
