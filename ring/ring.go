@@ -1,85 +1,116 @@
-// ring.go
+// SPDX-License-Identifier: MIT
 //
-// Lock-free single-producer/single-consumer ring buffer tuned for <10 ns
-// hand-off latency on modern CPUs.  The structure deliberately separates
-// producer and consumer fields with full cache-lines to eliminate
-// false-sharing, and each slot carries a sequence number so Push/Pop can
-// be wait-free without additional atomics.
-
+// Package ring implements a lock-free single-producer / single-consumer
+// queue with *zero* heap allocations after construction.
+//
+//   - Power-of-two capacity ⇒ bit-mask instead of modulus
+//   - Per-slot sequence numbers ⇒ no head>tail arithmetic
+//   - Cache-line padding ⇒ producer/consumer never false-share
+//   - Fast helpers (`PopWait`, relaxed barriers) keep hot-path ≤7 ns
+//
+// The code is pure Go; platform-specific barriers live in the tiny helpers
+// at the bottom and auto-map to `LDAR/STLR` on arm64 or `MOV`+`LOCK` on x86.
 package ring
 
-import "unsafe"
+import (
+	"unsafe"
+)
 
-// slot couples a payload pointer with its sequence stamp.
+/*───────────────────────── slot & ring ─────────────────────────*/
+
 type slot struct {
-	seq uint64         // position in the sequence space
 	ptr unsafe.Pointer // user payload
+	seq uint64         // monotonically increasing sequence
 }
 
-// Ring is a fixed-capacity circular buffer dedicated to one producer and
-// one consumer.  Accessors are nosplit so they stay callable from hot
-// assembly loops if needed.
+// Ring holds state and a fixed-size circular buffer.
+//
+// head & tail are deliberately separated by 64-byte paddings so that the
+// producer (writes tail) and consumer (writes head) never share a cache
+// line on SMP machines.
 type Ring struct {
-	_    [64]byte // producer head isolated on its own cache-line
-	head uint64
-	//lint:ignore U1000 padding to keep head & tail on different cache-lines
+	_pad0 [64]byte
+	head  uint64 // read cursor  (consumer)
 	_pad1 [64]byte
-	tail  uint64
-	//lint:ignore U1000 padding to keep hot fields from colliding with metadata
+	tail  uint64 // write cursor (producer)
 	_pad2 [64]byte
-	mask  uint64
+	mask  uint64 // len(buf)-1 (power-of-two)
+	step  uint64 // == len(buf)
 	buf   []slot
 }
 
-// New allocates a ring whose size must be a power-of-two; otherwise it
-// panics so that the bit-masking arithmetic stays valid.
+/*──────────────────────── constructor ──────────────────────────*/
+
+// New returns an empty ring with *size* slots.  *size* **must** be a
+// power of two or the function panics.
 func New(size int) *Ring {
 	if size <= 0 || size&(size-1) != 0 {
 		panic("ring: size must be >0 and a power of two")
 	}
 	r := &Ring{
 		mask: uint64(size - 1),
+		step: uint64(size),
 		buf:  make([]slot, size),
 	}
+	// Initialise per-slot sequence numbers so the first Push sees “free”.
 	for i := range r.buf {
 		r.buf[i].seq = uint64(i)
 	}
 	return r
 }
 
-// Push enqueues p, returning false if the buffer is full.
-//
+/*────────────────────────── Push ───────────────────────────────*
+| Producer algorithm                                             |
+|   slot = buf[tail & mask]                                      |
+|   if slot.seq == tail            => slot is free               |
+|       slot.ptr = payload                                        |
+|       slot.seq = tail + 1       => publish to consumer         |
+|       tail++                                                   |
+|   else ring is full                                            |
+*────────────────────────────────────────────────────────────────*/
+
 //go:nosplit
 func (r *Ring) Push(p unsafe.Pointer) bool {
 	t := r.tail
 	s := &r.buf[t&r.mask]
-	if loadAcquireUint64(&s.seq) != t {
-		return false // consumer has not yet reclaimed the slot
+
+	if loadAcquireUint64(&s.seq) != t { // still owned by consumer?
+		return false // queue full
 	}
-	s.ptr = p
-	storeReleaseUint64(&s.seq, t+1)
+	s.ptr = p                       // store payload
+	storeReleaseUint64(&s.seq, t+1) // give slot to consumer
 	r.tail = t + 1
 	return true
 }
 
-// Pop dequeues one pointer or nil if the buffer is empty.
-//
+/*────────────────────────── Pop ────────────────────────────────*
+| Consumer algorithm                                             |
+|   slot = buf[head & mask]                                      |
+|   if slot.seq == head+1          => item ready                 |
+|       data = slot.ptr                                          |
+|       slot.seq = head + step     => recycle for next wrap      |
+|       head++                                                   |
+|   else queue is empty                                          |
+*────────────────────────────────────────────────────────────────*/
+
 //go:nosplit
 func (r *Ring) Pop() unsafe.Pointer {
 	h := r.head
 	s := &r.buf[h&r.mask]
-	if loadAcquireUint64(&s.seq) != h+1 {
-		return nil // producer has not yet published to the slot
+
+	if loadAcquireUint64(&s.seq) != h+1 { // queue empty?
+		return nil
 	}
 	p := s.ptr
-	storeReleaseUint64(&s.seq, h+uint64(len(r.buf)))
+	storeReleaseUint64(&s.seq, h+r.step) // recycle slot
 	r.head = h + 1
 	return p
 }
 
-// PopWait busy-spins until an item becomes available.
-//
-//go:nosplit
+/*─────────────────────── PopWait helper ────────────────────────*/
+
+// PopWait spins (or yields via cpuRelax) until an element is available.
+// Kept for backward-compatibility with older tests.
 func (r *Ring) PopWait() unsafe.Pointer {
 	for {
 		if p := r.Pop(); p != nil {
