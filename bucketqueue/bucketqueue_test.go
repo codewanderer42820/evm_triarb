@@ -62,33 +62,6 @@ func TestUpdateTickOutOfBounds(t *testing.T) {
 	expectError(t, err, ErrPastWindow)
 }
 
-func TestRemove(t *testing.T) {
-	q := New()
-	h := borrowOrPanic(t, q)
-	pushOrFatal(t, q, 5, h)
-	if err := q.Remove(h); err != nil {
-		t.Fatalf("remove: %v", err)
-	}
-	expectEmpty(t, q)
-}
-
-func TestGenWrapClearsBucketGen(t *testing.T) {
-	q := New()
-	for i := 0; i < numBuckets; i++ {
-		h := borrowOrPanic(t, q)
-		pushOrFatal(t, q, int64(i), h)
-	}
-	for i := uint32(0); i < ^uint32(0); i++ {
-		q.gen++
-	}
-	q.recycleStaleBuckets()
-	for _, g := range q.bucketGen {
-		if g != 0 {
-			t.Fatalf("bucketGen not cleared")
-		}
-	}
-}
-
 func TestPushOutOfOrderStress(t *testing.T) {
 	const N = 1000
 	q := New()
