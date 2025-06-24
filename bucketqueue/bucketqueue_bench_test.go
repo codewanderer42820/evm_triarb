@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-
-
 // Borrow + Return (allocator loop)
 func BenchmarkBorrowReturn(b *testing.B) {
 	q := New()
