@@ -139,13 +139,13 @@ func TestKeyBytesNotMoved(t *testing.T) {
 
 // ---------- 6. rbm scan / return-nil path ------------------------------
 
-// meta returns (bucket, cluster, slot) derived from the map's hash.
+// meta returns (bucket, cluster, slot) exactly the way the table derives them.
 func meta(k string) (bucket, cluster, slot uint32) {
-	kptr := unsafe.StringData(k)
-	h32, _ := hashPtrLen(unsafe.Pointer(kptr), uint16(len(k)))
-	return h32 & bucketMask,
-		(h32 >> bucketShift) & clMask,
-		uint32(h32) & slotMask
+	h32, _ := crc32cMix(k)
+	bucket = (h32 >> hashShift) & bucketMask
+	cluster = (h32 >> (hashShift + bucketShift)) & clMask
+	slot = h32 & slotMask
+	return
 }
 
 // craftKeysSameCluster returns N distinct keys that fall into the same bucket+cluster.

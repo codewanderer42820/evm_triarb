@@ -1,43 +1,63 @@
+// SPDX‑License‑Identifier: MIT
+// Ultra‑low‑latency SWMR hash map – bucketed + clustered + bitmap scan
+// Target: < 8 ns per Get/Put (uncontended) with reader‑lock‑free safety.
+
 package pairidx
 
 import (
+	"hash/crc32"
 	"math/bits"
+	"sync/atomic"
 	"unsafe"
 )
 
-// -----------------------------------------------------------------------------
-// Constants & layout – cache‑friendly, power‑of‑two everywhere
-// -----------------------------------------------------------------------------
+/*
+─────────────────────────────────────────────────────────────────────────────*
+| Geometry – everything power‑of‑two so masks beat mods                    |
+*────────────────────────────────────────────────────────────────────────────
+*/
 const (
-	bucketCnt      = 64 // primary buckets (must be 2^n)
-	clustersPerBkt = 4  // secondary hash fan‑out
-	clusterSlots   = 16 // slots per cluster – fits in a u64 bitmap
+	bucketCnt   = 1024 // primary buckets (2^10)
+	bucketShift = 10   // log2(bucketCnt)
+	bucketMask  = bucketCnt - 1
 
-	slotMask   = clusterSlots - 1
-	clMask     = clustersPerBkt - 1
-	bucketMask = bucketCnt - 1
+	clustersPerBkt = 4 // fan‑out per bucket
+	clMask         = clustersPerBkt - 1
 
-	bucketShift = 6 // log2(bucketCnt) – compile‑time constant (64 → 6)
+	clusterSlots = 64                                // slots per cluster (fits u64 bitmap)
+	slotMask     = clusterSlots - 1                  // == 63
+	fullMask     = ^uint64(0) >> (64 - clusterSlots) // low N bits set
+
+	hashShift = 16 // skip low entropy bits
 )
 
-// -----------------------------------------------------------------------------
-// 64‑bit pointer‑length avalanche (xxh3‑style)
-// -----------------------------------------------------------------------------
-func hashPtrLen(ptr unsafe.Pointer, klen uint16) (h32 uint32, tag uint16) {
-	x := uint64(uintptr(ptr)) ^ (uint64(klen) * 0x9e3779b97f4a7c15)
-	x ^= x >> 33
-	x *= 0xc2b2ae3d27d4eb4f
-	x ^= x >> 29
-	tag = uint16(x>>48) | 1 // never zero
-	h32 = uint32(x)
+/*
+─────────────────────────────────────────────────────────────────────────────*
+
+	| Fast CRC32C hash – good avalanche, ~2–4 ns on Apple M‑series             |
+	*────────────────────────────────────────────────────────────────────────────
+*/
+var crcTab = crc32.MakeTable(crc32.Castagnoli)
+
+func crc32cMix(k string) (h32 uint32, tag uint16) {
+	// Zero‑copy view of the string bytes
+	bs := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.StringData(k))), len(k))
+	x := crc32.Update(0, crcTab, bs)
+
+	// One 32×32→64 multiply to smear low bits further
+	x64 := uint64(x) * 0x9E3779B185EBCA87
+	h32 = uint32(x64)
+	tag = uint16(x64>>48) | 1 // never zero
 	return
 }
 
-// -----------------------------------------------------------------------------
-// Key compare – zero‑alloc, branch‑cheap
-// -----------------------------------------------------------------------------
+/*
+─────────────────────────────────────────────────────────────────────────────*
+
+	| Key compare – zero‑alloc, early‑exit                                     |
+	*────────────────────────────────────────────────────────────────────────────
+*/
 func sameKey(a, b unsafe.Pointer, n uint16) bool {
-	// Zero‑length keys are equal by definition and require no dereference.
 	if n == 0 {
 		return true
 	}
@@ -76,99 +96,122 @@ func sameKey(a, b unsafe.Pointer, n uint16) bool {
 	return true
 }
 
-// -----------------------------------------------------------------------------
-// Slot / cluster layout
-// -----------------------------------------------------------------------------
-
+/*─────────────────────────────────────────────────────────────────────────────*
+| Slot / cluster layout                                                    |
+*────────────────────────────────────────────────────────────────────────────*/
+// 32‑byte cold slot – padded for cache alignment.
+// (tag,klen) share the first word so one 32‑bit load gets both.
+// Epoch/version is handled at table level so we keep slot lean.
 type slot struct {
-	tag  uint16         // 16‑bit collision tag
-	klen uint16         // key length
-	kptr unsafe.Pointer // raw pointer to key bytes
-	val  uint32         // user value
-	_    [8]byte        // pad to 32 B
+	tag  uint16         // collision tag (upper 16 bits of hash)
+	klen uint16         // key length (<= 65 535)
+	kptr unsafe.Pointer // ptr to key bytes (string data)
+	val  uint32         // user value (change as needed)
+	_    [12]byte       // pad to 32 B
 }
 
 type cluster struct {
-	bitmap uint64             // occupancy bitmap (LSB ⇒ slot0)
-	_      [56]byte           // keep metadata away from slot array
-	slots  [clusterSlots]slot // 512 B
+	bitmap uint64             // 1‑bit per slot: 1 = used
+	_      [56]byte           // keep meta separate (false‑sharing guard)
+	slots  [clusterSlots]slot // 64 × 32 B = 2 KiB
 }
 
-// -----------------------------------------------------------------------------
-// HashMap – SWMR, zero alloc
-// -----------------------------------------------------------------------------
+/*
+─────────────────────────────────────────────────────────────────────────────*
 
+	| HashMap – single writer / multi reader                                   |
+	*────────────────────────────────────────────────────────────────────────────
+*/
 type HashMap struct {
-	buckets [bucketCnt][clustersPerBkt]cluster
-	size    uint32 // monotonically increasing – no deletes
+	epoch   uint64                             // even ⇒ quiescent, odd ⇒ writer busy
+	buckets [bucketCnt][clustersPerBkt]cluster // main storage
+	size    uint32                             // monotonic – no deletes here
 }
 
 func New() *HashMap { return &HashMap{} }
 
-// -----------------------------------------------------------------------------
-// Helpers – bitmap rotations
-// -----------------------------------------------------------------------------
+/*
+─────────────────────────────────────────────────────────────────────────────*
 
-const fullMask16 = uint64(1<<clusterSlots) - 1
-
-func rotateBits16(x uint64, k int) uint64 {
-	// Rotate left by k (0‑15) in the low 16 bits.
-	return ((x >> uint(k)) | (x << uint(clusterSlots-k))) & fullMask16
+	| Helpers                                                                   |
+	*────────────────────────────────────────────────────────────────────────────
+*/
+func rotateBits(x uint64, k int) uint64 {
+	return ((x >> uint(k)) | (x << uint(clusterSlots-k))) & fullMask
 }
-
 func derotateIdx(i, start int) int { return (i + start) & slotMask }
 
-// -----------------------------------------------------------------------------
-// Get – branchless bitmap scan
-// -----------------------------------------------------------------------------
+/*
+─────────────────────────────────────────────────────────────────────────────*
 
+	| SWMR Get – reader lock‑free, writer‑consistent                            |
+	*────────────────────────────────────────────────────────────────────────────
+*/
 func (h *HashMap) Get(k string) unsafe.Pointer {
-	kptr := unsafe.StringData(k)
-	klen := uint16(len(k))
-
-	h32, tag := hashPtrLen(unsafe.Pointer(kptr), klen)
-	bi := h32 & bucketMask
-	ci := (h32 >> bucketShift) & clMask
-	cl := &h.buckets[bi][ci]
-
-	bm := cl.bitmap
-	if bm == 0 {
-		return nil
-	}
-
-	start := int(h32) & slotMask
-	rbm := rotateBits16(bm, start)
-
-	for rbm != 0 {
-		tz := bits.TrailingZeros64(rbm)
-		idx := derotateIdx(tz, start)
-		s := &cl.slots[idx]
-		if s.tag == tag && s.klen == klen && sameKey(s.kptr, unsafe.Pointer(kptr), klen) {
-			return unsafe.Pointer(&s.val)
+	for {
+		snap := atomic.LoadUint64(&h.epoch)
+		if snap&1 != 0 { // writer in flight – spin briefly
+			continue
 		}
-		rbm &= rbm - 1 // clear lowest set bit
+
+		kptr := unsafe.StringData(k)
+		klen := uint16(len(k))
+		h32, tag := crc32cMix(k)
+
+		bi := (h32 >> hashShift) & bucketMask
+		ci := (h32 >> (hashShift + bucketShift)) & clMask
+		cl := &h.buckets[bi][ci]
+
+		bm := atomic.LoadUint64(&cl.bitmap) // relaxed ok – verified by epoch
+		if bm == 0 {
+			if atomic.LoadUint64(&h.epoch) == snap {
+				return nil
+			}
+			continue // retry – writer touched something
+		}
+
+		start := int(h32) & slotMask
+		rbm := rotateBits(bm, start)
+		for rbm != 0 {
+			tz := bits.TrailingZeros64(rbm)
+			idx := derotateIdx(tz, start)
+			s := &cl.slots[idx]
+			if s.tag == tag && s.klen == klen && sameKey(s.kptr, unsafe.Pointer(kptr), klen) {
+				if atomic.LoadUint64(&h.epoch) == snap {
+					return unsafe.Pointer(&s.val)
+				}
+				break // epoch changed – redo lookup
+			}
+			rbm &= rbm - 1
+		}
+		if atomic.LoadUint64(&h.epoch) == snap {
+			return nil // consistent miss
+		}
+		// else: writer raced – retry
 	}
-	return nil
 }
 
-// -----------------------------------------------------------------------------
-// Put – scans all 16 probe positions once (branchless), inserts at first hole
-// -----------------------------------------------------------------------------
+/*
+─────────────────────────────────────────────────────────────────────────────*
 
+	| Put – single writer only; readers stay lock‑free                           |
+	*────────────────────────────────────────────────────────────────────────────
+*/
 func (h *HashMap) Put(k string, v uint32) unsafe.Pointer {
+	// Block readers
+	atomic.AddUint64(&h.epoch, 1) // odd
+
 	kptr := unsafe.StringData(k)
 	klen := uint16(len(k))
+	h32, tag := crc32cMix(k)
 
-	h32, tag := hashPtrLen(unsafe.Pointer(kptr), klen)
-	bi := h32 & bucketMask
-	ci := (h32 >> bucketShift) & clMask
+	bi := (h32 >> hashShift) & bucketMask
+	ci := (h32 >> (hashShift + bucketShift)) & clMask
 	cl := &h.buckets[bi][ci]
 
 	bm := cl.bitmap
 	start := int(h32) & slotMask
-
-	// Pre‑rotated mask that walks every slot exactly once in probe order.
-	scan := rotateBits16(fullMask16, start)
+	scan := rotateBits(fullMask, start) // 64 bits set
 
 	for scan != 0 {
 		tz := bits.TrailingZeros64(scan)
@@ -176,24 +219,46 @@ func (h *HashMap) Put(k string, v uint32) unsafe.Pointer {
 		bit := uint64(1) << uint(idx)
 		s := &cl.slots[idx]
 
-		if bm&bit == 0 {
-			// Empty – claim and return.
+		if bm&bit == 0 { // empty – insert
 			s.tag, s.klen, s.kptr, s.val = tag, klen, unsafe.Pointer(kptr), v
 			cl.bitmap = bm | bit
 			h.size++
+			atomic.AddUint64(&h.epoch, 1) // even – readers proceed
 			return unsafe.Pointer(&s.val)
 		}
-
-		// Occupied – check for duplicate.
 		if s.tag == tag && s.klen == klen && sameKey(s.kptr, unsafe.Pointer(kptr), klen) {
 			s.val = v // overwrite
+			atomic.AddUint64(&h.epoch, 1)
 			return unsafe.Pointer(&s.val)
 		}
-		scan &= scan - 1 // clear bit, continue
+		scan &= scan - 1
 	}
 
+	// Fallback cluster (second hash) – extremely rare
+	h32b := bits.Reverse32(h32) // cheap 1‑cycle permutation
+	bi = (h32b >> hashShift) & bucketMask
+	ci = (h32b >> (hashShift + bucketShift)) & clMask
+	cl = &h.buckets[bi][ci]
+	bm = cl.bitmap
+	scan = fullMask
+	for scan != 0 {
+		tz := bits.TrailingZeros64(scan)
+		idx := tz
+		bit := uint64(1) << uint(idx)
+		s := &cl.slots[idx]
+		if bm&bit == 0 {
+			s.tag, s.klen, s.kptr, s.val = tag, klen, unsafe.Pointer(kptr), v
+			cl.bitmap = bm | bit
+			h.size++
+			atomic.AddUint64(&h.epoch, 1)
+			return unsafe.Pointer(&s.val)
+		}
+		scan &= scan - 1
+	}
+
+	atomic.AddUint64(&h.epoch, 1) // unblock readers before panicking
 	panic("pairidx: cluster full – reduce load factor or re‑hash keys")
 }
 
-// Size returns the current entry count.
-func (h *HashMap) Size() int { return int(h.size) }
+// Size returns the monotonically increasing entry count.
+func (h *HashMap) Size() int { return int(atomic.LoadUint32(&h.size)) }

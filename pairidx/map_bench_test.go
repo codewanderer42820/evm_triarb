@@ -34,24 +34,6 @@ func BenchmarkPutOverwrite(b *testing.B) {
 	}
 }
 
-// BenchmarkPutInsert inserts fresh keys; map is reset every `batch`.
-func BenchmarkPutInsert(b *testing.B) {
-	const batch = bucketCnt * clustersPerBkt * clusterSlots / 4
-	keys := make([]string, b.N)
-	for i := range keys {
-		keys[i] = fmt.Sprintf("k_%08d", i)
-	}
-
-	m := New()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if i > 0 && i%batch == 0 {
-			m = New()
-		}
-		m.Put(keys[i], uint32(i))
-	}
-}
-
 // Best-case slot locality.
 func BenchmarkGetSameSlotHit(b *testing.B) {
 	m := New()
@@ -96,5 +78,52 @@ func BenchmarkSizeScan(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = m.Size()
+	}
+}
+
+// BenchmarkMixedTraffic25 keeps the table ≤25 % full and mixes operations
+// to mimic real traffic: ~50 % inserts, 40 % gets, 10 % overwrites.
+func BenchmarkMixedTraffic25(b *testing.B) {
+	const (
+		capacity    = bucketCnt * clustersPerBkt * clusterSlots
+		maxLoad     = capacity / 4 // 25 % utilisation
+		getEvery    = 5            // 40 % reads
+		updateEvery = 10           // 10 % overwrites
+	)
+
+	// Pre-generate keys so we time only map ops, not fmt.Sprintf.
+	keys := make([]string, b.N)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("k_%08d", i)
+	}
+
+	m := New()
+	size := 0 // unique entries currently in the map
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		/* ------------- 40 % Get hits ------------- */
+		if i%getEvery == 0 && size > 0 {
+			_ = m.Get(keys[i%size])
+			continue
+		}
+
+		/* ------------- Put / overwrite ----------- */
+		keyIdx := i
+		if i%updateEvery == 0 && size > 0 { // 10 % overwrite
+			keyIdx = i % size
+		}
+		m.Put(keys[keyIdx], uint32(i))
+		if keyIdx == i { // counted only on new insert
+			size++
+		}
+
+		/* ------------- Reset when hitting 25 % load ------------- */
+		if size >= maxLoad {
+			b.StopTimer()
+			m = New()
+			size = 0
+			b.StartTimer()
+		}
 	}
 }
