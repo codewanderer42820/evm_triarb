@@ -44,20 +44,20 @@ func TestPutSameValueNoOverwrite(t *testing.T) {
 	m := New()
 	m.Put("foo", 42)
 	m.Put("foo", 42) // identical value → should not change size
-	if m.Size() != 1 {
+	if m.size != 1 {
 		t.Fatalf("size changed after no-op overwrite")
 	}
 }
 
 func TestSizeAccounting(t *testing.T) {
 	m := New()
-	if m.Size() != 0 {
-		t.Fatalf("expected size 0, got %d", m.Size())
+	if m.size != 0 {
+		t.Fatalf("expected size 0, got %d", m.size)
 	}
 	m.Put("a", 1)
 	m.Put("b", 2)
-	if m.Size() != 2 {
-		t.Fatalf("expected size 2, got %d", m.Size())
+	if m.size != 2 {
+		t.Fatalf("expected size 2, got %d", m.size)
 	}
 }
 
