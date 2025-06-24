@@ -71,7 +71,8 @@ type node struct {
 	next  idx32          // next node within the same bucket list (nilIdx = end)
 	prev  idx32          // previous node within the bucket list (nilIdx = head)
 	count uint32         // multiplicity when same handle pushed N times at tick
-	_pad  uint32         // forces 8‑byte alignment of the whole struct
+	//lint:ignore U1000 padding for cache alignment
+	_pad uint32 // forces 8‑byte alignment of the whole struct
 }
 
 // ---------------------------------------------------------------------------
