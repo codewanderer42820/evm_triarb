@@ -214,3 +214,129 @@ func TestUpdateValid(t *testing.T) {
 		t.Error("queue should be empty after final PopMin")
 	}
 }
+
+// TestPushRemovalNextPrevBoth exercises the Push() removal path
+// when the removed node sits in the *middle* of a 3‐node list,
+// so both n.prev != nilIdx and n.next != nilIdx branches fire.
+func TestPushRemovalNextPrevBoth(t *testing.T) {
+	q := New()
+	h1, _ := q.Borrow()
+	h2, _ := q.Borrow()
+	h3, _ := q.Borrow()
+
+	// Value for the re–push of the middle node:
+	x := 123
+	p := unsafe.Pointer(&x)
+
+	// Build a 3-node list at tick=0: head→h3→h2→h1
+	if err := q.Push(0, h1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Push(0, h2, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Push(0, h3, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-push h2 at tick=1: this must remove h2 from the middle,
+	// hitting both q.arena[n.prev].next = n.next and
+	// q.arena[n.next].prev = n.prev
+	if err := q.Push(1, h2, p); err != nil {
+		t.Fatalf("Push removal-next-prev-both: %v", err)
+	}
+
+	// After that, size==3 and the queue contains:
+	//  • two items at tick=0 (h3, h1) in that order,
+	//  • one item at tick=1 (h2).
+	// Pop them and verify:
+	h, tick, data := q.PopMin()
+	if h != h3 || tick != 0 || data != nil {
+		t.Errorf("1st PopMin = (%v,%d,%v); want (%v,0,nil)", h, tick, data, h3)
+	}
+	h, tick, data = q.PopMin()
+	if h != h1 || tick != 0 || data != nil {
+		t.Errorf("2nd PopMin = (%v,%d,%v); want (%v,0,nil)", h, tick, data, h1)
+	}
+	h, tick, data = q.PopMin()
+	if h != h2 || tick != 1 || data != nil {
+		t.Errorf("3rd PopMin = (%v,%d,%v); want (%v,1,nil)", h, tick, data, h2)
+	}
+}
+
+// TestUpdateRemovalNextPrevBoth exercises the same “remove from middle” logic
+// in Update(), covering both q.arena[n.prev].next = n.next and
+// q.arena[n.next].prev = n.prev.
+func TestUpdateRemovalNextPrevBoth(t *testing.T) {
+	q := New()
+	h1, _ := q.Borrow()
+	h2, _ := q.Borrow()
+	h3, _ := q.Borrow()
+
+	// Value for Update()
+	x := 456
+	p := unsafe.Pointer(&x)
+
+	// Build a 3-node list at tick=2: head→h3→h2→h1
+	if err := q.Push(2, h1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Push(2, h2, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Push(2, h3, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now Update h2 → tick=5. Removal of h2 from the middle
+	// must hit both prev and next fixups.
+	if err := q.Update(5, h2, p); err != nil {
+		t.Fatalf("Update removal-next-prev-both: %v", err)
+	}
+
+	// The queue now has two at tick=2 (h3, h1) and one at tick=5 (h2).
+	// Pop in order:
+	h, tick, data := q.PopMin()
+	if h != h3 || tick != 2 || data != nil {
+		t.Errorf("1st PopMin = (%v,%d,%v); want (%v,2,nil)", h, tick, data, h3)
+	}
+	h, tick, data = q.PopMin()
+	if h != h1 || tick != 2 || data != nil {
+		t.Errorf("2nd PopMin = (%v,%d,%v); want (%v,2,nil)", h, tick, data, h1)
+	}
+	h, tick, data = q.PopMin()
+	if h != h2 || tick != 5 || data != nil {
+		t.Errorf("3rd PopMin = (%v,%d,%v); want (%v,5,nil)", h, tick, data, h2)
+	}
+}
+
+// TestPopMinRemovalHeadPrev covers the PopMin() head-removal branch
+// where n.prev == nilIdx but n.next != nilIdx, causing
+// q.arena[n.next].prev = nilIdx to run.
+func TestPopMinRemovalHeadPrev(t *testing.T) {
+	q := New()
+	h1, _ := q.Borrow()
+	h2, _ := q.Borrow()
+
+	// Push two distinct handles at the same tick so
+	// the first PopMin must remove a head with a non-nil next.
+	if err := q.Push(10, h1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Push(10, h2, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// First PopMin should return h2 (the head),
+	// and internally clear h1.prev = nilIdx.
+	h, tick, data := q.PopMin()
+	if h != h2 || tick != 10 || data != nil {
+		t.Errorf("1st PopMin = (%v,%d,%v); want (%v,10,nil)", h, tick, data, h2)
+	}
+
+	// Now the next head must be h1, with no panics or linkage bugs.
+	h, tick, data = q.PopMin()
+	if h != h1 || tick != 10 || data != nil {
+		t.Errorf("2nd PopMin = (%v,%d,%v); want (%v,10,nil)", h, tick, data, h1)
+	}
+}
