@@ -1,6 +1,5 @@
 // Package bucketqueue is an ultra-low-latency, zero-alloc time-bucket priority
-// queue. Two-level bitmaps give O(1) PopMin. This version does the bare minimum
-// work required to maintain correctness, with no heap use and pure tick-window logic.
+// queue. Two-level bitmaps give O(1) PopMin.
 package bucketqueue
 
 import (
@@ -9,17 +8,19 @@ import (
 	"unsafe"
 )
 
+// ——— hard constants ————————————————————————————————————————————————
 const (
-	numBuckets       = 4096
-	groupSize        = 64
-	numGroups        = numBuckets / groupSize
-	capItems         = 1 << 16
+	numBuckets       = 4096 // window width (power-of-two)
+	numGroups        = numBuckets / 64
+	capItems         = 1 << 16 // handles/archetypes
 	nilIdx     idx32 = ^idx32(0)
 )
 
+// build-time power-of-two checks (compile-time only, no code emitted)
 var _ [-int(numBuckets & (numBuckets - 1))]byte
 var _ [-int(capItems % numBuckets)]byte
 
+// ——— internal types ————————————————————————————————————————————————
 type idx32 uint32
 
 type node struct {
@@ -27,9 +28,17 @@ type node struct {
 	tick       int64
 	count      uint32
 	data       unsafe.Pointer
-	_          [64 - 2*4 - 8 - 4 - unsafe.Sizeof(unsafe.Pointer(nil))]byte
 }
 
+// ——— public errors ————————————————————————————————————————————————
+var (
+	ErrFull         = errors.New("bucketqueue: no free handles")
+	ErrPastWindow   = errors.New("bucketqueue: tick too far in the past")
+	ErrBeyondWindow = errors.New("bucketqueue: tick too far in the future")
+	ErrItemNotFound = errors.New("bucketqueue: invalid handle")
+)
+
+// ——— queue state ————————————————————————————————————————————————
 type Queue struct {
 	arena     [capItems]node
 	freeHead  idx32
@@ -40,16 +49,7 @@ type Queue struct {
 	groupBits [numGroups]uint64
 }
 
-var (
-	ErrFull         = errors.New("bucketqueue: no free handles")
-	ErrEmpty        = errors.New("bucketqueue: empty queue")
-	ErrPastWindow   = errors.New("bucketqueue: tick too far in the past")
-	ErrBeyondWindow = errors.New("bucketqueue: tick too far in the future")
-	ErrItemNotFound = errors.New("bucketqueue: invalid handle")
-)
-
-var ErrPastTick = ErrPastWindow
-
+// ——— ctor & small helpers ——————————————————————————————————————————
 type Handle idx32
 
 func New() *Queue {
@@ -81,24 +81,18 @@ func (q *Queue) Return(h Handle) error {
 		return ErrItemNotFound
 	}
 	n := &q.arena[idx32(h)]
-	n.next = q.freeHead
-	n.prev = nilIdx
-	n.count = 0
-	n.data = nil
+	n.next, n.prev, n.count, n.data = q.freeHead, nilIdx, 0, nil
 	q.freeHead = idx32(h)
 	return nil
 }
 
 func (q *Queue) release(h idx32) {
 	n := &q.arena[h]
-	n.next = q.freeHead
-	n.prev = nilIdx
-	n.count = 0
-	n.data = nil
+	n.next, n.prev, n.count, n.data = q.freeHead, nilIdx, 0, nil
 	q.freeHead = h
 }
 
-//go:nosplit
+// ——— primary operations ——————————————————————————————————————————
 func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	if h >= Handle(capItems) {
 		return ErrItemNotFound
@@ -110,13 +104,18 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	case delta >= numBuckets:
 		return ErrBeyondWindow
 	}
+
 	idx := idx32(h)
 	n := &q.arena[idx]
+
+	// duplicate-tick fast-path
 	if n.count != 0 && n.tick == tick {
 		n.count++
 		q.size++
 		return nil
 	}
+
+	// detach if the handle is already resident elsewhere
 	if n.count != 0 {
 		if n.prev != nilIdx {
 			q.arena[n.prev].next = n.next
@@ -138,6 +137,8 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 		}
 		n.next, n.prev = nilIdx, nilIdx
 	}
+
+	// regular insert
 	bkt := delta
 	n.next, n.prev = q.buckets[bkt], nilIdx
 	if n.next != nilIdx {
@@ -145,6 +146,7 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	}
 	q.buckets[bkt] = idx
 	n.tick, n.count, n.data = tick, 1, val
+
 	g := bkt >> 6
 	q.groupBits[g] |= 1 << (bkt & 63)
 	q.summary |= 1 << g
@@ -162,6 +164,8 @@ func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 	if n.count == 0 {
 		return ErrItemNotFound
 	}
+
+	// detach from old bucket
 	old := uint64(n.tick) - q.baseTick
 	q.size -= int(n.count)
 	if n.prev != nilIdx {
@@ -180,6 +184,8 @@ func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 		}
 	}
 	n.next, n.prev, n.count = nilIdx, nilIdx, 0
+
+	// re-insert at new tick
 	return q.Push(tick, h, val)
 }
 
@@ -203,18 +209,24 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	g := bits.TrailingZeros64(q.summary)
 	b := bits.TrailingZeros64(q.groupBits[g])
 	bkt := uint64(g<<6 | b)
+
 	h := q.buckets[bkt]
 	n := &q.arena[h]
+
+	// multi-count fast-path
 	if n.count > 1 {
 		n.count--
 		q.size--
 		return Handle(h), n.tick, n.data
 	}
+
+	// remove head node
 	q.buckets[bkt] = n.next
 	if n.next != nilIdx {
 		q.arena[n.next].prev = nilIdx
 	}
 	q.size--
+
 	q.groupBits[g] &^= 1 << (bkt & 63)
 	if q.groupBits[g] == 0 {
 		q.summary &^= 1 << g
@@ -223,24 +235,6 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	return Handle(h), n.tick, n.data
 }
 
-func (q *Queue) recycleStaleBuckets() {
-	for g, bits64 := range q.groupBits {
-		for bits64 != 0 {
-			b := bits.TrailingZeros64(bits64)
-			bkt := uint64(g<<6 | b)
-			for idx := q.buckets[bkt]; idx != nilIdx; {
-				next := q.arena[idx].next
-				q.release(idx)
-				idx = next
-			}
-			q.buckets[bkt] = nilIdx
-			bits64 &^= 1 << b
-		}
-		q.groupBits[g] = 0
-	}
-	q.summary = 0
-	q.size = 0
-}
-
+// cheap accessors
 func (q *Queue) Size() int   { return q.size }
 func (q *Queue) Empty() bool { return q.size == 0 }

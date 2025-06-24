@@ -80,7 +80,7 @@ func TestPushNegativeTickStress(t *testing.T) {
 	q := New()
 	h := borrowOrPanic(t, q)
 	err := q.Push(-1, h, nil)
-	expectError(t, err, ErrPastTick)
+	expectError(t, err, ErrPastWindow)
 }
 
 func TestPushPopCycle(t *testing.T) {

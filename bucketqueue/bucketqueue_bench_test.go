@@ -2,13 +2,10 @@ package bucketqueue
 
 import (
 	"math/rand"
-	"runtime"
 	"testing"
 )
 
-func init() {
-	runtime.GOMAXPROCS(1) // Enforce single-core, real-time profile
-}
+
 
 // Borrow + Return (allocator loop)
 func BenchmarkBorrowReturn(b *testing.B) {
