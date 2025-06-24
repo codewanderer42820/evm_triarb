@@ -69,18 +69,6 @@ func BenchmarkPopMinDuplicate(b *testing.B) {
 	}
 }
 
-// Peek at min repeatedly without popping
-func BenchmarkPeepMin(b *testing.B) {
-	q := New()
-	h, _ := q.Borrow()
-	_ = q.Push(999, h, nil)
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, _, _ = q.PeepMin()
-	}
-}
-
 // Update tick in-place (detach + re-insert)
 func BenchmarkUpdate(b *testing.B) {
 	q := New()

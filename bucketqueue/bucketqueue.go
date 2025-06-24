@@ -187,17 +187,6 @@ func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 	return q.Push(tick, h, val)
 }
 
-func (q *Queue) PeepMin() (Handle, int64, unsafe.Pointer) {
-	if q.size == 0 || q.summary == 0 {
-		return Handle(nilIdx), 0, nil
-	}
-	g := bits.TrailingZeros64(q.summary)
-	b := bits.TrailingZeros64(q.groupBits[g])
-	bkt := uint64(g<<6 | b)
-	n := &q.arena[q.buckets[bkt]]
-	return Handle(q.buckets[bkt]), n.tick, n.data
-}
-
 func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	if q.size == 0 || q.summary == 0 {
 		return Handle(nilIdx), 0, nil

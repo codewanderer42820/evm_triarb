@@ -109,16 +109,6 @@ func TestPushThenUpdate(t *testing.T) {
 	}
 }
 
-func TestPeepMin(t *testing.T) {
-	q := New()
-	h := borrowOrPanic(t, q)
-	pushOrFatal(t, q, 42, h)
-	ph, tick, _ := q.PeepMin()
-	if ph != h || tick != 42 {
-		t.Fatalf("PeepMin mismatch")
-	}
-}
-
 func TestPopMin(t *testing.T) {
 	q := New()
 	h := borrowOrPanic(t, q)
