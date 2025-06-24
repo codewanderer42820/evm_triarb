@@ -40,7 +40,7 @@ func TestStressBasicRandom(t *testing.T) {
 	heap.Init(ref)
 	seq := 0
 
-	for i := 0; i < 1_000_000; i++ {
+	for i := 0; i < 100_000_000; i++ {
 		switch rng.Intn(3) {
 		case 0:
 			h, err := q.Borrow()
