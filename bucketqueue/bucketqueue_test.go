@@ -340,3 +340,109 @@ func TestPopMinRemovalHeadPrev(t *testing.T) {
 		t.Errorf("2nd PopMin = (%v,%d,%v); want (%v,10,nil)", h, tick, data, h1)
 	}
 }
+
+// TestPeepMinEmpty verifies PeepMin on an empty queue returns the invalid handle.
+func TestPeepMinEmpty(t *testing.T) {
+	q := New()
+
+	h, tick, data := q.PeepMin()
+	if h != Handle(nilIdx) || tick != 0 || data != nil {
+		t.Errorf("PeepMin(empty) = (%v,%d,%v); want (invalid,0,nil)", h, tick, data)
+	}
+	// also check PopMin unchanged
+	h2, tick2, data2 := q.PopMin()
+	if h2 != Handle(nilIdx) || tick2 != 0 || data2 != nil {
+		t.Errorf("PopMin(empty) after PeepMin = (%v,%d,%v); want (invalid,0,nil)", h2, tick2, data2)
+	}
+}
+
+// TestPeepMinBasic ensures PeepMin returns the correct head without dequeuing.
+func TestPeepMinBasic(t *testing.T) {
+	q := New()
+	h, _ := q.Borrow()
+	x := 99
+	ptr := unsafe.Pointer(&x)
+
+	if err := q.Push(7, h, ptr); err != nil {
+		t.Fatalf("Push failed: %v", err)
+	}
+
+	// Call PeepMin multiple times—state should not change
+	for i := 0; i < 3; i++ {
+		h2, tick2, data2 := q.PeepMin()
+		if h2 != h || tick2 != 7 || data2 != ptr {
+			t.Errorf("PeepMin #%d = (%v,%d,%v); want (%v,7,%v)", i, h2, tick2, data2, h, ptr)
+		}
+		if q.Size() != 1 {
+			t.Errorf("Size after PeepMin #%d = %d; want 1", i, q.Size())
+		}
+	}
+
+	// Finally PopMin to ensure the element is still there
+	h3, tick3, data3 := q.PopMin()
+	if h3 != h || tick3 != 7 || data3 != nil {
+		t.Errorf("PopMin after PeepMin = (%v,%d,%v); want (%v,7,nil)", h3, tick3, data3, h)
+	}
+}
+
+// TestPeepMinCountMoreThanOne checks that PeepMin returns the stored data even when count>1.
+func TestPeepMinCountMoreThanOne(t *testing.T) {
+	q := New()
+	h, _ := q.Borrow()
+	a, b := 1, 2
+	pA := unsafe.Pointer(&a)
+	pB := unsafe.Pointer(&b)
+
+	// Push twice same handle
+	if err := q.Push(3, h, pA); err != nil {
+		t.Fatalf("first Push: %v", err)
+	}
+	if err := q.Push(3, h, pB); err != nil {
+		t.Fatalf("second Push: %v", err)
+	}
+
+	// PeepMin should see the latest data pointer
+	h1, tick1, data1 := q.PeepMin()
+	if h1 != h || tick1 != 3 || data1 != pB {
+		t.Errorf("PeepMin = (%v,%d,%v); want (%v,3,%v)", h1, tick1, data1, h, pB)
+	}
+	if q.Size() != 2 {
+		t.Errorf("Size after two pushes = %d; want 2", q.Size())
+	}
+
+	// PopMin once (count>1 branch)
+	_, _, pop1 := q.PopMin()
+	if pop1 != pB {
+		t.Errorf("PopMin(count>1) data = %v; want %v", pop1, pB)
+	}
+	if q.Size() != 1 {
+		t.Errorf("Size after PopMin(count>1) = %d; want 1", q.Size())
+	}
+
+	// PeepMin should still return the pointer and not remove it
+	h2, tick2, data2 := q.PeepMin()
+	if h2 != h || tick2 != 3 || data2 != pB {
+		t.Errorf("PeepMin after one PopMin = (%v,%d,%v); want (%v,3,%v)", h2, tick2, data2, h, pB)
+	}
+}
+
+// TestPeepMinAfterDraining ensures PeepMin reflects when the queue becomes empty.
+func TestPeepMinAfterDraining(t *testing.T) {
+	q := New()
+	h, _ := q.Borrow()
+	ptr := unsafe.Pointer(new(int))
+
+	// Single push
+	if err := q.Push(1, h, ptr); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	// Pop it out
+	q.PopMin()
+
+	// Now queue is empty again
+	h2, tick2, data2 := q.PeepMin()
+	if h2 != Handle(nilIdx) || tick2 != 0 || data2 != nil {
+		t.Errorf("PeepMin(after drain) = (%v,%d,%v); want (invalid,0,nil)", h2, tick2, data2)
+	}
+}

@@ -157,6 +157,22 @@ func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 	return q.Push(tick, h, val)
 }
 
+func (q *Queue) PeepMin() (Handle, int64, unsafe.Pointer) {
+	// empty-queue guard
+	if q.size == 0 || q.summary == 0 {
+		return Handle(nilIdx), 0, nil
+	}
+	// find lowest non-empty group and bucket
+	g := bits.TrailingZeros64(q.summary)
+	b := bits.TrailingZeros64(q.groupBits[g])
+	bkt := uint64(g<<6 | b)
+	// grab the head node
+	h := q.buckets[bkt]
+	n := &q.arena[h]
+	// return without touching any pointers or bits
+	return Handle(h), n.tick, n.data
+}
+
 func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	if q.size == 0 || q.summary == 0 {
 		return Handle(nilIdx), 0, nil
