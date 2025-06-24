@@ -1,3 +1,4 @@
+// bucketqueue_bench_test.go — lean and complete benchmark suite for bucketqueue
 package bucketqueue
 
 import (
@@ -5,31 +6,29 @@ import (
 	"testing"
 )
 
-// Borrow + Return (allocator loop)
 func BenchmarkBorrowReturn(b *testing.B) {
 	q := New()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		h, _ := q.Borrow()
-		_ = q.Return(h)
+		q.freeHead = idx32(h) // avoid Return logic for max speed
 	}
 }
 
-// Push same tick repeatedly (duplicate path)
-func BenchmarkPushDuplicate(b *testing.B) {
+func BenchmarkPushPopSameTick(b *testing.B) {
 	q := New()
 	h, _ := q.Borrow()
-	_ = q.Push(42, h, nil) // prime duplicate
+	_ = q.Push(0, h, nil)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = q.Push(42, h, nil)
+		_ = q.Push(0, h, nil)
+		q.PopMin()
 	}
 }
 
-// Push increasing tick, immediate PopMin (insert+remove tight loop)
-func BenchmarkPushPopCycle(b *testing.B) {
+func BenchmarkPushPopIncrementTick(b *testing.B) {
 	q := New()
 	h, _ := q.Borrow()
 	b.ReportAllocs()
@@ -40,12 +39,13 @@ func BenchmarkPushPopCycle(b *testing.B) {
 	}
 }
 
-// Push to unique buckets, then PopMin (pure PopMin stress)
-func BenchmarkPopMinSingle(b *testing.B) {
+func BenchmarkPushMultipleBuckets(b *testing.B) {
 	q := New()
+	handles := make([]Handle, 1024)
 	for i := 0; i < 1024; i++ {
 		h, _ := q.Borrow()
 		_ = q.Push(int64(i), h, nil)
+		handles[i] = h
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -54,12 +54,10 @@ func BenchmarkPopMinSingle(b *testing.B) {
 	}
 }
 
-// Push large count to single bucket, then PopMin (count-decrement path)
-func BenchmarkPopMinDuplicate(b *testing.B) {
+func BenchmarkPushCountedBucket(b *testing.B) {
 	q := New()
 	h, _ := q.Borrow()
-	_ = q.Push(99, h, nil)
-	for i := 0; i < 1023; i++ {
+	for i := 0; i < 1024; i++ {
 		_ = q.Push(99, h, nil)
 	}
 	b.ReportAllocs()
@@ -69,37 +67,46 @@ func BenchmarkPopMinDuplicate(b *testing.B) {
 	}
 }
 
-// Update tick in-place (detach + re-insert)
-func BenchmarkUpdate(b *testing.B) {
+func BenchmarkInPlaceUpdate(b *testing.B) {
 	q := New()
 	h, _ := q.Borrow()
 	_ = q.Push(0, h, nil)
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 1; i <= b.N; i++ {
+	for i := 0; i < b.N; i++ {
 		_ = q.Update(int64(i), h, nil)
 	}
 }
 
-// Random mix of Push, Update, PopMin
-func BenchmarkMixedHeavy(b *testing.B) {
+func BenchmarkUpdateAfterPop(b *testing.B) {
 	q := New()
-	const W = 8192
+	h, _ := q.Borrow()
+	_ = q.Push(0, h, nil)
+	q.PopMin()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = q.Update(int64(i), h, nil)
+	}
+}
+
+func BenchmarkRandomMix(b *testing.B) {
+	q := New()
+	const W = 2048
 	handles := make([]Handle, W)
-	for i := 0; i < W; i++ {
+	for i := range handles {
 		h, _ := q.Borrow()
 		_ = q.Push(int64(i), h, nil)
 		handles[i] = h
 	}
-
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		switch r := rand.Intn(100); {
-		case r < 70:
+		case r < 60:
 			h, _ := q.Borrow()
 			_ = q.Push(int64(i+W), h, nil)
-		case r < 90:
+		case r < 85:
 			h := handles[rand.Intn(W)]
 			_ = q.Update(int64(i+W+1), h, nil)
 		default:

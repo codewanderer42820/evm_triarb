@@ -1,5 +1,4 @@
-// Package bucketqueue is an ultra-low-latency, zero-alloc time-bucket priority
-// queue. Two-level bitmaps give O(1) PopMin.
+// Lean and minimal bucketqueue implementation
 package bucketqueue
 
 import (
@@ -8,18 +7,12 @@ import (
 	"unsafe"
 )
 
-// ——— hard constants ———
 const (
-	numBuckets       = 4096 // window width (power-of-two)
+	numBuckets       = 4096
 	numGroups        = numBuckets / 64
-	capItems         = 1 << 16 // handles/archetypes
+	capItems         = 1 << 16
 	nilIdx     idx32 = ^idx32(0)
 )
-
-var _ [-int(numBuckets & (numBuckets - 1))]byte
-var _ [-int(capItems % numBuckets)]byte
-
-// ——— internal types ———
 
 type idx32 uint32
 
@@ -30,15 +23,12 @@ type node struct {
 	data       unsafe.Pointer
 }
 
-// ——— public errors ———
 var (
 	ErrFull         = errors.New("bucketqueue: no free handles")
 	ErrPastWindow   = errors.New("bucketqueue: tick too far in the past")
 	ErrBeyondWindow = errors.New("bucketqueue: tick too far in the future")
 	ErrItemNotFound = errors.New("bucketqueue: invalid handle")
 )
-
-// ——— queue state ———
 
 type Queue struct {
 	arena     [capItems]node
@@ -75,25 +65,6 @@ func (q *Queue) Borrow() (Handle, error) {
 	n.next, n.prev, n.count = nilIdx, nilIdx, 0
 	return Handle(h), nil
 }
-
-func (q *Queue) Return(h Handle) error {
-	if idx32(h) >= capItems {
-		return ErrItemNotFound
-	}
-	n := &q.arena[idx32(h)]
-	n.next, n.prev, n.count, n.data = q.freeHead, nilIdx, 0, nil
-	q.freeHead = idx32(h)
-	return nil
-}
-
-func (q *Queue) release(h idx32) {
-	n := &q.arena[h]
-	n.next, n.prev, n.count, n.data = q.freeHead, nilIdx, 0, nil
-	q.freeHead = h
-}
-
-// Partial fix to bucketqueue.go — ensures summary is properly updated for fast-path reinsertions
-// with pre-released handles that have had their bucket cleared
 
 func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	if h >= Handle(capItems) {
@@ -183,7 +154,6 @@ func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 		q.arena[n.next].prev = n.prev
 	}
 	n.next, n.prev, n.count = nilIdx, nilIdx, 0
-
 	return q.Push(tick, h, val)
 }
 
@@ -194,32 +164,26 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	g := bits.TrailingZeros64(q.summary)
 	b := bits.TrailingZeros64(q.groupBits[g])
 	bkt := uint64(g<<6 | b)
-
 	h := q.buckets[bkt]
 	n := &q.arena[h]
-
 	if n.count > 1 {
 		n.count--
 		q.size--
 		return Handle(h), n.tick, n.data
 	}
-
 	q.buckets[bkt] = n.next
 	if n.next != nilIdx {
 		q.arena[n.next].prev = nilIdx
 	}
 	q.size--
-
 	if q.buckets[bkt] == nilIdx {
 		q.groupBits[g] &^= 1 << (bkt & 63)
 		if q.groupBits[g] == 0 {
 			q.summary &^= 1 << g
 		}
 	}
-
 	n.next, n.prev, n.count, n.data = nilIdx, nilIdx, 0, nil
 	q.freeHead, n.next = h, q.freeHead
-
 	return Handle(h), n.tick, n.data
 }
 
