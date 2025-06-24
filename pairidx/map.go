@@ -107,12 +107,12 @@ type slot struct {
 	klen uint16         // key length (<= 65 535)
 	kptr unsafe.Pointer // ptr to key bytes (string data)
 	val  uint32         // user value (change as needed)
-	_    [12]byte       // pad to 32 B
+	_pad [12]byte       // pad to 32 B
 }
 
 type cluster struct {
 	bitmap uint64             // 1‑bit per slot: 1 = used
-	_      [56]byte           // keep meta separate (false‑sharing guard)
+	_pad   [56]byte           // keep meta separate (false‑sharing guard)
 	slots  [clusterSlots]slot // 64 × 32 B = 2 KiB
 }
 

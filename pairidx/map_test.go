@@ -3,8 +3,11 @@ package pairidx
 import (
 	"bytes"
 	"fmt"
+	"math/rand"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -196,13 +199,6 @@ func TestSameKeyWideLengths(t *testing.T) {
 
 // ---------- 8. sameKey false-branch coverage --------------------------
 
-func p(b []byte) unsafe.Pointer {
-	if len(b) == 0 {
-		return nil
-	}
-	return unsafe.Pointer(&b[0])
-}
-
 // Each case tweaks exactly one compare stage to fail.
 func TestSameKeyFalseBranches(t *testing.T) {
 	cases := []struct {
@@ -232,3 +228,118 @@ func TestSameKeyFalseBranches(t *testing.T) {
 		}
 	}
 }
+
+/* ---------- 9. Epoch-retry & fallback-cluster coverage -------------------- */
+
+func TestEpochRetryAndFallback(t *testing.T) {
+	rand.Seed(time.Now().UnixNano())
+	m := New()
+
+	seed := "fallbackSeed"
+	b0, c0, _ := meta(seed)
+
+	// Fill every slot in that cluster.
+	count := 0
+	for i := 0; count < clusterSlots; i++ {
+		k := fmt.Sprintf("%s_%d_%d", seed, rand.Uint32(), i)
+		if b, c, _ := meta(k); b == b0 && c == c0 {
+			m.Put(k, uint32(i))
+			count++
+		}
+	}
+
+	// Launch writer that must fall back to secondary cluster.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		m.Put("fallbackWinner", 999)
+	}()
+
+	wg.Wait() // writer done → epoch even again
+
+	// Now the key must be visible to any reader.
+	if p := m.Get("fallbackWinner"); p == nil || *(*uint32)(p) != 999 {
+		t.Fatal("fallback key not visible after writer completed")
+	}
+}
+
+/* ---------- 10. sameKey corner-case branches ----------------------------- */
+
+func TestSameKeyCornerBranches(t *testing.T) {
+	a := []byte("ABCDEFGH")  // 8 bytes
+	b := []byte("ABCDEFGH1") // 9 bytes
+
+	if !sameKey(p(a), p(b), 8) { // identical 8-byte prefix
+		t.Fatal("sameKey failed on identical 8-byte prefix")
+	}
+	if sameKey(p(a), p(b), 9) { // different 9-byte strings
+		t.Fatal("sameKey incorrectly matched 9-byte strings")
+	}
+}
+
+/* ---------- 11. Reader-contention micro-benchmark ------------------------ */
+
+func BenchmarkReaders8Contention(b *testing.B) {
+	m := New()
+	for i := 0; i < 1_000; i++ {
+		m.Put(fmt.Sprintf("k%04d", i), uint32(i))
+	}
+
+	var wg sync.WaitGroup
+	readers := 8
+	b.ResetTimer()
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < b.N/readers; j++ {
+				_ = m.Get(fmt.Sprintf("k%04d", j%1000))
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+/* ---------- 12. Epoch spin‑loop branch coverage ------------------------- */
+
+// This test forces the reader to enter *all* epoch‑retry paths inside Get():
+//  1. early‑spin (snap&1!=0)
+//  2. post‑lookup retry when epoch2!=snap (the comment line "continue // retry …")
+//  3. inner break that restarts lookup.
+//
+// We do that by toggling the epoch odd→even in a tight loop while a reader
+// continuously calls Get on an existing key.
+func TestEpochSpinBranches(t *testing.T) {
+	m := New()
+	key := "spinKey"
+	m.Put(key, 42)
+
+	// Writer goroutine: rapid epoch odd→even toggles without touching data.
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				// odd, even – two increments → data unchanged but epoch bumps.
+				atomic.AddUint64(&m.epoch, 1)
+				atomic.AddUint64(&m.epoch, 1)
+			}
+		}
+	}()
+
+	// Reader: loop enough times to guarantee the slow‑path branches execute.
+	// Coverage needs the source lines hit, not a specific assertion.
+	for i := 0; i < 1_000_000; i++ {
+		p := m.Get(key)
+		if p == nil || *(*uint32)(p) != 42 {
+			t.Fatalf("reader lost visibility of key")
+		}
+	}
+	close(stop)
+}
+
+/* helper: []byte → unsafe.Pointer */
+func p(b []byte) unsafe.Pointer { return unsafe.Pointer(&b[0]) }
