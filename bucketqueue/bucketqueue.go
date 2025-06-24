@@ -257,7 +257,7 @@ func (q *Queue) PeepMin() (Handle, int64, unsafe.Pointer) {
 // PopMin – destructive O(1) removal (branch‑free hot path for count>1 case).
 // -----------------------------------------------------------------------------
 func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
-	if q.size == 0 {
+	if q.size == 0 || q.summary == 0 {
 		return Handle(nilIdx), 0, nil
 	}
 	g := bits.TrailingZeros64(q.summary)
@@ -278,7 +278,7 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 		return h, tick, val
 	}
 
-	// --- single‑item bucket – unlink & recycle --------------------------------
+	// --- single‑item bucket – unlink & recycle -------------------------------
 	q.buckets[bktIdx] = n.next
 	if n.next != nilIdx {
 		q.arena[n.next].prev = nilIdx
