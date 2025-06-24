@@ -1,18 +1,11 @@
-// ============================================================================
-// bucketqueue.go — performance‑tuned, heavily documented revision
+// Package bucketqueue implements a zero-allocation, low-latency time-bucket priority queue.
+// Items are distributed across a fixed-size sliding window of time-indexed buckets.
+// A two-level bitmap structure allows O(1) retrieval of the earliest item.
 //
-//   - Re‑ordered structs to minimise padding and improve cache locality.
-//   - Added //go:inline and //go:nosplit directives to the hottest tiny helpers
-//     so the compiler is urged to keep them on the leaf stack and inline them
-//     into call‑sites where practical.
-//   - Split explanatory commentary into “why” and “how”, focusing on the hard
-//     real‑time guarantees that the surrounding trading system demands.
-//
-// NOTE: The public API surface is **unchanged** so existing callers continue to
-//
-//	compile.  Only internal layout / compiler hints were touched.
-//
-// ============================================================================
+// This implementation uses a fixed arena allocator, intrusive linked lists,
+// and compact handle management for high-throughput applications such as
+// schedulers, simulation engines, or event queues.
+
 package bucketqueue
 
 import (
