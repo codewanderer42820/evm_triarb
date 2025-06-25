@@ -2,6 +2,7 @@
 package router
 
 import (
+	"encoding/binary"
 	"math/bits"
 	"runtime"
 	"unsafe"
@@ -132,8 +133,9 @@ func RouteUpdate(v *types.LogView) {
 	addr := v.Addr[3:43]
 	pair := lookupPairID(addr)
 
-	r0 := utils.ParseHexU64(v.Data[:32])
-	r1 := utils.ParseHexU64(v.Data[32:64])
+	// parse raw big-endian reserves directly (highest performance)
+	r0 := binary.BigEndian.Uint64(v.Data[24:32])
+	r1 := binary.BigEndian.Uint64(v.Data[56:64])
 	fwd := fastuni.Log2ReserveRatio(r0, r1)
 
 	upd := PriceUpdate{PairId: pair, FwdTick: fwd, RevTick: -fwd}
@@ -180,8 +182,8 @@ func lookupPairID(addr []byte) uint16 {
 	}
 }
 
-func onProfitablePath(p *ArbPath, gain float64) {
-	_ = p
-	_ = gain
-	// stub
+// onProfitablePath is a placeholder for arbitrage profit handling.
+// It is currently a no-op stub to satisfy compilation.
+func onProfitablePath(p *ArbPath, tick float64) {
+	// no-op
 }

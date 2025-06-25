@@ -3,6 +3,7 @@
 package router
 
 import (
+	"encoding/binary"
 	"math/rand"
 	"runtime"
 	"testing"
@@ -13,10 +14,6 @@ import (
 	"main/ring"
 	"main/types"
 )
-
-// -----------------------------------------------------------------------------
-// helpers
-// -----------------------------------------------------------------------------
 
 // resetGlobals zeroes global state mutated across tests so each test can run in isolation.
 func resetGlobals() {
@@ -31,10 +28,6 @@ func resetGlobals() {
 		coreRings[i] = nil
 	}
 }
-
-// -----------------------------------------------------------------------------
-// unit‑tests
-// -----------------------------------------------------------------------------
 
 func TestMapL2ToBucket(t *testing.T) {
 	cases := []float64{-9999, -64, -32, 0, 32, 64, 9999}
@@ -87,7 +80,7 @@ func TestInitAndRegisterCycles(t *testing.T) {
 	}
 
 	for _, rt := range coreRouters {
-		idx := int(rt.PairIndex[10]) // direct bucket index stored
+		idx := int(rt.PairIndex[10])
 		if idx >= len(rt.Routes) {
 			t.Fatalf("pair index %d out of range (routes=%d)", idx, len(rt.Routes))
 		}
@@ -124,9 +117,15 @@ func TestRouteUpdateAndOnPriceUpdate(t *testing.T) {
 
 	// Craft a mock Uniswap "Sync" log view with non‑zero reserves.
 	var lv types.LogView
-	lv.Addr = append([]byte{0, 0, 0}, addr...) // pad to 43‑byte layout
-	lv.Data = []byte("0000000000000000000000000000007b" +
-		"000000000000000000000000000001c8") // reserve0=123, reserve1=456
+	lv.Addr = append([]byte{0, 0, 0}, addr...)
+	lv.Data = make([]byte, 64)
+	const (
+		r0 uint64 = 123
+		r1 uint64 = 456
+	)
+	// place 8‑byte big‑endian at offsets 24..31 and 56..63
+	binary.BigEndian.PutUint64(lv.Data[24:32], r0)
+	binary.BigEndian.PutUint64(lv.Data[56:64], r1)
 
 	// Producer path: convert log → price update → ring push
 	RouteUpdate(&lv)
