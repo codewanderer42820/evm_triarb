@@ -16,8 +16,6 @@ func init() {
 // Cycle represents a closed arbitrage path:
 //
 //	TokenA → (PairAB) → TokenB → (PairBC) → TokenC → (PairCA) → TokenA
-//
-// All IDs here are internal DB IDs, not raw addresses.
 type Cycle struct {
 	Tokens [3]uint32 // three unique token IDs
 	Pairs  [3]uint16 // three corresponding pair IDs
@@ -65,13 +63,13 @@ func RegisterCycles(cycles []Cycle) {
 					idx = uint32(len(rt.Routes))
 					rt.PairIndex[pairID] = idx
 				}
-				bktIndex := idx - 1
-				q := rt.Routes[bktIndex].Queue
+				bkt := idx - 1
+				q := rt.Routes[bkt].Queue
 				h, _ := q.Borrow()
 				_ = q.Push(0, h, unsafe.Pointer(path))
 
-				// fanout slot already preallocated in InitCPURings; just append
-				rt.Fanouts[bktIndex] = append(rt.Fanouts[bktIndex], fanRef{
+				// fanout slice was preallocated in InitCPURings
+				rt.Fanouts[bkt] = append(rt.Fanouts[bkt], fanRef{
 					P:         path,
 					Q:         q,
 					H:         h,
