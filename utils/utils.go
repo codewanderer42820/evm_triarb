@@ -1,4 +1,4 @@
-// utils.go — low-level helpers shared by parser, deduper & WS I/O.
+// utils/utils.go — low-level helpers shared by parser, router, deduper & WS I/O.
 package utils
 
 import "unsafe"
@@ -7,7 +7,7 @@ import "unsafe"
 // Tiny zero-alloc conversions & key probes
 ///////////////////////////////////////////////////////////////////////////////
 
-// b2s converts a []byte to string without an allocation.
+// B2s converts a []byte to string without an allocation.
 //
 //go:nosplit
 //go:inline
@@ -22,7 +22,7 @@ func B2s(b []byte) string {
 // Micro-scanners used by the JSON fast path
 ///////////////////////////////////////////////////////////////////////////////
 
-// findQuote returns the index of the next '"' after the ':' in `"field":"`.
+// FindQuote returns the index of the next '"' after the ':' in `"field":"`.
 //
 //go:nosplit
 //go:inline
@@ -33,7 +33,7 @@ func FindQuote(b []byte) int {
 				switch c := b[j]; {
 				case c == '"':
 					return j
-				case c > ' ': // hit anything non-whitespace ⇒ malformed
+				case c > ' ': // anything non-whitespace ⇒ malformed
 					return -1
 				}
 			}
@@ -42,7 +42,7 @@ func FindQuote(b []byte) int {
 	return -1
 }
 
-// findBracket returns the index of the first '[' (for JSON topic arrays).
+// FindBracket returns the index of the first '[' (for JSON topic arrays).
 //
 //go:nosplit
 //go:inline
@@ -55,7 +55,7 @@ func FindBracket(b []byte) int {
 	return -1
 }
 
-// sliceASCII returns bytes between the two '"' that start at b[i].
+// SliceASCII returns bytes between the two '"' that start at b[i].
 //
 //go:nosplit
 //go:inline
@@ -71,7 +71,7 @@ func SliceASCII(b []byte, i int) []byte {
 	return nil
 }
 
-// sliceJSONArray returns the bytes inside [...] (without the brackets).
+// SliceJSONArray returns the bytes inside [...] (without the brackets).
 //
 //go:nosplit
 //go:inline
@@ -106,7 +106,7 @@ func Load128(b []byte) (uint64, uint64) {
 // Fast hex decoders (no allocations, stop at first invalid nibble)
 ///////////////////////////////////////////////////////////////////////////////
 
-// parseHexU64 parses a (0x-optional) hex string into uint64.
+// ParseHexU64 parses a (0x-optional) hex string into uint64.
 //
 //go:nosplit
 //go:inline
@@ -130,7 +130,7 @@ func ParseHexU64(b []byte) uint64 {
 	return u
 }
 
-// parseHexN handles any length (used by uint32 helper below).
+// ParseHexN handles any length hex string.
 //
 //go:nosplit
 //go:inline
@@ -167,4 +167,21 @@ func Mix64(x uint64) uint64 {
 	x *= 0xc4ceb9fe1a85ec53
 	x ^= x >> 33
 	return x
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Address hash → 17-bit bucket index (array lookup)
+///////////////////////////////////////////////////////////////////////////////
+
+// Hash17 maps the first 6 hex chars of a 40-byte lowercase address into 17 bits.
+// It is deterministic, zero-alloc, and <10 ns on modern CPUs.
+//
+//go:nosplit
+//go:inline
+func Hash17(addr []byte) uint32 {
+	if len(addr) < 6 {
+		return 0
+	}
+	raw := ParseHexN(addr[:6])           // 24-bit value
+	return uint32(raw) & ((1 << 17) - 1) // keep low 17 bits
 }
