@@ -9,6 +9,7 @@ import (
 	"main/bucketqueue"
 	"main/fastuni"
 	"main/ring"
+	"main/types"
 )
 
 // -----------------------------------------------------------------------------
@@ -144,7 +145,7 @@ func onPriceUpdate(rt *CoreRouter, upd *PriceUpdate) {
 // Ingress: called by parser for each Sync log
 // -----------------------------------------------------------------------------
 
-func RouteUpdate(v *logView) {
+func RouteUpdate(v *types.LogView) {
 	// v.Addr: "0x" prefix + 40‑byte lowercase hex address (total 42 ASCII chars)
 	key := v.Addr[3:43] // strip '"0x'
 	pairId := addrToPairId[hashAddress(key)]
