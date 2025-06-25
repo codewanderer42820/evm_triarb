@@ -13,6 +13,7 @@ import (
 	"main/bucketqueue"
 	"main/ring"
 	"main/types"
+	"main/utils"
 )
 
 // resetGlobals zeroes global state mutated across tests so each test can run in isolation.
@@ -168,4 +169,111 @@ func TestRegisterCyclesMultiPair(t *testing.T) {
 	if idx1 == idx2 || idx1 == idx3 || idx2 == idx3 {
 		t.Fatalf("pairs mapped to the same bucket: %d,%d,%d", idx1, idx2, idx3)
 	}
+}
+
+func TestInitCPURings_SpawnsRoutersAndConsumers(t *testing.T) {
+	// Make sure InitCPURings doesn’t panic, allocates at least one coreRouter
+	InitCPURings()
+	if len(coreRouters) == 0 {
+		t.Fatal("expected at least one coreRouter")
+	}
+	if coreRings[0] == nil {
+		t.Fatal("expected coreRings[0] to be non-nil")
+	}
+}
+
+func TestOnPriceUpdate_UsesRevTickWhenIsReverse(t *testing.T) {
+	// set up a single-route router with a seeded queue & fanouts
+	q := bucketqueue.New()
+	h, _ := q.Borrow()
+	dummyPath := &ArbPath{}
+	_ = q.Push(0, h, unsafe.Pointer(dummyPath))
+
+	rt := &CoreRouter{
+		Routes:    []*DeltaBucket{&DeltaBucket{Queue: q}}, // one bucket
+		Fanouts:   make([][]fanRef, 1),                    // one empty fanout list
+		PairIndex: []uint32{0},                            // map pair 0 → bucket 0
+		IsReverse: true,                                   // force use of RevTick
+	}
+	pu := &PriceUpdate{PairId: 0, FwdTick: 1.23, RevTick: 4.56}
+	onPriceUpdate(rt, pu)
+	// since IsReverse=true, CurLog must equal RevTick
+	if rt.Routes[0].CurLog != 4.56 {
+		t.Fatalf("got CurLog=%v; want RevTick=4.56", rt.Routes[0].CurLog)
+	}
+}
+
+func TestOnPriceUpdate_FanoutPathUpdate(t *testing.T) {
+	// seed the route’s primary queue so PeepMin() never returns nil
+	mainQ := bucketqueue.New()
+	mh, _ := mainQ.Borrow()
+	mainDummy := &ArbPath{}
+	_ = mainQ.Push(0, mh, unsafe.Pointer(mainDummy))
+
+	// single-route, single-fanRef
+	q := bucketqueue.New()
+	path := &ArbPath{}
+	h, _ := q.Borrow()
+	// initial push so the handle is in the queue
+	_ = q.Push(0, h, unsafe.Pointer(path))
+
+	rt := &CoreRouter{
+		Routes:    []*DeltaBucket{{Queue: mainQ}},
+		Fanouts:   [][]fanRef{{{P: path, Q: q, H: h, SharedLeg: 1}}},
+		PairIndex: []uint32{0},
+		IsReverse: false,
+	}
+	pu := &PriceUpdate{PairId: 0, FwdTick: 2.0, RevTick: -2.0}
+
+	// drive the fanout branch
+	onPriceUpdate(rt, pu)
+
+	// fanRef.P.Ticks[1] should now be set to FwdTick
+	if path.Ticks[1] != 2.0 {
+		t.Fatalf("fanout did not update path.Ticks[1]: got %v, want 2.0", path.Ticks[1])
+	}
+
+	// and queue should have been “updated” — PeepMin should still return the same pointer
+	_, _, got := q.PeepMin()
+	if got != unsafe.Pointer(path) {
+		t.Fatal("queue.Update moved or dropped the element unexpectedly")
+	}
+}
+
+func TestRegisterPair_PanicsWhenTableFull(t *testing.T) {
+	// pick a test address and fill all 2048 slots spaced by 64
+	addr := make([]byte, 40)
+	start := utils.Hash17(addr)
+	mask := (1 << 17) - 1
+	for i := 0; i < 2048; i++ {
+		idx := (start + uint32(i*64)) & uint32(mask)
+		addrToPairId[idx] = 0xFFFF // dummy non-zero
+	}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic from full addrToPairId in RegisterPair")
+		}
+	}()
+	RegisterPair(addr, 42)
+}
+
+func TestLookupPairID_PanicsWhenUnregistered(t *testing.T) {
+	// clear table and then force exhaustion
+	for i := range addrToPairId {
+		addrToPairId[i] = 0
+	}
+	addr := make([]byte, 40)
+	start := utils.Hash17(addr)
+	// fill exactly the same 2048 slots
+	mask := (1 << 17) - 1
+	for i := 0; i < 2048; i++ {
+		idx := (start + uint32(i*64)) & uint32(mask)
+		addrToPairId[idx] = 0 // keep zero so lookup never finds a pair
+	}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic from exhausted addrToPairId in lookupPairID")
+		}
+	}()
+	_ = lookupPairID(addr)
 }
