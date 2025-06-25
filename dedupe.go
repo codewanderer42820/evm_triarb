@@ -27,7 +27,7 @@ func (d *Deduper) Check(
 	i := utils.Mix64(key) & (uint64(len(d.buf)) - 1)
 	slot := &d.buf[i]
 
-	stale := (latestBlk - slot.age) > maxReorg
+	stale := latestBlk < slot.age || (latestBlk-slot.age) > maxReorg
 	match := !stale &&
 		slot.blk == blk && slot.tx == tx && slot.log == log &&
 		slot.tagHi == tagHi && slot.tagLo == tagLo
