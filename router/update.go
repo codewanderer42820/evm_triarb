@@ -180,8 +180,10 @@ func RegisterPair(addr40 []byte, pairId uint16) {
 	}
 }
 
-func RegisterRoute(id uint16, mask uint16) {
-	routingBitmap[id] = mask
+// RegisterRoute sets bits in routingBitmap rather than overwriting.
+// This lets us OR in multiple independent masks.
+func RegisterRoute(pairID uint16, mask uint16) {
+	routingBitmap[pairID] |= mask
 }
 
 func lookupPairID(addr []byte) uint16 {
