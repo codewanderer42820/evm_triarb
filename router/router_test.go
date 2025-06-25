@@ -73,26 +73,28 @@ func TestInitAndRegisterCycles(t *testing.T) {
 	cyc := Cycle{Pairs: [3]uint16{10, 20, 30}}
 	RegisterCycles([]Cycle{cyc})
 
-	// Expect exactly 6 unique cores used — 2 per pair, no overlap
-	coreUsed := make([]bool, len(coreRouters))
+	forwardSet := map[int]bool{}
+	reverseSet := map[int]bool{}
+
+	half := len(coreRouters) / 2
+
 	for coreIdx, rt := range coreRouters {
 		for _, pid := range []uint16{10, 20, 30} {
 			if rt.PairIndex[pid] != 0 {
-				coreUsed[coreIdx] = true
-				break
+				if coreIdx < half {
+					forwardSet[coreIdx] = true
+				} else {
+					reverseSet[coreIdx] = true
+				}
 			}
 		}
 	}
 
-	var used int
-	for _, active := range coreUsed {
-		if active {
-			used++
-		}
+	if len(forwardSet) != 3 {
+		t.Fatalf("expected 3 unique forward cores, got %d: %+v", len(forwardSet), forwardSet)
 	}
-
-	if used != 6 {
-		t.Fatalf("expected exactly 6 unique cores to be used, got %d", used)
+	if len(reverseSet) != 3 {
+		t.Fatalf("expected 3 unique reverse cores, got %d: %+v", len(reverseSet), reverseSet)
 	}
 }
 
