@@ -82,28 +82,36 @@ type PriceUpdate struct {
 }
 
 // ─── Core ingestion loop ───
+// InitCPURings spawns one pinned consumer goroutine per core, allocating all state on that OS thread.
 func InitCPURings() {
 	active := runtime.NumCPU() - 4
 	if active > 64 {
 		active = 64
 	}
+	// allocate slice for router metadata references
 	coreRouters = make([]*CoreRouter, active)
 
 	for core := 0; core < active; core++ {
-		rb := ring.New(1 << 14)
-		coreRings[core] = rb
+		// launch a consumer pinned to its OS thread
+		go func(core int) {
+			runtime.LockOSThread()
 
-		rt := &CoreRouter{
-			Routes:    make([]*DeltaBucket, 0, 1<<17),
-			Fanouts:   make([][]fanRef, 0, 1<<17),
-			PairIndex: make([]uint32, 1<<17),
-			IsReverse: core >= active/2,
-		}
-		coreRouters[core] = rt
+			// allocate the ring buffer first for core-local placement
+			rb := ring.New(1 << 14)
+			coreRings[core] = rb
 
-		go ring.PinnedConsumer(core, rb, new(uint32), new(uint32), func(p unsafe.Pointer) {
-			onPriceUpdate(rt, (*PriceUpdate)(p))
-		}, make(chan struct{}))
+			// allocate router state now, from largest slice to smallest
+			rt := &CoreRouter{IsReverse: core >= active/2}
+			rt.Fanouts = make([][]fanRef, 0, 1<<17)
+			rt.Routes = make([]*DeltaBucket, 0, 1<<17)
+			rt.PairIndex = make([]uint32, 1<<17)
+			coreRouters[core] = rt
+
+			// start the pinned consumer loop (blocks on ring.Pop)
+			ring.PinnedConsumer(core, rb, new(uint32), new(uint32), func(p unsafe.Pointer) {
+				onPriceUpdate(rt, (*PriceUpdate)(p))
+			}, make(chan struct{}))
+		}(core)
 	}
 }
 
