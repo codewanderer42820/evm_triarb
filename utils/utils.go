@@ -1,4 +1,3 @@
-// utils/utils.go — low-level helpers shared by parser, router, deduper & WS I/O.
 package utils
 
 import "unsafe"
