@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"main/types"
 	"unsafe"
 )
 
@@ -16,7 +17,7 @@ var (
 // handleFrame scans a full WebSocket payload (result JSON) once, in 8-byte
 // aligned strides, extracting only the six fields we care about.
 func handleFrame(p []byte) {
-	var v logView
+	var v types.LogView
 
 	const (
 		wantAddr = 1 << iota
@@ -101,7 +102,7 @@ func handleFrame(p []byte) {
 }
 
 // emitLog prints one fully-deduped event in human-readable form.
-func emitLog(v *logView) {
+func emitLog(v *types.LogView) {
 	fmt.Println("[EVENT]")
 	fmt.Println("  address   =", b2s(v.Addr))
 	fmt.Println("  data      =", b2s(v.Data))
