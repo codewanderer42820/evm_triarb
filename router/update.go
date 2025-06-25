@@ -1,8 +1,4 @@
-// router/update.go — ultra‑tight, zero‑alloc fan‑out of Sync logs to per‑core bucketqueues.
-//
-//   - Static arrays + pinned threads  →  no locks, no GC work.
-//   - Two‑pair log₂ mapped to 4 096 buckets for O(1) queue ops.
-//   - Open‑address 17‑bit table with fixed stride‑64 probing — collision‑free in practice.
+// router/update.go — core update + ingestion logic for tick propagation and fanout
 package router
 
 import (
@@ -17,31 +13,23 @@ import (
 	"main/utils"
 )
 
-////////////////////////////////////////////////////////////////////////////////
-//                      Global, hot‑path immutable tables                    //
-////////////////////////////////////////////////////////////////////////////////
-
+// ───── Global runtime state ─────
 var (
-	cpuRingsGlobal [64]*ring.Ring  // per‑core SPSC rings (index == coreID)
-	routingBitmap  [65536]uint16   // pairId → 16‑bit CPU mask
-	addrToPairId   [1 << 17]uint16 // 131 072‑slot open‑address table
-	routers        []*CoreRouter   // len == active cores
+	cpuRingsGlobal [64]*ring.Ring  // per-core SPSC ring buffers
+	routingBitmap  [65536]uint16   // pairId → 16-bit CPU bitmask
+	addrToPairId   [1 << 17]uint16 // 131072-entry open-address table
+	routers        []*CoreRouter   // router state per pinned core
 )
 
-////////////////////////////////////////////////////////////////////////////////
-//            High‑res log₂ → bucket mapping (±64 → 0…4095)                 //
-////////////////////////////////////////////////////////////////////////////////
-
+// ───── Tick-to-bucket mapper ─────
 const (
 	clampL2  = 64
 	buckets  = 4096
-	scaleMul = buckets - 1 // 4095
-	scaleDiv = clampL2 * 2 // 128
-	zeroOff  = buckets / 2 // 2048
+	scaleMul = buckets - 1
+	scaleDiv = clampL2 * 2
+	zeroOff  = buckets / 2
 )
 
-//go:nosplit
-//go:inline
 func mapL2ToBucket(l2 float64) int64 {
 	if l2 > clampL2 {
 		l2 = clampL2
@@ -51,74 +39,66 @@ func mapL2ToBucket(l2 float64) int64 {
 	return int64(zeroOff) + int64(l2*scaleMul/scaleDiv)
 }
 
-////////////////////////////////////////////////////////////////////////////////
-//                              Core structs                                  //
-////////////////////////////////////////////////////////////////////////////////
-
+// ───── Data structs ─────
 type DeltaBucket struct {
-	CurLog float64            // 8 B
-	Queue  *bucketqueue.Queue // 8 B
+	CurLog float64
+	Queue  *bucketqueue.Queue
 }
 
 type ArbPath struct {
-	// 3 × 8 B floats first for aligned loads in Sum()
 	LegVal [3]float64
-	PoolID [3]uint32 // each 4 B; packed after floats
-	Dir    [3]bool   // 3 B
-	_      byte      // pad to 8‑byte boundary
+	PoolID [3]uint32
+	Dir    [3]bool
+	_      byte
 }
 
-//go:nosplit
-//go:inline
-func (p *ArbPath) Sum() float64 { return p.LegVal[0] + p.LegVal[1] + p.LegVal[2] }
+func (p *ArbPath) Sum() float64 {
+	return p.LegVal[0] + p.LegVal[1] + p.LegVal[2]
+}
 
 type fanRef struct {
-	P         *ArbPath           // 8 B  (payload first – accessed every Update)
-	Q         *bucketqueue.Queue // 8 B
-	H         bucketqueue.Handle // 4 B (uint32)
-	SharedLeg uint8              // 1 B
-	_         [3]byte            // pad to 8‑byte boundary
+	P         *ArbPath
+	Q         *bucketqueue.Queue
+	H         bucketqueue.Handle
+	SharedLeg uint8
+	_         [3]byte
 }
 
 type CoreRouter struct {
-	// fields ordered by read frequency
-	buckets     []*DeltaBucket // 24 B slice header
-	fanOut      [][]fanRef     // 24 B slice header
-	pairToLocal []uint32       // 24 B slice header
-	isReverse   bool           // 1 B flag (read once per update)
-	_           [7]byte        // pad → 8‑byte multiple
+	Buckets     []*DeltaBucket
+	FanOut      [][]fanRef
+	PairToLocal []uint32
+	isReverse   bool
+	_           [7]byte
 }
 
-////////////////////////////////////////////////////////////////////////////////
-//                        Update payload (stack‑only)                         //
-////////////////////////////////////////////////////////////////////////////////
-
+// ───── PriceUpdate payload ─────
 type PriceUpdate struct {
 	PairId  uint16
-	_       uint16 // align tick to 8‑byte boundary
+	_       uint16
 	FwdTick float64
 	RevTick float64
 }
 
-////////////////////////////////////////////////////////////////////////////////
-//                 Bootstrap: pin one consumer goroutine per core            //
-////////////////////////////////////////////////////////////////////////////////
-
+// ───── Core ingestion loop ─────
 func InitCPURings() {
-	active := runtime.NumCPU() - 4 // keep 4 cores for OS / I/O
+	active := runtime.NumCPU() - 4
+	if active > 64 {
+		active = 64
+	}
 	routers = make([]*CoreRouter, active)
 
 	for core := 0; core < active; core++ {
 		go func(id int) {
 			runtime.LockOSThread()
 
-			rb := ring.New(1 << 14) // 16 384‑slot ring
+			rb := ring.New(1 << 14)
 			cpuRingsGlobal[id] = rb
 
 			rt := &CoreRouter{
-				buckets:     make([]*DeltaBucket, 0, 1<<17),
-				fanOut:      make([][]fanRef, 0, 1<<17),
-				pairToLocal: make([]uint32, 1<<17),
+				Buckets:     make([]*DeltaBucket, 0, 1<<17),
+				FanOut:      make([][]fanRef, 0, 1<<17),
+				PairToLocal: make([]uint32, 1<<17),
 				isReverse:   id >= active/2,
 			}
 			routers[id] = rt
@@ -130,60 +110,30 @@ func InitCPURings() {
 	}
 }
 
-////////////////////////////////////////////////////////////////////////////////
-//                          Per‑core hot‑path logic                           //
-////////////////////////////////////////////////////////////////////////////////
-
-//go:nosplit
 func onPriceUpdate(rt *CoreRouter, upd *PriceUpdate) {
 	tick := upd.FwdTick
 	if rt.isReverse {
 		tick = upd.RevTick
 	}
 
-	idx := rt.pairToLocal[upd.PairId]
-	bkt := rt.buckets[idx]
+	idx := rt.PairToLocal[upd.PairId]
+	bkt := rt.Buckets[idx]
 	bkt.CurLog = tick
 
-	// Profit check (queue invariant: head never empty)
 	_, _, ptr := bkt.Queue.PeepMin()
 	if tick+(*ArbPath)(ptr).Sum() < 0 {
 		logProfit((*ArbPath)(ptr), tick)
 	}
 
-	// Fan‑out: mutate shared leg & reprioritise
-	for _, ref := range rt.fanOut[idx] {
+	for _, ref := range rt.FanOut[idx] {
 		ref.P.LegVal[ref.SharedLeg] = tick
 		ref.Q.Update(mapL2ToBucket(ref.P.Sum()), ref.H, unsafe.Pointer(ref.P))
 	}
 }
 
-////////////////////////////////////////////////////////////////////////////////
-//                      Ingress from JSON‑parser thread                       //
-////////////////////////////////////////////////////////////////////////////////
-
-// lookupPairID performs stride‑64 open addressing. If we make a full circle
-// without finding a populated slot the process panics — collisions must have
-// been resolved at bootstrap time; runtime misses indicate data corruption.
-//
-//go:nosplit
-//go:nosplit
-func lookupPairID(addr []byte) uint16 {
-	start := utils.Hash17(addr)
-	idx := start
-	for {
-		if id := addrToPairId[idx]; id != 0 {
-			return id // found
-		}
-		idx = (idx + 64) & ((1 << 17) - 1) // fixed stride probe
-		if idx == start {
-			panic("addrToPairId: exhausted 17‑bit table — collision or unregistered pool")
-		}
-	}
-}
-
+// ───── Ingress from JSON log parser ─────
 func RouteUpdate(v *types.LogView) {
-	addr := v.Addr[3:43] // skip '"0x'
+	addr := v.Addr[3:43]
 	pair := lookupPairID(addr)
 
 	r0 := utils.ParseHexU64(v.Data[:32])
@@ -194,17 +144,13 @@ func RouteUpdate(v *types.LogView) {
 	ptr := unsafe.Pointer(&upd)
 
 	for m := routingBitmap[pair]; m != 0; {
-		core := bits.TrailingZeros16(m) // 0‥15  → first 1-bit
-		cpuRingsGlobal[core].Push(ptr)  // <── one push for that core
-		m &^= 1 << core                 // clear that bit
+		core := bits.TrailingZeros16(m)
+		cpuRingsGlobal[core].Push(ptr)
+		m &^= 1 << core
 	}
 }
 
-////////////////////////////////////////////////////////////////////////////////
-//                                  Helpers                                   //
-////////////////////////////////////////////////////////////////////////////////
-
-// RegisterPair inserts a pool → pairId mapping; panics on bucket collision.
+// ───── Address map setup ─────
 func RegisterPair(addr40 []byte, pairId uint16) {
 	idx := utils.Hash17(addr40)
 	start := idx
@@ -215,12 +161,31 @@ func RegisterPair(addr40 []byte, pairId uint16) {
 		}
 		idx = (idx + 64) & ((1 << 17) - 1)
 		if idx == start {
-			panic("addrToPairId: table full unexpectedly while registering pool")
+			panic("addrToPairId: table full while registering pool")
 		}
 	}
 }
 
-func RegisterRoute(id uint16, mask uint16) { routingBitmap[id] = mask }
+func RegisterRoute(id uint16, mask uint16) {
+	routingBitmap[id] = mask
+}
 
-// stub: replace with actual metric / alerting pipeline
-func logProfit(p *ArbPath, gain float64) { _ = p; _ = gain }
+func lookupPairID(addr []byte) uint16 {
+	start := utils.Hash17(addr)
+	idx := start
+	for {
+		if id := addrToPairId[idx]; id != 0 {
+			return id
+		}
+		idx = (idx + 64) & ((1 << 17) - 1)
+		if idx == start {
+			panic("addrToPairId: exhausted table — unregistered pool")
+		}
+	}
+}
+
+func logProfit(p *ArbPath, gain float64) {
+	_ = p
+	_ = gain
+	// stub
+}
