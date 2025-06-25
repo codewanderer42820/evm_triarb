@@ -27,26 +27,41 @@ func coreMask(fwd, rev int) uint64 {
 }
 
 // RegisterCycles enables exactly two cores per pair in each cycle,
-// selecting 6 distinct cores per cycle (2 for each of 3 pairs).
+// selecting 6 distinct cores per cycle: 3 forward + 3 reverse.
 func RegisterCycles(cycles []Cycle) {
 	nCores := len(coreRouters)
 	if nCores < 6 {
 		return // not enough cores for full dispersion
 	}
 
-	for _, cyc := range cycles {
-		// pick 6 distinct cores via a single permutation
-		perm := rand.Perm(nCores)
-		coreSet := perm[:6]
+	half := nCores / 2
+	if half < 3 {
+		return // not enough forward/reverse cores
+	}
 
-		// assign each pair (fwd, rev) and register route
+	for _, cyc := range cycles {
+		// pick 3 unique forward cores
+		fwdSet := rand.Perm(half)[:3]
+
+		// pick 3 unique reverse cores (adjusted to upper half)
+		revRaw := rand.Perm(nCores - half)[:3]
+		for i := range revRaw {
+			revRaw[i] += half
+		}
+
+		// interleave (fwd0, rev0), (fwd1, rev1), (fwd2, rev2)
+		coreSet := []int{
+			fwdSet[0], revRaw[0],
+			fwdSet[1], revRaw[1],
+			fwdSet[2], revRaw[2],
+		}
+
 		for i, pairID := range cyc.Pairs {
 			fwd := coreSet[i*2]
 			rev := coreSet[i*2+1]
 			RegisterRoute(pairID, coreMask(fwd, rev))
 		}
 
-		// pre-allocate shared path once per cycle
 		path := &ArbPath{PoolID: [3]uint32{
 			uint32(cyc.Pairs[0]),
 			uint32(cyc.Pairs[1]),
@@ -69,7 +84,6 @@ func RegisterCycles(cycles []Cycle) {
 				h, _ := q.Borrow()
 				_ = q.Push(0, h, unsafe.Pointer(path))
 
-				// efficient slice growth (safe and compact)
 				if bkt >= uint32(len(rt.Fanouts)) {
 					grow := int(bkt) + 1 - len(rt.Fanouts)
 					rt.Fanouts = append(rt.Fanouts, make([][]fanRef, grow)...)
