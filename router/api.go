@@ -17,7 +17,7 @@ type Cycle struct {
 // It registers pairs, assigns route masks, initializes per-core queues,
 // creates shared ArbPath objects, and hooks up fan-out references.
 func RegisterCycles(cycles []Cycle) {
-	nCores := len(routers)
+	nCores := len(coreRouters)
 	mask := uint16((1 << nCores) - 1)
 
 	for _, cyc := range cycles {
@@ -28,33 +28,33 @@ func RegisterCycles(cycles []Cycle) {
 
 		// Shared path object for all legs
 		path := &ArbPath{
-			PoolID: [3]uint32{uint32(cyc.Pairs[0]), uint32(cyc.Pairs[1]), uint32(cyc.Pairs[2])},
-			Dir:    [3]bool{false, false, false},
+			PoolID:  [3]uint32{uint32(cyc.Pairs[0]), uint32(cyc.Pairs[1]), uint32(cyc.Pairs[2])},
+			Reverse: [3]bool{false, false, false},
 		}
 
 		for i, pairID := range cyc.Pairs {
 			for coreID := 0; coreID < nCores; coreID++ {
-				rt := routers[coreID]
-				idx := rt.PairToLocal[pairID]
+				rt := coreRouters[coreID]
+				idx := rt.PairIndex[pairID]
 
 				// Initialize per-core bucket if needed
-				if idx == 0 && (len(rt.Buckets) == 0 || rt.Buckets[0] == nil || rt.Buckets[0].Queue == nil) {
+				if idx == 0 && (len(rt.Routes) == 0 || rt.Routes[0] == nil || rt.Routes[0].Queue == nil) {
 					q := bucketqueue.New()
-					rt.Buckets = append(rt.Buckets, &DeltaBucket{Queue: q})
-					rt.PairToLocal[pairID] = uint32(len(rt.Buckets) - 1)
-					idx = rt.PairToLocal[pairID]
+					rt.Routes = append(rt.Routes, &DeltaBucket{Queue: q})
+					rt.PairIndex[pairID] = uint32(len(rt.Routes) - 1)
+					idx = rt.PairIndex[pairID]
 				}
 
 				// Attach fan-out reference
-				q := rt.Buckets[idx].Queue
+				q := rt.Routes[idx].Queue
 				h, _ := q.Borrow()
 				_ = q.Push(2048, h, unsafe.Pointer(path))
 				ref := fanRef{P: path, Q: q, H: h, SharedLeg: uint8(i)}
 
-				for len(rt.FanOut) <= int(idx) {
-					rt.FanOut = append(rt.FanOut, nil)
+				for len(rt.Fanouts) <= int(idx) {
+					rt.Fanouts = append(rt.Fanouts, nil)
 				}
-				rt.FanOut[idx] = append(rt.FanOut[idx], ref)
+				rt.Fanouts[idx] = append(rt.Fanouts[idx], ref)
 			}
 		}
 	}

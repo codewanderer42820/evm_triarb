@@ -13,15 +13,15 @@ import (
 	"main/utils"
 )
 
-// ───── Global runtime state ─────
+// ─── Global runtime state ───
 var (
-	cpuRingsGlobal [64]*ring.Ring  // per-core SPSC ring buffers
-	routingBitmap  [65536]uint16   // pairId → 16-bit CPU bitmask
-	addrToPairId   [1 << 17]uint16 // 131072-entry open-address table
-	routers        []*CoreRouter   // router state per pinned core
+	coreRings     [64]*ring.Ring  // per-core SPSC ring buffers
+	routingBitmap [65536]uint16   // pairId → 16-bit CPU bitmask
+	addrToPairId  [1 << 17]uint16 // 131072-entry open-address table
+	coreRouters   []*CoreRouter   // router state per pinned core
 )
 
-// ───── Tick-to-bucket mapper ─────
+// ─── Tick-to-bucket mapper ───
 const (
 	clampL2  = 64
 	buckets  = 4096
@@ -39,21 +39,21 @@ func mapL2ToBucket(l2 float64) int64 {
 	return int64(zeroOff) + int64(l2*scaleMul/scaleDiv)
 }
 
-// ───── Data structs ─────
+// ─── Data structs ───
 type DeltaBucket struct {
 	CurLog float64
 	Queue  *bucketqueue.Queue
 }
 
 type ArbPath struct {
-	LegVal [3]float64
-	PoolID [3]uint32
-	Dir    [3]bool
-	_      byte
+	Ticks   [3]float64
+	PoolID  [3]uint32
+	Reverse [3]bool
+	_       byte
 }
 
 func (p *ArbPath) Sum() float64 {
-	return p.LegVal[0] + p.LegVal[1] + p.LegVal[2]
+	return p.Ticks[0] + p.Ticks[1] + p.Ticks[2]
 }
 
 type fanRef struct {
@@ -65,14 +65,14 @@ type fanRef struct {
 }
 
 type CoreRouter struct {
-	Buckets     []*DeltaBucket
-	FanOut      [][]fanRef
-	PairToLocal []uint32
-	isReverse   bool
-	_           [7]byte
+	Routes    []*DeltaBucket
+	Fanouts   [][]fanRef
+	PairIndex []uint32
+	IsReverse bool
+	_         [7]byte
 }
 
-// ───── PriceUpdate payload ─────
+// ─── PriceUpdate payload ───
 type PriceUpdate struct {
 	PairId  uint16
 	_       uint16
@@ -80,58 +80,54 @@ type PriceUpdate struct {
 	RevTick float64
 }
 
-// ───── Core ingestion loop ─────
+// ─── Core ingestion loop ───
 func InitCPURings() {
 	active := runtime.NumCPU() - 4
 	if active > 64 {
 		active = 64
 	}
-	routers = make([]*CoreRouter, active)
+	coreRouters = make([]*CoreRouter, active)
 
 	for core := 0; core < active; core++ {
-		go func(id int) {
-			runtime.LockOSThread()
+		rb := ring.New(1 << 14)
+		coreRings[core] = rb
 
-			rb := ring.New(1 << 14)
-			cpuRingsGlobal[id] = rb
+		rt := &CoreRouter{
+			Routes:    make([]*DeltaBucket, 0, 1<<17),
+			Fanouts:   make([][]fanRef, 0, 1<<17),
+			PairIndex: make([]uint32, 1<<17),
+			IsReverse: core >= active/2,
+		}
+		coreRouters[core] = rt
 
-			rt := &CoreRouter{
-				Buckets:     make([]*DeltaBucket, 0, 1<<17),
-				FanOut:      make([][]fanRef, 0, 1<<17),
-				PairToLocal: make([]uint32, 1<<17),
-				isReverse:   id >= active/2,
-			}
-			routers[id] = rt
-
-			ring.PinnedConsumer(id, rb, new(uint32), new(uint32), func(p unsafe.Pointer) {
-				onPriceUpdate(rt, (*PriceUpdate)(p))
-			}, make(chan struct{}))
-		}(core)
+		go ring.PinnedConsumer(core, rb, new(uint32), new(uint32), func(p unsafe.Pointer) {
+			onPriceUpdate(rt, (*PriceUpdate)(p))
+		}, make(chan struct{}))
 	}
 }
 
 func onPriceUpdate(rt *CoreRouter, upd *PriceUpdate) {
 	tick := upd.FwdTick
-	if rt.isReverse {
+	if rt.IsReverse {
 		tick = upd.RevTick
 	}
 
-	idx := rt.PairToLocal[upd.PairId]
-	bkt := rt.Buckets[idx]
+	idx := rt.PairIndex[upd.PairId]
+	bkt := rt.Routes[idx]
 	bkt.CurLog = tick
 
 	_, _, ptr := bkt.Queue.PeepMin()
 	if tick+(*ArbPath)(ptr).Sum() < 0 {
-		logProfit((*ArbPath)(ptr), tick)
+		onProfitablePath((*ArbPath)(ptr), tick)
 	}
 
-	for _, ref := range rt.FanOut[idx] {
-		ref.P.LegVal[ref.SharedLeg] = tick
+	for _, ref := range rt.Fanouts[idx] {
+		ref.P.Ticks[ref.SharedLeg] = tick
 		ref.Q.Update(mapL2ToBucket(ref.P.Sum()), ref.H, unsafe.Pointer(ref.P))
 	}
 }
 
-// ───── Ingress from JSON log parser ─────
+// ─── Ingress from JSON log parser ───
 func RouteUpdate(v *types.LogView) {
 	addr := v.Addr[3:43]
 	pair := lookupPairID(addr)
@@ -145,12 +141,12 @@ func RouteUpdate(v *types.LogView) {
 
 	for m := routingBitmap[pair]; m != 0; {
 		core := bits.TrailingZeros16(m)
-		cpuRingsGlobal[core].Push(ptr)
+		coreRings[core].Push(ptr)
 		m &^= 1 << core
 	}
 }
 
-// ───── Address map setup ─────
+// ─── Address map setup ───
 func RegisterPair(addr40 []byte, pairId uint16) {
 	idx := utils.Hash17(addr40)
 	start := idx
@@ -184,7 +180,7 @@ func lookupPairID(addr []byte) uint16 {
 	}
 }
 
-func logProfit(p *ArbPath, gain float64) {
+func onProfitablePath(p *ArbPath, gain float64) {
 	_ = p
 	_ = gain
 	// stub
