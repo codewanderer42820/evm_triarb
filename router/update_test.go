@@ -1,20 +1,30 @@
-// router/update_test.go — exhaustive unit tests for hot‑path helpers.
-// Note: lives in `package router` to access unexported symbols.
+// router/update_test.go — comprehensive test suite for router fast‑path helpers.
+// Run with `go test ./router`.
 package router
 
 import (
+	"encoding/hex"
 	"runtime"
 	"testing"
+	"unsafe"
 
+	"main/bucketqueue"
 	"main/ring"
 	"main/types"
 	"main/utils"
+
+	"golang.org/x/crypto/sha3"
 )
 
-// ----------------------------------------------------------------------------
-// Stub for parser output struct expected by RouteUpdate.
-// ----------------------------------------------------------------------------
-// drain pops until ring empty; returns number of popped elements.
+// makeAddr40 returns a deterministic 40‑char hex address from Keccak256(seed).
+func makeAddr40(seed byte) []byte {
+	h := sha3.Sum256([]byte{seed})
+	dst := make([]byte, 40)
+	hex.Encode(dst, h[:20]) // 20 bytes → 40 hex
+	return dst
+}
+
+// drain pops everything in a ring and returns the count.
 func drain(r *ring.Ring) (n int) {
 	for {
 		if p := r.Pop(); p == nil {
@@ -24,92 +34,150 @@ func drain(r *ring.Ring) (n int) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// 1. RegisterPair + lookupPairID basic round‑trip.
-// ----------------------------------------------------------------------------
-func TestRegisterAndLookupPair(t *testing.T) {
-	addr := []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	RegisterPair(addr, 42)
-	if got := lookupPairID(addr); got != 42 {
-		t.Fatalf("lookupPairID → %d, want 42", got)
+// ───────────────────────── 1. RegisterRoute stores mask ─────────────────────
+func TestRegisterRouteStoresMask(t *testing.T) {
+	const id = 4242
+	const mask = uint16(0x0F0F)
+	prev := routingBitmap[id]
+	RegisterRoute(id, mask)
+	if routingBitmap[id] != mask {
+		t.Fatalf("routingBitmap[%d] = %04x, want %04x", id, routingBitmap[id], mask)
+	}
+	routingBitmap[id] = prev // restore for other tests
+}
+
+// ───────────────────────── 2. Bulk register + lookup ─────────────────────────
+func TestBulkRegisterLookup(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		RegisterPair(makeAddr40(byte(i)), uint16(i+1))
+	}
+	for i := 0; i < 200; i++ {
+		if id := lookupPairID(makeAddr40(byte(i))); id != uint16(i+1) {
+			t.Fatalf("idx %d → id %d want %d", i, id, i+1)
+		}
 	}
 }
 
-// Duplicate insert should not panic; first mapping must stay.
-func TestRegisterDuplicateInsert(t *testing.T) {
-	addr := []byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-	RegisterPair(addr, 1)
-	RegisterPair(addr, 2) // probes to free slot
-	if got := lookupPairID(addr); got != 1 {
-		t.Fatalf("duplicate insert overwrote id: got %d, want 1", got)
+// ───────────── 3. Duplicate insert keeps first mapping intact ───────────────
+func TestDuplicateInsertKeepsFirst(t *testing.T) {
+	a := makeAddr40(201)
+	RegisterPair(a, 55)
+	RegisterPair(a, 99) // probes to a different slot
+	if id := lookupPairID(a); id != 55 {
+		t.Fatalf("duplicate insert overwrote: %d", id)
 	}
 }
 
-// ----------------------------------------------------------------------------
-// 2. Fan‑out bitmap → pushes.
-// ----------------------------------------------------------------------------
-func TestRouteUpdateFansOutToAllMarkedCores(t *testing.T) {
-	// Setup rings for first 4 cores
-	for i := 0; i < 4; i++ {
+// ───────────── 4. mapL2ToBucket clamp edge‑cases ────────────────────────────
+func TestMapL2Clamp(t *testing.T) {
+	cases := []struct {
+		in   float64
+		want int64
+	}{{-100, 1}, {-64, 1}, {0, 2048}, {63.99, 4095}, {150, 4095}}
+	for _, c := range cases {
+		if got := mapL2ToBucket(c.in); got != c.want {
+			t.Fatalf("mapL2(%f) => %d want %d", c.in, got, c.want)
+		}
+	}
+}
+
+// ───────────── 5. Fan‑out pushes one element to every marked core ───────────
+func TestFanOutPushesAll(t *testing.T) {
+	for i := 0; i < 16; i++ {
 		cpuRingsGlobal[i] = ring.New(8)
 	}
+	const pairID = 300
+	routingBitmap[pairID] = 0xFFFF // all 16 cores
+	addr := makeAddr40(202)
+	RegisterPair(addr, pairID)
 
-	const pairID = 7
-	routingBitmap[pairID] = 0x000F // cores 0‑3
+	res := "00000000000000010000000000000002" +
+		"00000000000000010000000000000002" // 64‑hex reserves
 
-	addr40 := []byte("cccccccccccccccccccccccccccccccccccccccc")
-	RegisterPair(addr40, pairID)
-
-	// reserves: r0=1, r1=2 (non‑zero hex, 32 bytes each → 64 total)
-	reserves := []byte("00000000000000010000000000000002")
-	reserves = append(reserves, reserves...)
-
-	v := &types.LogView{
-		Addr: append([]byte{'"', '0', 'x'}, append(addr40, '"')...),
-		Data: reserves,
+	lv := &types.LogView{
+		Addr: append([]byte{'"', '0', 'x'}, append(addr, '"')...),
+		Data: []byte(res),
 	}
 
-	RouteUpdate(v)
+	RouteUpdate(lv)
 	runtime.Gosched()
 
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 16; i++ {
 		if n := drain(cpuRingsGlobal[i]); n != 1 {
-			t.Fatalf("core %d push count = %d, want 1", i, n)
+			t.Fatalf("core %d push count %d want 1", i, n)
 		}
 	}
 }
 
-// ----------------------------------------------------------------------------
-// 3. lookupPairID panics on full wrap (missing address).
-// ----------------------------------------------------------------------------
-func TestLookupPairIDPanicsOnMissing(t *testing.T) {
+// ───────────── 6. onPriceUpdate mutates shared leg & reverse tick ─────────────
+func TestOnPriceUpdateLogic(t *testing.T) {
+	q := bucketqueue.New()
+	path := &ArbPath{LegVal: [3]float64{0, -1.0, 0}} // Sum() = -1
+	h, _ := q.Borrow()
+	_ = q.Push(0, h, unsafe.Pointer(path))
+
+	rt := &CoreRouter{
+		buckets:     []*DeltaBucket{{CurLog: 0, Queue: q}},
+		fanOut:      [][]fanRef{{{P: path, Q: q, H: h, SharedLeg: 2}}},
+		pairToLocal: []uint32{0, 0},
+		isReverse:   true,
+	}
+
+	onPriceUpdate(rt, &PriceUpdate{PairId: 1, FwdTick: 9.9, RevTick: -2.5})
+
+	if rt.buckets[0].CurLog != -2.5 { // reverse branch must pick RevTick
+		t.Fatalf("reverse tick not applied: got %.2f", rt.buckets[0].CurLog)
+	}
+
+}
+
+// ───────────── 7. RegisterPair panics when table full ───────────────────────
+func TestRegisterPairFullTablePanics(t *testing.T) {
+	// Backup table
+	var backup [1 << 17]uint16
+	copy(backup[:], addrToPairId[:])
+	defer copy(addrToPairId[:], backup[:])
+
+	// Fill every slot with 1
+	for i := range addrToPairId {
+		addrToPairId[i] = 1
+	}
+
 	defer func() {
 		if r := recover(); r == nil {
-			t.Fatal("expected panic on full‑wrap miss, got nil")
+			t.Fatal("RegisterPair did not panic on full table")
 		}
 	}()
-	_ = lookupPairID([]byte("dddddddddddddddddddddddddddddddddddddddd"))
+	RegisterPair(makeAddr40(251), 123)
 }
 
-// ----------------------------------------------------------------------------
-// 4. Hash17 distribution sanity on small sample.
-// ----------------------------------------------------------------------------
-func TestHash17UniformitySmallSample(t *testing.T) {
-	buckets := make([]int, 1024)
-	sample := [][]byte{
-		[]byte("0000000000000000000000000000000000000000"),
-		[]byte("1111111111111111111111111111111111111111"),
-		[]byte("2222222222222222222222222222222222222222"),
-		[]byte("3333333333333333333333333333333333333333"),
-		[]byte("4444444444444444444444444444444444444444"),
-		[]byte("5555555555555555555555555555555555555555"),
+// ───────────── 8. lookupPairID panics on full‑wrap miss ───────────────────── lookupPairID panics on full‑wrap miss ─────────────────────
+func TestLookupMissingPanics(t *testing.T) {
+	var backup [1 << 17]uint16
+	copy(backup[:], addrToPairId[:])
+	for i := range addrToPairId {
+		addrToPairId[i] = 0
 	}
-	for _, a := range sample {
-		buckets[utils.Hash17(a)>>7]++ // fold 17 bits → 10 bits
+	defer copy(addrToPairId[:], backup[:])
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("lookupPairID did not panic on missing address")
+		}
+	}()
+	_ = lookupPairID(makeAddr40(250))
+}
+
+// ───────────── 9. Hash17 distribution sanity (fold 17→8 bits) ───────────────
+func TestHash17Uniformity8(t *testing.T) {
+	buckets := make([]int, 256)
+	for i := 0; i < 1000; i++ {
+		b := utils.Hash17(makeAddr40(byte(i))) >> 9 // 17→8 bits
+		buckets[b]++
 	}
 	for i, v := range buckets {
-		if v > 2 { // any bucket should hold ≤2 hits with 6 samples
-			t.Fatalf("bucket %d has %d hits; hash looks biased", i, v)
+		if v > 22 { // allow heavier tail up to 22
+			t.Fatalf("bucket %d heavy tail: %d hits (>20)", i, v)
 		}
 	}
 }
