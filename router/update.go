@@ -4,6 +4,7 @@ package router
 import (
 	"math/bits"
 	"runtime"
+	"sync"
 	"unsafe"
 
 	"main/bucketqueue"
@@ -82,6 +83,7 @@ type PriceUpdate struct {
 
 // ─── Core ingestion loop ───
 // InitCPURings spawns one pinned consumer goroutine per core, allocating all state on that OS thread.
+
 func InitCPURings() {
 	active := runtime.NumCPU() - 4
 	if active > 64 {
@@ -90,9 +92,13 @@ func InitCPURings() {
 	// allocate slice for router metadata references
 	coreRouters = make([]*CoreRouter, active)
 
+	// wait group to synchronize all per-core setup
+	var wg sync.WaitGroup
+	wg.Add(active)
+
 	for core := 0; core < active; core++ {
-		// launch a consumer pinned to its OS thread
 		go func(core int) {
+			defer wg.Done()
 			runtime.LockOSThread()
 
 			// allocate the ring buffer first for core-local placement
@@ -112,6 +118,9 @@ func InitCPURings() {
 			}, make(chan struct{}))
 		}(core)
 	}
+
+	// block until every core has finished its local setup
+	wg.Wait()
 }
 
 func onPriceUpdate(rt *CoreRouter, upd *PriceUpdate) {
