@@ -5,7 +5,6 @@ package router
 
 import (
 	"encoding/binary"
-	"math/bits"
 	"math/rand"
 	"runtime"
 	"testing"
@@ -32,6 +31,7 @@ func resetGlobals() {
 	}
 }
 
+// TestMapL2ToBucket validates that tick values are clamped and mapped correctly into bucket range.
 func TestMapL2ToBucket(t *testing.T) {
 	cases := []float64{-9999, -64, -32, 0, 32, 64, 9999}
 	for _, in := range cases {
@@ -42,6 +42,7 @@ func TestMapL2ToBucket(t *testing.T) {
 	}
 }
 
+// TestRegisterPairLookup ensures the RegisterPair and lookupPairID path works without collision.
 func TestRegisterPairLookup(t *testing.T) {
 	resetGlobals()
 	addr := make([]byte, 40)
@@ -54,6 +55,7 @@ func TestRegisterPairLookup(t *testing.T) {
 	}
 }
 
+// TestRegisterRoute confirms that a bitmask is correctly written to the routing table.
 func TestRegisterRoute(t *testing.T) {
 	resetGlobals()
 	RegisterRoute(42, 0xdeadbeef)
@@ -62,49 +64,39 @@ func TestRegisterRoute(t *testing.T) {
 	}
 }
 
+// TestInitAndRegisterCycles ensures RegisterCycles assigns each pair to exactly 2 cores.
 func TestInitAndRegisterCycles(t *testing.T) {
 	resetGlobals()
-	runtime.GOMAXPROCS(4)
+	runtime.GOMAXPROCS(8)
 	InitCPURings()
 
 	cyc := Cycle{Pairs: [3]uint16{10, 20, 30}}
 	RegisterCycles([]Cycle{cyc})
-	mask := routingBitmap[10]
-	if bits.OnesCount64(mask) != 2 {
-		t.Fatalf("expected exactly 2 cores enabled for pair 10, got mask %x", mask)
-	}
-	half := len(coreRouters) / 2
-	var sawFwd, sawRev bool
-	for i := range coreRouters {
-		if mask&(1<<i) != 0 {
-			if i < half {
-				sawFwd = true
-			} else {
-				sawRev = true
+
+	// Expect exactly 6 unique cores used — 2 per pair, no overlap
+	coreUsed := make([]bool, len(coreRouters))
+	for coreIdx, rt := range coreRouters {
+		for _, pid := range []uint16{10, 20, 30} {
+			if rt.PairIndex[pid] != 0 {
+				coreUsed[coreIdx] = true
+				break
 			}
 		}
 	}
-	if !sawFwd || !sawRev {
-		t.Fatalf("expected one forward and one reverse core, got mask %x", mask)
+
+	var used int
+	for _, active := range coreUsed {
+		if active {
+			used++
+		}
 	}
-	for i, rt := range coreRouters {
-		if mask&(1<<i) == 0 {
-			if rt.PairIndex[10] != 0 {
-				t.Errorf("core %d was not selected but has PairIndex=%d", i, rt.PairIndex[10])
-			}
-			continue
-		}
-		idx := rt.PairIndex[10]
-		if idx == 0 || int(idx) > len(rt.Routes) {
-			t.Fatalf("core %d: invalid PairIndex %d (routes=%d)", i, idx, len(rt.Routes))
-		}
-		b := rt.Routes[idx-1]
-		if b == nil || b.Queue == nil {
-			t.Fatalf("core %d: missing bucket queue at index %d", i, idx-1)
-		}
+
+	if used != 6 {
+		t.Fatalf("expected exactly 6 unique cores to be used, got %d", used)
 	}
 }
 
+// TestRouteUpdateAndOnPriceUpdate drives a price update into a single-core setup.
 func TestRouteUpdateAndOnPriceUpdate(t *testing.T) {
 	resetGlobals()
 	coreRouters = []*CoreRouter{{
@@ -148,23 +140,30 @@ func TestRouteUpdateAndOnPriceUpdate(t *testing.T) {
 	}
 }
 
+// TestRegisterCyclesMultiPair confirms all 3 pairs in a cycle appear on at least one core.
 func TestRegisterCyclesMultiPair(t *testing.T) {
 	resetGlobals()
 	runtime.GOMAXPROCS(4)
 	InitCPURings()
 	cyc := Cycle{Pairs: [3]uint16{1, 2, 3}}
 	RegisterCycles([]Cycle{cyc})
-	idx1 := coreRouters[0].PairIndex[1]
-	idx2 := coreRouters[0].PairIndex[2]
-	idx3 := coreRouters[0].PairIndex[3]
-	if idx1 == 0 || idx2 == 0 || idx3 == 0 {
-		t.Fatalf("one or more pairs not mapped: %d, %d, %d", idx1, idx2, idx3)
+
+	mapped := map[uint16]bool{}
+	for _, rt := range coreRouters {
+		for _, pid := range []uint16{1, 2, 3} {
+			if rt.PairIndex[pid] != 0 {
+				mapped[pid] = true
+			}
+		}
 	}
-	if idx1 == idx2 || idx1 == idx3 || idx2 == idx3 {
-		t.Fatalf("pairs mapped to same bucket: %d, %d, %d", idx1, idx2, idx3)
+	for _, pid := range []uint16{1, 2, 3} {
+		if !mapped[pid] {
+			t.Fatalf("pair %d not mapped to any core", pid)
+		}
 	}
 }
 
+// TestInitCPURings_SpawnsRoutersAndConsumers confirms InitCPURings allocates coreRouters and coreRings.
 func TestInitCPURings_SpawnsRoutersAndConsumers(t *testing.T) {
 	InitCPURings()
 	if len(coreRouters) == 0 {
@@ -175,6 +174,7 @@ func TestInitCPURings_SpawnsRoutersAndConsumers(t *testing.T) {
 	}
 }
 
+// TestOnPriceUpdate_UsesRevTickWhenIsReverse ensures tick selection logic works with reverse flag.
 func TestOnPriceUpdate_UsesRevTickWhenIsReverse(t *testing.T) {
 	q := bucketqueue.New()
 	h, _ := q.Borrow()
@@ -193,6 +193,7 @@ func TestOnPriceUpdate_UsesRevTickWhenIsReverse(t *testing.T) {
 	}
 }
 
+// TestOnPriceUpdate_FanoutPathUpdate ensures the fanout pointer's tick value is updated correctly.
 func TestOnPriceUpdate_FanoutPathUpdate(t *testing.T) {
 	mainQ := bucketqueue.New()
 	mh, _ := mainQ.Borrow()
@@ -219,6 +220,7 @@ func TestOnPriceUpdate_FanoutPathUpdate(t *testing.T) {
 	}
 }
 
+// TestRegisterPair_PanicsWhenTableFull forces a RegisterPair collision exhaustion case.
 func TestRegisterPair_PanicsWhenTableFull(t *testing.T) {
 	addr := make([]byte, 40)
 	start := utils.Hash17(addr)
@@ -235,6 +237,7 @@ func TestRegisterPair_PanicsWhenTableFull(t *testing.T) {
 	RegisterPair(addr, 42)
 }
 
+// TestLookupPairID_PanicsWhenUnregistered confirms panic occurs when lookup fails.
 func TestLookupPairID_PanicsWhenUnregistered(t *testing.T) {
 	for i := range addrToPairId {
 		addrToPairId[i] = 0

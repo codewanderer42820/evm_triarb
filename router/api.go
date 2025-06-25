@@ -46,14 +46,15 @@ func RegisterCycles(cycles []Cycle) {
 			RegisterRoute(pairID, coreMask(fwd, rev))
 		}
 
-		// allocate per-core path data and seed queues
+		// pre-allocate shared path once per cycle
+		path := &ArbPath{PoolID: [3]uint32{
+			uint32(cyc.Pairs[0]),
+			uint32(cyc.Pairs[1]),
+			uint32(cyc.Pairs[2]),
+		}}
+
 		for _, coreIdx := range coreSet {
 			rt := coreRouters[coreIdx]
-			path := &ArbPath{PoolID: [3]uint32{
-				uint32(cyc.Pairs[0]),
-				uint32(cyc.Pairs[1]),
-				uint32(cyc.Pairs[2]),
-			}}
 
 			for legIdx, pairID := range cyc.Pairs {
 				idx := rt.PairIndex[pairID]
@@ -68,7 +69,12 @@ func RegisterCycles(cycles []Cycle) {
 				h, _ := q.Borrow()
 				_ = q.Push(0, h, unsafe.Pointer(path))
 
-				// fanout slice was preallocated in InitCPURings
+				// efficient slice growth (safe and compact)
+				if bkt >= uint32(len(rt.Fanouts)) {
+					grow := int(bkt) + 1 - len(rt.Fanouts)
+					rt.Fanouts = append(rt.Fanouts, make([][]fanRef, grow)...)
+				}
+
 				rt.Fanouts[bkt] = append(rt.Fanouts[bkt], fanRef{
 					P:         path,
 					Q:         q,
