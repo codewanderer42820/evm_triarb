@@ -59,7 +59,6 @@ func TestRegisterPairLookup(t *testing.T) {
 	if got := lookupPairID(addr); got != pairID {
 		t.Fatalf("lookupPairID=%d, want %d", got, pairID)
 	}
-
 }
 
 func TestRegisterRoute(t *testing.T) {
@@ -88,9 +87,9 @@ func TestInitAndRegisterCycles(t *testing.T) {
 	}
 
 	for _, rt := range coreRouters {
-		idx := rt.PairIndex[10]
-		if int(idx) >= len(rt.Routes) {
-			t.Fatalf("pair index not mapped in router")
+		idx := int(rt.PairIndex[10]) // stored as index+1
+		if idx >= len(rt.Routes) {
+			t.Fatalf("pair index %d out of range (routes=%d)", idx, len(rt.Routes))
 		}
 		if rt.Routes[idx] == nil || rt.Routes[idx].Queue == nil {
 			t.Fatalf("bucket queue missing after RegisterCycles")
@@ -120,7 +119,7 @@ func TestRouteUpdateAndOnPriceUpdate(t *testing.T) {
 	const pairID = 77
 	RegisterPair(addr, pairID)
 	RegisterRoute(pairID, 1)             // core 0 only
-	coreRouters[0].PairIndex[pairID] = 0 // route index 0
+	coreRouters[0].PairIndex[pairID] = 0 // route index 0  // store index+1 (route index 0)
 
 	// Seed queue so PeepMin() has a value to work with.
 	path := &ArbPath{}
@@ -147,7 +146,7 @@ func TestRouteUpdateAndOnPriceUpdate(t *testing.T) {
 	onPriceUpdate(coreRouters[0], (*PriceUpdate)(ptr))
 
 	// Validate side‑effects: CurLog updated & queue head still valid.
-	idx := coreRouters[0].PairIndex[pairID]
+	idx := int(coreRouters[0].PairIndex[pairID])
 	bkt := coreRouters[0].Routes[idx]
 	if bkt.CurLog == 0 {
 		t.Fatalf("CurLog not updated by onPriceUpdate")
