@@ -1,5 +1,6 @@
-// Full‑coverage tests for the router package.
-// Run: go test -cover ./...
+// Full-coverage tests for the router package.
+// This file validates core router behaviors: mapping reserves to buckets, pair registration,
+// route initialization, cycle registration, price-update routing, fanout logic, and error conditions.
 package router
 
 import (
@@ -16,107 +17,135 @@ import (
 	"main/utils"
 )
 
-// resetGlobals zeroes global state mutated across tests so each test can run in isolation.
+// resetGlobals clears all global state so each test starts from a clean slate.
+// It zeroes routing bitmaps, address mappings, core router slices and rings.
 func resetGlobals() {
+	// Clear routing bitmap entries used by RegisterRoute and RegisterCycles
 	for i := range routingBitmap {
 		routingBitmap[i] = 0
 	}
+
+	// Clear address-to-pair ID lookup table used by RegisterPair and lookupPairID
 	for i := range addrToPairId {
 		addrToPairId[i] = 0
 	}
+
+	// Reset coreRouters slice (each element is a *CoreRouter)
 	coreRouters = nil
+
+	// Reset coreRings ring buffers to nil
 	for i := range coreRings {
 		coreRings[i] = nil
 	}
 }
 
+// TestMapL2ToBucket ensures that mapL2ToBucket maps any log2 ratio to a valid bucket index.
 func TestMapL2ToBucket(t *testing.T) {
+	// Test a range of input values, including negative, zero, and large positive floats
 	cases := []float64{-9999, -64, -32, 0, 32, 64, 9999}
 	for _, in := range cases {
 		out := mapL2ToBucket(in)
+		// The bucket index must lie within [0, buckets)
 		if out < 0 || out >= buckets {
 			t.Fatalf("bucket out of range for %.2f: %d", in, out)
 		}
 	}
 }
 
+// TestRegisterPairLookup verifies that RegisterPair stores the given pairID and lookupPairID retrieves it.
 func TestRegisterPairLookup(t *testing.T) {
-	resetGlobals()
+	resetGlobals() // Ensure no prior mappings exist
 
+	// Create a random 40-byte address
 	addr := make([]byte, 40)
 	rand.Seed(time.Now().UnixNano())
 	rand.Read(addr)
 	const pairID = 12345
 
+	// Register the address -> pairID mapping
 	RegisterPair(addr, pairID)
 
+	// lookupPairID should return the same pairID
 	if got := lookupPairID(addr); got != pairID {
 		t.Fatalf("lookupPairID=%d, want %d", got, pairID)
 	}
 }
 
+// TestRegisterRoute ensures RegisterRoute writes into the routingBitmap array.
 func TestRegisterRoute(t *testing.T) {
-	resetGlobals()
+	resetGlobals() // Clear previous routes
+
+	// Register a route for pairID 42 to use mask 0xdead
 	RegisterRoute(42, 0xdead)
+	// Verify the bitmap entry was updated
 	if routingBitmap[42] != 0xdead {
-		t.Fatalf("routingBitmap not recorded")
+		t.Fatalf("routingBitmap not recorded: got %x", routingBitmap[42])
 	}
 }
 
+// TestInitAndRegisterCycles checks InitCPURings and subsequent RegisterCycles wiring.
 func TestInitAndRegisterCycles(t *testing.T) {
 	resetGlobals()
+	// Limit parallelism to 2 cores for the test
 	runtime.GOMAXPROCS(2)
+	// Initialize per-core routers and ring buffers
 	InitCPURings()
 
+	// There must be at least one router instantiated
 	if len(coreRouters) == 0 {
 		t.Fatalf("InitCPURings created zero routers")
 	}
 
+	// Define a single 3-pair cycle and register it
 	cyc := Cycle{Pairs: [3]uint16{10, 20, 30}}
 	RegisterCycles([]Cycle{cyc})
 
+	// The bitmap mask should be all-ones across active routers
 	mask := uint16((1 << len(coreRouters)) - 1)
 	if routingBitmap[10] != mask {
-		t.Fatalf("pair bitmap not set by RegisterCycles")
+		t.Fatalf("pair bitmap not set by RegisterCycles: got %x, want %x", routingBitmap[10], mask)
 	}
 
+	// For each CoreRouter, ensure the cycle registration created a route and initialized a bucket queue
 	for _, rt := range coreRouters {
 		idx := int(rt.PairIndex[10])
 		if idx >= len(rt.Routes) {
 			t.Fatalf("pair index %d out of range (routes=%d)", idx, len(rt.Routes))
 		}
+		// Each route should have a non-nil DeltaBucket and queue
 		if rt.Routes[idx] == nil || rt.Routes[idx].Queue == nil {
-			t.Fatalf("bucket queue missing after RegisterCycles")
+			t.Fatalf("bucket queue missing after RegisterCycles at index %d", idx)
 		}
 	}
 }
 
-// TestRouteUpdateAndOnPriceUpdate drives tick ingestion and fan‑out logic on a single‑core router.
+// TestRouteUpdateAndOnPriceUpdate drives a price update through a single-core router.
 func TestRouteUpdateAndOnPriceUpdate(t *testing.T) {
 	resetGlobals()
 
-	// single‑core router with one bucket queue
+	// Manually set up a single-core router without using InitCPURings
 	coreRouters = []*CoreRouter{{
 		Routes:    []*DeltaBucket{{Queue: bucketqueue.New()}},
 		Fanouts:   [][]fanRef{{}},
 		PairIndex: make([]uint32, 1<<17),
 	}}
+	// Create a small ring buffer for core 0
 	coreRings[0] = ring.New(16)
 
-	// Random address ↔ pair registration.
+	// Simulate registering an address->pair and route on core 0
 	addr := make([]byte, 40)
 	rand.Read(addr)
 	const pairID = 77
 	RegisterPair(addr, pairID)
-	RegisterRoute(pairID, 1)             // core 0 only
-	coreRouters[0].PairIndex[pairID] = 0 // bucket 0
+	RegisterRoute(pairID, 1)             // mask=1 -> core 0 only
+	coreRouters[0].PairIndex[pairID] = 0 // map to bucket 0
 
-	// Seed queue so PeepMin() has a value to work with.
+	// Seed the bucket queue so PeepMin never returns nil
 	path := &ArbPath{}
 	h, _ := coreRouters[0].Routes[0].Queue.Borrow()
 	_ = coreRouters[0].Routes[0].Queue.Push(0, h, unsafe.Pointer(path))
 
-	// Craft a mock Uniswap "Sync" log view with non‑zero reserves.
+	// Create a fake Uniswap Sync log with r0,r1 reserves at offsets 24 and 56
 	var lv types.LogView
 	lv.Addr = append([]byte{0, 0, 0}, addr...)
 	lv.Data = make([]byte, 64)
@@ -124,55 +153,60 @@ func TestRouteUpdateAndOnPriceUpdate(t *testing.T) {
 		r0 uint64 = 123
 		r1 uint64 = 456
 	)
-	// place 8‑byte big‑endian at offsets 24..31 and 56..63
 	binary.BigEndian.PutUint64(lv.Data[24:32], r0)
 	binary.BigEndian.PutUint64(lv.Data[56:64], r1)
 
-	// Producer path: convert log → price update → ring push
+	// Execute RouteUpdate: push PriceUpdate onto ring
 	RouteUpdate(&lv)
 
-	// Drain ring deterministically (simulate consumer goroutine)
+	// Pop the update off the ring to simulate the consumer goroutine
 	ptr := coreRings[0].Pop()
 	if ptr == nil {
 		t.Fatalf("ring was empty after RouteUpdate push")
 	}
+	// Invoke onPriceUpdate to apply the update to the router state
 	onPriceUpdate(coreRouters[0], (*PriceUpdate)(ptr))
 
-	// Validate side‑effects: CurLog updated & queue head still valid.
+	// Check that CurLog was updated from 0 to a non-zero value
 	idx := int(coreRouters[0].PairIndex[pairID])
 	bkt := coreRouters[0].Routes[idx]
 	if bkt.CurLog == 0 {
 		t.Fatalf("CurLog not updated by onPriceUpdate")
 	}
+
+	// Ensure PeepMin still returns the original path pointer
 	_, _, gotPtr := bkt.Queue.PeepMin()
 	if gotPtr != unsafe.Pointer(path) {
-		t.Fatalf("PeepMin pointer mismatch after onPriceUpdate")
+		t.Fatalf("PeepMin pointer mismatch: got %p, want %p", gotPtr, unsafe.Pointer(path))
 	}
 }
 
-// Verifies that each pair in a cycle gets its own bucket index.
+// TestRegisterCyclesMultiPair verifies that multi-pair cycles assign distinct buckets
 func TestRegisterCyclesMultiPair(t *testing.T) {
 	resetGlobals()
 	runtime.GOMAXPROCS(4)
 	InitCPURings()
 
+	// Register a cycle of 3 distinct pairs
 	cyc := Cycle{Pairs: [3]uint16{1, 2, 3}}
 	RegisterCycles([]Cycle{cyc})
 
+	// Each pair should have a non-zero bucket index
 	idx1 := coreRouters[0].PairIndex[1]
 	idx2 := coreRouters[0].PairIndex[2]
 	idx3 := coreRouters[0].PairIndex[3]
 
 	if idx1 == 0 || idx2 == 0 || idx3 == 0 {
-		t.Fatalf("one or more pairs not mapped (idx=0)")
+		t.Fatalf("one or more pairs not mapped: %d, %d, %d", idx1, idx2, idx3)
 	}
+	// Indices must all be unique
 	if idx1 == idx2 || idx1 == idx3 || idx2 == idx3 {
-		t.Fatalf("pairs mapped to the same bucket: %d,%d,%d", idx1, idx2, idx3)
+		t.Fatalf("pairs mapped to same bucket: %d, %d, %d", idx1, idx2, idx3)
 	}
 }
 
+// TestInitCPURings_SpawnsRoutersAndConsumers ensures InitCPURings produces at least one router
 func TestInitCPURings_SpawnsRoutersAndConsumers(t *testing.T) {
-	// Make sure InitCPURings doesn’t panic, allocates at least one coreRouter
 	InitCPURings()
 	if len(coreRouters) == 0 {
 		t.Fatal("expected at least one coreRouter")
@@ -182,41 +216,45 @@ func TestInitCPURings_SpawnsRoutersAndConsumers(t *testing.T) {
 	}
 }
 
+// TestOnPriceUpdate_UsesRevTickWhenIsReverse verifies reverse-tick behavior
 func TestOnPriceUpdate_UsesRevTickWhenIsReverse(t *testing.T) {
-	// set up a single-route router with a seeded queue & fanouts
+	// Set up a bucketqueue with a dummy path
 	q := bucketqueue.New()
 	h, _ := q.Borrow()
 	dummyPath := &ArbPath{}
 	_ = q.Push(0, h, unsafe.Pointer(dummyPath))
 
+	// Create a CoreRouter marked as reverse
 	rt := &CoreRouter{
-		Routes:    []*DeltaBucket{&DeltaBucket{Queue: q}}, // one bucket
-		Fanouts:   make([][]fanRef, 1),                    // one empty fanout list
-		PairIndex: []uint32{0},                            // map pair 0 → bucket 0
-		IsReverse: true,                                   // force use of RevTick
+		Routes:    []*DeltaBucket{{Queue: q}},
+		Fanouts:   make([][]fanRef, 1),
+		PairIndex: []uint32{0},
+		IsReverse: true,
 	}
 	pu := &PriceUpdate{PairId: 0, FwdTick: 1.23, RevTick: 4.56}
 	onPriceUpdate(rt, pu)
-	// since IsReverse=true, CurLog must equal RevTick
+
+	// CurLog should reflect RevTick when IsReverse=true
 	if rt.Routes[0].CurLog != 4.56 {
 		t.Fatalf("got CurLog=%v; want RevTick=4.56", rt.Routes[0].CurLog)
 	}
 }
 
+// TestOnPriceUpdate_FanoutPathUpdate validates fanout logic updates shared paths
 func TestOnPriceUpdate_FanoutPathUpdate(t *testing.T) {
-	// seed the route’s primary queue so PeepMin() never returns nil
+	// Seed main queue so its PeepMin never returns nil
 	mainQ := bucketqueue.New()
 	mh, _ := mainQ.Borrow()
 	mainDummy := &ArbPath{}
 	_ = mainQ.Push(0, mh, unsafe.Pointer(mainDummy))
 
-	// single-route, single-fanRef
+	// Create secondary queue for fanout
 	q := bucketqueue.New()
 	path := &ArbPath{}
 	h, _ := q.Borrow()
-	// initial push so the handle is in the queue
 	_ = q.Push(0, h, unsafe.Pointer(path))
 
+	// Single route with one fanRef: path shares element in secondary queue
 	rt := &CoreRouter{
 		Routes:    []*DeltaBucket{{Queue: mainQ}},
 		Fanouts:   [][]fanRef{{{P: path, Q: q, H: h, SharedLeg: 1}}},
@@ -225,30 +263,33 @@ func TestOnPriceUpdate_FanoutPathUpdate(t *testing.T) {
 	}
 	pu := &PriceUpdate{PairId: 0, FwdTick: 2.0, RevTick: -2.0}
 
-	// drive the fanout branch
+	// Trigger onPriceUpdate which should update path.Ticks[1]
 	onPriceUpdate(rt, pu)
 
-	// fanRef.P.Ticks[1] should now be set to FwdTick
+	// Confirm tick update on shared path leg
 	if path.Ticks[1] != 2.0 {
 		t.Fatalf("fanout did not update path.Ticks[1]: got %v, want 2.0", path.Ticks[1])
 	}
 
-	// and queue should have been “updated” — PeepMin should still return the same pointer
+	// Ensure secondary queue still holds the path
 	_, _, got := q.PeepMin()
 	if got != unsafe.Pointer(path) {
 		t.Fatal("queue.Update moved or dropped the element unexpectedly")
 	}
 }
 
+// TestRegisterPair_PanicsWhenTableFull verifies panic on full addrToPairId table
 func TestRegisterPair_PanicsWhenTableFull(t *testing.T) {
-	// pick a test address and fill all 2048 slots spaced by 64
+	// Pre-fill all 2048 slots so RegisterPair cannot find a free slot
 	addr := make([]byte, 40)
 	start := utils.Hash17(addr)
 	mask := (1 << 17) - 1
 	for i := 0; i < 2048; i++ {
 		idx := (start + uint32(i*64)) & uint32(mask)
-		addrToPairId[idx] = 0xFFFF // dummy non-zero
+		addrToPairId[idx] = 0xFFFF // dummy non-zero means occupied
 	}
+
+	// Expect panic due to exhausted table
 	defer func() {
 		if r := recover(); r == nil {
 			t.Fatal("expected panic from full addrToPairId in RegisterPair")
@@ -257,19 +298,22 @@ func TestRegisterPair_PanicsWhenTableFull(t *testing.T) {
 	RegisterPair(addr, 42)
 }
 
+// TestLookupPairID_PanicsWhenUnregistered verifies panic when lookupPairID finds no entry
 func TestLookupPairID_PanicsWhenUnregistered(t *testing.T) {
-	// clear table and then force exhaustion
+	// Clear the table
 	for i := range addrToPairId {
 		addrToPairId[i] = 0
 	}
 	addr := make([]byte, 40)
 	start := utils.Hash17(addr)
-	// fill exactly the same 2048 slots
 	mask := (1 << 17) - 1
+	// Fill same slots with zero (unregistered) to exhaust lookup
 	for i := 0; i < 2048; i++ {
 		idx := (start + uint32(i*64)) & uint32(mask)
-		addrToPairId[idx] = 0 // keep zero so lookup never finds a pair
+		addrToPairId[idx] = 0 // still zero, forces lookup exhaustion
 	}
+
+	// Expect panic due to missing entry
 	defer func() {
 		if r := recover(); r == nil {
 			t.Fatal("expected panic from exhausted addrToPairId in lookupPairID")
