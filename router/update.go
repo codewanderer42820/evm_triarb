@@ -83,8 +83,8 @@ type PriceUpdate struct {
 
 // ─── Core ingestion loop ───
 // InitCPURings spawns one pinned consumer goroutine per core, allocating all state on that OS thread.
-
 func InitCPURings() {
+	// clamp to [8,64]
 	n := runtime.NumCPU() - 4
 	if n < 8 {
 		n = 8
@@ -93,6 +93,7 @@ func InitCPURings() {
 		n = 64
 	}
 
+	// allocate slice for router metadata
 	coreRouters = make([]*CoreRouter, n)
 
 	var wg sync.WaitGroup
@@ -103,21 +104,25 @@ func InitCPURings() {
 			defer wg.Done()
 			runtime.LockOSThread()
 
+			// allocate the ring buffer first for core-local placement
 			rb := ring.New(1 << 14)
 			coreRings[core] = rb
 
+			// allocate router state now
 			rt := &CoreRouter{IsReverse: core >= n/2}
 			rt.Fanouts = make([][]fanRef, 0, 1<<17)
 			rt.Routes = make([]*DeltaBucket, 0, 1<<17)
 			rt.PairIndex = make([]uint32, 1<<17)
 			coreRouters[core] = rt
 
+			// start the pinned consumer loop
 			ring.PinnedConsumer(core, rb, new(uint32), new(uint32), func(p unsafe.Pointer) {
 				onPriceUpdate(rt, (*PriceUpdate)(p))
 			}, make(chan struct{}))
 		}(core)
 	}
 
+	// wait for all goroutines to have done their allocations
 	wg.Wait()
 }
 
@@ -177,6 +182,7 @@ func RegisterPair(addr40 []byte, pairId uint16) {
 	}
 }
 
+// RegisterRoute ORs a full 64-bit mask into routingBitmap.
 func RegisterRoute(pairID uint16, mask uint64) {
 	routingBitmap[pairID] |= mask
 }
