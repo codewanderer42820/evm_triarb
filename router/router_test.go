@@ -87,7 +87,7 @@ func TestInitAndRegisterCycles(t *testing.T) {
 	}
 
 	for _, rt := range coreRouters {
-		idx := int(rt.PairIndex[10]) // stored as index+1
+		idx := int(rt.PairIndex[10]) // direct bucket index stored
 		if idx >= len(rt.Routes) {
 			t.Fatalf("pair index %d out of range (routes=%d)", idx, len(rt.Routes))
 		}
@@ -97,15 +97,11 @@ func TestInitAndRegisterCycles(t *testing.T) {
 	}
 }
 
-// TestRouteUpdateAndOnPriceUpdate drives tick ingestion and fan‑out logic on a
-// hand‑rolled single‑core setup so we can deterministically exercise the hot paths.
+// TestRouteUpdateAndOnPriceUpdate drives tick ingestion and fan‑out logic on a single‑core router.
 func TestRouteUpdateAndOnPriceUpdate(t *testing.T) {
 	resetGlobals()
 
-	// ------------------------------------------------------------------
-	// deterministic single‑core router with one bucket queue
-	// ------------------------------------------------------------------
-
+	// single‑core router with one bucket queue
 	coreRouters = []*CoreRouter{{
 		Routes:    []*DeltaBucket{{Queue: bucketqueue.New()}},
 		Fanouts:   [][]fanRef{{}},
@@ -119,21 +115,18 @@ func TestRouteUpdateAndOnPriceUpdate(t *testing.T) {
 	const pairID = 77
 	RegisterPair(addr, pairID)
 	RegisterRoute(pairID, 1)             // core 0 only
-	coreRouters[0].PairIndex[pairID] = 0 // route index 0  // store index+1 (route index 0)
+	coreRouters[0].PairIndex[pairID] = 0 // bucket 0
 
 	// Seed queue so PeepMin() has a value to work with.
 	path := &ArbPath{}
 	h, _ := coreRouters[0].Routes[0].Queue.Borrow()
 	_ = coreRouters[0].Routes[0].Queue.Push(0, h, unsafe.Pointer(path))
 
-	// ------------------------------------------------------------------
-	// craft a mock Uniswap "Sync" log view with non‑zero reserves
-	// ------------------------------------------------------------------
-
+	// Craft a mock Uniswap "Sync" log view with non‑zero reserves.
 	var lv types.LogView
-	lv.Addr = append([]byte{0, 0, 0}, addr...) // 3‑byte padding mimics v.Addr layout
-	lv.Data = []byte("11111111111111111111111111111111" +
-		"22222222222222222222222222222222")
+	lv.Addr = append([]byte{0, 0, 0}, addr...) // pad to 43‑byte layout
+	lv.Data = []byte("0000000000000000000000000000007b" +
+		"000000000000000000000000000001c8") // reserve0=123, reserve1=456
 
 	// Producer path: convert log → price update → ring push
 	RouteUpdate(&lv)
@@ -157,7 +150,7 @@ func TestRouteUpdateAndOnPriceUpdate(t *testing.T) {
 	}
 }
 
-// Verifies that each pair in a cycle gets its own bucket index (bug repro).
+// Verifies that each pair in a cycle gets its own bucket index.
 func TestRegisterCyclesMultiPair(t *testing.T) {
 	resetGlobals()
 	runtime.GOMAXPROCS(4)
