@@ -17,7 +17,7 @@ import (
 // ─── Global runtime state ───
 var (
 	coreRings     [64]*ring.Ring  // per-core SPSC ring buffers
-	routingBitmap [65536]uint16   // pairId → 16-bit CPU bitmask
+	routingBitmap [65536]uint64   // pairId → 64-bit CPU bitmask
 	addrToPairId  [1 << 17]uint16 // 131072-entry open-address table
 	coreRouters   []*CoreRouter   // router state per pinned core
 )
@@ -85,41 +85,39 @@ type PriceUpdate struct {
 // InitCPURings spawns one pinned consumer goroutine per core, allocating all state on that OS thread.
 
 func InitCPURings() {
-	active := runtime.NumCPU() - 4
-	if active > 64 {
-		active = 64
+	n := runtime.NumCPU() - 4
+	if n < 8 {
+		n = 8
 	}
-	// allocate slice for router metadata references
-	coreRouters = make([]*CoreRouter, active)
+	if n > 64 {
+		n = 64
+	}
 
-	// wait group to synchronize all per-core setup
+	coreRouters = make([]*CoreRouter, n)
+
 	var wg sync.WaitGroup
-	wg.Add(active)
+	wg.Add(n)
 
-	for core := 0; core < active; core++ {
+	for core := 0; core < n; core++ {
 		go func(core int) {
 			defer wg.Done()
 			runtime.LockOSThread()
 
-			// allocate the ring buffer first for core-local placement
 			rb := ring.New(1 << 14)
 			coreRings[core] = rb
 
-			// allocate router state now, from largest slice to smallest
-			rt := &CoreRouter{IsReverse: core >= active/2}
+			rt := &CoreRouter{IsReverse: core >= n/2}
 			rt.Fanouts = make([][]fanRef, 0, 1<<17)
 			rt.Routes = make([]*DeltaBucket, 0, 1<<17)
 			rt.PairIndex = make([]uint32, 1<<17)
 			coreRouters[core] = rt
 
-			// start the pinned consumer loop (blocks on ring.Pop)
 			ring.PinnedConsumer(core, rb, new(uint32), new(uint32), func(p unsafe.Pointer) {
 				onPriceUpdate(rt, (*PriceUpdate)(p))
 			}, make(chan struct{}))
 		}(core)
 	}
 
-	// block until every core has finished its local setup
 	wg.Wait()
 }
 
@@ -149,7 +147,6 @@ func RouteUpdate(v *types.LogView) {
 	addr := v.Addr[3:43]
 	pair := lookupPairID(addr)
 
-	// parse raw big-endian reserves directly (highest performance)
 	r0 := utils.LoadBE64(v.Data[24:])
 	r1 := utils.LoadBE64(v.Data[56:])
 	fwd := fastuni.Log2ReserveRatio(r0, r1)
@@ -158,7 +155,7 @@ func RouteUpdate(v *types.LogView) {
 	ptr := unsafe.Pointer(&upd)
 
 	for m := routingBitmap[pair]; m != 0; {
-		core := bits.TrailingZeros16(m)
+		core := bits.TrailingZeros64(m)
 		coreRings[core].Push(ptr)
 		m &^= 1 << core
 	}
@@ -180,9 +177,7 @@ func RegisterPair(addr40 []byte, pairId uint16) {
 	}
 }
 
-// RegisterRoute sets bits in routingBitmap rather than overwriting.
-// This lets us OR in multiple independent masks.
-func RegisterRoute(pairID uint16, mask uint16) {
+func RegisterRoute(pairID uint16, mask uint64) {
 	routingBitmap[pairID] |= mask
 }
 
@@ -201,7 +196,6 @@ func lookupPairID(addr []byte) uint16 {
 }
 
 // onProfitablePath is a placeholder for arbitrage profit handling.
-// It is currently a no-op stub to satisfy compilation.
 func onProfitablePath(p *ArbPath, tick float64) {
 	// no-op
 }

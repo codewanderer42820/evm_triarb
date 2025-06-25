@@ -23,71 +23,54 @@ type Cycle struct {
 	Pairs  [3]uint16 // three corresponding pair IDs
 }
 
-// RegisterCycles randomly enables exactly two cores per cycle:
-// one chosen from the “forward” half (indices [0..half-1]),
-// one chosen from the “reverse” half ([half..nCores-1]).
-// We OR those two single-bit masks together so RegisterRoute only
-// flips those two bits on.
+// coreMask builds a 64-bit mask for two cores.
+func coreMask(fwd, rev int) uint64 {
+	return (uint64(1) << fwd) | (uint64(1) << rev)
+}
+
+// RegisterCycles enables exactly two cores per pair in each cycle,
+// selecting 6 distinct cores per cycle (2 for each of 3 pairs).
 func RegisterCycles(cycles []Cycle) {
 	nCores := len(coreRouters)
-	if nCores == 0 {
-		return
+	if nCores < 6 {
+		return // not enough cores for full dispersion
 	}
-	half := nCores / 2
 
 	for _, cyc := range cycles {
-		// pick one forward-core index [0,half)
-		fwdCore := rand.Intn(half)
-		// pick one reverse-core index [half, nCores)
-		revCore := rand.Intn(nCores-half) + half
+		// pick 6 distinct cores via a single permutation
+		perm := rand.Perm(nCores)
+		coreSet := perm[:6]
 
-		// build a mask with just those two bits
-		mask := uint16(1<<fwdCore | 1<<revCore)
-
-		// register each pair under exactly those two cores
-		for _, pairID := range cyc.Pairs {
-			RegisterRoute(pairID, mask)
+		// assign each pair (fwd, rev) and register route
+		for i, pairID := range cyc.Pairs {
+			fwd := coreSet[i*2]
+			rev := coreSet[i*2+1]
+			RegisterRoute(pairID, coreMask(fwd, rev))
 		}
 
-		// wire up only those two cores
-		for _, coreIdx := range []int{fwdCore, revCore} {
+		// allocate per-core path data and seed queues
+		for _, coreIdx := range coreSet {
 			rt := coreRouters[coreIdx]
-			legPairs := cyc.Pairs
+			path := &ArbPath{PoolID: [3]uint32{
+				uint32(cyc.Pairs[0]),
+				uint32(cyc.Pairs[1]),
+				uint32(cyc.Pairs[2]),
+			}}
 
-			// build one shared ArbPath for this core
-			// Reverse flags nominally unused here, since onPriceUpdate
-			// uses CoreRouter.IsReverse to pick RevTick vs FwdTick.
-			path := &ArbPath{
-				PoolID: [3]uint32{
-					uint32(legPairs[0]),
-					uint32(legPairs[1]),
-					uint32(legPairs[2]),
-				},
-			}
-
-			// for each leg, ensure a queue exists and seed it
-			for legIdx, pairID := range legPairs {
+			for legIdx, pairID := range cyc.Pairs {
 				idx := rt.PairIndex[pairID]
 				if idx == 0 {
-					// first time for this pair on this core; allocate
 					q := bucketqueue.New()
 					rt.Routes = append(rt.Routes, &DeltaBucket{Queue: q})
 					idx = uint32(len(rt.Routes))
 					rt.PairIndex[pairID] = idx
 				}
-
 				bktIndex := idx - 1
 				q := rt.Routes[bktIndex].Queue
-
-				// seed so PeepMin never returns nil
 				h, _ := q.Borrow()
 				_ = q.Push(0, h, unsafe.Pointer(path))
 
-				// make sure the fanout slot exists
-				if len(rt.Fanouts) <= int(bktIndex) {
-					needed := int(bktIndex) - len(rt.Fanouts) + 1
-					rt.Fanouts = append(rt.Fanouts, make([][]fanRef, needed)...)
-				}
+				// fanout slot already preallocated in InitCPURings; just append
 				rt.Fanouts[bktIndex] = append(rt.Fanouts[bktIndex], fanRef{
 					P:         path,
 					Q:         q,
