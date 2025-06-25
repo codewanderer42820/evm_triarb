@@ -10,6 +10,7 @@ import (
 	"main/fastuni"
 	"main/ring"
 	"main/types"
+	"main/utils"
 )
 
 // -----------------------------------------------------------------------------
@@ -148,10 +149,10 @@ func onPriceUpdate(rt *CoreRouter, upd *PriceUpdate) {
 func RouteUpdate(v *types.LogView) {
 	// v.Addr: "0x" prefix + 40‑byte lowercase hex address (total 42 ASCII chars)
 	key := v.Addr[3:43] // strip '"0x'
-	pairId := addrToPairId[hashAddress(key)]
+	pairId := addrToPairId[utils.HashAddress(key)]
 
-	r0 := parseHexU64(v.Data[:32])
-	r1 := parseHexU64(v.Data[32:64])
+	r0 := utils.ParseHexU64(v.Data[:32])
+	r1 := utils.ParseHexU64(v.Data[32:64])
 	fwd := fastuni.Log2ReserveRatio(r0, r1)
 	rev := -fwd
 
@@ -173,6 +174,4 @@ func RegisterRoute(pairId uint16, mask uint16) { routingBitmap[pairId] = mask }
 // Stubs / helpers (must be provided elsewhere in project)
 // -----------------------------------------------------------------------------
 
-func hashAddress(addr []byte) uint32     { /* TODO */ return 0 }
-func parseHexU64(b []byte) uint64        { /* TODO */ return 0 }
 func logProfit(p *ArbPath, gain float64) { log.Printf("PROFIT %.4f %% path %+v", gain, p) }

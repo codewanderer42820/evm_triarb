@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"main/types"
+	"main/utils"
 	"unsafe"
 )
 
@@ -35,17 +36,17 @@ func handleFrame(p []byte) {
 		switch tag {
 		case keyAddress:
 			if missing&wantAddr != 0 {
-				v.Addr = sliceASCII(p, i+8+findQuote(p[i+8:]))
+				v.Addr = utils.SliceASCII(p, i+8+utils.FindQuote(p[i+8:]))
 				missing &^= wantAddr
 			}
 		case keyData:
 			if missing&wantData != 0 {
-				v.Data = sliceASCII(p, i+7)
+				v.Data = utils.SliceASCII(p, i+7)
 				missing &^= wantData
 			}
 		case keyTopics:
 			if missing&wantTopics != 0 {
-				v.Topics = sliceJSONArray(p, i+8+findBracket(p[i+8:]))
+				v.Topics = utils.SliceJSONArray(p, i+8+utils.FindBracket(p[i+8:]))
 				// quick Uniswap-V2 Sync filter
 				if len(v.Topics) < 11 ||
 					*(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
@@ -55,17 +56,17 @@ func handleFrame(p []byte) {
 			}
 		case keyBlockNumber:
 			if missing&wantBlk != 0 {
-				v.BlkNum = sliceASCII(p, i+8+findQuote(p[i+8:]))
+				v.BlkNum = utils.SliceASCII(p, i+8+utils.FindQuote(p[i+8:]))
 				missing &^= wantBlk
 			}
 		case keyTransactionIndex:
 			if missing&wantTx != 0 && bytes.Equal(p[i:i+18], litTxIdx) {
-				v.TxIndex = sliceASCII(p, i+18+findQuote(p[i+18:]))
+				v.TxIndex = utils.SliceASCII(p, i+18+utils.FindQuote(p[i+18:]))
 				missing &^= wantTx
 			}
 		case keyLogIndex:
 			if missing&wantLog != 0 {
-				v.LogIdx = sliceASCII(p, i+8+findQuote(p[i+8:]))
+				v.LogIdx = utils.SliceASCII(p, i+8+utils.FindQuote(p[i+8:]))
 				missing &^= wantLog
 			}
 		}
@@ -79,18 +80,18 @@ func handleFrame(p []byte) {
 	// fast 128-bit fingerprint for dedup
 	switch {
 	case len(v.Topics) >= 16:
-		v.TagHi, v.TagLo = load128(v.Topics)
+		v.TagHi, v.TagLo = utils.Load128(v.Topics)
 	case len(v.Topics) >= 8:
-		v.TagLo = load64(v.Topics)
+		v.TagLo = utils.Load64(v.Topics)
 	case len(v.Data) >= 8:
-		v.TagLo = load64(v.Data)
+		v.TagLo = utils.Load64(v.Data)
 	default:
 		return // insufficient entropy
 	}
 
-	blk32 := uint32(parseHexU64(v.BlkNum))
-	tx32 := parseHexU32(v.TxIndex)
-	log32 := parseHexU32(v.LogIdx)
+	blk32 := uint32(utils.ParseHexU64(v.BlkNum))
+	tx32 := utils.ParseHexU32(v.TxIndex)
+	log32 := utils.ParseHexU32(v.LogIdx)
 
 	if blk32 > latestBlk {
 		latestBlk = blk32
@@ -104,10 +105,10 @@ func handleFrame(p []byte) {
 // emitLog prints one fully-deduped event in human-readable form.
 func emitLog(v *types.LogView) {
 	fmt.Println("[EVENT]")
-	fmt.Println("  address   =", b2s(v.Addr))
-	fmt.Println("  data      =", b2s(v.Data))
-	fmt.Println("  topics    =", b2s(v.Topics))
-	fmt.Println("  block     =", b2s(v.BlkNum))
-	fmt.Println("  txIndex   =", b2s(v.TxIndex))
-	fmt.Println("  logIndex  =", b2s(v.LogIdx))
+	fmt.Println("  address   =", utils.B2s(v.Addr))
+	fmt.Println("  data      =", utils.B2s(v.Data))
+	fmt.Println("  topics    =", utils.B2s(v.Topics))
+	fmt.Println("  block     =", utils.B2s(v.BlkNum))
+	fmt.Println("  txIndex   =", utils.B2s(v.TxIndex))
+	fmt.Println("  logIndex  =", utils.B2s(v.LogIdx))
 }

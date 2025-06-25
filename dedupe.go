@@ -1,5 +1,7 @@
 package main
 
+import "main/utils"
+
 // dedupe.go — branch-free ring that lives entirely in L1 cache.
 // Each slot is exactly 32 bytes => half a cache-line (avoids false sharing).
 
@@ -22,7 +24,7 @@ func (d *Deduper) Check(
 	latestBlk uint32,
 ) bool {
 	key := (uint64(blk) << 40) ^ (uint64(tx) << 20) ^ uint64(log)
-	i := mix64(key) & (uint64(len(d.buf)) - 1)
+	i := utils.Mix64(key) & (uint64(len(d.buf)) - 1)
 	slot := &d.buf[i]
 
 	stale := (latestBlk - slot.age) > maxReorg

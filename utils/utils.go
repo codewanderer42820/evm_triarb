@@ -1,5 +1,5 @@
 // utils.go — low-level helpers shared by parser, deduper & WS I/O.
-package main
+package utils
 
 import "unsafe"
 
@@ -11,7 +11,7 @@ import "unsafe"
 //
 //go:nosplit
 //go:inline
-func b2s(b []byte) string {
+func B2s(b []byte) string {
 	if len(b) == 0 {
 		return ""
 	}
@@ -26,7 +26,7 @@ func b2s(b []byte) string {
 //
 //go:nosplit
 //go:inline
-func findQuote(b []byte) int {
+func FindQuote(b []byte) int {
 	for i := 0; i < len(b)-1; i++ {
 		if b[i] == ':' {
 			for j := i + 1; j < len(b); j++ {
@@ -46,7 +46,7 @@ func findQuote(b []byte) int {
 //
 //go:nosplit
 //go:inline
-func findBracket(b []byte) int {
+func FindBracket(b []byte) int {
 	for i := 0; i < len(b); i++ {
 		if b[i] == '[' {
 			return i
@@ -59,7 +59,7 @@ func findBracket(b []byte) int {
 //
 //go:nosplit
 //go:inline
-func sliceASCII(b []byte, i int) []byte {
+func SliceASCII(b []byte, i int) []byte {
 	if i < 0 || i >= len(b) || b[i] != '"' {
 		return nil
 	}
@@ -75,7 +75,7 @@ func sliceASCII(b []byte, i int) []byte {
 //
 //go:nosplit
 //go:inline
-func sliceJSONArray(b []byte, i int) []byte {
+func SliceJSONArray(b []byte, i int) []byte {
 	if i < 0 || i >= len(b) || b[i] != '[' {
 		return nil
 	}
@@ -93,11 +93,11 @@ func sliceJSONArray(b []byte, i int) []byte {
 
 //go:nosplit
 //go:inline
-func load64(b []byte) uint64 { return *(*uint64)(unsafe.Pointer(&b[0])) }
+func Load64(b []byte) uint64 { return *(*uint64)(unsafe.Pointer(&b[0])) }
 
 //go:nosplit
 //go:inline
-func load128(b []byte) (uint64, uint64) {
+func Load128(b []byte) (uint64, uint64) {
 	p := (*[2]uint64)(unsafe.Pointer(&b[0]))
 	return p[0], p[1]
 }
@@ -110,7 +110,7 @@ func load128(b []byte) (uint64, uint64) {
 //
 //go:nosplit
 //go:inline
-func parseHexU64(b []byte) uint64 {
+func ParseHexU64(b []byte) uint64 {
 	j := 0
 	if len(b) >= 2 && b[0] == '0' && (b[1]|0x20) == 'x' {
 		j = 2
@@ -134,7 +134,7 @@ func parseHexU64(b []byte) uint64 {
 //
 //go:nosplit
 //go:inline
-func parseHexN(b []byte) uint64 {
+func ParseHexN(b []byte) uint64 {
 	var v uint64
 	for _, c := range b {
 		v <<= 4
@@ -152,7 +152,7 @@ func parseHexN(b []byte) uint64 {
 
 //go:nosplit
 //go:inline
-func parseHexU32(b []byte) uint32 { return uint32(parseHexN(b)) }
+func ParseHexU32(b []byte) uint32 { return uint32(ParseHexN(b)) }
 
 ///////////////////////////////////////////////////////////////////////////////
 // Misc – 64-bit avalanche mixer (MurmurHash3 finalizer)
@@ -160,7 +160,7 @@ func parseHexU32(b []byte) uint32 { return uint32(parseHexN(b)) }
 
 //go:nosplit
 //go:inline
-func mix64(x uint64) uint64 {
+func Mix64(x uint64) uint64 {
 	x ^= x >> 33
 	x *= 0xff51afd7ed558ccd
 	x ^= x >> 33
