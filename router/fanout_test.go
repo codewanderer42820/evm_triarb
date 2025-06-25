@@ -8,12 +8,12 @@ import (
 
 func buildCycles() []Cycle {
 	return []Cycle{
-		{Pairs: [3]uint16{1, 2, 3}},
-		{Pairs: [3]uint16{2, 3, 4}},
-		{Pairs: [3]uint16{3, 4, 5}},
-		{Pairs: [3]uint16{1, 2, 5}},
-		{Pairs: [3]uint16{2, 3, 5}},
-		{Pairs: [3]uint16{5, 3, 1}},
+		{Pairs: [3]uint32{1, 2, 3}},
+		{Pairs: [3]uint32{2, 3, 4}},
+		{Pairs: [3]uint32{3, 4, 5}},
+		{Pairs: [3]uint32{1, 2, 5}},
+		{Pairs: [3]uint32{2, 3, 5}},
+		{Pairs: [3]uint32{5, 3, 1}},
 	}
 }
 
