@@ -5,6 +5,7 @@ package router
 
 import (
 	"encoding/binary"
+	"math/bits"
 	"math/rand"
 	"runtime"
 	"testing"
@@ -83,38 +84,58 @@ func TestRegisterRoute(t *testing.T) {
 	}
 }
 
-// TestInitAndRegisterCycles checks InitCPURings and subsequent RegisterCycles wiring.
+// TestInitAndRegisterCycles verifies InitCPURings and that RegisterCycles
+// picks exactly one forward-core and one reverse-core, wiring their queues.
 func TestInitAndRegisterCycles(t *testing.T) {
 	resetGlobals()
-	// Limit parallelism to 2 cores for the test
-	runtime.GOMAXPROCS(2)
-	// Initialize per-core routers and ring buffers
+	runtime.GOMAXPROCS(4)
 	InitCPURings()
 
-	// There must be at least one router instantiated
-	if len(coreRouters) == 0 {
-		t.Fatalf("InitCPURings created zero routers")
-	}
-
-	// Define a single 3-pair cycle and register it
+	// Register a single 3-pair cycle
 	cyc := Cycle{Pairs: [3]uint16{10, 20, 30}}
 	RegisterCycles([]Cycle{cyc})
 
-	// The bitmap mask should be all-ones across active routers
-	mask := uint16((1 << len(coreRouters)) - 1)
-	if routingBitmap[10] != mask {
-		t.Fatalf("pair bitmap not set by RegisterCycles: got %x, want %x", routingBitmap[10], mask)
+	// Mask for pair 10
+	mask := routingBitmap[10]
+
+	// 1) Exactly two bits set
+	if bits.OnesCount16(mask) != 2 {
+		t.Fatalf("expected exactly 2 cores enabled for pair 10, got mask %x", mask)
 	}
 
-	// For each CoreRouter, ensure the cycle registration created a route and initialized a bucket queue
-	for _, rt := range coreRouters {
-		idx := int(rt.PairIndex[10])
-		if idx >= len(rt.Routes) {
-			t.Fatalf("pair index %d out of range (routes=%d)", idx, len(rt.Routes))
+	// 2) One in forward half, one in reverse half
+	half := len(coreRouters) / 2
+	var sawFwd, sawRev bool
+	for i := range coreRouters {
+		if mask&(1<<i) != 0 {
+			if i < half {
+				sawFwd = true
+			} else {
+				sawRev = true
+			}
 		}
-		// Each route should have a non-nil DeltaBucket and queue
-		if rt.Routes[idx] == nil || rt.Routes[idx].Queue == nil {
-			t.Fatalf("bucket queue missing after RegisterCycles at index %d", idx)
+	}
+	if !sawFwd || !sawRev {
+		t.Fatalf("expected one forward and one reverse core, got mask %x", mask)
+	}
+
+	// 3) Only those two cores must have routes queued
+	for i, rt := range coreRouters {
+		if mask&(1<<i) == 0 {
+			// this core wasn’t selected → no routes for pair 10
+			if rt.PairIndex[10] != 0 {
+				t.Errorf("core %d was not selected but has PairIndex=%d", i, rt.PairIndex[10])
+			}
+			continue
+		}
+		// for selected cores, PairIndex should be 1-based and within Routes
+		idx := rt.PairIndex[10]
+		if idx == 0 || int(idx) > len(rt.Routes) {
+			t.Fatalf("core %d: invalid PairIndex %d (routes=%d)", i, idx, len(rt.Routes))
+		}
+		b := rt.Routes[idx-1]
+		if b == nil || b.Queue == nil {
+			t.Fatalf("core %d: missing bucket queue at index %d", i, idx-1)
 		}
 	}
 }
