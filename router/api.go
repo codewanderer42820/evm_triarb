@@ -1,5 +1,10 @@
-// router/api.go — fast fan-out router (SoA buckets + 64-byte Fanout)
-
+// router/api.go — integrated fan‑out builder + core update logic
+//
+// Hot‑path layout finalised:
+//   - TickBucket owns Tick + Queue.
+//   - Fanout is 64‑byte (Path, Queue ptr, Edge, padding).
+//   - Index remains simple map[PairID]uint32 for clarity.
+//   - All helper types/functions compile under Go 1.22.
 package router
 
 import (
@@ -13,7 +18,6 @@ import (
 
 	"main/bucketqueue"
 	"main/fastuni"
-	"main/pairidx"
 	"main/ring"
 	"main/types"
 	"main/utils"
@@ -22,7 +26,9 @@ import (
 /* ---------- domain ---------- */
 
 type PairID uint32
+
 type CPUMask uint64
+
 type TriCycle [3]PairID
 
 type Ref struct {
@@ -31,20 +37,19 @@ type Ref struct {
 	_pad  [3]byte
 }
 
-/* ---------- build-time fan-outs ---------- */
+/* ---------- bootstrap fan‑outs ---------- */
 
 type Shard struct {
 	Pair PairID
 	Refs []Ref
 }
+
 type Fanouts map[PairID][]Shard
 
 var (
 	fanouts        Fanouts
 	splitThreshold = 16_384
 )
-
-func ResetFanouts() { fanouts = make(Fanouts) }
 
 /* ---------- crypto shuffle ---------- */
 
@@ -66,6 +71,8 @@ func shuffleRefs(r []Ref) {
 }
 
 /* ---------- BuildFanouts ---------- */
+
+func ResetFanouts() { fanouts = make(Fanouts) }
 
 func BuildFanouts(cycles []TriCycle) {
 	debug.SetGCPercent(100)
@@ -91,25 +98,50 @@ func BuildFanouts(cycles []TriCycle) {
 	runtime.GC()
 }
 
-/* ---------- buckets & fanouts ---------- */
+/* ---------- mapper ---------- */
 
-type TickBucket = tickSoA // alias to SoA implementation (ticksoa.go)
+const (
+	clampL2  = 64
+	buckets  = 4096
+	scaleMul = buckets - 1
+	scaleDiv = clampL2 * 2
+	zeroOff  = buckets / 2
+)
 
-type Fanout struct { // see fanout.go
-	Pairs [3]PairID
-	_pad0 [28]byte
-	Queue *bucketqueue.Queue
-	Edge  uint16
-	Idx   uint16
-	_pad1 [6]byte
+func mapL2ToBucket(l2 float64) int64 {
+	if l2 > clampL2 {
+		l2 = clampL2
+	} else if l2 < -clampL2 {
+		l2 = -clampL2
+	}
+	return int64(zeroOff) + int64(l2*scaleMul/scaleDiv)
 }
 
-/* ---------- core router ---------- */
+/* ---------- hot structs ---------- */
+
+type TickBucket struct {
+	Tick  float64
+	Queue bucketqueue.Queue
+}
+
+type ArbPath struct {
+	Ticks [3]float64
+	Pairs [3]PairID
+}
+
+func (p *ArbPath) Sum() float64 { return p.Ticks[0] + p.Ticks[1] + p.Ticks[2] }
+
+type Fanout struct {
+	Path  ArbPath            // 40 B (ticks + pairs)
+	Queue *bucketqueue.Queue // 8  B
+	Edge  uint8              // 1  B — which tick slot 0‑2
+	_pad  [15]byte           // pad to 64‑byte whole cache line
+}
 
 type CoreRouter struct {
-	Buckets []TickBucket // localID → bucket
-	Fanouts []Fanout     // flat slice; Idx into bucket.t*
-	Idx     pairidx.Hash // PairID → localID
+	Buckets []TickBucket
+	Fanouts [][]Fanout
+	Index   map[PairID]uint32
 	IsRev   bool
 	ShardCh chan Shard
 }
@@ -119,12 +151,12 @@ type PriceUpdate struct {
 	FwdTick, RevTick float64
 }
 
-/* ---------- global arrays ---------- */
+/* ---------- globals ---------- */
 
 var (
 	coreRings    [64]*ring.Ring
 	coreRouters  []*CoreRouter
-	routingMask  [1 << 17]CPUMask
+	routeList    [1 << 17][]uint8
 	addrToPairID [1 << 17]PairID
 )
 
@@ -143,18 +175,20 @@ func InitCPURings(cycles []TriCycle) {
 	coreRouters = make([]*CoreRouter, n)
 	var wg sync.WaitGroup
 	wg.Add(n)
+
 	for core := 0; core < n; core++ {
 		go func(core int) {
 			defer wg.Done()
 			runtime.LockOSThread()
 
-			rb := ring.New(15873)
+			rb := ring.New(16381) // prime size
 			shCh := make(chan Shard, 256)
+
 			rt := &CoreRouter{
 				IsRev:   core >= n/2,
 				Buckets: make([]TickBucket, 0, 1024),
-				Fanouts: make([]Fanout, 0, 1<<17),
-				Idx:     pairidx.New(1 << 16),
+				Fanouts: make([][]Fanout, 0, 1024),
+				Index:   make(map[PairID]uint32, 1024),
 				ShardCh: shCh,
 			}
 			coreRouters[core] = rt
@@ -164,14 +198,13 @@ func InitCPURings(cycles []TriCycle) {
 				installShard(rt, &sh)
 			}
 
-			ring.PinnedConsumer(core, rb, new(uint32), new(uint32),
-				func(p unsafe.Pointer) { onPrice(rt, (*PriceUpdate)(p)) },
-				make(chan struct{}),
-			)
+			ring.PinnedConsumer(core, rb, new(uint32), new(uint32), func(p unsafe.Pointer) {
+				onPriceUpdate(rt, (*PriceUpdate)(p))
+			}, make(chan struct{}))
 		}(core)
 	}
 
-	go func() { // stripe shards
+	go func() {
 		core := 0
 		for _, shards := range fanouts {
 			for _, sh := range shards {
@@ -187,69 +220,53 @@ func InitCPURings(cycles []TriCycle) {
 	wg.Wait()
 }
 
-/* ---------- install shard ---------- */
+/* ---------- shard install ---------- */
 
 func localID(rt *CoreRouter, pid PairID) uint32 {
-	if id, ok := rt.Idx.Get(uint32(pid)); ok {
+	if id, ok := rt.Index[pid]; ok {
 		return id
 	}
-	id, _ := rt.Idx.Put(uint32(pid), uint32(len(rt.Buckets)))
+	id := uint32(len(rt.Buckets))
+	rt.Index[pid] = id
 	rt.Buckets = append(rt.Buckets, TickBucket{})
+	rt.Fanouts = append(rt.Fanouts, nil)
 	return id
 }
 
 func installShard(rt *CoreRouter, sh *Shard) {
 	lid := localID(rt, sh.Pair)
-	b := &rt.Buckets[lid]
-	b.ensureCap(len(sh.Refs)) // ensure SoA slices fit
+	qb := &rt.Buckets[lid].Queue
 
-	for i, ref := range sh.Refs {
-		rt.Fanouts = append(rt.Fanouts, Fanout{
-			Pairs: ref.Pairs,
-			Queue: &b.Queue,
-			Edge:  uint16(ref.Edge),
-			Idx:   uint16(i), // position inside slice
-		})
+	for _, ref := range sh.Refs {
+		f := Fanout{Path: ArbPath{Pairs: ref.Pairs}, Queue: qb, Edge: ref.Edge}
+		rt.Fanouts[lid] = append(rt.Fanouts[lid], f)
 	}
 }
 
 /* ---------- price update ---------- */
 
-func onPrice(rt *CoreRouter, upd *PriceUpdate) {
-	t := upd.FwdTick
+func onPriceUpdate(rt *CoreRouter, upd *PriceUpdate) {
+	tick := upd.FwdTick
 	if rt.IsRev {
-		t = upd.RevTick
+		tick = upd.RevTick
 	}
 
-	lid, ok := rt.Idx.Get(uint32(upd.Pair))
+	lid, ok := rt.Index[upd.Pair]
 	if !ok {
 		return
-	} // pair not on this core
+	}
 
-	b := &rt.Buckets[lid]
-	b.Tick = t
+	bucket := &rt.Buckets[lid]
+	bucket.Tick = tick
 
-	for i := range rt.Fanouts {
-		f := &rt.Fanouts[i]
-		if rt.Idx.Get(uint32(f.Pairs[0])) != lid &&
-			rt.Idx.Get(uint32(f.Pairs[1])) != lid &&
-			rt.Idx.Get(uint32(f.Pairs[2])) != lid {
-			continue
-		}
-		switch f.Edge {
-		case 0:
-			b.t0[f.Idx] = t
-		case 1:
-			b.t1[f.Idx] = t
-		default:
-			b.t2[f.Idx] = t
-		}
-		sum := b.t0[f.Idx] + b.t1[f.Idx] + b.t2[f.Idx]
-		f.Queue.Update(mapL2ToBucket(sum), 0, unsafe.Pointer(&f.Pairs))
+	for i := range rt.Fanouts[lid] {
+		f := &rt.Fanouts[lid][i]
+		f.Path.Ticks[f.Edge] = tick
+		f.Queue.Update(mapL2ToBucket(f.Path.Sum()), 0, unsafe.Pointer(&f.Path))
 	}
 }
 
-/* ---------- log ingress ---------- */
+/* ---------- ingress ---------- */
 
 func RouteUpdate(v *types.LogView) {
 	addr := v.Addr[3:43]
@@ -265,9 +282,7 @@ func RouteUpdate(v *types.LogView) {
 	}
 }
 
-/* ---------- registration helpers ---------- */
-
-var routeList [1 << 17][]uint8
+/* ---------- registration ---------- */
 
 func RegisterPair(addr40 []byte, pid PairID) {
 	idx := utils.Hash17(addr40)
@@ -279,8 +294,14 @@ func RegisterPair(addr40 []byte, pid PairID) {
 		idx = (idx + 64) & ((1 << 17) - 1)
 	}
 }
-func RegisterRoute(pid PairID, cpu uint8) { routeList[pid] = append(routeList[pid], cpu) }
 
+// RegisterRoute appends a core‑ID (0‑63) to the per‑pair route list.
+func RegisterRoute(pid PairID, coreID uint8) {
+	routeList[pid] = append(routeList[pid], coreID)
+}
+
+// lookupPairID resolves a 40‑byte pool address to its PairID.
+// Panics if the pool hasn’t been registered at bootstrap.
 func lookupPairID(addr []byte) PairID {
 	idx := utils.Hash17(addr)
 	for {
@@ -291,4 +312,5 @@ func lookupPairID(addr []byte) PairID {
 	}
 }
 
-func onProfitablePath(_ *ArbPath, _ float64) {} // stub
+// Stub hook — integrate with execution engine / alerting as needed.
+func onProfitablePath(*ArbPath, float64) {}

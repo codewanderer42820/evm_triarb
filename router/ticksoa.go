@@ -11,6 +11,7 @@ import (
 )
 
 type tickSoA struct {
+	Tick  float64           // <-- re-added
 	Queue bucketqueue.Queue // owned SPSC queue
 	t0    []float64         // leg-0 ticks  (index == Fanout.Idx)
 	t1    []float64         // leg-1 ticks
