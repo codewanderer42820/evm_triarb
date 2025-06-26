@@ -117,66 +117,84 @@ func BuildFanouts(cycles []TriCycle) {
    Bootstrap
 ───────────────────────────────────*/
 
-// InitCPURings sets up one forward-polarity core set and one mirrored
-// reverse-polarity set.  Each shard is installed *twice*—first into the
-// forward core, then into the matching reverse core (core+half).  All
-// installation happens before any pinned-consumer goroutine starts, so the
-// data path is race-free.
+// InitCPURings creates two mirrored core sets.  Each shard is delivered by
+// value to both the forward core and the matching reverse core.  Inside the
+// per-core goroutine we deep-copy the Refs slice so *all* data is local to
+// that core before installShard runs.
 
 func InitCPURings(cycles []TriCycle) {
-	// ── 1. Decide how many logical cores we’ll use ───────────────────────────
-	n := runtime.NumCPU() - 4 // leave 4 for OS / networking
+	/* 1. decide active cores (even) */
+	n := runtime.NumCPU() - 4
 	if n < 8 {
 		n = 8
 	}
 	if n > 64 {
 		n = 64
 	}
-	if n&1 != 0 { // guarantee an even split
-		n-- // e.g., 17 → 16
+	if n&1 != 0 {
+		n--
 	}
-	half := n / 2 // forward cores: [0 .. half-1]
-	// reverse cores: [half .. n-1]
+	half := n / 2
 
-	// ── 2. Create an empty CoreRouter for every active core ─────────────────
-	for i := 0; i < n; i++ {
-		coreRouters[i] = &CoreRouter{
-			Buckets:   make([]tickSoA, 0, 1024),
-			Local:     localidx.New(1 << 16),
-			IsReverse: i >= half, // second half = reverse polarity
-		}
-	}
-
-	// ── 3. Build the global fan-out plan (no per-core mutation) ─────────────
+	/* 2. build global fan-out plan (fills rawShards) */
 	BuildFanouts(cycles)
 
-	// ── 4. Install every shard twice: forward & mirrored reverse core ───────
-	fwdCore := 0 // round-robin index into the forward set
-	for _, shards := range rawShards {
-		for _, sh := range shards {
-			fwd := fwdCore % half // 0,1,2,…,half-1
-			rev := fwd + half     // matching reverse core
-
-			installShard(coreRouters[fwd], &sh)
-			installShard(coreRouters[rev], &sh)
-
-			fwdCore++
-		}
+	/* 3. one shard channel per core, element type Shard (BY VALUE) */
+	shardCh := make([]chan Shard, n)
+	for i := range shardCh {
+		shardCh[i] = make(chan Shard, 128)
 	}
 
-	// ── 5. Spin up pinned consumers after *all* shards are in place ─────────
-	for i := 0; i < n; i++ {
-		coreRings[i] = ring.New(1 << 14)
-		rt := coreRouters[i]
+	/* 4. per-core goroutine: pin → local alloc → receive shards → deep-copy */
+	for coreID := 0; coreID < n; coreID++ {
+		go func(coreID, half int, in <-chan Shard) {
+			runtime.LockOSThread() // NUMA pin
 
-		go func(coreID int, rt *CoreRouter) {
+			/* 4-a. allocate router & ring on this core */
+			rt := &CoreRouter{
+				Buckets:   make([]tickSoA, 0, 1024),
+				Local:     localidx.New(1 << 16),
+				IsReverse: coreID >= half,
+			}
+			coreRouters[coreID] = rt
+
+			rb := ring.New(1 << 14) // local first-touch
+			coreRings[coreID] = rb
+
+			/* 4-b. receive shards, deep-copy Refs, install */
+			for sh := range in {
+				localRefs := append([]Ref(nil), sh.Refs...) // deep copy
+				localShard := Shard{Pair: sh.Pair, Refs: localRefs}
+				installShard(rt, &localShard)
+			}
+
+			/* 4-c. everything installed – start hot loop */
 			ring.PinnedConsumer(
-				coreID, coreRings[coreID],
+				coreID, rb,
 				new(uint32), new(uint32),
 				func(p unsafe.Pointer) { onPrice(rt, (*PriceUpdate)(p)) },
 				make(chan struct{}),
 			)
-		}(i, rt)
+		}(coreID, half, shardCh[coreID])
+	}
+
+	/* 5. distribute each shard twice: forward core f, reverse core f+half */
+	coreIdx := 0
+	for _, shards := range rawShards {
+		for _, s := range shards {
+			fwd := coreIdx % half
+			rev := fwd + half // mirrored partner
+
+			shardCh[fwd] <- s // send BY VALUE
+			shardCh[rev] <- s
+
+			coreIdx++
+		}
+	}
+
+	/* 6. close all channels so goroutines enter consumer loop */
+	for _, ch := range shardCh {
+		close(ch)
 	}
 }
 
