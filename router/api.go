@@ -145,7 +145,7 @@ func InitCPURings(cycles []TriCycle) {
 		shardCh[i] = make(chan Shard, 128)
 	}
 
-	/* 4. per-core goroutine: pin → local alloc → receive shards → deep-copy */
+	/* 4. per-core goroutine: pin → local alloc → receive shards */
 	for coreID := 0; coreID < n; coreID++ {
 		go func(coreID, half int, in <-chan Shard) {
 			runtime.LockOSThread() // NUMA pin
@@ -157,18 +157,19 @@ func InitCPURings(cycles []TriCycle) {
 				IsReverse: coreID >= half,
 			}
 			coreRouters[coreID] = rt
-
-			rb := ring.New(1 << 14) // local first-touch
+			rb := ring.New(1 << 14)
 			coreRings[coreID] = rb
+
+			paths := make([]ArbPath, 0, 1024) // ← owns every ArbPath for this core
 
 			/* 4-b. receive shards, deep-copy Refs, install */
 			for sh := range in {
 				localRefs := append([]Ref(nil), sh.Refs...) // deep copy
 				localShard := Shard{Pair: sh.Pair, Refs: localRefs}
-				installShard(rt, &localShard)
+				installShard(rt, &localShard, &paths) // *** 3-arg call ***
 			}
 
-			/* 4-c. everything installed – start hot loop */
+			/* 4-c. all shards installed – start hot loop */
 			ring.PinnedConsumer(
 				coreID, rb,
 				new(uint32), new(uint32),
