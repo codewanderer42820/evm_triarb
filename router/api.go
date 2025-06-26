@@ -169,12 +169,14 @@ func InitCPURings(cycles []TriCycle) {
 		coreRings[i] = ring.New(1 << 14)
 		rt := coreRouters[i]
 
-		go ring.PinnedConsumer(
-			i, coreRings[i],
-			new(uint32), new(uint32),
-			func(p unsafe.Pointer) { onPrice(rt, (*PriceUpdate)(p)) },
-			make(chan struct{}), // close to stop consumer if needed
-		)
+		go func(coreID int, rt *CoreRouter) {
+			ring.PinnedConsumer(
+				coreID, coreRings[coreID],
+				new(uint32), new(uint32),
+				func(p unsafe.Pointer) { onPrice(rt, (*PriceUpdate)(p)) },
+				make(chan struct{}),
+			)
+		}(i, rt)
 	}
 }
 
