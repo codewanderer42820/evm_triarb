@@ -17,13 +17,12 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 	b := &rt.Buckets[lid]
 	fan := rt.Fanouts[lid] // guaranteed non-empty
 
-	// 3. peek cheapest path *before* mutation; fire if profitable (<0)
-	if bucket, ptr, ok := b.PeekMin(); ok {
-		p := (*ArbPath)(ptr)
-		profit := tick + p.Ticks[0] + p.Ticks[1] + p.Ticks[2]
-		if profit < 0 {
-			onProfitablePath(p, bucket) // do NOT pop
-		}
+	// 3. peep cheapest path *before* mutation; fire if profitable (<0)
+	_, _, ptr := b.PeepMin()
+	p := (*ArbPath)(ptr)
+	profit := tick + p.Ticks[0] + p.Ticks[1] + p.Ticks[2]
+	if profit < 0 {
+		onProfitablePath(p, profit)
 	}
 
 	// 4. update every attached path & bucket
