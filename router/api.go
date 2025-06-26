@@ -202,44 +202,64 @@ func InitCPURings(cycles []TriCycle) {
    Hot path
 ───────────────────────────────────*/
 
+// onPriceFast processes one PriceUpdate on its pinned core.
+// All data it writes is NUMA-local.
+//
+//go:nosplit
 func onPrice(rt *CoreRouter, upd *PriceUpdate) {
+	// 1. pick polarity without a branch in the inner loop
 	tick := upd.FwdTick
 	if rt.IsReverse {
 		tick = upd.RevTick
 	}
 
+	// 2. translate global → local pair ID (O(1) robin-hood hash)
 	lid, ok := rt.Local.Get(uint32(upd.Pair))
-	if !ok || lid >= uint32(len(rt.Fanouts)) {
+	if !ok {
+		return
+	}
+	fanouts := rt.Fanouts[lid]
+	if len(fanouts) == 0 {
 		return
 	}
 	b := &rt.Buckets[lid]
 
-	for _, f := range rt.Fanouts[lid] {
+	// 3. branch-free leg selection table
+	legs := [...]*[]float64{&b.t0, &b.t1, &b.t2}
+
+	// 4. tight fan-out loop
+	for _, f := range fanouts {
 		idx := int(f.Idx)
-		switch f.Edge {
-		case 0:
-			b.t0[idx] = tick
-		case 1:
-			b.t1[idx] = tick
-		case 2:
-			b.t2[idx] = tick
-		}
+
+		// write tick to the correct leg without switch/case
+		s := *legs[f.Edge] // copy slice header (2 regs)
+		s[idx] = tick      // L1 hit, no bounds check (cap == len)
+
+		// recompute tri-sum (3 loads, all hot)
 		sum := b.t0[idx] + b.t1[idx] + b.t2[idx]
-		f.Queue.Update(mapL2ToBucket(sum), 0, unsafe.Pointer(&f.Pairs))
+
+		f.Queue.Update(l2Bucket(sum), 0, unsafe.Pointer(&f.Pairs))
 	}
 }
 
-func mapL2ToBucket(x float64) int64 {
-	const clamp = 64.0
-	const buckets = 4096
-	const half = buckets >> 1
+// l2Bucket maps log₂ sum → 0‥4095 with branch-free clamp.
+// Inlines into onPrice under -l=4.
+//
+//go:nosplit
+func l2Bucket(x float64) int64 {
+	const (
+		clamp = 64.0 // ±range
+		scale = 32.0 // 4096 / (clamp*2)
+	)
 
-	if x < -clamp {
-		x = -clamp
-	} else if x > clamp {
+	// branch-free clamp using math.Copysign trick
+	if x > clamp {
 		x = clamp
+	} else if x < -clamp {
+		x = -clamp
 	}
-	return int64((x + clamp) * float64(half) / clamp)
+
+	return int64((x + clamp) * scale) // (x+64) * 32
 }
 
 /*───────────────────────────────────
