@@ -58,7 +58,7 @@ type CoreRouter struct {
 // ----- Globals -----
 
 var (
-	coreRouters   []*CoreRouter
+	coreRouters   [64]*CoreRouter
 	coreRings     [64]*ring.Ring
 	addrToPairID  [1 << 17]PairID
 	routingBitmap [1 << 17]CPUMask // one 64-bit mask per pair
@@ -122,7 +122,6 @@ func InitCPURings(cycles []TriCycle) {
 		n = 64
 	}
 
-	coreRouters = make([]*CoreRouter, n)
 	for i := 0; i < n; i++ {
 		coreRouters[i] = &CoreRouter{
 			Buckets:   make([]tickSoA, 0, 1024),
