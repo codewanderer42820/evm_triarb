@@ -1,3 +1,5 @@
+// api.go — core/router API, 64-CPU bitmap edition.
+
 package router
 
 import (
@@ -58,10 +60,10 @@ type CoreRouter struct {
 // ----- Globals -----
 
 var (
-	coreRouters  []*CoreRouter
-	coreRings    [64]*ring.Ring
-	addrToPairID [1 << 17]PairID
-	routeList    [1 << 17][]uint8
+	coreRouters   []*CoreRouter
+	coreRings     [64]*ring.Ring
+	addrToPairID  [1 << 17]PairID
+	routingBitmap [1 << 17]CPUMask // NEW: 64-bit CPU masks per pair
 
 	rawShards      map[PairID][]Shard
 	splitThreshold = 16_384
@@ -237,7 +239,7 @@ func installShard(rt *CoreRouter, sh *Shard) {
 	}
 }
 
-// ----- Registration -----
+// ----- Registration helpers -----
 
 func RegisterPair(addr40 []byte, pid PairID) {
 	idx := utils.Hash17(addr40)
@@ -251,7 +253,10 @@ func RegisterPair(addr40 []byte, pid PairID) {
 }
 
 func RegisterRoute(pid PairID, core uint8) {
-	routeList[pid] = append(routeList[pid], core)
+	if core >= 64 {
+		panic("core id out of range")
+	}
+	routingBitmap[pid] |= 1 << core
 }
 
 func lookupPairID(addr []byte) PairID {
@@ -264,8 +269,10 @@ func lookupPairID(addr []byte) PairID {
 	}
 }
 
+// ----- Public entry point -----
+
 func RouteUpdate(v *types.LogView) {
-	addr := v.Addr[3:43]
+	addr := v.Addr[3:43] // skip "0x"
 	pair := lookupPairID(addr)
 
 	r0 := utils.LoadBE64(v.Data[24:])
@@ -275,9 +282,13 @@ func RouteUpdate(v *types.LogView) {
 	upd := PriceUpdate{Pair: pair, FwdTick: tick, RevTick: -tick}
 	ptr := unsafe.Pointer(&upd)
 
-	for _, c := range routeList[pair] {
-		coreRings[c].Push(ptr)
+	for m := routingBitmap[pair]; m != 0; {
+		core := bits.TrailingZeros64(uint64(m))
+		coreRings[core].Push(ptr)
+		m &^= 1 << core
 	}
 }
+
+// ----- Placeholder for executor -----
 
 func onProfitablePath(_ *ArbPath, _ float64) {}
