@@ -248,8 +248,8 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 //go:nosplit
 func l2Bucket(x float64) int64 {
 	const (
-		clamp = 64.0 // ±range
-		scale = 32.0 // 4096 / (clamp*2)
+		clamp = 128.0 // covers ±2×64
+		scale = 16.0  // 4096 / 256
 	)
 
 	// branch-free clamp using math.Copysign trick
