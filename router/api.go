@@ -117,38 +117,54 @@ func BuildFanouts(cycles []TriCycle) {
    Bootstrap
 ───────────────────────────────────*/
 
+// InitCPURings sets up one forward-polarity core set and one mirrored
+// reverse-polarity set.  Each shard is installed *twice*—first into the
+// forward core, then into the matching reverse core (core+half).  All
+// installation happens before any pinned-consumer goroutine starts, so the
+// data path is race-free.
+
 func InitCPURings(cycles []TriCycle) {
-	n := runtime.NumCPU() - 4
+	// ── 1. Decide how many logical cores we’ll use ───────────────────────────
+	n := runtime.NumCPU() - 4 // leave 4 for OS / networking
 	if n < 8 {
 		n = 8
 	}
 	if n > 64 {
 		n = 64
 	}
+	if n&1 != 0 { // guarantee an even split
+		n-- // e.g., 17 → 16
+	}
+	half := n / 2 // forward cores: [0 .. half-1]
+	// reverse cores: [half .. n-1]
 
-	/* 0️⃣  create per-core routers (empty Fanouts for now) */
+	// ── 2. Create an empty CoreRouter for every active core ─────────────────
 	for i := 0; i < n; i++ {
 		coreRouters[i] = &CoreRouter{
 			Buckets:   make([]tickSoA, 0, 1024),
 			Local:     localidx.New(1 << 16),
-			IsReverse: i >= n/2,
+			IsReverse: i >= half, // second half = reverse polarity
 		}
 	}
 
-	/* 1️⃣  build global fan-out plan */
+	// ── 3. Build the global fan-out plan (no per-core mutation) ─────────────
 	BuildFanouts(cycles)
 
-	/* 2️⃣  install every shard synchronously (race-free) */
-	core := 0
+	// ── 4. Install every shard twice: forward & mirrored reverse core ───────
+	fwdCore := 0 // round-robin index into the forward set
 	for _, shards := range rawShards {
 		for _, sh := range shards {
-			installShard(coreRouters[core%n], &sh)
-			core++
+			fwd := fwdCore % half // 0,1,2,…,half-1
+			rev := fwd + half     // matching reverse core
+
+			installShard(coreRouters[fwd], &sh)
+			installShard(coreRouters[rev], &sh)
+
+			fwdCore++
 		}
 	}
-	// At this point every CoreRouter.Fanouts is fully sized & populated.
 
-	/* 3️⃣  start pinned consumers */
+	// ── 5. Spin up pinned consumers after *all* shards are in place ─────────
 	for i := 0; i < n; i++ {
 		coreRings[i] = ring.New(1 << 14)
 		rt := coreRouters[i]
@@ -157,7 +173,7 @@ func InitCPURings(cycles []TriCycle) {
 			i, coreRings[i],
 			new(uint32), new(uint32),
 			func(p unsafe.Pointer) { onPrice(rt, (*PriceUpdate)(p)) },
-			make(chan struct{}),
+			make(chan struct{}), // close to stop consumer if needed
 		)
 	}
 }
