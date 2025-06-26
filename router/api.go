@@ -148,28 +148,30 @@ func InitCPURings(cycles []TriCycle) {
 	/* 4. per-core goroutine: pin → local alloc → receive shards */
 	for coreID := 0; coreID < n; coreID++ {
 		go func(coreID, half int, in <-chan Shard) {
-			runtime.LockOSThread() // NUMA pin
+			runtime.LockOSThread() // pin to this CPU
 
-			/* 4-a. allocate router & ring on this core */
+			// ── local allocations (all faulted in by this core) ──
 			rt := &CoreRouter{
 				Buckets:   make([]tickSoA, 0, 1024),
 				Local:     localidx.New(1 << 16),
 				IsReverse: coreID >= half,
 			}
 			coreRouters[coreID] = rt
+
 			rb := ring.New(1 << 14)
 			coreRings[coreID] = rb
 
-			paths := make([]ArbPath, 0, 1024) // ← owns every ArbPath for this core
+			// 👉 THIS is where the slice goes
+			paths := make([]ArbPath, 0, 1024) // owns every ArbPath on this core
 
-			/* 4-b. receive shards, deep-copy Refs, install */
+			// ── install every shard sent to this core ──
 			for sh := range in {
 				localRefs := append([]Ref(nil), sh.Refs...) // deep copy
-				localShard := Shard{Pair: sh.Pair, Refs: localRefs}
-				installShard(rt, &localShard, &paths) // *** 3-arg call ***
+				local := Shard{Pair: sh.Pair, Refs: localRefs}
+				installShard(rt, &local, &paths) // pass &paths
 			}
 
-			/* 4-c. all shards installed – start hot loop */
+			// ── all shards done: start the hot consumer ──
 			ring.PinnedConsumer(
 				coreID, rb,
 				new(uint32), new(uint32),
@@ -203,37 +205,28 @@ func InitCPURings(cycles []TriCycle) {
    Shard installation
 ───────────────────────────────────*/
 
+// installShard attaches every Ref as a Fanout and creates one ArbPath per Ref.
 func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
 	lid := rt.Local.Put(uint32(sh.Pair), uint32(len(rt.Buckets)))
 
-	// 1. create bucket once
+	// bucket once per pair
 	if int(lid) == len(rt.Buckets) {
 		rt.Buckets = append(rt.Buckets, tickSoA{})
 		rt.Buckets[lid].Queue = *bucketqueue.New()
 	}
-
-	// 2. outer fanouts slice must reach lid
+	// outer slice long enough
 	if int(lid) >= len(rt.Fanouts) {
 		rt.Fanouts = append(rt.Fanouts,
 			make([][]Fanout, int(lid)-len(rt.Fanouts)+1)...)
 	}
 
-	b := &rt.Buckets[lid]
-	base := len(rt.Fanouts[lid]) // existing rows
-	total := base + len(sh.Refs)
-	b.ensureCap(total) // grow t0/t1/t2
-
-	for i, ref := range sh.Refs {
-		// 3. create or reuse the shared ArbPath
-		path := ArbPath{Pairs: ref.Pairs} // Tick array zero-init
-		*paths = append(*paths, path)
+	for _, ref := range sh.Refs {
+		*paths = append(*paths, ArbPath{Pairs: ref.Pairs})
 		pPtr := &(*paths)[len(*paths)-1]
 
-		// 4. wire fanout
 		rt.Fanouts[lid] = append(rt.Fanouts[lid], Fanout{
-			Path:  pPtr, // ← new field
-			Queue: &b.Queue,
-			Idx:   uint32(base + i),
+			Path:  pPtr,
+			Queue: &rt.Buckets[lid].Queue,
 			Edge:  ref.Edge,
 		})
 	}
