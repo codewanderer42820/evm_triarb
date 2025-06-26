@@ -1,16 +1,17 @@
-// ticksoa.go — per-pair storage with SoA floats.
 package router
 
 import "main/bucketqueue"
 
+// tickSoA owns three parallel slices.  Index “idx” is shared across them.
+// Each slice length == capacity, so bounds checks vanish after inlining.
 type tickSoA struct {
-	Queue bucketqueue.Queue // owned SPSC queue
-	t0    []float64         // leg-0 ticks  (index == Fanout.Idx)
-	t1    []float64         // leg-1 ticks
-	t2    []float64         // leg-2 ticks
+	Queue bucketqueue.Queue // SPSC queue (bucket ring) for this pair
+	t0    []float64         // ticks where pair is Edge 0
+	t1    []float64         // ticks where pair is Edge 1
+	t2    []float64         // ticks where pair is Edge 2
 }
 
-// ensureCap now guarantees *length* as well as capacity ≥ n.
+// ensureCap grows *length* and capacity so writes are always in-bounds.
 func (b *tickSoA) ensureCap(n int) {
 	if len(b.t0) >= n {
 		return

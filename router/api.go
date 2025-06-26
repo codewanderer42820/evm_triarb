@@ -199,81 +199,41 @@ func InitCPURings(cycles []TriCycle) {
 }
 
 /*───────────────────────────────────
-   Hot path
-───────────────────────────────────*/
-
-// onPriceFast processes one PriceUpdate on its pinned core.
-//
-//go:nosplit
-func onPrice(rt *CoreRouter, upd *PriceUpdate) {
-	tick := upd.FwdTick
-	if rt.IsReverse {
-		tick = upd.RevTick // branch only once per update
-	}
-
-	lid, _ := rt.Local.Get(uint32(upd.Pair)) // guaranteed hit
-	b := &rt.Buckets[lid]
-	fan := rt.Fanouts[lid] // guaranteed non-empty
-
-	// branch-free slice table for leg selection
-	legs := [...]*[]float64{&b.t0, &b.t1, &b.t2}
-
-	for _, f := range fan {
-		idx := int(f.Idx)
-
-		(*legs[f.Edge])[idx] = tick // no switch, no bounds check
-
-		sum := b.t0[idx] + b.t1[idx] + b.t2[idx]
-		f.Queue.Update(l2Bucket(sum), 0, unsafe.Pointer(&f.Pairs))
-	}
-}
-
-// l2Bucket maps a clamped log₂ sum (±128) into 4096 buckets.
-// clamp = 128  ⇒  range 256;  scale = 4096 / 256 = 16.
-//
-//go:nosplit
-func l2Bucket(x float64) int64 {
-	const (
-		clamp = 128.0 // covers two full V2-pool log₂ moves
-		scale = 16.0  // 4096 / (2*clamp)
-	)
-	if x > clamp {
-		x = clamp
-	} else if x < -clamp {
-		x = -clamp
-	}
-	return int64((x + clamp) * scale) // (x+128)*16  →  0‥4095
-}
-
-/*───────────────────────────────────
    Shard installation
 ───────────────────────────────────*/
 
-func installShard(rt *CoreRouter, sh *Shard) {
+func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
 	lid := rt.Local.Put(uint32(sh.Pair), uint32(len(rt.Buckets)))
 
-	/* create bucket exactly once per pair */
+	// 1. create bucket once
 	if int(lid) == len(rt.Buckets) {
 		rt.Buckets = append(rt.Buckets, tickSoA{})
 		rt.Buckets[lid].Queue = *bucketqueue.New()
 	}
 
-	/* make sure Fanouts slice is long enough */
+	// 2. outer fanouts slice must reach lid
 	if int(lid) >= len(rt.Fanouts) {
-		rt.Fanouts = append(rt.Fanouts, make([][]Fanout, int(lid)-len(rt.Fanouts)+1)...)
+		rt.Fanouts = append(rt.Fanouts,
+			make([][]Fanout, int(lid)-len(rt.Fanouts)+1)...)
 	}
 
 	b := &rt.Buckets[lid]
-	base := len(rt.Fanouts[lid]) // cumulative length so far
+	base := len(rt.Fanouts[lid]) // existing rows
 	total := base + len(sh.Refs)
-	b.ensureCap(total)
+	b.ensureCap(total) // grow t0/t1/t2
 
 	for i, ref := range sh.Refs {
+		// 3. create or reuse the shared ArbPath
+		path := ArbPath{Pairs: ref.Pairs} // Tick array zero-init
+		*paths = append(*paths, path)
+		pPtr := &(*paths)[len(*paths)-1]
+
+		// 4. wire fanout
 		rt.Fanouts[lid] = append(rt.Fanouts[lid], Fanout{
-			Pairs: ref.Pairs,
-			Edge:  ref.Edge,
-			Idx:   uint32(base + i), // unique across shards
+			Path:  pPtr, // ← new field
 			Queue: &b.Queue,
+			Idx:   uint32(base + i),
+			Edge:  ref.Edge,
 		})
 	}
 }
