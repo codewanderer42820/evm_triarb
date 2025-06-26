@@ -34,7 +34,8 @@ type TriCycle [3]PairID
 type Ref struct {
 	Pairs TriCycle
 	Edge  uint8
-	_pad  [3]byte
+	//lint:ignore U1000 "used for cache-line alignment"
+	_pad [3]byte
 }
 
 /* ---------- bootstrap fan‑outs ---------- */
@@ -135,7 +136,8 @@ type Fanout struct {
 	Path  ArbPath            // 40 B (ticks + pairs)
 	Queue *bucketqueue.Queue // 8  B
 	Edge  uint8              // 1  B — which tick slot 0‑2
-	_pad  [15]byte           // pad to 64‑byte whole cache line
+	//lint:ignore U1000 "used for cache-line alignment"
+	_pad [15]byte // pad to 64‑byte whole cache line
 }
 
 type CoreRouter struct {
