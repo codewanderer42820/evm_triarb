@@ -31,7 +31,8 @@ type ArbPath struct {
 type Ref struct {
 	Pairs TriCycle
 	Edge  uint16
-	_pad  [2]byte
+	//lint:ignore U1000 "used for cache-line alignment"
+	_pad [2]byte
 }
 
 type Shard struct {
