@@ -26,7 +26,7 @@ type TriCycle [3]PairID
 
 type ArbPath struct {
 	Ticks [3]float64
-	Pairs [3]PairID
+	Pairs TriCycle
 }
 
 type Ref struct {
