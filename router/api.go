@@ -19,28 +19,34 @@ import (
 // ---------- domain ----------
 
 type PairID uint32
+
+// LocalPairID is the identifier for a local pair, used as a map key
+type LocalPairID uint32 // Using a custom type for clarity and consistency
+
 type CPUMask uint64
 type TriCycle [3]PairID
 
-// ArbPath definition
+// ArbPath holds the ticks and pairs for arbitrage paths
 type ArbPath struct {
-	Ticks [3]float64 // One tick will always be zero, the common tick
-	Pairs [3]PairID  // Global pair IDs for transaction submission
+	Ticks [3]float64
+	Pairs [3]PairID
 }
 
+// Ref represents a reference in an arbitrage path
 type Ref struct {
 	Pairs TriCycle
-	Edge  uint16 // Use uint16 for Edge
+	Edge  uint16
 	_pad  [3]byte
 }
 
-// ---------- build-time fan-outs ----------
-
+// Shard represents a pair of Fanouts
 type Shard struct {
 	Pair PairID
 	Refs []Ref
 }
-type Fanouts map[PairID][]Shard
+
+// Fanouts is a map of LocalPairID to a slice of Fanouts
+type Fanouts map[LocalPairID][]Fanout
 
 var (
 	fanouts        Fanouts
@@ -79,7 +85,7 @@ func BuildFanouts(cycles []TriCycle) {
 	tmp := make(map[PairID][]Ref, len(cycles)*3)
 	for _, tri := range cycles {
 		for pos, pair := range tri {
-			tmp[pair] = append(tmp[pair], Ref{Pairs: tri, Edge: uint16(pos)}) // Use uint16 for Edge
+			tmp[pair] = append(tmp[pair], Ref{Pairs: tri, Edge: uint16(pos)})
 		}
 	}
 	for pair, refs := range tmp {
@@ -122,7 +128,7 @@ type TickBucket = tickSoA // alias
 
 type CoreRouter struct {
 	Buckets []TickBucket
-	Fanouts []Fanout
+	Fanouts Fanouts // Change Fanouts to map[LocalPairID][]Fanout
 	Local   localidx.Hash
 	IsRev   bool
 	ShardCh chan Shard
@@ -144,6 +150,11 @@ var (
 
 // ---------- init ----------
 
+// Convert global PairID to LocalPairID
+func GlobalPairIDToLocalPairID(rt *CoreRouter, pid PairID) LocalPairID {
+	return LocalPairID(pid)
+}
+
 func InitCPURings(cycles []TriCycle) {
 	n := runtime.NumCPU() - 4
 	if n < 8 {
@@ -162,12 +173,12 @@ func InitCPURings(cycles []TriCycle) {
 			defer wg.Done()
 			runtime.LockOSThread()
 
-			rb := ring.New(15873) // prime size
+			rb := ring.New(15873)
 			shCh := make(chan Shard, 256)
 			rt := &CoreRouter{
 				IsRev:   core >= n/2,
 				Buckets: make([]TickBucket, 0, 1024),
-				Fanouts: make([]Fanout, 0, 1<<17),
+				Fanouts: make(Fanouts),
 				Local:   localidx.New(1 << 16),
 				ShardCh: shCh,
 			}
@@ -199,34 +210,33 @@ func InitCPURings(cycles []TriCycle) {
 	wg.Wait()
 }
 
-// ---------- shard install ----------
-
-func localID(rt *CoreRouter, pid PairID) uint32 {
-	if id, ok := rt.Local.Get(uint32(pid)); ok {
-		return id
-	}
-	id := rt.Local.Put(uint32(pid), uint32(len(rt.Buckets)))
-	rt.Buckets = append(rt.Buckets, TickBucket{})
-	return id
+// Retrieve the LocalPairID from the hash map
+func LocalPairKey(rt *CoreRouter, pid PairID) LocalPairID {
+	// Convert global PairID to LocalPairID using the conversion function
+	return GlobalPairIDToLocalPairID(rt, pid)
 }
 
+// Install a shard of data into the core router
 func installShard(rt *CoreRouter, sh *Shard) {
-	lid := localID(rt, sh.Pair)
+	lid := LocalPairKey(rt, sh.Pair) // Correctly using LocalPairKey here
 	b := &rt.Buckets[lid]
 	b.ensureCap(len(sh.Refs))
 
+	if rt.Fanouts[lid] == nil {
+		rt.Fanouts[lid] = []Fanout{}
+	}
+
 	for i, ref := range sh.Refs {
-		rt.Fanouts = append(rt.Fanouts, Fanout{
+		rt.Fanouts[lid] = append(rt.Fanouts[lid], Fanout{
 			Pairs: ref.Pairs,
 			Queue: &b.Queue,
-			Edge:  ref.Edge, // Use Edge as uint16 directly
+			Edge:  ref.Edge,
 			Idx:   uint16(i),
 		})
 	}
 }
 
-// ---------- price update ----------
-
+// Process price updates based on the current state
 func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 	tick := upd.FwdTick
 	if rt.IsRev {
@@ -238,13 +248,7 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 	}
 
 	b := &rt.Buckets[lid]
-	for _, f := range rt.Fanouts[lid] { // Fixed range over rt.Fanouts[lid] assuming it's a slice
-		if rt.Local.Get(uint32(f.Pairs[0])) != lid &&
-			rt.Local.Get(uint32(f.Pairs[1])) != lid &&
-			rt.Local.Get(uint32(f.Pairs[2])) != lid {
-			continue
-		}
-
+	for _, f := range rt.Fanouts[lid] {
 		switch f.Edge {
 		case 0:
 			b.t0[f.Idx] = tick
@@ -259,8 +263,7 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 	}
 }
 
-// ---------- log ingress ----------
-
+// Route the log update to the relevant price processors
 func RouteUpdate(v *types.LogView) {
 	addr := v.Addr[3:43]
 	pair := lookupPairID(addr)
@@ -276,8 +279,7 @@ func RouteUpdate(v *types.LogView) {
 	}
 }
 
-// ---------- registration ----------
-
+// Register a pair in the address-to-pair mapping
 func RegisterPair(addr40 []byte, pid PairID) {
 	idx := utils.Hash17(addr40)
 	for {
@@ -289,10 +291,12 @@ func RegisterPair(addr40 []byte, pid PairID) {
 	}
 }
 
+// Register a route for a specific pair
 func RegisterRoute(pid PairID, coreID uint8) {
 	routeList[pid] = append(routeList[pid], coreID)
 }
 
+// Lookup a pair ID based on the address
 func lookupPairID(addr []byte) PairID {
 	idx := utils.Hash17(addr)
 	for {
