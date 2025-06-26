@@ -45,7 +45,8 @@ type ArbPath struct {
 type Ref struct {
 	Pairs TriCycle
 	Edge  uint16
-	_pad  [2]byte // alignment padding
+	//lint:ignore U1000 padding for cache alignment
+	_pad [2]byte // alignment padding
 }
 
 // Shard contains refs grouped by a pair
@@ -65,7 +66,8 @@ type Fanout struct {
 	Path  *ArbPath           // shared triangle object
 	Queue *bucketqueue.Queue // per-pair queue used for PeepMin/Update
 	Edge  uint16             // which of the 3 tick slots this edge updates
-	_pad  uint16             // alignment
+	//lint:ignore U1000 padding for cache alignment
+	_pad uint16 // alignment
 }
 
 // CoreRouter contains per-core router state
