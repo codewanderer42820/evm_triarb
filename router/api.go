@@ -211,15 +211,9 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 		tick = upd.RevTick // branch only once per update
 	}
 
-	lid, ok := rt.Local.Get(uint32(upd.Pair))
-	if !ok {
-		return
-	}
-	fan := rt.Fanouts[lid]
-	if len(fan) == 0 {
-		return
-	}
+	lid, _ := rt.Local.Get(uint32(upd.Pair)) // guaranteed hit
 	b := &rt.Buckets[lid]
+	fan := rt.Fanouts[lid] // guaranteed non-empty
 
 	// branch-free slice table for leg selection
 	legs := [...]*[]float64{&b.t0, &b.t1, &b.t2}
