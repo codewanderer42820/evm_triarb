@@ -1,261 +1,294 @@
-// router/fanout.go — minimal‑footprint fan‑out with **cryptographically secure** randomness
-//
-// Changes in this revision
-// ------------------------
-//   - Replaced all uses of math/rand with a helper that falls back to
-//     **crypto/rand** (CSPRNG). If EmitCfg.Seed != 0 we keep a deterministic
-//     math/rand path for reproducible tests; otherwise we source every random
-//     index from crypto/rand.
-//   - secureShuffle implements Fisher‑Yates with CSPRNG.
-//   - `emitLoop` uses the same helper for random pop.
+// router/api.go — fast fan-out router (SoA buckets + 64-byte Fanout)
+
 package router
 
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"fmt"
-	mathrand "math/rand" // alias to differentiate from crypto/rand
+	"math/bits"
 	"runtime"
-	"sort"
+	"runtime/debug"
+	"sync"
+	"unsafe"
+
+	"main/bucketqueue"
+	"main/fastuni"
+	"main/pairidx"
+	"main/ring"
+	"main/types"
+	"main/utils"
 )
 
-// -----------------------------------------------------------------------------
-// Triangle table (deduplicated)
-// -----------------------------------------------------------------------------
+/* ---------- domain ---------- */
 
-var triTable [][3]uint32
-var triIndex map[[3]uint32]uint32
+type PairID uint32
+type CPUMask uint64
+type TriCycle [3]PairID
 
-func resetTriTable(capHint int) {
-	triTable = make([][3]uint32, 0, capHint)
-	triIndex = make(map[[3]uint32]uint32, capHint)
+type Ref struct {
+	Pairs TriCycle
+	Edge  uint8
+	_pad  [3]byte
 }
 
-func triID(t [3]uint32) uint32 {
-	if id, ok := triIndex[t]; ok {
+/* ---------- build-time fan-outs ---------- */
+
+type Shard struct {
+	Pair PairID
+	Refs []Ref
+}
+type Fanouts map[PairID][]Shard
+
+var (
+	fanouts        Fanouts
+	splitThreshold = 16_384
+)
+
+func ResetFanouts() { fanouts = make(Fanouts) }
+
+/* ---------- crypto shuffle ---------- */
+
+func crandInt(n int) int {
+	var b [8]byte
+	rand.Read(b[:])
+	v := binary.LittleEndian.Uint64(b[:])
+	if n&(n-1) == 0 {
+		return int(v & uint64(n-1))
+	}
+	hi, _ := bits.Mul64(v, uint64(n))
+	return int(hi)
+}
+func shuffleRefs(r []Ref) {
+	for i := len(r) - 1; i > 0; i-- {
+		j := crandInt(i + 1)
+		r[i], r[j] = r[j], r[i]
+	}
+}
+
+/* ---------- BuildFanouts ---------- */
+
+func BuildFanouts(cycles []TriCycle) {
+	debug.SetGCPercent(100)
+	defer debug.SetGCPercent(-1)
+
+	ResetFanouts()
+	tmp := make(map[PairID][]Ref, len(cycles)*3)
+	for _, tri := range cycles {
+		for pos, pair := range tri {
+			tmp[pair] = append(tmp[pair], Ref{Pairs: tri, Edge: uint8(pos)})
+		}
+	}
+	for pair, refs := range tmp {
+		shuffleRefs(refs)
+		for off := 0; off < len(refs); off += splitThreshold {
+			end := off + splitThreshold
+			if end > len(refs) {
+				end = len(refs)
+			}
+			fanouts[pair] = append(fanouts[pair], Shard{Pair: pair, Refs: refs[off:end]})
+		}
+	}
+	runtime.GC()
+}
+
+/* ---------- buckets & fanouts ---------- */
+
+type TickBucket = tickSoA // alias to SoA implementation (ticksoa.go)
+
+type Fanout struct { // see fanout.go
+	Pairs [3]PairID
+	_pad0 [28]byte
+	Queue *bucketqueue.Queue
+	Edge  uint16
+	Idx   uint16
+	_pad1 [6]byte
+}
+
+/* ---------- core router ---------- */
+
+type CoreRouter struct {
+	Buckets []TickBucket // localID → bucket
+	Fanouts []Fanout     // flat slice; Idx into bucket.t*
+	Idx     pairidx.Hash // PairID → localID
+	IsRev   bool
+	ShardCh chan Shard
+}
+
+type PriceUpdate struct {
+	Pair             PairID
+	FwdTick, RevTick float64
+}
+
+/* ---------- global arrays ---------- */
+
+var (
+	coreRings    [64]*ring.Ring
+	coreRouters  []*CoreRouter
+	routingMask  [1 << 17]CPUMask
+	addrToPairID [1 << 17]PairID
+)
+
+/* ---------- init ---------- */
+
+func InitCPURings(cycles []TriCycle) {
+	n := runtime.NumCPU() - 4
+	if n < 8 {
+		n = 8
+	}
+	if n > 64 {
+		n = 64
+	}
+	BuildFanouts(cycles)
+
+	coreRouters = make([]*CoreRouter, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for core := 0; core < n; core++ {
+		go func(core int) {
+			defer wg.Done()
+			runtime.LockOSThread()
+
+			rb := ring.New(15873)
+			shCh := make(chan Shard, 256)
+			rt := &CoreRouter{
+				IsRev:   core >= n/2,
+				Buckets: make([]TickBucket, 0, 1024),
+				Fanouts: make([]Fanout, 0, 1<<17),
+				Idx:     pairidx.New(1 << 16),
+				ShardCh: shCh,
+			}
+			coreRouters[core] = rt
+			coreRings[core] = rb
+
+			for sh := range shCh {
+				installShard(rt, &sh)
+			}
+
+			ring.PinnedConsumer(core, rb, new(uint32), new(uint32),
+				func(p unsafe.Pointer) { onPrice(rt, (*PriceUpdate)(p)) },
+				make(chan struct{}),
+			)
+		}(core)
+	}
+
+	go func() { // stripe shards
+		core := 0
+		for _, shards := range fanouts {
+			for _, sh := range shards {
+				coreRouters[core%n].ShardCh <- sh
+				core++
+			}
+		}
+		for _, rt := range coreRouters {
+			close(rt.ShardCh)
+		}
+	}()
+
+	wg.Wait()
+}
+
+/* ---------- install shard ---------- */
+
+func localID(rt *CoreRouter, pid PairID) uint32 {
+	if id, ok := rt.Idx.Get(uint32(pid)); ok {
 		return id
 	}
-	id := uint32(len(triTable))
-	triTable = append(triTable, t)
-	triIndex[t] = id
+	id, _ := rt.Idx.Put(uint32(pid), uint32(len(rt.Buckets)))
+	rt.Buckets = append(rt.Buckets, TickBucket{})
 	return id
 }
 
-func GetTri(id uint32) [3]uint32 { return triTable[id] }
+func installShard(rt *CoreRouter, sh *Shard) {
+	lid := localID(rt, sh.Pair)
+	b := &rt.Buckets[lid]
+	b.ensureCap(len(sh.Refs)) // ensure SoA slices fit
 
-// -----------------------------------------------------------------------------
-// Core types (compact)
-// -----------------------------------------------------------------------------
-
-type Cycle struct{ Pairs [3]uint32 }
-
-type PathRef struct {
-	Tri uint32
-	Pos uint8
-}
-
-type ShardItem struct {
-	Pair uint32
-	Refs []PathRef // read‑only if Move=true
-}
-
-// -----------------------------------------------------------------------------
-// Cryptographically‑secure RNG helpers
-// -----------------------------------------------------------------------------
-
-// crandInt returns a uniform random int in [0,n) using crypto/rand.
-func crandInt(n int) int {
-	for {
-		var b [8]byte
-		if _, err := rand.Read(b[:]); err != nil {
-			panic(err) // crypto/rand should never fail on *nix
-		}
-		v := binary.LittleEndian.Uint64(b[:])
-		if vMax := uint64(n); vMax&(vMax-1) == 0 {
-			// power‑of‑two fast path
-			return int(v & (vMax - 1))
-		} else {
-			if x := v % vMax; v-vMax+x < vMax { // unbiased discard trick
-				return int(x)
-			}
-		}
+	for i, ref := range sh.Refs {
+		rt.Fanouts = append(rt.Fanouts, Fanout{
+			Pairs: ref.Pairs,
+			Queue: &b.Queue,
+			Edge:  uint16(ref.Edge),
+			Idx:   uint16(i), // position inside slice
+		})
 	}
 }
 
-// secureInt chooses between deterministic math/rand (if rng!=nil) or crypto.
-func secureInt(n int, rng *mathrand.Rand) int {
-	if rng != nil {
-		return rng.Intn(n)
-	}
-	return crandInt(n)
-}
+/* ---------- price update ---------- */
 
-func secureShuffle(refs []PathRef, rng *mathrand.Rand) {
-	for i := len(refs) - 1; i > 0; i-- {
-		j := secureInt(i+1, rng)
-		refs[i], refs[j] = refs[j], refs[i]
-	}
-}
-
-// -----------------------------------------------------------------------------
-// Staging map + builder
-// -----------------------------------------------------------------------------
-
-var Forward map[uint32][][]PathRef
-
-const splitThreshold = 16_384
-
-func ResetFanouts() {
-	Forward = make(map[uint32][][]PathRef)
-	resetTriTable(1024)
-}
-
-func BuildFanouts(cycles []Cycle) {
-	ResetFanouts()
-
-	tmp := make(map[uint32][]PathRef, len(cycles)*3)
-
-	for i := range cycles {
-		tri := cycles[i].Pairs
-		id := triID(tri)
-		for pos, pair := range tri {
-			tmp[pair] = append(tmp[pair], PathRef{Tri: id, Pos: uint8(pos)})
-		}
+func onPrice(rt *CoreRouter, upd *PriceUpdate) {
+	t := upd.FwdTick
+	if rt.IsRev {
+		t = upd.RevTick
 	}
 
-	usable := runtime.NumCPU() - 4
-	if usable < 1 {
-		usable = 1
-	}
+	lid, ok := rt.Idx.Get(uint32(upd.Pair))
+	if !ok {
+		return
+	} // pair not on this core
 
-	Forward = make(map[uint32][][]PathRef, len(tmp))
+	b := &rt.Buckets[lid]
+	b.Tick = t
 
-	for pair, refs := range tmp {
-		if len(refs) <= splitThreshold || usable == 1 {
-			Forward[pair] = [][]PathRef{refs}
+	for i := range rt.Fanouts {
+		f := &rt.Fanouts[i]
+		if rt.Idx.Get(uint32(f.Pairs[0])) != lid &&
+			rt.Idx.Get(uint32(f.Pairs[1])) != lid &&
+			rt.Idx.Get(uint32(f.Pairs[2])) != lid {
 			continue
 		}
-		secureShuffle(refs, nil)
-		shards := make([][]PathRef, usable)
-		for idx, ref := range refs {
-			shards[idx%usable] = append(shards[idx%usable], ref)
+		switch f.Edge {
+		case 0:
+			b.t0[f.Idx] = t
+		case 1:
+			b.t1[f.Idx] = t
+		default:
+			b.t2[f.Idx] = t
 		}
-		Forward[pair] = shards
+		sum := b.t0[f.Idx] + b.t1[f.Idx] + b.t2[f.Idx]
+		f.Queue.Update(mapL2ToBucket(sum), 0, unsafe.Pointer(&f.Pairs))
 	}
-	triIndex = nil
 }
 
-// -----------------------------------------------------------------------------
-// Emission APIs
-// -----------------------------------------------------------------------------
+/* ---------- log ingress ---------- */
 
-type EmitCfg struct {
-	Buffer int
-	Seed   int64 // if non‑zero => deterministic math/rand, else crypto/rand
-	Move   bool
+func RouteUpdate(v *types.LogView) {
+	addr := v.Addr[3:43]
+	pair := lookupPairID(addr)
+	r0 := utils.LoadBE64(v.Data[24:])
+	r1 := utils.LoadBE64(v.Data[56:])
+	fwd := fastuni.Log2ReserveRatio(r0, r1)
+
+	upd := PriceUpdate{Pair: pair, FwdTick: fwd, RevTick: -fwd}
+	ptr := unsafe.Pointer(&upd)
+	for _, c := range routeList[pair] {
+		coreRings[c].Push(ptr)
+	}
 }
 
-func EmitShards(cfg EmitCfg) <-chan ShardItem {
-	if cfg.Buffer == 0 {
-		cfg.Buffer = 1024
-	}
-	ch := make(chan ShardItem, cfg.Buffer)
-	go emitLoop(cfg, ch, nil)
-	return ch
-}
+/* ---------- registration helpers ---------- */
 
-func EmitShardsPerCore(cfg EmitCfg) []<-chan ShardItem {
-	usable := runtime.NumCPU() - 4
-	if usable < 1 {
-		usable = 1
-	}
-	if cfg.Buffer == 0 {
-		cfg.Buffer = 256
-	}
-	chans := make([]chan ShardItem, usable)
-	for i := range chans {
-		chans[i] = make(chan ShardItem, cfg.Buffer)
-	}
-	go emitLoop(cfg, nil, chans)
-	outs := make([]<-chan ShardItem, usable)
-	for i := range chans {
-		outs[i] = chans[i]
-	}
-	return outs
-}
+var routeList [1 << 17][]uint8
 
-func emitLoop(cfg EmitCfg, single chan<- ShardItem, perCore []chan ShardItem) {
-	defer func() {
-		if single != nil {
-			close(single)
+func RegisterPair(addr40 []byte, pid PairID) {
+	idx := utils.Hash17(addr40)
+	for {
+		if addrToPairID[idx] == 0 {
+			addrToPairID[idx] = pid
+			return
 		}
-		for _, c := range perCore {
-			if c != nil {
-				close(c)
-			}
-		}
-	}()
-	if Forward == nil {
-		return
+		idx = (idx + 64) & ((1 << 17) - 1)
 	}
+}
+func RegisterRoute(pid PairID, cpu uint8) { routeList[pid] = append(routeList[pid], cpu) }
 
-	var rng *mathrand.Rand
-	if cfg.Seed != 0 {
-		rng = mathrand.New(mathrand.NewSource(cfg.Seed))
-	}
-
-	type tuple struct {
-		pair  uint32
-		shard []PathRef
-	}
-	items := make([]tuple, 0)
-	for pair, shards := range Forward {
-		for _, s := range shards {
-			items = append(items, tuple{pair, s})
+func lookupPairID(addr []byte) PairID {
+	idx := utils.Hash17(addr)
+	for {
+		if id := addrToPairID[idx]; id != 0 {
+			return id
 		}
-	}
-
-	core := 0
-	for len(items) > 0 {
-		idx := secureInt(len(items), rng)
-		it := items[idx]
-		items[idx] = items[len(items)-1]
-		items = items[:len(items)-1]
-
-		var refs []PathRef
-		if cfg.Move {
-			refs = it.shard
-		} else {
-			refs = append([]PathRef(nil), it.shard...)
-		}
-
-		if single != nil {
-			single <- ShardItem{Pair: it.pair, Refs: refs}
-		} else {
-			perCore[core] <- ShardItem{Pair: it.pair, Refs: refs}
-			core = (core + 1) % len(perCore)
-		}
+		idx = (idx + 64) & ((1 << 17) - 1)
 	}
 }
 
-func Release() {
-	Forward = nil
-	triTable = nil
-}
-
-// -----------------------------------------------------------------------------
-// Debug helper
-// -----------------------------------------------------------------------------
-
-func DebugString() string {
-	keys := make([]uint32, 0, len(Forward))
-	for k := range Forward {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-	out := ""
-	for _, k := range keys {
-		out += fmt.Sprintf("%d: %v\n", k, Forward[k])
-	}
-	return out
-}
+func onProfitablePath(_ *ArbPath, _ float64) {} // stub
