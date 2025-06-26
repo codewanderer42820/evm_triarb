@@ -19,10 +19,7 @@ import (
 // ---------- domain ----------
 
 type PairID uint32
-
-// LocalPairID is the identifier for a local pair, used as a map key
-type LocalPairID uint32 // Using a custom type for clarity and consistency
-
+type LocalPairID uint32
 type CPUMask uint64
 type TriCycle [3]PairID
 
@@ -128,7 +125,7 @@ type TickBucket = tickSoA // alias
 
 type CoreRouter struct {
 	Buckets []TickBucket
-	Fanouts Fanouts // Change Fanouts to map[LocalPairID][]Fanout
+	Fanouts Fanouts
 	Local   localidx.Hash
 	IsRev   bool
 	ShardCh chan Shard
