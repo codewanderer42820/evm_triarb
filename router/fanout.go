@@ -1,20 +1,18 @@
-// fanout.go — fan-out entry flattened to 64 bytes for cache line efficiency.
-// Path contains ticks (SoA), Edge refers to the triangle leg.
+// fanout.go — one record tying a pair-edge to its triangle and queue
 
 package router
 
-import (
-	"main/bucketqueue"
-)
+import "main/bucketqueue"
 
+// Fanout now fits in 32 bytes and supports >64 K refs per pair.
 type Fanout struct {
-	Pairs [3]PairID // 12 B - cycle (triangle)
-	//lint:ignore U1000 "used for cache-line alignment"
-	_pad0 [28]byte // padding to align Queue field to 8 bytes
+	Pairs TriCycle // 12 B
+	//lint:ignore U1000 padding for cache alignment
+	_pad0 uint32 // align next field to 8-byte boundary
 
-	Queue *bucketqueue.Queue // 8 B - back-pointer to bucket queue
-	Edge  uint16             // 2 B - leg (0,1,2) in the triangle
-	Idx   uint16             // 2 B - index of tick slice
-	//lint:ignore U1000 "used for cache-line alignment"
-	_pad1 [6]byte // padding to make total size 64 B
+	Queue *bucketqueue.Queue // 8  B (offset 16)
+	Idx   uint32             // 4  B (offset 24)  — widened from uint16
+	Edge  uint16             // 2  B (offset 28)
+	//lint:ignore U1000 padding for cache alignment
+	_pad1 uint16 // 2  B (offset 30)  — maintain 32-byte size
 }
