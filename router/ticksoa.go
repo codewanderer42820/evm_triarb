@@ -2,7 +2,9 @@
 
 package router
 
-import "main/bucketqueue"
+import (
+	"main/bucketqueue"
+)
 
 type tickSoA struct {
 	Queue bucketqueue.Queue // owned SPSC queue

@@ -3,7 +3,9 @@
 
 package router
 
-import "main/bucketqueue"
+import (
+	"main/bucketqueue"
+)
 
 type Fanout struct {
 	Pairs [3]PairID // 12 B - cycle (triangle)
