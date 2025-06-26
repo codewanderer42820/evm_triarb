@@ -1,0 +1,218 @@
+diff --git a/router/api.go b/router/api.go
+index 5266e1a..02ee1b5 100644
+--- a/router/api.go
++++ b/router/api.go
+@@ -148,28 +148,30 @@ func InitCPURings(cycles []TriCycle) {
+ 	/* 4. per-core goroutine: pin → local alloc → receive shards */
+ 	for coreID := 0; coreID < n; coreID++ {
+ 		go func(coreID, half int, in <-chan Shard) {
+-			runtime.LockOSThread() // NUMA pin
++			runtime.LockOSThread() // pin to this CPU
+ 
+-			/* 4-a. allocate router & ring on this core */
++			// ── local allocations (all faulted in by this core) ──
+ 			rt := &CoreRouter{
+ 				Buckets:   make([]tickSoA, 0, 1024),
+ 				Local:     localidx.New(1 << 16),
+ 				IsReverse: coreID >= half,
+ 			}
+ 			coreRouters[coreID] = rt
++
+ 			rb := ring.New(1 << 14)
+ 			coreRings[coreID] = rb
+ 
+-			paths := make([]ArbPath, 0, 1024) // ← owns every ArbPath for this core
++			// 👉 THIS is where the slice goes
++			paths := make([]ArbPath, 0, 1024) // owns every ArbPath on this core
+ 
+-			/* 4-b. receive shards, deep-copy Refs, install */
++			// ── install every shard sent to this core ──
+ 			for sh := range in {
+ 				localRefs := append([]Ref(nil), sh.Refs...) // deep copy
+-				localShard := Shard{Pair: sh.Pair, Refs: localRefs}
+-				installShard(rt, &localShard, &paths) // *** 3-arg call ***
++				local := Shard{Pair: sh.Pair, Refs: localRefs}
++				installShard(rt, &local, &paths) // pass &paths
+ 			}
+ 
+-			/* 4-c. all shards installed – start hot loop */
++			// ── all shards done: start the hot consumer ──
+ 			ring.PinnedConsumer(
+ 				coreID, rb,
+ 				new(uint32), new(uint32),
+@@ -203,37 +205,28 @@ func InitCPURings(cycles []TriCycle) {
+    Shard installation
+ ───────────────────────────────────*/
+ 
++// installShard attaches every Ref as a Fanout and creates one ArbPath per Ref.
+ func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
+ 	lid := rt.Local.Put(uint32(sh.Pair), uint32(len(rt.Buckets)))
+ 
+-	// 1. create bucket once
++	// bucket once per pair
+ 	if int(lid) == len(rt.Buckets) {
+ 		rt.Buckets = append(rt.Buckets, tickSoA{})
+ 		rt.Buckets[lid].Queue = *bucketqueue.New()
+ 	}
+-
+-	// 2. outer fanouts slice must reach lid
++	// outer slice long enough
+ 	if int(lid) >= len(rt.Fanouts) {
+ 		rt.Fanouts = append(rt.Fanouts,
+ 			make([][]Fanout, int(lid)-len(rt.Fanouts)+1)...)
+ 	}
+ 
+-	b := &rt.Buckets[lid]
+-	base := len(rt.Fanouts[lid]) // existing rows
+-	total := base + len(sh.Refs)
+-	b.ensureCap(total) // grow t0/t1/t2
+-
+-	for i, ref := range sh.Refs {
+-		// 3. create or reuse the shared ArbPath
+-		path := ArbPath{Pairs: ref.Pairs} // Tick array zero-init
+-		*paths = append(*paths, path)
++	for _, ref := range sh.Refs {
++		*paths = append(*paths, ArbPath{Pairs: ref.Pairs})
+ 		pPtr := &(*paths)[len(*paths)-1]
+ 
+-		// 4. wire fanout
+ 		rt.Fanouts[lid] = append(rt.Fanouts[lid], Fanout{
+-			Path:  pPtr, // ← new field
+-			Queue: &b.Queue,
+-			Idx:   uint32(base + i),
++			Path:  pPtr,
++			Queue: &rt.Buckets[lid].Queue,
+ 			Edge:  ref.Edge,
+ 		})
+ 	}
+diff --git a/router/fanout.go b/router/fanout.go
+index 8fa6f68..a3e497f 100644
+--- a/router/fanout.go
++++ b/router/fanout.go
+@@ -2,16 +2,10 @@ package router
+ 
+ import "main/bucketqueue"
+ 
+-// Fanout lives in CoreRouter.Fanouts[lid][j] .
+-//
+-//	Path  ─ points at the shared triangle object (ArbPath).
+-//	Queue ─ bucket queue owned by *this pair* (tickSoA.Queue).
+-//	Idx   ─ row in tickSoA.t0/t1/t2  (SoA fast path).
+-//	Edge  ─ 0,1,2 = which leg inside Path the *pair* represents.
++// Fanout is 24 B: two pointers + uint16 Edge (+2 B pad).
+ type Fanout struct {
+-	Path  *ArbPath           //  8 B
+-	Queue *bucketqueue.Queue //  8 B
+-	Idx   uint32             //  4 B  (≤ 2^32 fan-outs per pair)
+-	Edge  uint16             //  2 B
+-	_pad  uint16             //  2 B  -> struct size = 32 B
++	Path  *ArbPath           // shared triangle object
++	Queue *bucketqueue.Queue // per-pair bucket ring
++	Edge  uint16             // 0,1,2 — which leg inside Path
++	_pad  uint16             // alignment filler
+ }
+diff --git a/router/onprice.go b/router/onprice.go
+index bdce9df..5657fa8 100644
+--- a/router/onprice.go
++++ b/router/onprice.go
+@@ -4,53 +4,43 @@ import (
+ 	"unsafe"
+ )
+ 
+-// onPrice handles one PriceUpdate on its pinned core.
+-//  1. pick polarity            (fwd / rev tick)
+-//  2. write tick to SoA slice   (b.t0/t1/t2)
+-//  3. mirror tick into ArbPath  (p.Ticks[Edge])
+-//  4. tri-sum via SoA           (fast contiguous loads)
+-//  5. queue.Update( bucket, p ) (pointer to shared path)
+-//
+-//go:nosplit
++// onPrice: write anchor tick, update leg tick in ArbPath, bucketise, fire path.
+ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
+ 	tick := upd.FwdTick
+ 	if rt.IsReverse {
+ 		tick = upd.RevTick
+ 	}
+ 
+-	lid, _ := rt.Local.Get(uint32(upd.Pair)) // always present
++	lid, _ := rt.Local.Get(uint32(upd.Pair))
+ 	b := &rt.Buckets[lid]
+-	fan := rt.Fanouts[lid] // installed at bootstrap
++	fan := rt.Fanouts[lid]
+ 
+-	legs := [...]*[]float64{&b.t0, &b.t1, &b.t2} // branch-free slice table
++	// anchor-pair absolute tick
++	b.CommonTick = tick
+ 
+ 	for _, f := range fan {
+-		idx := int(f.Idx)
+-
+-		(*legs[f.Edge])[idx] = tick // SoA write
+ 		p := f.Path
+-		p.Ticks[f.Edge] = tick // keep ArbPath current
++		p.Ticks[f.Edge] = tick // store real tick for this leg
++
++		sum := b.CommonTick + p.Ticks[0] + p.Ticks[1] + p.Ticks[2]
+ 
+-		sum := b.t0[idx] + b.t1[idx] + b.t2[idx]
+ 		f.Queue.Update(l2Bucket(sum), 0, unsafe.Pointer(p))
++
++		// after each update: if best bucket negative, pop & fire
++		if bucket, ptr, ok := f.Queue.PeekMin(); ok && bucket < 2048 {
++			f.Queue.PopMin()
++			onProfitablePath((*ArbPath)(ptr), bucket)
++		}
+ 	}
+ }
+ 
+-// l2Bucket maps a log₂ sum in ±128 into 4 096 histogram slots.
+-//
+-//	clamp = 128   (covers two full Uniswap V2 pool swings)
+-//	scale = 16    (4096 / (2*clamp))
+-//
+-//go:nosplit
++// ±128 log₂  →  0‥4095 bucket range.  <2048 == negative profitability.
+ func l2Bucket(x float64) int64 {
+-	const (
+-		clamp = 128.0
+-		scale = 16.0
+-	)
++	const clamp, scale = 128.0, 16.0 // scale = 4096/(2*clamp)
+ 	if x > clamp {
+ 		x = clamp
+ 	} else if x < -clamp {
+ 		x = -clamp
+ 	}
+-	return int64((x + clamp) * scale) // (x+128)*16  →  0‥4095
++	return int64((x + clamp) * scale)
+ }
+diff --git a/router/ticksoa.go b/router/ticksoa.go
+index 4df55d2..86f344b 100644
+--- a/router/ticksoa.go
++++ b/router/ticksoa.go
+@@ -2,22 +2,8 @@ package router
+ 
+ import "main/bucketqueue"
+ 
+-// tickSoA owns three parallel slices.  Index “idx” is shared across them.
+-// Each slice length == capacity, so bounds checks vanish after inlining.
++// tickSoA now contains only the queue plus the anchor-pair tick.
+ type tickSoA struct {
+-	Queue bucketqueue.Queue // SPSC queue (bucket ring) for this pair
+-	t0    []float64         // ticks where pair is Edge 0
+-	t1    []float64         // ticks where pair is Edge 1
+-	t2    []float64         // ticks where pair is Edge 2
+-}
+-
+-// ensureCap grows *length* and capacity so writes are always in-bounds.
+-func (b *tickSoA) ensureCap(n int) {
+-	if len(b.t0) >= n {
+-		return
+-	}
+-	grow := n - len(b.t0)
+-	b.t0 = append(b.t0, make([]float64, grow)...)
+-	b.t1 = append(b.t1, make([]float64, grow)...)
+-	b.t2 = append(b.t2, make([]float64, grow)...)
++	Queue      bucketqueue.Queue // SPSC bucket queue
++	CommonTick float64           // last log₂ tick of this pair
+ }

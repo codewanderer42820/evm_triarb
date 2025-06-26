@@ -47,10 +47,10 @@ type PriceUpdate struct {
 }
 
 type CoreRouter struct {
-	Buckets   []tickSoA     // per-pair tick + queue storage
-	Fanouts   [][]Fanout    // index == LocalPairID (dense)
-	Local     localidx.Hash // global → local ID mapping
-	IsReverse bool          // forward (false) or reverse (true) core
+	Buckets   []bucketqueue.Queue // per-pair tick + queue storage
+	Fanouts   [][]Fanout          // index == LocalPairID (dense)
+	Local     localidx.Hash       // global → local ID mapping
+	IsReverse bool                // forward (false) or reverse (true) core
 }
 
 /*───────────────────────────────────
@@ -152,7 +152,7 @@ func InitCPURings(cycles []TriCycle) {
 
 			// ── local allocations (all faulted in by this core) ──
 			rt := &CoreRouter{
-				Buckets:   make([]tickSoA, 0, 1024),
+				Buckets:   make([]bucketqueue.Queue, 0, 1024),
 				Local:     localidx.New(1 << 16),
 				IsReverse: coreID >= half,
 			}
@@ -211,8 +211,8 @@ func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
 
 	// bucket once per pair
 	if int(lid) == len(rt.Buckets) {
-		rt.Buckets = append(rt.Buckets, tickSoA{})
-		rt.Buckets[lid].Queue = *bucketqueue.New()
+		rt.Buckets = append(rt.Buckets, bucketqueue.Queue{})
+		rt.Buckets = append(rt.Buckets, *bucketqueue.New())
 	}
 	// outer slice long enough
 	if int(lid) >= len(rt.Fanouts) {
@@ -226,7 +226,7 @@ func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
 
 		rt.Fanouts[lid] = append(rt.Fanouts[lid], Fanout{
 			Path:  pPtr,
-			Queue: &rt.Buckets[lid].Queue,
+			Queue: &rt.Buckets[lid],
 			Edge:  ref.Edge,
 		})
 	}
