@@ -32,7 +32,7 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 		p.Ticks[f.Edge] = tick // store real tick for this leg
 
 		sum := p.Ticks[0] + p.Ticks[1] + p.Ticks[2]
-		f.Update(l2Bucket(sum), 0, unsafe.Pointer(p))
+		f.Queue.Update(l2Bucket(sum), 0, unsafe.Pointer(p))
 	}
 }
 

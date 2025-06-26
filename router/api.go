@@ -212,7 +212,6 @@ func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
 	// bucket once per pair
 	if int(lid) == len(rt.Buckets) {
 		rt.Buckets = append(rt.Buckets, bucketqueue.Queue{})
-		rt.Buckets = append(rt.Buckets, *bucketqueue.New())
 	}
 	// outer slice long enough
 	if int(lid) >= len(rt.Fanouts) {
