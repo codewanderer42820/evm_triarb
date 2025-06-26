@@ -1,5 +1,4 @@
-// api.go — core/router API, 64-CPU bitmap edition, race-free bootstrap.
-
+// api.go — 64-core bitmap router with slice-based Fanouts.
 package router
 
 import (
@@ -17,7 +16,9 @@ import (
 	"main/utils"
 )
 
-// ----- Types & constants -----
+/*───────────────────────────────────
+   Types
+───────────────────────────────────*/
 
 type PairID uint32
 type LocalPairID uint32
@@ -32,8 +33,7 @@ type ArbPath struct {
 type Ref struct {
 	Pairs TriCycle
 	Edge  uint16
-	//lint:ignore U1000 padding for cache alignment
-	_pad [2]byte
+	_pad  [2]byte
 }
 
 type Shard struct {
@@ -41,33 +41,35 @@ type Shard struct {
 	Refs []Ref
 }
 
-type Fanouts map[LocalPairID][]Fanout
-
 type PriceUpdate struct {
 	Pair             PairID
 	FwdTick, RevTick float64
 }
 
 type CoreRouter struct {
-	Buckets   []tickSoA
-	Fanouts   Fanouts
-	Local     localidx.Hash
-	IsReverse bool
+	Buckets   []tickSoA     // per-pair tick + queue storage
+	Fanouts   [][]Fanout    // index == LocalPairID (dense)
+	Local     localidx.Hash // global → local ID mapping
+	IsReverse bool          // forward (false) or reverse (true) core
 }
 
-// ----- Globals -----
+/*───────────────────────────────────
+   Globals
+───────────────────────────────────*/
 
 var (
-	coreRouters   [64]*CoreRouter
+	coreRouters   [64]*CoreRouter // index == core ID
 	coreRings     [64]*ring.Ring
-	addrToPairID  [1 << 17]PairID
-	routingBitmap [1 << 17]CPUMask // one 64-bit mask per pair
+	addrToPairID  [1 << 17]PairID  // open-addressed hash table
+	routingBitmap [1 << 17]CPUMask // per-pair 64-bit CPU mask
 
 	rawShards      map[PairID][]Shard
 	splitThreshold = 16_384
 )
 
-// ----- Fan-out building (unchanged except helper) -----
+/*───────────────────────────────────
+   Fan-out planning helpers
+───────────────────────────────────*/
 
 func ResetFanouts() { rawShards = make(map[PairID][]Shard) }
 
@@ -111,7 +113,9 @@ func BuildFanouts(cycles []TriCycle) {
 	}
 }
 
-// ----- Init -----
+/*───────────────────────────────────
+   Bootstrap
+───────────────────────────────────*/
 
 func InitCPURings(cycles []TriCycle) {
 	n := runtime.NumCPU() - 4
@@ -122,19 +126,19 @@ func InitCPURings(cycles []TriCycle) {
 		n = 64
 	}
 
+	/* 0️⃣  create per-core routers (empty Fanouts for now) */
 	for i := 0; i < n; i++ {
 		coreRouters[i] = &CoreRouter{
 			Buckets:   make([]tickSoA, 0, 1024),
-			Fanouts:   make(Fanouts),
 			Local:     localidx.New(1 << 16),
 			IsReverse: i >= n/2,
 		}
 	}
 
-	// ① Build fan-outs once.
+	/* 1️⃣  build global fan-out plan */
 	BuildFanouts(cycles)
 
-	// ② Install every shard synchronously (no race with consumers).
+	/* 2️⃣  install every shard synchronously (race-free) */
 	core := 0
 	for _, shards := range rawShards {
 		for _, sh := range shards {
@@ -142,8 +146,9 @@ func InitCPURings(cycles []TriCycle) {
 			core++
 		}
 	}
+	// At this point every CoreRouter.Fanouts is fully sized & populated.
 
-	// ③ Now start the price-update consumers.
+	/* 3️⃣  start pinned consumers */
 	for i := 0; i < n; i++ {
 		coreRings[i] = ring.New(1 << 14)
 		rt := coreRouters[i]
@@ -157,7 +162,9 @@ func InitCPURings(cycles []TriCycle) {
 	}
 }
 
-// ----- Price update hot path -----
+/*───────────────────────────────────
+   Hot path
+───────────────────────────────────*/
 
 func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 	tick := upd.FwdTick
@@ -166,12 +173,12 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 	}
 
 	lid, ok := rt.Local.Get(uint32(upd.Pair))
-	if !ok {
+	if !ok || lid >= uint32(len(rt.Fanouts)) {
 		return
 	}
 	b := &rt.Buckets[lid]
 
-	for _, f := range rt.Fanouts[LocalPairID(lid)] {
+	for _, f := range rt.Fanouts[lid] {
 		idx := int(f.Idx)
 		switch f.Edge {
 		case 0:
@@ -199,28 +206,31 @@ func mapL2ToBucket(x float64) int64 {
 	return int64((x + clamp) * float64(half) / clamp)
 }
 
-// ----- Shard installation -----
+/*───────────────────────────────────
+   Shard installation
+───────────────────────────────────*/
 
 func installShard(rt *CoreRouter, sh *Shard) {
 	lid := rt.Local.Put(uint32(sh.Pair), uint32(len(rt.Buckets)))
 
-	// Create bucket (exactly once per pair).
+	/* create bucket exactly once per pair */
 	if int(lid) == len(rt.Buckets) {
 		rt.Buckets = append(rt.Buckets, tickSoA{})
 		rt.Buckets[lid].Queue = *bucketqueue.New()
 	}
-	b := &rt.Buckets[lid]
 
-	lpid := LocalPairID(lid)
-	base := len(rt.Fanouts[lpid]) // cumulative length so far
-	total := base + len(sh.Refs)
-	b.ensureCap(total) // grow slices to *total* length
-
-	if rt.Fanouts[lpid] == nil {
-		rt.Fanouts[lpid] = make([]Fanout, 0, len(sh.Refs))
+	/* make sure Fanouts slice is long enough */
+	if int(lid) >= len(rt.Fanouts) {
+		rt.Fanouts = append(rt.Fanouts, make([][]Fanout, int(lid)-len(rt.Fanouts)+1)...)
 	}
+
+	b := &rt.Buckets[lid]
+	base := len(rt.Fanouts[lid]) // cumulative length so far
+	total := base + len(sh.Refs)
+	b.ensureCap(total)
+
 	for i, ref := range sh.Refs {
-		rt.Fanouts[lpid] = append(rt.Fanouts[lpid], Fanout{
+		rt.Fanouts[lid] = append(rt.Fanouts[lid], Fanout{
 			Pairs: ref.Pairs,
 			Edge:  ref.Edge,
 			Idx:   uint32(base + i), // unique across shards
@@ -229,7 +239,9 @@ func installShard(rt *CoreRouter, sh *Shard) {
 	}
 }
 
-// ----- Registration helpers -----
+/*───────────────────────────────────
+   Registration helpers
+───────────────────────────────────*/
 
 func RegisterPair(addr40 []byte, pid PairID) {
 	idx := utils.Hash17(addr40)
@@ -259,7 +271,9 @@ func lookupPairID(addr []byte) PairID {
 	}
 }
 
-// ----- Public entry point -----
+/*───────────────────────────────────
+   Public entry point
+───────────────────────────────────*/
 
 func RouteUpdate(v *types.LogView) {
 	addr := v.Addr[3:43] // skip "0x"
@@ -279,6 +293,8 @@ func RouteUpdate(v *types.LogView) {
 	}
 }
 
-// ----- Placeholder -----
+/*───────────────────────────────────
+   Placeholder for execution layer
+───────────────────────────────────*/
 
 func onProfitablePath(_ *ArbPath, _ float64) {}

@@ -1,5 +1,4 @@
 // ticksoa.go — per-pair storage with SoA floats.
-
 package router
 
 import "main/bucketqueue"
@@ -11,7 +10,7 @@ type tickSoA struct {
 	t2    []float64         // leg-2 ticks
 }
 
-// ensureCap now guarantees both capacity **and length** ≥ n.
+// ensureCap now guarantees *length* as well as capacity ≥ n.
 func (b *tickSoA) ensureCap(n int) {
 	if len(b.t0) >= n {
 		return
