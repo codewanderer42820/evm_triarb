@@ -1,12 +1,4 @@
-// -----------------------------------------------------------------------------
-// ring_test.go — Functional sanity checks for the 32-byte SPSC ring
-// -----------------------------------------------------------------------------
-//
-//  Covers constructor invariants, push/pop round-trip, full-queue back-pressure,
-//  blocking PopWait, empty Pop semantics, and index wrap-around correctness.
-//  The suite keeps resource usage tiny so it can run inside `go test -race`.
-// -----------------------------------------------------------------------------
-
+// ring_test.go — Functional verification of the lock-free SPSC ring
 package ring32
 
 import (
@@ -14,11 +6,10 @@ import (
 	"time"
 )
 
-// TestNewPanicsOnBadSize verifies that the constructor rejects sizes that are
-// either non‑power‑of‑two or ≤ 0.  We wrap the call in an inlined closure so we
-// can recover() and inspect the panic without terminating the whole test run.
+// TestNewPanicsOnBadSize validates that the constructor panics
+// on non-power-of-two or non-positive sizes.
 func TestNewPanicsOnBadSize(t *testing.T) {
-	bad := []int{0, 3, 1000} // 3 and 1000 are not powers of two
+	bad := []int{0, 3, 1000}
 	for _, sz := range bad {
 		func() {
 			defer func() {
@@ -26,31 +17,31 @@ func TestNewPanicsOnBadSize(t *testing.T) {
 					t.Fatalf("New(%d) should panic", sz)
 				}
 			}()
-			_ = New(sz) // expect panic
+			_ = New(sz)
 		}()
 	}
 }
 
-// TestPushPopRoundTrip performs a minimal sanity round‑trip on a size‑8 ring.
-// It pushes one element, pops it, and confirms the ring is empty afterwards.
+// TestPushPopRoundTrip confirms single element round-trip integrity
+// and checks that the queue is empty afterwards.
 func TestPushPopRoundTrip(t *testing.T) {
 	r := New(8)
 	val := &[32]byte{1, 2, 3}
 
 	if !r.Push(val) {
-		t.Fatal("first push must succeed")
+		t.Fatal("Push should succeed")
 	}
 	got := r.Pop()
 	if got == nil || *got != *val {
-		t.Fatalf("got %v, want %v", got, val)
+		t.Fatalf("expected %v, got %v", val, got)
 	}
 	if r.Pop() != nil {
-		t.Fatal("ring should now be empty")
+		t.Fatal("Ring should be empty")
 	}
 }
 
-// TestPushFailsWhenFull fills the ring to capacity and checks that a further
-// Push returns false (non‑blocking back‑pressure).
+// TestPushFailsWhenFull fills the ring and verifies that further
+// pushes are rejected.
 func TestPushFailsWhenFull(t *testing.T) {
 	r := New(4)
 	val := &[32]byte{7}
@@ -64,32 +55,30 @@ func TestPushFailsWhenFull(t *testing.T) {
 	}
 }
 
-// TestPopWaitBlocksUntilItem launches a goroutine that will push after a tiny
-// delay, then asserts PopWait blocks and eventually returns the value.
+// TestPopWaitBlocksUntilItem verifies PopWait blocks until data arrives
+// and returns the correct value.
 func TestPopWaitBlocksUntilItem(t *testing.T) {
 	r := New(2)
 	want := &[32]byte{42}
-
 	go func() {
 		time.Sleep(5 * time.Millisecond)
 		r.Push(want)
 	}()
-
 	if got := r.PopWait(); got == nil || *got != *want {
-		t.Fatalf("PopWait returned %v, want %v", got, want)
+		t.Fatalf("PopWait = %v, want %v", got, want)
 	}
 }
 
-// TestPopNil confirms that Pop on an empty ring returns nil.
+// TestPopNil confirms that Pop returns nil on an empty ring.
 func TestPopNil(t *testing.T) {
 	r := New(4)
 	if r.Pop() != nil {
-		t.Fatal("Pop on empty ring returned non‑nil")
+		t.Fatal("Pop on empty ring should return nil")
 	}
 }
 
-// TestWrapAround exercises >mask iterations to ensure head/tail wrap correctly
-// and masking math is sound.
+// TestWrapAround ensures wrap-around of head and tail math works
+// after more than one full ring cycle.
 func TestWrapAround(t *testing.T) {
 	const size = 4
 	r := New(size)
