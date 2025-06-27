@@ -9,7 +9,7 @@
 // Each benchmark keeps the ring 50-100 % full so steady-state costs are measured
 // without allocation noise or re-zeroing of slots.
 
-package ring
+package ring32
 
 import (
 	"runtime"

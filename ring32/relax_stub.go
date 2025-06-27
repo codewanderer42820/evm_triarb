@@ -6,7 +6,7 @@
 // disabled.  Declares cpuRelax as an empty function so source compiles
 // unchanged on every architecture.
 
-package ring
+package ring32
 
 // cpuRelax is a no-op on unsupported targets.
 func cpuRelax() {}

@@ -6,7 +6,7 @@
 // plain MOVQ to provide acquire / release semantics and act as compiler
 // barriers without the cost of mfence on TSO x86-64.
 
-package ring
+package ring32
 
 // loadAcquireUint64 returns *p with acquire ordering.
 //

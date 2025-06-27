@@ -12,10 +12,10 @@
 // SPDX-License-Identifier: MIT
 
 /* Package statement intentionally omitted here because this code block will be
-   split by file name when copied out.  The real file starts with `package ring`
+   split by file name when copied out.  The real file starts with `package ring32`
 */
 
-package ring
+package ring32
 
 import (
 	"runtime"

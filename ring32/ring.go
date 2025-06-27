@@ -10,7 +10,7 @@
 
 // SPDX-License-Identifier: MIT
 
-package ring
+package ring32
 
 /*───────────────────────── slot & ring ─────────────────────────*/
 

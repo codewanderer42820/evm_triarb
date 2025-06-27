@@ -20,7 +20,7 @@
 // unconditionally; when this stub is selected it silently does nothing and the
 // goroutine remains scheduled wherever the Go runtime decides.
 
-package ring
+package ring32
 
 // setAffinity is a no‑op on unsupported OSes or when building with TinyGo.
 func setAffinity(cpu int) {}

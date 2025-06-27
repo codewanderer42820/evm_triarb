@@ -19,7 +19,7 @@
 //
 // This file is built only when `GOOS=linux` and **not** under TinyGo.
 
-package ring
+package ring32
 
 import (
 	"syscall"

@@ -7,7 +7,7 @@
 //  The suite keeps resource usage tiny so it can run inside `go test -race`.
 // -----------------------------------------------------------------------------
 
-package ring
+package ring32
 
 import (
 	"testing"

@@ -5,7 +5,7 @@
 // Portable implementations for the acquire/release helpers using
 // sync/atomic.  Seq-cst is a conservative superset of the required order.
 
-package ring
+package ring32
 
 import "sync/atomic"
 

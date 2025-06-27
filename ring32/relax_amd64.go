@@ -6,7 +6,7 @@
 // relax_amd64.s and emits a single PAUSE instruction so busy-wait loops
 // back-off politely while remaining in userspace.
 
-package ring
+package ring32
 
 // cpuRelax executes the x86_64 PAUSE instruction.
 //

@@ -8,7 +8,7 @@
 //  activity to ensure the adaptive spin logic never deadlocks or starves.
 // -----------------------------------------------------------------------------
 
-package ring
+package ring32
 
 import (
 	"runtime"

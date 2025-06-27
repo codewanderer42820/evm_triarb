@@ -24,7 +24,7 @@ import (
 	"main/bucketqueue"
 	"main/fastuni"
 	"main/localidx"
-	"main/ring"
+	"main/ring32"
 	"main/types"
 	"main/utils"
 )
@@ -103,7 +103,7 @@ func init() {
 
 var (
 	coreRouters [64]*CoreRouter
-	coreRings   [64]*ring.Ring
+	coreRings   [64]*ring32.Ring
 
 	addrToPairID [1 << 17]PairID
 	pairCoreMask [1 << 17]CPUMask
@@ -250,7 +250,7 @@ func shardWorker(coreID, half int, in <-chan Shard) {
 	}
 	coreRouters[coreID] = rt
 
-	rb := ring.New(1 << 14)
+	rb := ring32.New(1 << 14)
 	coreRings[coreID] = rb
 
 	buf := make([]PathState, 0, 4096)
@@ -258,7 +258,7 @@ func shardWorker(coreID, half int, in <-chan Shard) {
 		installShard(rt, &sh, &buf)
 	}
 
-	ring.PinnedConsumer(
+	ring32.PinnedConsumer(
 		coreID, rb, new(uint32), new(uint32),
 		func(p *[32]byte) { onPrice(rt, (*PriceUpdate)(unsafe.Pointer(p))) },
 		make(chan struct{}),
