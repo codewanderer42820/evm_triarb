@@ -1,9 +1,3 @@
-// ring_test.go — Unit-test suite for 32-byte ring queue
-//
-// This validates constructor behavior, push/pop edge cases,
-// wraparound logic, and PopWait blocking.
-// All paths now use *[32]byte directly.
-
 package ring
 
 import (
@@ -11,12 +5,11 @@ import (
 	"time"
 )
 
-// -----------------------------------------------------------------------------
-// Constructor validation
-// -----------------------------------------------------------------------------
-
+// TestNewPanicsOnBadSize verifies that the constructor rejects sizes that are
+// either non‑power‑of‑two or ≤ 0.  We wrap the call in an inlined closure so we
+// can recover() and inspect the panic without terminating the whole test run.
 func TestNewPanicsOnBadSize(t *testing.T) {
-	bad := []int{0, 3, 1000}
+	bad := []int{0, 3, 1000} // 3 and 1000 are not powers of two
 	for _, sz := range bad {
 		func() {
 			defer func() {
@@ -29,10 +22,8 @@ func TestNewPanicsOnBadSize(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Push/Pop round trip: single item push-pop
-// -----------------------------------------------------------------------------
-
+// TestPushPopRoundTrip performs a minimal sanity round‑trip on a size‑8 ring.
+// It pushes one element, pops it, and confirms the ring is empty afterwards.
 func TestPushPopRoundTrip(t *testing.T) {
 	r := New(8)
 	val := &[32]byte{1, 2, 3}
@@ -49,10 +40,8 @@ func TestPushPopRoundTrip(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Push fails when full
-// -----------------------------------------------------------------------------
-
+// TestPushFailsWhenFull fills the ring to capacity and checks that a further
+// Push returns false (non‑blocking back‑pressure).
 func TestPushFailsWhenFull(t *testing.T) {
 	r := New(4)
 	val := &[32]byte{7}
@@ -66,16 +55,14 @@ func TestPushFailsWhenFull(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// PopWait blocks and receives value
-// -----------------------------------------------------------------------------
-
+// TestPopWaitBlocksUntilItem launches a goroutine that will push after a tiny
+// delay, then asserts PopWait blocks and eventually returns the value.
 func TestPopWaitBlocksUntilItem(t *testing.T) {
 	r := New(2)
 	want := &[32]byte{42}
 
 	go func() {
-		time.Sleep(5 * time.Millisecond) // allow PopWait to block
+		time.Sleep(5 * time.Millisecond)
 		r.Push(want)
 	}()
 
@@ -84,25 +71,19 @@ func TestPopWaitBlocksUntilItem(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Pop returns nil on empty
-// -----------------------------------------------------------------------------
-
+// TestPopNil confirms that Pop on an empty ring returns nil.
 func TestPopNil(t *testing.T) {
 	r := New(4)
 	if r.Pop() != nil {
-		t.Fatal("Pop on empty ring returned non-nil")
+		t.Fatal("Pop on empty ring returned non‑nil")
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Wrap-around test (masking correctness)
-// -----------------------------------------------------------------------------
-
+// TestWrapAround exercises >mask iterations to ensure head/tail wrap correctly
+// and masking math is sound.
 func TestWrapAround(t *testing.T) {
 	const size = 4
 	r := New(size)
-
 	for i := 0; i < 10; i++ {
 		val := &[32]byte{byte(i)}
 		if !r.Push(val) {

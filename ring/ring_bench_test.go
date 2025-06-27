@@ -1,7 +1,3 @@
-// ring_bench_test.go — Benchmarks for fixed-size [32]byte ring
-//
-// Includes tests for push, pop, push+pop, and cross-core usage.
-
 package ring
 
 import (
@@ -9,31 +5,25 @@ import (
 	"testing"
 )
 
-const benchCap = 1024 // fits in L1/L2 cache
+const benchCap = 1024 // chosen so the whole ring fits inside L2 on most CPUs
 
-var dummy32 = &[32]byte{1, 2, 3}
-var sink any
+var dummy32 = &[32]byte{1, 2, 3} // reused buffer to avoid allocation noise
+var sink any                     // global escape sink (prevent compiler cheats)
 
-// -----------------------------------------------------------------------------
-// Push only: producer-only path
-// -----------------------------------------------------------------------------
-
+// BenchmarkRing_Push measures producer throughput under zero contention.
 func BenchmarkRing_Push(b *testing.B) {
 	r := New(benchCap)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if !r.Push(dummy32) {
-			_ = r.Pop()
+			_ = r.Pop() // make room
 			_ = r.Push(dummy32)
 		}
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Pop only: consumer-only path
-// -----------------------------------------------------------------------------
-
+// BenchmarkRing_Pop measures consumer throughput when the ring is mostly full.
 func BenchmarkRing_Pop(b *testing.B) {
 	r := New(benchCap)
 	for i := 0; i < benchCap-1; i++ {
@@ -53,10 +43,8 @@ func BenchmarkRing_Pop(b *testing.B) {
 	runtime.KeepAlive(sink)
 }
 
-// -----------------------------------------------------------------------------
-// Push + Pop inside single goroutine
-// -----------------------------------------------------------------------------
-
+// BenchmarkRing_PushPop benchmarks the balanced case where the same goroutine
+// alternates push and pop, simulating a stage that both produces and consumes.
 func BenchmarkRing_PushPop(b *testing.B) {
 	r := New(benchCap)
 	for i := 0; i < benchCap/2; i++ {
