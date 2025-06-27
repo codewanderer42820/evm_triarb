@@ -1,35 +1,33 @@
-// -----------------------------------------------------------------------------
-// localidx/hash.go — Fixed-capacity Robin-Hood map (32-bit keys & values)
-// -----------------------------------------------------------------------------
-//
-//  Contract (unchanged):
-//  ─────────────────────
-//    • Put(new key, v)           → stores v, returns v
-//    • Put(existing key, v2)     → leaves old value, returns old
-//    • Get(key)                  → (value, true) | (0, false)
-//
-//  Design notes:
-//    • Single-writer in this repo; safe for unsynchronised reads.
-//    • Table never grows, so caller sizes with New(capacity).
-//    • 50 % load-factor (capacity×2) keeps avg probe length ≈1.5.
-//    • Robin-Hood displacement equalises probe distances → tight tail latency.
-//    • Prefetch hides main-memory latency in worst-case clusters.
-//
-//  2025-06-27: only comments added; behaviour byte-for-byte identical to the
-//              version that previously passed all tests.
-// -----------------------------------------------------------------------------
-
 package localidx
 
 import "unsafe"
 
-// Hash stores parallel key/value slices plus a power-of-two mask for modulo.
+//go:nosplit
+
+// Hash implements a fixed-capacity Robin-Hood hashmap.
+//
+// Design:
+//   - Key and value slices are allocated in parallel.
+//   - Capacity is always a power-of-two ×2 the requested capacity.
+//   - Mask allows modulo via bitmasking.
+//   - Single writer; no sync needed.
+//   - Zero-valued key marks empty slot (so key==0 is disallowed).
+//
+// Optimized for:
+//   - Tightest probe latency under load (Robin-Hood policy equalizes path).
+//   - Memory layout ensures fast vectorization and prefetch friendliness.
 type Hash struct {
-	keys, vals []uint32
-	mask       uint32
+	keys []uint32 // key slots; key=0 denotes empty
+	vals []uint32 // corresponding values
+	mask uint32   // bitmask for modulo (len(keys)-1)
+	_pad [4]byte  // padding for alignment (8-byte aligned for mask)
 }
 
-// nextPow2 rounds n up to the next power-of-two; tiny helper.
+//go:nosplit
+//go:inline
+
+// nextPow2 rounds an integer up to the next power-of-two.
+// Used to compute table capacity and mask.
 func nextPow2(n int) uint32 {
 	s := uint32(1)
 	for s < uint32(n) {
@@ -38,9 +36,13 @@ func nextPow2(n int) uint32 {
 	return s
 }
 
-// New returns a table sized so that ‘capacity’ keys will fill it ~50 %.
+//go:nosplit
+//go:inline
+
+// New creates a new Hash with enough capacity to store 'capacity' entries
+// with a ~50% load factor. Underlying slices are allocated as power-of-two.
 func New(capacity int) Hash {
-	sz := nextPow2(capacity * 2) // ×2 → 50 % max load
+	sz := nextPow2(capacity * 2) // doubled → leaves 50% headroom
 	return Hash{
 		keys: make([]uint32, sz),
 		vals: make([]uint32, sz),
@@ -48,49 +50,64 @@ func New(capacity int) Hash {
 	}
 }
 
-// Put implements load-or-store semantics:
+//go:nosplit
+
+// Put inserts a key with associated value.
+// If the key already exists, it returns the existing value.
+// Otherwise, it stores 'val' and returns it.
 //
-//	– Empty slot  → (store val, return val)
-//	– Key exists  → (leave as-is, return stored)
-//	– Collisions  → Robin-Hood displacement until one of the above fires.
+// Algorithm:
+//   - Robin-Hood probing with displacement comparison.
+//   - If incoming key's probe distance is larger than occupant’s, it swaps.
+//   - Probing continues until an empty slot or match is found.
+//   - Empty slot → insert and return.
+//   - Match → return current value (no overwrite).
 func (h Hash) Put(key, val uint32) uint32 {
-	i := key & h.mask
-	dist := uint32(0)
+	i := key & h.mask // initial bucket index
+	dist := uint32(0) // distance from original hashed bucket
 
 	for {
 		k := h.keys[i]
 
-		// ░░ Empty slot ░░
+		// Empty slot → insert here
 		if k == 0 {
 			h.keys[i], h.vals[i] = key, val
 			return val
 		}
 
-		// ░░ Key match ░░
+		// Existing key → return stored value
 		if k == key {
-			return h.vals[i] // leave stored value untouched
+			return h.vals[i]
 		}
 
-		// ░░ Robin-Hood: swap if resident’s probe < ours ░░
+		// Compute current resident's probe distance
 		kDist := (i + h.mask + 1 - (k & h.mask)) & h.mask
+
+		// Robin-Hood: swap if we're "poorer" (i.e., have higher dist)
 		if kDist < dist {
 			key, h.keys[i] = h.keys[i], key
 			val, h.vals[i] = h.vals[i], val
 			dist = kDist
 		}
 
-		// Soft prefetch of next key slot to overlap memory latency
+		// Soft-prefetch next slot’s key to overlap memory latency
 		_ = *(*uint32)(unsafe.Pointer(
 			uintptr(unsafe.Pointer(&h.keys[0])) + uintptr(((i+1)&h.mask)<<2)))
 
+		// Linear probe to next slot
 		i = (i + 1) & h.mask
 		dist++
 	}
 }
 
-// Get returns (value, true) if present, else (0, false).
-// Early-exit bound check: once we hit a slot with shorter probe distance than
-// our own search, the key cannot be further along the chain.
+//go:nosplit
+
+// Get returns the value associated with the key if present.
+// Otherwise, it returns (0, false).
+//
+// Optimizations:
+//   - Early exit via “bound check”: if current slot's probe distance is
+//     smaller than ours, key must be missing (Robin-Hood guarantee).
 func (h Hash) Get(key uint32) (uint32, bool) {
 	i := key & h.mask
 	dist := uint32(0)
@@ -98,18 +115,19 @@ func (h Hash) Get(key uint32) (uint32, bool) {
 	for {
 		k := h.keys[i]
 
-		if k == 0 { // empty → miss
-			return 0, false
+		if k == 0 {
+			return 0, false // empty slot = not present
 		}
-		if k == key { // hit
-			return h.vals[i], true
+		if k == key {
+			return h.vals[i], true // match
 		}
 
 		kDist := (i + h.mask + 1 - (k & h.mask)) & h.mask
-		if kDist < dist { // bound check
-			return 0, false
+		if kDist < dist {
+			return 0, false // bound-check fail → key not in cluster
 		}
 
+		// Soft-prefetch ahead
 		_ = *(*uint32)(unsafe.Pointer(
 			uintptr(unsafe.Pointer(&h.keys[0])) + uintptr(((i+1)&h.mask)<<2)))
 

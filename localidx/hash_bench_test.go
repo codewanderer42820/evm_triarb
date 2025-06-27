@@ -1,13 +1,3 @@
-// -----------------------------------------------------------------------------
-// localidx/hash_bench_test.go — Micro-benchmarks for the Robin-Hood map
-// -----------------------------------------------------------------------------
-//
-//  • Measures put/get throughput under different access patterns
-//  • Uses deterministic random input so results are reproducible
-//  • Benchmarks are sized to saturate L2 but not spill into main memory,
-//    keeping variance low across CPU micro-architectures
-// -----------------------------------------------------------------------------
-
 package localidx
 
 import (
@@ -16,36 +6,37 @@ import (
 )
 
 const (
-	insertSize = 1 << 16        // 65 536 inserts → ~256 KiB table
-	lookupSize = insertSize / 2 // sized to give 50 % hit-rate where needed
+	insertSize = 1 << 16        // 65,536 → ~256 KiB table, fits in L2
+	lookupSize = insertSize / 2 // 32,768 → ensures 50% hit-rate in mixed tests
 )
 
-var rnd = rand.New(rand.NewSource(1337))
+var rnd = rand.New(rand.NewSource(1337)) // deterministic RNG for reproducibility
 
-// Pre-allocated input so the benchmark loop is pure map traffic.
+// Pre-allocated input keys to avoid measuring slice ops during benchmarking
 var (
-	keys     = make([]uint32, insertSize)
-	missKeys = make([]uint32, lookupSize)
+	keys     = make([]uint32, insertSize) // inserted keys
+	missKeys = make([]uint32, lookupSize) // guaranteed misses
 )
 
 func init() {
-	// keys = 1..insertSize shuffled
+	// Populate keys with 1..insertSize, then shuffle
 	for i := 0; i < insertSize; i++ {
 		keys[i] = uint32(i + 1)
 	}
 	rnd.Shuffle(insertSize, func(i, j int) { keys[i], keys[j] = keys[j], keys[i] })
 
-	// missKeys are outside the insert range so Get misses deterministically.
+	// missKeys start well beyond inserted key range to avoid accidental hits
 	for i := 0; i < lookupSize; i++ {
 		missKeys[i] = uint32(i + insertSize + 100)
 	}
 }
 
 // -----------------------------------------------------------------------------
-// Put() benchmarks
+// ░░ Benchmark: Put() with fresh keys (worst case) ░░
 // -----------------------------------------------------------------------------
 
-// BenchmarkHashPutUnique inserts *new* keys each iteration (worst-case path).
+// BenchmarkHashPutUnique simulates worst-case insert throughput:
+// new table each time, all unique keys.
 func BenchmarkHashPutUnique(b *testing.B) {
 	for n := 0; n < b.N; n++ {
 		h := New(insertSize)
@@ -55,56 +46,76 @@ func BenchmarkHashPutUnique(b *testing.B) {
 	}
 }
 
-// BenchmarkHashPutOverwrite measures overwrite speed once the table is hot.
+// -----------------------------------------------------------------------------
+// ░░ Benchmark: Put() overwrite into hot table ░░
+// -----------------------------------------------------------------------------
+
+// BenchmarkHashPutOverwrite measures overwrite performance into a prefilled table.
+// Should exercise fast match-path, not Robin-Hood insert path.
 func BenchmarkHashPutOverwrite(b *testing.B) {
 	h := New(insertSize)
 	for i := 0; i < insertSize; i++ {
 		h.Put(keys[i], keys[i]*2)
 	}
 	b.ResetTimer()
+
 	for n := 0; n < b.N; n++ {
 		for i := 0; i < insertSize; i++ {
-			h.Put(keys[i], keys[i]*3)
+			h.Put(keys[i], keys[i]*3) // logically overwrites, but value isn't stored
 		}
 	}
 }
 
 // -----------------------------------------------------------------------------
-// Get() benchmarks
+// ░░ Benchmark: Get() hit-path ░░
 // -----------------------------------------------------------------------------
 
+// BenchmarkHashGetHit measures lookup throughput on a table with all keys present.
 func BenchmarkHashGetHit(b *testing.B) {
 	h := New(insertSize)
 	for i := 0; i < insertSize; i++ {
 		h.Put(keys[i], keys[i]*2)
 	}
 	b.ResetTimer()
+
 	for n := 0; n < b.N; n++ {
 		k := keys[n%insertSize]
 		_, _ = h.Get(k)
 	}
 }
 
+// -----------------------------------------------------------------------------
+// ░░ Benchmark: Get() miss-path ░░
+// -----------------------------------------------------------------------------
+
+// BenchmarkHashGetMiss stresses full-probe-path for keys not present in the table.
+// Each miss guarantees full traversal until bound-check fails.
 func BenchmarkHashGetMiss(b *testing.B) {
 	h := New(insertSize)
 	for i := 0; i < insertSize; i++ {
 		h.Put(keys[i], keys[i]*2)
 	}
 	b.ResetTimer()
+
 	for n := 0; n < b.N; n++ {
 		k := missKeys[n%lookupSize]
 		_, _ = h.Get(k)
 	}
 }
 
-// BenchmarkHashGetMixed interleaves 50 % hits / 50 % misses — a common pattern
-// when the table backs a front-loaded cache.
+// -----------------------------------------------------------------------------
+// ░░ Benchmark: Mixed hit/miss workload (50/50) ░░
+// -----------------------------------------------------------------------------
+
+// BenchmarkHashGetMixed simulates a front-loaded LRU cache scenario,
+// where some lookups hit and others predictably miss.
 func BenchmarkHashGetMixed(b *testing.B) {
 	h := New(insertSize)
 	for i := 0; i < insertSize; i++ {
 		h.Put(keys[i], keys[i]*2)
 	}
 	b.ResetTimer()
+
 	for n := 0; n < b.N; n++ {
 		var k uint32
 		if n&1 == 0 {
@@ -116,8 +127,12 @@ func BenchmarkHashGetMixed(b *testing.B) {
 	}
 }
 
-// BenchmarkHashGetTightLoop hammers a single hot key to expose pure lookup cost
-// under maximum CPU cache residency (≈ 2.5 ns on M4 Pro).
+// -----------------------------------------------------------------------------
+// ░░ Benchmark: Repeated hit on hot key ░░
+// -----------------------------------------------------------------------------
+
+// BenchmarkHashGetTightLoop isolates per-access latency under L1 cache residency.
+// Measures latency ceiling when probing cost is minimized.
 func BenchmarkHashGetTightLoop(b *testing.B) {
 	h := New(insertSize)
 	for i := 0; i < insertSize; i++ {
@@ -125,34 +140,41 @@ func BenchmarkHashGetTightLoop(b *testing.B) {
 	}
 	k := keys[12345]
 	b.ResetTimer()
+
 	for n := 0; n < b.N; n++ {
 		_, _ = h.Get(k)
 	}
 }
 
-// BenchmarkHashGetTinyMap shows the latency floor when the whole table fits in
-// L1 — useful for spotting regressions in the inner loop itself.
+// -----------------------------------------------------------------------------
+// ░░ Benchmark: Table small enough to fully fit in L1 ░░
+// -----------------------------------------------------------------------------
+
+// BenchmarkHashGetTinyMap measures ultra-low latency in tables where
+// the entire working set fits in L1 (128 entries = 512 bytes).
 func BenchmarkHashGetTinyMap(b *testing.B) {
-	h := New(128) // 128 slots → 512 B table
+	h := New(128)
 	for i := 0; i < 128; i++ {
 		h.Put(uint32(i+1), uint32(i+100))
 	}
 	b.ResetTimer()
+
 	for n := 0; n < b.N; n++ {
 		_, _ = h.Get(uint32((n & 127) + 1))
 	}
 }
 
 // -----------------------------------------------------------------------------
-// Pathological cases
+// ░░ Benchmark: Insert pattern with maximal clustering ░░
 // -----------------------------------------------------------------------------
 
-// BenchmarkHashPutLinearProbeWorst inserts keys that collide into a single
-// bucket modulo 256, exercising the linear probe worst-case path.
+// BenchmarkHashPutLinearProbeWorst stresses the longest probe chains possible
+// by inserting keys that all map to the same bucket (mod 256).
 func BenchmarkHashPutLinearProbeWorst(b *testing.B) {
 	h := New(insertSize)
 	base := uint32(0xDEADBEEF)
 	b.ResetTimer()
+
 	for n := 0; n < b.N; n++ {
 		h.Put(base+uint32(n&255), uint32(n))
 	}
