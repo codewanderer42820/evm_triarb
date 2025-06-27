@@ -189,36 +189,43 @@ func shardWorker(coreID, half int, in <-chan Shard) {
 
 /*────────────────────────  Shard Attach  ────────────────────────*/
 
-// Pre-insert each path into its bucket with dummy tick 0.
+// installShard attaches one pair’s refs to a core router.
+//
+//   - Creates the per-pair bucket on first sighting.
+//   - Pre-inserts each ArbPath into that bucket with dummy tick 0.
+//   - Stores one borrowed handle (shared by the two fan-outs) plus the
+//     local-pair index (Lid) so onPrice can refetch the queue fast.
 func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
-	lid := rt.Local.Put(uint32(sh.Pair), uint32(len(rt.Buckets))) // uint32
+	lid32 := rt.Local.Put(uint32(sh.Pair), uint32(len(rt.Buckets))) // uint32
+	lid := LocalPairID(lid32)                                       // single cast
 
-	// create bucket / fanout slice once
-	if int(lid) == len(rt.Buckets) {
+	// Make bucket & fan-out slice if this is the first shard for the pair.
+	if int(lid32) == len(rt.Buckets) {
 		rt.Buckets = append(rt.Buckets, *bucketqueue.New())
 	}
-	if int(lid) >= len(rt.Fanouts) {
+	if int(lid32) >= len(rt.Fanouts) {
 		rt.Fanouts = append(rt.Fanouts,
-			make([][]Fanout, int(lid)-len(rt.Fanouts)+1)...)
+			make([][]Fanout, int(lid32)-len(rt.Fanouts)+1)...)
 	}
 
-	q := &rt.Buckets[lid] // use lid directly (no cast)
+	q := &rt.Buckets[lid32]
 
 	for _, ref := range sh.Refs {
 		*paths = append(*paths, ArbPath{Pairs: ref.Pairs})
 		pPtr := &(*paths)[len(*paths)-1]
 
-		handle, _ := q.Borrow()
-		_ = q.Push(0, handle, unsafe.Pointer(pPtr))
+		// One handle per path, shared by the two fan-outs.
+		handle, _ := q.Borrow()                     // error deliberately ignored
+		_ = q.Push(0, handle, unsafe.Pointer(pPtr)) // ignore push error by design
 
 		for _, slot := range []uint16{
 			uint16((ref.CommonEdge + 1) % 3),
 			uint16((ref.CommonEdge + 2) % 3),
 		} {
-			rt.Fanouts[lid] = append(rt.Fanouts[lid], Fanout{
+			rt.Fanouts[lid32] = append(rt.Fanouts[lid32], Fanout{
 				Path:       pPtr,
 				Handle:     handle,
-				Lid:        LocalPairID(lid), // ← single cast here
+				Lid:        lid, // LocalPairID, already cast once
 				FanoutEdge: slot,
 			})
 		}
