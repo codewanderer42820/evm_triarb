@@ -339,3 +339,33 @@ func onProfitablePath(p *PathState) {
 	// TODO: forward to execution engine.
 	_ = p
 }
+
+// -----------------------------------------------------------------------------
+// log2ToTick — Quantises a base-2 log-ratio into a 4 096-bucket tick index
+// -----------------------------------------------------------------------------
+//
+//   - clamp = 128   → values beyond ±128 are saturated (covers worst-case swings)
+//
+//   - scale = 16    → (2 × clamp) × scale == 4 096  (12-bit histogram)
+//
+//   - Two-branch clamp compiles to a single compare+cmov on modern CPUs
+//     and is faster than math.{Min,Max} for scalar data.
+//
+//     r = −128  → 0
+//     r =    0  → 2 048
+//     r = +128  → 4 095
+//
+// -----------------------------------------------------------------------------
+func log2ToTick(r float64) int64 {
+	const clamp = 128.0 // ±range
+	const scale = 16.0  // buckets per unit
+
+	// Cheap saturating clamp
+	if r > clamp {
+		r = clamp
+	} else if r < -clamp {
+		r = -clamp
+	}
+	// Shift into [0,256] then scale → [0,4 096)
+	return int64((r + clamp) * scale)
+}
