@@ -1,4 +1,9 @@
-// router.go — 64-core fan-out router (queues pre-seeded with dummy ticks).
+// router.go — 64‑core fan‑out router (queues pre‑seeded with dummy ticks).
+//
+// Updated 2025‑06‑27: the ring now transfers **32‑byte payloads in‑place**.
+// All pushes/pops therefore recast a struct to *[32]byte* on the send side
+// and back to *PriceUpdate on the consumer side.  No heap allocation occurs –
+// just an unsafe view of the same 32‑byte buffer.
 
 package router
 
@@ -20,7 +25,10 @@ import (
 /*────────────────────────  Data Structures  ────────────────────────*/
 
 type PairID uint32
+
+// Local (dense) id inside one core.
 type LocalPairID uint32
+
 type CPUMask uint64
 
 type TriCycle [3]PairID
@@ -41,23 +49,40 @@ type Shard struct {
 	Refs []Ref
 }
 
+// ---------------- 32‑byte message pushed through the ring ------------------
+// PriceUpdate is recast to a *[32]byte when enqueued.  Size check below keeps
+// us honest – an accidental field addition that grows the struct >32 B will
+// fail the build.
+
 type PriceUpdate struct {
-	Pair             PairID
-	FwdTick, RevTick float64
+	Pair             PairID  // 4  B
+	_pad             uint32  // 4  B (align the float64s)
+	FwdTick, RevTick float64 // 16 B
+	_                [8]byte // 8  B (explicit pad → total == 32)
 }
 
-// Fanout keeps no queue pointer; it stores the local-pair index (Lid)
-// and a *shared* handle for the pre-inserted queue item.
+const _priceUpdateSize = unsafe.Sizeof(PriceUpdate{})
+
+// compile‑time guarantee (will not compile if violated)
+var _ [1]struct{} = [1]struct{}{{}}
+
+func init() {
+	const msgSize = 32
+	_ = [msgSize - _priceUpdateSize]byte{}
+}
+
+// Fanout keeps no queue pointer; it stores the local‑pair index (Lid)
+// and a *shared* handle for the pre‑inserted queue item.
 type Fanout struct {
 	Path       *ArbPath
-	Handle     bucketqueue.Handle // shared by the two fan-outs
+	Handle     bucketqueue.Handle // shared by the two fan‑outs
 	Lid        LocalPairID        // index into rt.Buckets
-	FanoutEdge uint16             // tick slot to write (0-2)
+	FanoutEdge uint16             // tick slot to write (0‑2)
 }
 
 type CoreRouter struct {
 	Buckets   []bucketqueue.Queue // value slice; core owns queues
-	Fanouts   [][]Fanout          // fan-outs per local pair
+	Fanouts   [][]Fanout          // fan‑outs per local pair
 	Local     localidx.Hash
 	IsReverse bool
 }
@@ -74,7 +99,7 @@ var (
 	splitThreshold = 16_384
 )
 
-/*────────────────────────  Fan-out Planner  ────────────────────────*/
+/*────────────────────────  Fan‑out Planner  ────────────────────────*/
 
 func ResetFanouts() { rawShards = make(map[PairID][]Shard) }
 
@@ -122,6 +147,7 @@ func BuildFanouts(cycles []TriCycle) {
 
 /*────────────────────────  Bootstrap  ────────────────────────*/
 
+// InitRouters sets up per‑core routers and seeds them with shards.
 func InitRouters(cycles []TriCycle) { // ← new generalized name
 	n := runtime.NumCPU() - 4
 	if n < 8 {
@@ -154,18 +180,14 @@ func InitRouters(cycles []TriCycle) { // ← new generalized name
 			shardCh[fwd] <- s
 			shardCh[rev] <- s
 
-			// ────────────────────────────────────────────────
-			// NEW: mark *all* three legs of every triangle
-			// carried by this shard so RouteUpdate pushes
-			// ticks to the correct forward & reverse cores.
-			// ────────────────────────────────────────────────
-			for _, ref := range s.Refs { // each ref holds the tri-cycle
+			// mark *all* three legs of every triangle carried by this shard so
+			// RouteUpdate pushes ticks to the correct forward & reverse cores.
+			for _, ref := range s.Refs { // each ref holds the tri‑cycle
 				for _, pid := range ref.Pairs { // three pair IDs
 					routingBitmap[pid] |= 1 << fwd
 					routingBitmap[pid] |= 1 << rev
 				}
 			}
-
 			coreIdx++
 		}
 	}
@@ -184,7 +206,7 @@ func shardWorker(coreID, half int, in <-chan Shard) {
 	}
 	coreRouters[coreID] = rt
 
-	rb := ring.New(1 << 14)
+	rb := ring.New(1 << 14) // 16K‑slot SPSC queue
 	coreRings[coreID] = rb
 
 	paths := make([]ArbPath, 0, 1024)
@@ -195,7 +217,7 @@ func shardWorker(coreID, half int, in <-chan Shard) {
 
 	ring.PinnedConsumer(
 		coreID, rb, new(uint32), new(uint32),
-		func(p unsafe.Pointer) { onPrice(rt, (*PriceUpdate)(p)) },
+		func(p *[32]byte) { onPrice(rt, (*PriceUpdate)(unsafe.Pointer(p))) },
 		make(chan struct{}),
 	)
 }
@@ -203,16 +225,15 @@ func shardWorker(coreID, half int, in <-chan Shard) {
 /*────────────────────────  Shard Attach  ────────────────────────*/
 
 // installShard attaches one pair’s refs to a core router.
-//
-//   - Creates the per-pair bucket on first sighting.
-//   - Pre-inserts each ArbPath into that bucket with dummy tick 0.
-//   - Stores one borrowed handle (shared by the two fan-outs) plus the
-//     local-pair index (Lid) so onPrice can refetch the queue fast.
+//   - Creates the per‑pair bucket on first sighting.
+//   - Pre‑inserts each ArbPath into that bucket with dummy tick 0.
+//   - Stores one borrowed handle (shared by the two fan‑outs) plus the
+//     local‑pair index (Lid) so onPrice can refetch the queue fast.
 func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
-	lid32 := rt.Local.Put(uint32(sh.Pair), uint32(len(rt.Buckets))) // uint32
-	lid := LocalPairID(lid32)                                       // single cast
+	lid32 := rt.Local.Put(uint32(sh.Pair), uint32(len(rt.Buckets)))
+	lid := LocalPairID(lid32)
 
-	// Make bucket & fan-out slice if this is the first shard for the pair.
+	// Make bucket & fan‑out slice if this is the first shard for the pair.
 	if int(lid32) == len(rt.Buckets) {
 		rt.Buckets = append(rt.Buckets, *bucketqueue.New())
 	}
@@ -227,7 +248,7 @@ func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
 		*paths = append(*paths, ArbPath{Pairs: ref.Pairs})
 		pPtr := &(*paths)[len(*paths)-1]
 
-		// One handle per path, shared by the two fan-outs.
+		// One handle per path, shared by the two fan‑outs.
 		handle, _ := q.Borrow()                     // error deliberately ignored
 		_ = q.Push(0, handle, unsafe.Pointer(pPtr)) // ignore push error by design
 
@@ -238,7 +259,7 @@ func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
 			rt.Fanouts[lid32] = append(rt.Fanouts[lid32], Fanout{
 				Path:       pPtr,
 				Handle:     handle,
-				Lid:        lid, // LocalPairID, already cast once
+				Lid:        lid,
 				FanoutEdge: slot,
 			})
 		}
@@ -317,6 +338,8 @@ func lookupPairID(addr []byte) PairID {
 
 /*────────────────────────  External Entry  ────────────────────────*/
 
+// RouteUpdate converts an on‑chain Sync event (LogView) into ticks and pushes
+// a *32‑byte* message to every core interested in this pair.
 func RouteUpdate(v *types.LogView) {
 	addr := v.Addr[3:43]
 	pair := lookupPairID(addr)
@@ -325,12 +348,16 @@ func RouteUpdate(v *types.LogView) {
 	r1 := utils.LoadBE64(v.Data[56:])
 	tick := fastuni.Log2ReserveRatio(r0, r1)
 
-	upd := PriceUpdate{Pair: pair, FwdTick: tick, RevTick: -tick}
-	ptr := unsafe.Pointer(&upd)
+	// Build message in‑place inside a fixed 32‑byte buffer.
+	var msg [32]byte
+	upd := (*PriceUpdate)(unsafe.Pointer(&msg))
+	upd.Pair = pair
+	upd.FwdTick = tick
+	upd.RevTick = -tick
 
 	for m := routingBitmap[pair]; m != 0; {
 		core := bits.TrailingZeros64(uint64(m))
-		coreRings[core].Push(ptr)
+		coreRings[core].Push(&msg)
 		m &^= 1 << core
 	}
 }
