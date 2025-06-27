@@ -16,7 +16,6 @@ package router
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"math"
 	"math/bits"
 	"runtime"
 	"unsafe"
@@ -302,36 +301,59 @@ func installShard(rt *CoreRouter, sh *Shard, buf *[]PathState) {
 
 /*────────────────────────  Hot Path  ────────────────────────*/
 
+// onPrice — hot-path tick ingest
+// -----------------------------------------------------------------------------
+// 1️⃣  Determine the tick polarity (forward vs. reverse core).
+// 2️⃣  Locate the local bucket & fan-out slice for this pair.
+// 3️⃣  FAST-PROFIT CHECK: peek the current *minimum* path in the bucket
+//
+//	*before* any mutation.  If the new tick makes that path profitable
+//	(sum < 0), fire it immediately.
+//
+// 4️⃣  Update every path that references this pair:
+//
+//   - write the fresh tick into the correct edge slot
+//
+//   - recompute the path’s running sum
+//
+//   - map the sum → 4 096-bucket key with log2ToTick()
+//
+//   - push the new key into the same bucket via Update().
+//
+//     All data races are impossible because every core owns its local buckets &
+//     fan-outs exclusively; the only shared mutable state lives inside those
+//     per-core structures.
 func onPrice(rt *CoreRouter, upd *PriceUpdate) {
+	/* 1️⃣  polarity */
 	tick := upd.FwdTick
 	if rt.IsReverse {
 		tick = upd.RevTick
 	}
 
+	/* 2️⃣  per-pair state */
 	lid32, _ := rt.Local.Get(uint32(upd.Pair))
 	lid := LocalPairID(lid32)
 	bq := &rt.Buckets[lid]
+	fan := rt.Fanouts[lid]
 
-	var minSum float64 = 1e300
-	var prof *PathState
-
-	for _, fan := range rt.Fanouts[lid] {
-		edge := uint16(fan.Meta & 0xFFFF) // decode EdgeIdx
-		ps := fan.Path
-		ps.Ticks[edge] = tick
-
-		sum := ps.Ticks[0] + ps.Ticks[1] + ps.Ticks[2]
-		key := int64(math.Float64bits(sum)) // bucket key is monotonic on sum
-
-		_ = bq.Update(key, fan.Handle, unsafe.Pointer(ps)) // ignore error
-
-		if sum < minSum {
-			minSum, prof = sum, ps
+	/* 3️⃣  peek current best path – zero alloc, O(1) */
+	if _, _, ptr := bq.PeepMin(); ptr != nil {
+		p := (*PathState)(ptr)
+		if tick+p.Ticks[0]+p.Ticks[1]+p.Ticks[2] < 0 {
+			onProfitablePath(p) // fire without touching the queue
 		}
 	}
 
-	if minSum < 0 {
-		onProfitablePath(prof)
+	/* 4️⃣  propagate the fresh tick to all dependent paths */
+	for _, f := range fan {
+		ps := f.Path
+		edge := uint16(f.Meta & 0xFFFF) // decode EdgeIdx
+		ps.Ticks[edge] = tick
+
+		sum := ps.Ticks[0] + ps.Ticks[1] + ps.Ticks[2]
+		key := int64(log2ToTick(sum)) // 0-4095 monotonic bucket key
+
+		_ = bq.Update(key, f.Handle, unsafe.Pointer(ps)) // ignore error; handle cannot be stale
 	}
 }
 
