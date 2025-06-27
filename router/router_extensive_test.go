@@ -227,3 +227,103 @@ func TestFuzzLog2ToTick(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+/*───────────────────────────── RegisterRoute ─────────────────────────────*/
+
+// TestRegisterRoute verifies that RegisterRoute correctly sets the CPU‑bit
+// inside the package‑level pair2cores bitmap.
+func TestRegisterRoute(t *testing.T) {
+	t.Parallel()
+	resetGlobals()
+
+	const (
+		pid  = PairID(777)
+		core = 9
+	)
+
+	RegisterRoute(pid, core)
+
+	if pair2cores[pid]&(1<<core) == 0 {
+		t.Fatalf("RegisterRoute did not set bit %d for pair %d", core, pid)
+	}
+}
+
+/*────────────────────────────── attachShard ──────────────────────────────*/
+
+// TestAttachShard wires a minimal PairShard into a fresh CoreExecutor and
+// ensures that fan‑out entries and heap handles are allocated as expected.
+func TestAttachShard(t *testing.T) {
+	t.Parallel()
+
+	ex := &CoreExecutor{
+		Heaps:    make([]bucketqueue.Queue, 0, 4),
+		Fanouts:  make([][]FanoutEntry, 0, 4),
+		LocalIdx: localidx.New(8),
+	}
+
+	shard := PairShard{
+		Pair: 1,
+		Bins: []EdgeBinding{
+			{Pairs: PairTriplet{1, 2, 3}, EdgeIdx: 0},
+			{Pairs: PairTriplet{1, 4, 5}, EdgeIdx: 0},
+		},
+	}
+
+	var buf []CycleState
+	attachShard(ex, &shard, &buf)
+
+	// One local pair ⇒ one heap and one fan‑out slice.
+	if len(ex.Heaps) != 1 {
+		t.Fatalf("attachShard produced %d heaps, want 1", len(ex.Heaps))
+	}
+	if len(ex.Fanouts) != 1 {
+		t.Fatalf("attachShard produced %d fanout slices, want 1", len(ex.Fanouts))
+	}
+
+	// Two EdgeBindings → four FanoutEntry (each binding subscribes the *other*
+	// two edges). Ensure that invariant holds.
+	if got := len(ex.Fanouts[0]); got != 4 {
+		t.Fatalf("fanout count = %d, want 4", got)
+	}
+
+	// CycleState buffer should grow by two and the pointers stored in fan‑out
+	// entries must be non‑nil.
+	if len(buf) != 2 {
+		t.Fatalf("cycle buffer len = %d, want 2", len(buf))
+	}
+	if ex.Fanouts[0][0].State == nil || unsafe.Pointer(ex.Fanouts[0][0].State) == nil {
+		t.Fatalf("fanout entry has nil State pointer")
+	}
+}
+
+/*────────────────────────── lookupPairID collision ───────────────────────*/
+
+// TestLookupPairIDCollision crafts two addresses that hash to the same bucket
+// (identical low‑order bits) so that open‑addressing must probe forward. Both
+// must still be retrievable.
+func TestLookupPairIDCollision(t *testing.T) {
+	t.Parallel()
+	resetGlobals()
+
+	// Generate a deterministic address and create a second that collides in
+	// the lowest 6 bits used by utils.Hash17’s stride walk.
+	a1 := randHex40()
+	a2 := make([]byte, len(a1))
+	copy(a2, a1)
+	a2[len(a2)-1] ^= 0b0100_0000 // flip a high bit to force collision
+
+	const (
+		pid1 = PairID(11)
+		pid2 = PairID(22)
+	)
+
+	RegisterPair(a1, pid1)
+	RegisterPair(a2, pid2)
+
+	if got := lookupPairID(a1); got != pid1 {
+		t.Fatalf("lookupPairID collision mismatch for addr1: got %d, want %d", got, pid1)
+	}
+	if got := lookupPairID(a2); got != pid2 {
+		t.Fatalf("lookupPairID collision mismatch for addr2: got %d, want %d", got, pid2)
+	}
+}
