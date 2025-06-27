@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"reflect"
 	"testing"
+	"time"
+	"unsafe"
 
 	"main/bucketqueue"
 	"main/localidx"
@@ -198,5 +200,103 @@ func TestZeroAllocLookup(t *testing.T) {
 	RegisterPair(addr, pid)
 	if got := lookupPairID(addr); got != pid {
 		t.Errorf("zeroalloc lookup returned %v; want %v", got, pid)
+	}
+}
+
+// Helper to extract tick sum
+func tickSum(cs *CycleState) float64 {
+	return cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2]
+}
+
+// TestDrainLoopProfitPath tests handleTick with wasProfit=true and maxDrain cap
+func TestDrainLoopProfitPath(t *testing.T) {
+	ex := &CoreExecutor{
+		Heaps:     make([]bucketqueue.Queue, 1),
+		Fanouts:   make([][]FanoutEntry, 1),
+		LocalIdx:  localidx.New(1 << 16),
+		IsReverse: false,
+	}
+	hq := &ex.Heaps[0]
+	var cs CycleState
+	cs.Ticks[0], cs.Ticks[1], cs.Ticks[2] = -10, -10, -10
+
+	// Fill heap with maxDrain = 64 entries all profitable
+	for i := 0; i < 64; i++ {
+		h, _ := hq.Borrow()
+		_ = hq.Push(0, h, unsafe.Pointer(&cs))
+	}
+
+	ex.Fanouts[0] = []FanoutEntry{
+		{State: &cs, Queue: hq, Handle: 1, EdgeIdx: 1},
+	}
+	upd := &TickUpdate{Pair: 0, FwdTick: -10}
+	ex.LocalIdx.Put(0, 0)
+	handleTick(ex, upd)
+}
+
+// TestDrainLoopStopsAtNil tests handleTick exit on nil ptr
+func TestDrainLoopStopsAtNil(t *testing.T) {
+	ex := &CoreExecutor{
+		Heaps:    make([]bucketqueue.Queue, 1),
+		Fanouts:  make([][]FanoutEntry, 1),
+		LocalIdx: localidx.New(1 << 16),
+	}
+	cs := &CycleState{Ticks: [3]float64{0, 0, 0}}
+	hq := &ex.Heaps[0]
+	h, _ := hq.Borrow()
+	_ = hq.Push(0, h, unsafe.Pointer(cs))
+	ex.Fanouts[0] = nil
+	ex.LocalIdx.Put(0, 0)
+	upd := &TickUpdate{Pair: 0, FwdTick: 0}
+	handleTick(ex, upd)
+}
+
+// TestHandleTickReverse tests that RevTick is used on reverse
+func TestHandleTickReverse(t *testing.T) {
+	ex := &CoreExecutor{
+		Heaps:     make([]bucketqueue.Queue, 1),
+		Fanouts:   make([][]FanoutEntry, 1),
+		LocalIdx:  localidx.New(1 << 16),
+		IsReverse: true,
+	}
+	cs := &CycleState{}
+	hq := &ex.Heaps[0]
+	h, _ := hq.Borrow()
+	_ = hq.Push(0, h, unsafe.Pointer(cs))
+	ex.Fanouts[0] = []FanoutEntry{{State: cs, Queue: hq, Handle: h, EdgeIdx: 1}}
+	ex.LocalIdx.Put(0, 0)
+	upd := &TickUpdate{Pair: 0, FwdTick: 1, RevTick: 42}
+	handleTick(ex, upd)
+	if cs.Ticks[1] != 42 {
+		t.Errorf("Expected tick=42 in reverse, got %v", cs.Ticks[1])
+	}
+}
+
+// TestPinnedConsumerDispatch ensures the ring dispatch path runs handleTick
+func TestPinnedConsumerDispatch(t *testing.T) {
+	ex := &CoreExecutor{
+		Heaps:    make([]bucketqueue.Queue, 1),
+		Fanouts:  make([][]FanoutEntry, 1),
+		LocalIdx: localidx.New(1 << 16),
+	}
+	cs := &CycleState{}
+	hq := &ex.Heaps[0]
+	h, _ := hq.Borrow()
+	_ = hq.Push(0, h, unsafe.Pointer(cs))
+	ex.Fanouts[0] = []FanoutEntry{{State: cs, Queue: hq, Handle: h, EdgeIdx: 0}}
+	ex.LocalIdx.Put(123, 0)
+	executors[3] = ex
+	r := ring32.New(4)
+	rings[3] = r
+	msg := &TickUpdate{Pair: 123, FwdTick: 99}
+	r.Push((*[32]byte)(unsafe.Pointer(msg)))
+	done := make(chan struct{})
+	go ring32.PinnedConsumer(3, r, new(uint32), new(uint32), func(p *[32]byte) {
+		handleTick(ex, (*TickUpdate)(unsafe.Pointer(p)))
+		close(done)
+	}, done)
+	time.Sleep(10 * time.Millisecond)
+	if cs.Ticks[0] != 99 {
+		t.Errorf("Expected tick=99 from PinnedConsumer, got %v", cs.Ticks[0])
 	}
 }
