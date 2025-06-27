@@ -120,9 +120,9 @@ func BuildFanouts(cycles []TriCycle) {
 	}
 }
 
-/*────────────────────────  CPU Bootstrap  ────────────────────────*/
+/*────────────────────────  Bootstrap  ────────────────────────*/
 
-func InitCPURings(cycles []TriCycle) {
+func InitRouters(cycles []TriCycle) { // ← new generalized name
 	n := runtime.NumCPU() - 4
 	if n < 8 {
 		n = 8
