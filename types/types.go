@@ -8,8 +8,6 @@ package types
 // This struct is hot in the parsing + deduplication path, so memory layout is
 // tuned for read locality on hot fields (addr, data, topics). Fields used only
 // in dedup logic are kept cold.
-//
-//go:nosplit
 type LogView struct {
 	// ───────────── Hot fields: accessed immediately by fastpath ──────────────
 
