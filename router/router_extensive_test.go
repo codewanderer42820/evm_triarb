@@ -24,6 +24,8 @@ import (
 
 	"main/bucketqueue"
 	"main/localidx"
+	"main/ring32"
+	"main/types"
 )
 
 /*────────────────────────────── Helpers ──────────────────────────────*/
@@ -463,4 +465,124 @@ func TestHandleTickConcurrent(t *testing.T) {
 	if got := runtime.NumGoroutine(); got > goroutines+16 { // generous headroom
 		t.Fatalf("goroutine leak detected: %d live goroutines", got)
 	}
+}
+
+func TestInitExecutorsBasic(t *testing.T) {
+	runtime.GOMAXPROCS(12)
+	resetGlobals()
+
+	cycles := []PairTriplet{
+		{1, 2, 3},
+	}
+
+	InitExecutors(cycles)
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		for _, ex := range executors {
+			if ex != nil {
+				return // ✅ Success
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("expected at least 1 executor, got 0")
+}
+
+func TestDispatchUpdateBasic(t *testing.T) {
+	resetGlobals()
+
+	// Set up executor and ring for core 0
+	ex := &CoreExecutor{
+		Heaps:    make([]bucketqueue.Queue, 1),
+		Fanouts:  make([][]FanoutEntry, 1),
+		LocalIdx: localidx.New(4),
+	}
+	executors[0] = ex
+
+	ring := ring32.New(128)
+	rings[0] = ring
+
+	// Register PairID 100 and bitmap route to core 0
+	addr := make([]byte, 40)
+	for i := range addr {
+		addr[i] = 'a'
+	}
+	RegisterPair(addr, 100)
+	pair2cores[100] = 1 << 0
+
+	// Mock LogView with known r0 = 8, r1 = 4 → tick = log2(2) = 1
+	data := make([]byte, 64)
+	binary.BigEndian.PutUint64(data[24:], 8)
+	binary.BigEndian.PutUint64(data[56:], 4)
+
+	v := &types.LogView{
+		Addr: append([]byte{0, 0, 0}, addr...), // Addr[3:43] → 40-byte ASCII
+		Data: data,
+	}
+
+	// Spawn a consumer that reads one message
+	var got TickUpdate
+	done := make(chan struct{})
+
+	go ring32.PinnedConsumer(0, ring, new(uint32), new(uint32),
+		func(p *[32]byte) {
+			got = *(*TickUpdate)(unsafe.Pointer(p))
+			close(done)
+		},
+		make(chan struct{}),
+	)
+
+	// Send one update
+	DispatchUpdate(v)
+
+	select {
+	case <-done:
+		// ok
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("DispatchUpdate did not deliver to ring")
+	}
+
+	if got.Pair != 100 {
+		t.Fatalf("TickUpdate.Pair = %d; want 100", got.Pair)
+	}
+	if math.Abs(got.FwdTick-1.0) > 1e-6 {
+		t.Fatalf("TickUpdate.FwdTick = %f; want ~1.0", got.FwdTick)
+	}
+	if math.Abs(got.RevTick+1.0) > 1e-6 {
+		t.Fatalf("TickUpdate.RevTick = %f; want ~-1.0", got.RevTick)
+	}
+}
+
+func TestShardWorkerBootstraps(t *testing.T) {
+	resetGlobals()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	ch := make(chan PairShard, 1)
+	ch <- PairShard{
+		Pair: 1,
+		Bins: []EdgeBinding{{Pairs: PairTriplet{1, 2, 3}, EdgeIdx: 0}},
+	}
+	close(ch)
+
+	go func() {
+		println("[DEBUG] launching shardWorker")
+		shardWorker(0, 1, ch)
+		wg.Done()
+	}()
+
+	// poll for executor registration
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if executors[0] != nil {
+			return // ✅ success
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("executor not registered at core 0")
+
+	// ensure graceful worker exit
+	wg.Wait()
 }
