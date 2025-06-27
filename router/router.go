@@ -138,7 +138,6 @@ var _TickUpdateSizeCheck [32 - int(_tickUpdateSize)]byte
 var (
 	executors   [64]*CoreExecutor // index == logical core
 	rings       [64]*ring32.Ring  // SPSC rings
-	addr2pair   [1 << 17]PairID   // 128 Ki × open addressing
 	pair2cores  [1 << 17]CoreMask // fan-out bitmap per pair
 	shardBucket map[PairID][]PairShard
 
@@ -194,15 +193,6 @@ func InitExecutors(cycles []PairTriplet) {
 	}
 }
 
-// RegisterPair hashes the 40-byte hex address → PairID (inject at init).
-func RegisterPair(addr40 []byte, pid PairID) {
-	idx := utils.Hash17(addr40)
-	for addr2pair[idx] != 0 {
-		idx = (idx + 64) & (1<<17 - 1) // 64-slot stride ≈ λ cache sets
-	}
-	addr2pair[idx] = pid
-}
-
 // RegisterRoute lets external code add extra core mappings (rare).
 func RegisterRoute(pid PairID, core uint8) { pair2cores[pid] |= 1 << core }
 
@@ -231,16 +221,6 @@ func DispatchUpdate(v *types.LogView) {
 		rings[core].Push(&msg)
 		m &^= 1 << core
 	}
-}
-
-/*────────────────────────  Helper Look-ups  ───────────────────────────*/
-
-func lookupPairID(addr40 []byte) PairID {
-	idx := utils.Hash17(addr40)
-	for pid := addr2pair[idx]; pid == 0; pid = addr2pair[idx] {
-		idx = (idx + 64) & (1<<17 - 1)
-	}
-	return addr2pair[idx]
 }
 
 /*────────────────────  Fan-out shard construction  ────────────────────*/

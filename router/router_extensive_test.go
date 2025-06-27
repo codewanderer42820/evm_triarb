@@ -30,7 +30,6 @@ import (
 // a pristine state and results remain deterministic regardless of execution
 // order or ‑run filters.
 func resetGlobals() {
-	addr2pair = [1 << 17]PairID{}
 	pair2cores = [1 << 17]CoreMask{}
 	shardBucket = make(map[PairID][]PairShard)
 	splitThreshold = 16_384 // restore default if tampered with
