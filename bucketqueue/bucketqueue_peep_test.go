@@ -1,30 +1,22 @@
-// Package bucketqueue implements a zero-allocation, low-latency time-bucket priority queue.
-// Items are distributed across a fixed-size sliding window of time-indexed buckets.
-// A two-level bitmap structure allows O(1) retrieval of the earliest item.
+// bucketqueue_peep_test.go verifies that PeepMin behaves identically to PopMin
+// in terms of ordering but does not mutate the internal queue state.
 //
-// This implementation uses a fixed arena allocator, intrusive linked lists,
-// and compact handle management for high-throughput applications such as
-// schedulers, simulation engines, or event queues.
-//
-// Peep‑oriented test‑suite — verifies that PeepMin() behaves exactly like PopMin()
-// in terms of ordering *without* mutating queue state.
-
+// These tests act as read-only validation of the earliest item retrieval
+// logic and its response to reordering and updates.
 package bucketqueue
 
 import "testing"
 
-// TestPeepMinEmpty confirms that PeepMin on an empty queue returns the sentinel
-// nilIdx handle and does not panic.
+// TestPeepMinEmpty ensures PeepMin returns a safe sentinel when empty.
 func TestPeepMinEmpty(t *testing.T) {
 	q := New()
-	if h, tick, val := q.PeepMin(); h != Handle(nilIdx) || tick != 0 || val != nil {
+	h, tick, val := q.PeepMin()
+	if h != Handle(nilIdx) || tick != 0 || val != nil {
 		t.Fatalf("expected empty peep → (nilIdx,0,nil); got h=%v tick=%d val=%v", h, tick, val)
 	}
 }
 
-// TestPeepMinBasic pushes three items with ascending tick values and ensures
-// PeepMin sees the earliest (lowest tick) *without* removing it, whereas the
-// subsequent PopMin must return the same item.
+// TestPeepMinBasic confirms PeepMin sees the earliest tick item without removal.
 func TestPeepMinBasic(t *testing.T) {
 	q := New()
 
@@ -51,21 +43,22 @@ func TestPeepMinBasic(t *testing.T) {
 	}
 }
 
-// TestPeepMinUpdates checks that PeepMin always tracks the current minimum when
-// items are updated to an earlier tick.
+// TestPeepMinUpdates checks if PeepMin respects tick updates.
 func TestPeepMinUpdates(t *testing.T) {
 	q := New()
 
 	h1, _ := q.Borrow()
 	_ = q.Push(90, h1, nil)
 
-	if _, tick, _ := q.PeepMin(); tick != 90 {
+	_, tick, _ := q.PeepMin()
+	if tick != 90 {
 		t.Fatalf("expected tick 90, got %d", tick)
 	}
 
-	// Move handle earlier and confirm PeepMin reflects change
+	// Move handle to earlier tick and confirm PeepMin tracks it
 	_ = q.Update(5, h1, nil)
-	if _, tick, _ := q.PeepMin(); tick != 5 {
-		t.Fatalf("PeepMin failed to reflect updated tick: got %d want 5", tick)
+	_, tick2, _ := q.PeepMin()
+	if tick2 != 5 {
+		t.Fatalf("PeepMin failed to reflect updated tick: got %d want 5", tick2)
 	}
 }
