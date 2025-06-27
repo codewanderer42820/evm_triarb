@@ -1,6 +1,4 @@
-// router.go — 64-core parallelised fan-out router for real-time arbitrage updates.
-// Core duties: dispatch price updates to per-core goroutines, manage per-pair
-// tick queues, and maintain arbitrage paths.
+// router.go — 64-core fan-out router (queues pre-seeded with dummy ticks).
 
 package router
 
@@ -19,82 +17,67 @@ import (
 	"main/utils"
 )
 
-/*──────────────────────────────────────────────────────────────────────────────
-   Data Structures
-──────────────────────────────────────────────────────────────────────────────*/
+/*────────────────────────  Data Structures  ────────────────────────*/
 
-// PairID: globally unique pair ID
 type PairID uint32
-
-// LocalPairID: dense per-core local ID (used as an index)
 type LocalPairID uint32
-
-// CPUMask: 64-bit bitmap of core targets for dispatch
 type CPUMask uint64
 
-// TriCycle: a 3-leg arbitrage path (three pair IDs)
 type TriCycle [3]PairID
 
-// ArbPath holds tick values and the cycle’s pair IDs
 type ArbPath struct {
 	Ticks [3]float64
 	Pairs TriCycle
 }
 
-// Ref: one per (pair, triangle). CommonEdge = this pair’s position (0,1,2).
+// Ref: one per (pair, triangle). CommonEdge = this pair’s leg (0,1,2).
 type Ref struct {
 	Pairs      TriCycle
 	CommonEdge uint16
 }
 
-// Shard groups refs by pair
 type Shard struct {
 	Pair PairID
 	Refs []Ref
 }
 
-// Passed between threads via ring
 type PriceUpdate struct {
 	Pair             PairID
 	FwdTick, RevTick float64
 }
 
-// Fanout links an ArbPath to its per-pair queue and the tick slot to update
+// Fanout keeps no queue pointer; it stores the local-pair index (Lid)
+// and a *shared* handle for the pre-inserted queue item.
 type Fanout struct {
-	Path       *ArbPath           // shared triangle object
-	Queue      *bucketqueue.Queue // per-pair queue (PeepMin / Update)
-	FanoutEdge uint16             // tick slot we write on update (0-2)
+	Path       *ArbPath
+	Handle     bucketqueue.Handle // shared by the two fan-outs
+	Lid        LocalPairID        // index into rt.Buckets
+	FanoutEdge uint16             // tick slot to write (0-2)
 }
 
-// Per-core router state
 type CoreRouter struct {
-	Buckets   []bucketqueue.Queue // indexed by LocalPairID
+	Buckets   []bucketqueue.Queue // value slice; core owns queues
 	Fanouts   [][]Fanout          // fan-outs per local pair
-	Local     localidx.Hash       // global PairID → LocalPairID
-	IsReverse bool                // true if this core handles reverse ticks
+	Local     localidx.Hash
+	IsReverse bool
 }
 
-/*──────────────────────────────────────────────────────────────────────────────
-   Global Runtime Structures
-──────────────────────────────────────────────────────────────────────────────*/
+/*────────────────────────  Globals  ────────────────────────*/
 
 var (
-	coreRouters   [64]*CoreRouter    // per-core logical routers
-	coreRings     [64]*ring.Ring     // SPSC ring per core
-	addrToPairID  [1 << 17]PairID    // fast address → pairID
-	routingBitmap [1 << 17]CPUMask   // bitmap of cores per pairID
-	rawShards     map[PairID][]Shard // pre-computed fan-out shards
+	coreRouters   [64]*CoreRouter
+	coreRings     [64]*ring.Ring
+	addrToPairID  [1 << 17]PairID
+	routingBitmap [1 << 17]CPUMask
+	rawShards     map[PairID][]Shard
 
-	splitThreshold = 16_384 // max refs per shard
+	splitThreshold = 16_384
 )
 
-/*──────────────────────────────────────────────────────────────────────────────
-   Fan-out Planner
-──────────────────────────────────────────────────────────────────────────────*/
+/*────────────────────────  Fan-out Planner  ────────────────────────*/
 
 func ResetFanouts() { rawShards = make(map[PairID][]Shard) }
 
-// Fisher-Yates shuffle to balance load
 func shuffleRefs(refs []Ref) {
 	for i := len(refs) - 1; i > 0; i-- {
 		j := crandInt(i + 1)
@@ -113,7 +96,7 @@ func crandInt(n int) int {
 	return int(hi)
 }
 
-// BuildFanouts: one Ref per (pair, CommonEdge) → split into shards
+// BuildFanouts: one Ref per (pair, CommonEdge) → shard by pair.
 func BuildFanouts(cycles []TriCycle) {
 	ResetFanouts()
 	tmp := make(map[PairID][]Ref, len(cycles)*3)
@@ -132,15 +115,12 @@ func BuildFanouts(cycles []TriCycle) {
 				end = len(refs)
 			}
 			rawShards[pair] = append(rawShards[pair],
-				Shard{Pair: pair, Refs: refs[off:end]},
-			)
+				Shard{Pair: pair, Refs: refs[off:end]})
 		}
 	}
 }
 
-/*──────────────────────────────────────────────────────────────────────────────
-   CPU Bootstrap (Router Initialization)
-──────────────────────────────────────────────────────────────────────────────*/
+/*────────────────────────  CPU Bootstrap  ────────────────────────*/
 
 func InitCPURings(cycles []TriCycle) {
 	n := runtime.NumCPU() - 4
@@ -163,34 +143,7 @@ func InitCPURings(cycles []TriCycle) {
 	}
 
 	for coreID := 0; coreID < n; coreID++ {
-		go func(coreID, half int, in <-chan Shard) {
-			runtime.LockOSThread()
-
-			rt := &CoreRouter{
-				Buckets:   make([]bucketqueue.Queue, 0, 1024),
-				Local:     localidx.New(1 << 16),
-				IsReverse: coreID >= half,
-			}
-			coreRouters[coreID] = rt
-
-			rb := ring.New(1 << 14)
-			coreRings[coreID] = rb
-
-			paths := make([]ArbPath, 0, 1024)
-
-			for sh := range in {
-				localRefs := append([]Ref(nil), sh.Refs...)
-				local := Shard{Pair: sh.Pair, Refs: localRefs}
-				installShard(rt, &local, &paths)
-			}
-
-			ring.PinnedConsumer(
-				coreID, rb,
-				new(uint32), new(uint32),
-				func(p unsafe.Pointer) { onPrice(rt, (*PriceUpdate)(p)) },
-				make(chan struct{}),
-			)
-		}(coreID, half, shardCh[coreID])
+		go shardWorker(coreID, half, shardCh[coreID])
 	}
 
 	coreIdx := 0
@@ -208,40 +161,71 @@ func InitCPURings(cycles []TriCycle) {
 	}
 }
 
-/*──────────────────────────────────────────────────────────────────────────────
-   Shard Attachment Logic
-──────────────────────────────────────────────────────────────────────────────*/
+func shardWorker(coreID, half int, in <-chan Shard) {
+	runtime.LockOSThread()
 
-// One bucket per pair; two Fanouts per Ref (for the other two legs).
+	rt := &CoreRouter{
+		Buckets:   make([]bucketqueue.Queue, 0, 1024),
+		Local:     localidx.New(1 << 16),
+		IsReverse: coreID >= half,
+	}
+	coreRouters[coreID] = rt
+
+	rb := ring.New(1 << 14)
+	coreRings[coreID] = rb
+
+	paths := make([]ArbPath, 0, 1024)
+
+	for sh := range in {
+		installShard(rt, &sh, &paths)
+	}
+
+	ring.PinnedConsumer(
+		coreID, rb, new(uint32), new(uint32),
+		func(p unsafe.Pointer) { onPrice(rt, (*PriceUpdate)(p)) },
+		make(chan struct{}),
+	)
+}
+
+/*────────────────────────  Shard Attach  ────────────────────────*/
+
+// Pre-insert each path into its bucket with dummy tick 0.
 func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
-	lid := rt.Local.Put(uint32(sh.Pair), uint32(len(rt.Buckets)))
+	lid := rt.Local.Put(uint32(sh.Pair), uint32(len(rt.Buckets))) // uint32
 
+	// create bucket / fanout slice once
 	if int(lid) == len(rt.Buckets) {
-		rt.Buckets = append(rt.Buckets, bucketqueue.Queue{})
+		rt.Buckets = append(rt.Buckets, *bucketqueue.New())
 	}
 	if int(lid) >= len(rt.Fanouts) {
 		rt.Fanouts = append(rt.Fanouts,
 			make([][]Fanout, int(lid)-len(rt.Fanouts)+1)...)
 	}
 
+	q := &rt.Buckets[lid] // use lid directly (no cast)
+
 	for _, ref := range sh.Refs {
 		*paths = append(*paths, ArbPath{Pairs: ref.Pairs})
 		pPtr := &(*paths)[len(*paths)-1]
 
-		// The two legs that change when THIS pair updates.
-		a := uint16((ref.CommonEdge + 1) % 3)
-		b := uint16((ref.CommonEdge + 2) % 3)
+		handle, _ := q.Borrow()
+		_ = q.Push(0, handle, unsafe.Pointer(pPtr))
 
-		rt.Fanouts[lid] = append(rt.Fanouts[lid],
-			Fanout{Path: pPtr, Queue: &rt.Buckets[lid], FanoutEdge: a},
-			Fanout{Path: pPtr, Queue: &rt.Buckets[lid], FanoutEdge: b},
-		)
+		for _, slot := range []uint16{
+			uint16((ref.CommonEdge + 1) % 3),
+			uint16((ref.CommonEdge + 2) % 3),
+		} {
+			rt.Fanouts[lid] = append(rt.Fanouts[lid], Fanout{
+				Path:       pPtr,
+				Handle:     handle,
+				Lid:        LocalPairID(lid), // ← single cast here
+				FanoutEdge: slot,
+			})
+		}
 	}
 }
 
-/*──────────────────────────────────────────────────────────────────────────────
-   Tick Processing & Arbitrage Execution
-──────────────────────────────────────────────────────────────────────────────*/
+/*────────────────────────  Tick Processing  ────────────────────────*/
 
 func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 	tick := upd.FwdTick
@@ -250,10 +234,10 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 	}
 
 	lid, _ := rt.Local.Get(uint32(upd.Pair))
-	b := &rt.Buckets[lid]
+	q := &rt.Buckets[lid]
 	fan := rt.Fanouts[lid]
 
-	if _, _, ptr := b.PeepMin(); ptr != nil {
+	if _, _, ptr := q.PeepMin(); ptr != nil {
 		p := (*ArbPath)(ptr)
 		if profit := tick + p.Ticks[0] + p.Ticks[1] + p.Ticks[2]; profit < 0 {
 			onProfitablePath(p, profit)
@@ -264,9 +248,12 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 		p := f.Path
 		p.Ticks[f.FanoutEdge] = tick
 		sum := p.Ticks[0] + p.Ticks[1] + p.Ticks[2]
-		f.Queue.Update(l2Bucket(sum), 0, unsafe.Pointer(p))
+		q := &rt.Buckets[f.Lid]
+		q.Update(l2Bucket(sum), f.Handle, unsafe.Pointer(p))
 	}
 }
+
+/*────────────────────────  Utilities  ────────────────────────*/
 
 func l2Bucket(x float64) int64 {
 	const clamp, scale = 128.0, 16.0
@@ -278,9 +265,7 @@ func l2Bucket(x float64) int64 {
 	return int64((x + clamp) * scale)
 }
 
-/*──────────────────────────────────────────────────────────────────────────────
-   Pair Registration & Lookup
-──────────────────────────────────────────────────────────────────────────────*/
+/*────────────────────────  Pair Registry  ────────────────────────*/
 
 func RegisterPair(addr40 []byte, pid PairID) {
 	idx := utils.Hash17(addr40)
@@ -310,9 +295,7 @@ func lookupPairID(addr []byte) PairID {
 	}
 }
 
-/*──────────────────────────────────────────────────────────────────────────────
-   External Entry Point
-──────────────────────────────────────────────────────────────────────────────*/
+/*────────────────────────  External Entry  ────────────────────────*/
 
 func RouteUpdate(v *types.LogView) {
 	addr := v.Addr[3:43]
@@ -332,9 +315,6 @@ func RouteUpdate(v *types.LogView) {
 	}
 }
 
-/*──────────────────────────────────────────────────────────────────────────────
-   Arbitrage Action Hook
-──────────────────────────────────────────────────────────────────────────────*/
+/*────────────────────────  Profit Hook  ────────────────────────*/
 
-// Called when a profitable path is discovered
 func onProfitablePath(_ *ArbPath, _ float64) {}
