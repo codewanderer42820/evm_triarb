@@ -6,8 +6,9 @@ import (
 )
 
 type slot struct {
-	val [32]byte // payload stored inline to avoid heap refs
-	seq uint64   // coordination ticket
+	val  [32]byte // fixed-size payload
+	seq  uint64   // slot ticket number
+	_pad [24]byte // pad to 64 bytes total, prevents false sharing
 }
 
 type Ring struct {
