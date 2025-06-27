@@ -77,7 +77,6 @@ var (
 // Zero value is invalid (reserved for nilIdx).
 //
 //go:inline
-//go:nosplit
 //nolint:revive
 //lint:ignore U1000 exported type used by consumers
 

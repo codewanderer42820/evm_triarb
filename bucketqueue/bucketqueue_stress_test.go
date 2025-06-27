@@ -1,11 +1,8 @@
-// Package bucketqueue implements a zero-allocation, low-latency time-bucket priority queue.
-// Items are distributed across a fixed-size sliding window of time-indexed buckets.
-// A two-level bitmap structure allows O(1) retrieval of the earliest item.
+// bucketqueue_stress_test.go exercises bucketqueue against a high-volume randomized
+// sequence of operations to verify correctness under stress.
 //
-// This implementation uses a fixed arena allocator, intrusive linked lists,
-// and compact handle management for high-throughput applications such as
-// schedulers, simulation engines, or event queues.
-
+// It uses a reference heap model to ensure pop order, updates, and insertions match
+// the priority queue behavior expected under adversarial conditions.
 package bucketqueue
 
 import (
@@ -14,12 +11,14 @@ import (
 	"testing"
 )
 
+// stressItem represents a single tracked entry used by the reference heap.
 type stressItem struct {
 	h    Handle
 	tick int64
-	seq  int
+	seq  int // to retain insertion order for stability testing
 }
 
+// stressHeap is a min-heap implementation used for validating queue order.
 type stressHeap []*stressItem
 
 func (sh stressHeap) Len() int { return len(sh) }
@@ -27,7 +26,7 @@ func (sh stressHeap) Less(i, j int) bool {
 	if sh[i].tick != sh[j].tick {
 		return sh[i].tick < sh[j].tick
 	}
-	return sh[i].seq > sh[j].seq // later seq wins on equal tick to mimic queue’s stable ordering
+	return sh[i].seq > sh[j].seq // later seq wins on tie → mimics push overwrites
 }
 func (sh stressHeap) Swap(i, j int)       { sh[i], sh[j] = sh[j], sh[i] }
 func (sh *stressHeap) Push(x interface{}) { *sh = append(*sh, x.(*stressItem)) }
@@ -39,34 +38,34 @@ func (sh *stressHeap) Pop() interface{} {
 	return item
 }
 
-// TestStressBasicRandom exercises randomised borrow‑push‑update‑pop cycles at massive scale to ensure
-// bucketqueue behaviour matches a reference heap under adversarial conditions.
+// TestStressBasicRandom validates that push/update/pop sequences remain coherent
+// with a reference heap under high load and pseudo-random conditions.
 func TestStressBasicRandom(t *testing.T) {
 	rng := rand.New(rand.NewSource(1234))
 	q := New()
-	handles := make([]Handle, 0, 1<<12)
 	ref := &stressHeap{}
 	heap.Init(ref)
+	handles := make([]Handle, 0, 1<<12)
 	seq := 0
 
 	for i := 0; i < 10_000_000; i++ {
 		switch rng.Intn(3) {
-		case 0: // borrow + push
+		case 0: // Borrow + Push
 			h, err := q.Borrow()
 			if err == nil {
 				tick := int64(rng.Intn(numBuckets))
 				_ = q.Push(tick, h, nil)
-				heap.Push(ref, &stressItem{h: h, tick: tick, seq: seq})
 				handles = append(handles, h)
+				heap.Push(ref, &stressItem{h: h, tick: tick, seq: seq})
 				seq++
 			}
-		case 1: // update 50% chance
+		case 1: // Update existing
 			if len(handles) > 0 {
 				idx := rng.Intn(len(handles))
 				h := handles[idx]
 				tick := int64(rng.Intn(numBuckets))
 				_ = q.Update(tick, h, nil)
-				// reference heap update: remove and re‑add
+
 				for j, it := range *ref {
 					if it.h == h {
 						heap.Remove(ref, j)
@@ -76,7 +75,7 @@ func TestStressBasicRandom(t *testing.T) {
 					}
 				}
 			}
-		case 2: // pop 25% chance
+		case 2: // Pop
 			if !q.Empty() {
 				h, tick1, _ := q.PopMin()
 				ri := heap.Pop(ref).(*stressItem)
@@ -87,7 +86,7 @@ func TestStressBasicRandom(t *testing.T) {
 		}
 	}
 
-	// Drain leftover elements and ensure order matches.
+	// Final drain validation.
 	for !q.Empty() && ref.Len() > 0 {
 		h, tick1, _ := q.PopMin()
 		ri := heap.Pop(ref).(*stressItem)
