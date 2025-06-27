@@ -16,7 +16,6 @@ package router
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"math"
 	"math/bits"
 	"runtime"
 	"unsafe"
@@ -302,55 +301,78 @@ func installShard(rt *CoreRouter, sh *Shard, buf *[]PathState) {
 
 /*────────────────────────  Hot Path  ────────────────────────*/
 
-// ────────────────────────────────────────────────────────────────────────────
-// onPrice — hot-path tick ingest (zero alloc, branch-minimal)
-// ────────────────────────────────────────────────────────────────────────────
-// Preconditions
-//   - shardWorker() has fully populated rt.Buckets & rt.Fanouts.
-//   - Every PathState already owns a live bucketqueue.Handle.
-//   - Fanouts[lid] is cache-local to this core (no sharing).
+// onPrice — PopMin profit-drain (items re-queued *before* propagate)
+// -----------------------------------------------------------------------------
+//   - All temporaries live on the stack (stash[64]) → zero heap traffic.
+//   - Drained paths are re-pushed with their original handles **prior** to the
+//     fan-out loop, guaranteeing that Update() can locate them.
 //
-// Fast path
-//  1. Convert the inbound tick into the correct polarity (fwd / rev).
-//  2. PeepMin() the current best path *without* a nil-check — the queue is
-//     guaranteed non-empty once bootstrap is complete.
-//  3. If the new tick makes that path profitable (sum < 0), fire it.
-//  4. Loop over the fan-outs for this pair, overwrite the tick slot, recompute
-//     the 3-tick sum, map it to a monotonic 64-bit key, and issue a
-//     bucketqueue.Update().
-//
-// No error handling, no pointer checks, no extra branches: exactly the same
-// level of “trust the invariants” as the rest of the codebase.
-// ────────────────────────────────────────────────────────────────────────────
+// Queue may be empty; hard cap of 64 keeps the stack bounded.
 func onPrice(rt *CoreRouter, upd *PriceUpdate) {
-	/* 1️⃣  polarity */
+	/* 1️⃣  polarity -------------------------------------------------------- */
 	tick := upd.FwdTick
 	if rt.IsReverse {
 		tick = upd.RevTick
 	}
 
-	/* 2️⃣  per-pair state */
+	/* 2️⃣  local state ----------------------------------------------------- */
 	lid32, _ := rt.Local.Get(uint32(upd.Pair))
 	lid := LocalPairID(lid32)
 	bq := &rt.Buckets[lid]
+	fan := rt.Fanouts[lid]
 
-	/* 3️⃣  one-shot profit probe (queue cannot be empty) */
-	_, _, ptr := bq.PeepMin()
-	ps := (*PathState)(ptr)
-	if tick+ps.Ticks[0]+ps.Ticks[1]+ps.Ticks[2] < 0 {
-		onProfitablePath(ps)
+	/* 3️⃣  profit-drain phase --------------------------------------------- */
+	const capDrain = 64
+	type popped struct {
+		h  bucketqueue.Handle
+		ps *PathState
+	}
+	var stash [capDrain]popped
+	n := 0
+
+	if h, _, ptr := bq.PopMin(); ptr != nil { // queue could be empty
+		for {
+			ps := (*PathState)(ptr)
+
+			if tick+ps.Ticks[0]+ps.Ticks[1]+ps.Ticks[2] >= 0 {
+				stash[n] = popped{h, ps} // first non-profitable
+				n++
+				break
+			}
+			onProfitablePath(ps)     // 🚀 fire trade
+			stash[n] = popped{h, ps} // keep for re-queue
+			n++
+			if n == capDrain {
+				break
+			} // stack guard
+
+			h, _, ptr = bq.PopMin() // next item
+			if ptr == nil {
+				break
+			} // queue drained
+		}
 	}
 
-	/* 4️⃣  propagate tick to every dependent path */
-	for _, fan := range rt.Fanouts[lid] { // fan slice is local
-		edge := uint16(fan.Meta) // low 16 bits = EdgeIdx:contentReference[oaicite:0]{index=0}
-		ps := fan.Path           // cached pointer:contentReference[oaicite:1]{index=1}
-		ps.Ticks[edge] = tick
+	/* 4️⃣  push drained items back in BEFORE propagate -------------------- */
+	for i := 0; i < n; i++ {
+		ps := stash[i].ps
+		h := stash[i].h
 
 		sum := ps.Ticks[0] + ps.Ticks[1] + ps.Ticks[2]
-		key := int64(math.Float64bits(sum)) // monotonic on sum:contentReference[oaicite:2]{index=2}
+		key := log2ToTick(sum)
 
-		_ = bq.Update(key, fan.Handle, unsafe.Pointer(ps)) // never stale:contentReference[oaicite:3]{index=3}
+		_ = bq.Push(key, h, unsafe.Pointer(ps)) // same handle, no alloc
+	}
+
+	/* 5️⃣  propagate fresh tick to every dependent path ------------------- */
+	for _, f := range fan { // fan slice is core-local
+		ps := f.Path
+		ps.Ticks[uint16(f.Meta)] = tick // low 16 b = EdgeIdx
+
+		sum := ps.Ticks[0] + ps.Ticks[1] + ps.Ticks[2]
+		key := log2ToTick(sum)
+
+		_ = bq.Update(key, f.Handle, unsafe.Pointer(ps))
 	}
 }
 
