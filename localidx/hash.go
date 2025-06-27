@@ -2,8 +2,6 @@ package localidx
 
 import "unsafe"
 
-//go:nosplit
-
 // Hash implements a fixed-capacity Robin-Hood hashmap.
 //
 // Design:
