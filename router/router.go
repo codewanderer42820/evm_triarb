@@ -103,7 +103,8 @@ type FanoutEntry struct {
 	Queue   *bucketqueue.Queue
 	Handle  bucketqueue.Handle
 	EdgeIdx uint16
-	_pad    [2]byte
+	//lint:ignore U1000 padding for cache alignment
+	_pad [2]byte
 }
 
 // CoreExecutor owns all per-core state and runs on a pinned thread.
@@ -118,16 +119,18 @@ type CoreExecutor struct {
 
 // TickUpdate is the fixed-size (32 B) message pushed through ring32.
 type TickUpdate struct {
-	Pair             PairID
-	_pad             uint32 // aligns following floats
+	Pair PairID
+	//lint:ignore U1000 padding for cache alignment
+	_pad0            uint32 // aligns following floats
 	FwdTick, RevTick float64
-	_                [8]byte // pad to 32 B exactly
+	//lint:ignore U1000 padding for cache alignment
+	_pad1 [8]byte // pad to 32 B exactly
 }
 
-// Compile-time layout assertion (panics at init if size drifts).
+//lint:ignore U1000 Compile-time layout assertion
 const _tickUpdateSize = unsafe.Sizeof(TickUpdate{})
 
-// Compile-time size check: TickUpdate must be exactly 32 bytes
+//lint:ignore U1000 Compile-time layout assertion
 var _TickUpdateSizeCheck [32 - int(_tickUpdateSize)]byte
 
 /*──────────────────────  Package-level scratch  ───────────────────────*/
