@@ -1,21 +1,9 @@
-// fastuni_test.go — Deterministic unit tests & micro‑benchmarks.
+// fastuni_test.go — Deterministic unit tests & micro-benchmarks.
 //
-// Synopsis
+// Overview
 // --------
-// Validates edge‑cases, panic guards, accuracy, monotonicity and provides
-// micro‑benchmarks for the production helpers.
-//
-// Structure
-// ---------
-// • Daily deterministic seed → reproducible CI even across mid‑night runs.
-// • Guard tests (expect panics on invalid input).
-// • Accuracy sweeps (near‑equal, ULP boundaries, power‑of‑two magnitudes).
-// • Monotonicity & determinism checks.
-// • Benchmarks (`BenchmarkLnReserveRatio`, `BenchmarkLog2PriceX96`).
-//
-// Style
-// -----
-// Shares the same ASCII‑ruler section headers as fastuni.go for quick grepping.
+// Ensures correctness, edge-case handling, determinism, monotonicity, and
+// performance of the fastuni logarithmic helpers.
 
 package fastuni
 
@@ -26,28 +14,31 @@ import (
 	"time"
 )
 
-/*────────────────── deterministic daily seed ──────────────────*/
+/*──────────────────── deterministic seed ───────────────────*/
 
 var testSeed int64
 
 func init() {
-	// One seed per UTC day → reproducible CI runs even if they span midnight.
+	// Seed rotates once per UTC day → reproducible across midnight boundaries.
 	testSeed = time.Now().UTC().Unix() / 86_400
 }
 
-/*────────────────── helpers ──────────────────*/
+/*──────────────────── test utilities ───────────────────*/
 
+//go:nosplit
+//go:inline
 func rngPair(r *rand.Rand) (uint64, uint64) {
 	for i := 0; i < 65_536; i++ {
-		a := r.Uint64()
-		b := r.Uint64()
+		a, b := r.Uint64(), r.Uint64()
 		if a != 0 && b != 0 {
 			return a, b
 		}
 	}
-	panic("rngPair: failed to generate non‑zero pair after 65 536 tries")
+	panic("rngPair: failed to generate non-zero pair after 65,536 attempts")
 }
 
+//go:nosplit
+//go:inline
 func assertPanics(t *testing.T, f func(), msg string) {
 	t.Helper()
 	defer func() {
@@ -58,62 +49,60 @@ func assertPanics(t *testing.T, f func(), msg string) {
 	f()
 }
 
-/*────────────────── zero / invalid input guards ──────────────────*/
+/*──────────────────── panic guard tests ───────────────────*/
 
 func TestZeroInputPanics(t *testing.T) {
+	zero := Uint128{}
 	assertPanics(t, func() { _ = log2u64(0) }, "log2u64(0)")
-	assertPanics(t, func() { _ = log2u128(Uint128{}) }, "log2u128(0)")
+	assertPanics(t, func() { _ = log2u128(zero) }, "log2u128(0)")
 	assertPanics(t, func() { _ = Log2ReserveRatio(0, 1) }, "Log2ReserveRatio(0,1)")
 	assertPanics(t, func() { _ = LnReserveRatio(1, 0) }, "LnReserveRatio(1,0)")
-	zero := Uint128{}
 	assertPanics(t, func() { _ = Log2PriceX96(zero) }, "Log2PriceX96(0)")
 }
 
 func TestValidateConvPanics(t *testing.T) {
 	badConvs := []float64{0, math.NaN(), math.Inf(1), 1e-305, 1e301}
-	for _, c := range badConvs {
-		assertPanics(t, func() { _ = LogReserveRatioConst(2, 1, c) }, "invalid conv")
-		assertPanics(t, func() { _ = LogPriceX96Const(Uint128{Hi: 1, Lo: 0}, c) }, "invalid conv in price helper")
+	for _, conv := range badConvs {
+		assertPanics(t, func() { _ = LogReserveRatioConst(2, 1, conv) }, "invalid conv")
+		assertPanics(t, func() { _ = LogPriceX96Const(Uint128{Hi: 1}, conv) }, "invalid price conv")
 	}
 }
 
-/*────────────────── internal path coverage ──────────────────*/
+/*──────────────────── log2u128 test coverage ───────────────────*/
 
 func TestLog2u128Paths(t *testing.T) {
 	v1 := Uint128{Hi: 0, Lo: 123456789}
-	got1 := log2u128(v1)
 	want1 := math.Log(float64(v1.Lo)) / math.Ln2
-	if math.Abs(got1-want1) > 5e-5 {
-		t.Fatalf("log2u128(Hi=0) mismatch: want %.12g got %.12g", want1, got1)
+	if got := log2u128(v1); math.Abs(got-want1) > 5e-5 {
+		t.Fatalf("log2u128(lo-only) mismatch: want %.12g got %.12g", want1, got)
 	}
 
 	v2 := Uint128{Hi: 1 << 20, Lo: 987654321}
 	x := float64(v2.Hi)*0x1p64 + float64(v2.Lo)
-	got2 := log2u128(v2)
 	want2 := math.Log(x) / math.Ln2
-	if math.Abs(got2-want2) > 5e-5 {
-		t.Fatalf("log2u128(full) mismatch: want %.12g got %.12g", want2, got2)
+	if got := log2u128(v2); math.Abs(got-want2) > 5e-5 {
+		t.Fatalf("log2u128(full) mismatch: want %.12g got %.12g", want2, got)
 	}
 }
 
-/*────────────────── Log2PriceX96 & LnPriceX96 coverage ──────────────────*/
+/*──────────────────── Q64.96 boundary checks ───────────────────*/
 
 func TestLnPriceX96SimpleCase(t *testing.T) {
-	sqrt := Uint128{Hi: 1 << 32, Lo: 0} // exactly 2^96 ⇒ price=1⇒ln=0
+	sqrt := Uint128{Hi: 1 << 32, Lo: 0} // exactly 2^96 ⇒ price=1 ⇒ ln=0
 	if got := LnPriceX96(sqrt); math.Abs(got) > 1e-12 {
-		t.Fatalf("LnPriceX96(1) expected 0 got %.12g", got)
+		t.Fatalf("LnPriceX96(1) = %.12g, expected 0", got)
 	}
 }
 
 func TestLog2PriceX96Guards(t *testing.T) {
 	big := Uint128{Hi: maxSqrtHi, Lo: 0}
-	assertPanics(t, func() { _ = Log2PriceX96(big) }, ">1‑tick guard")
+	assertPanics(t, func() { _ = Log2PriceX96(big) }, ">1-tick guard")
 
 	cliff := Uint128{Hi: maxSqrtHi - 1, Lo: lostLowMask}
 	assertPanics(t, func() { _ = Log2PriceX96(cliff) }, "precision cliff guard")
 }
 
-/*────────────────── LnReserveRatio accuracy tests ──────────────────*/
+/*──────────────────── accuracy & behavior tests ───────────────────*/
 
 func TestLnReserveRatioAccuracyNearEqual(t *testing.T) {
 	r := rand.New(rand.NewSource(testSeed))
@@ -121,32 +110,13 @@ func TestLnReserveRatioAccuracyNearEqual(t *testing.T) {
 		a, _ := rngPair(r)
 		a &= (1 << 60) - 1
 		diff := uint64(r.Intn(1_000))
-		var b uint64
-		if r.Intn(2) == 0 {
-			if a > diff+1 {
-				b = a - diff
-			} else {
-				b = a + diff
-			}
-		} else {
-			b = a + diff
+		b := a + diff
+		if r.Intn(2) == 0 && a > diff+1 {
+			b = a - diff
 		}
 		if b == 0 {
 			b = 1
 		}
-		want := math.Log(float64(a) / float64(b))
-		got := LnReserveRatio(a, b)
-		if math.Abs(got-want) > 1e-5 {
-			t.Fatalf("LnReserveRatio(%d,%d): want %.12g got %.12g (Δ=%.3g)", a, b, want, got, got-want)
-		}
-	}
-}
-
-func TestLnReserveRatioULPBoundaries(t *testing.T) {
-	b := uint64(1 << 53)
-	a1 := b + 1
-	a2 := b - 1
-	for _, a := range []uint64{a1, a2} {
 		want := math.Log(float64(a) / float64(b))
 		got := LnReserveRatio(a, b)
 		if math.Abs(got-want) > 1e-5 {
@@ -155,17 +125,26 @@ func TestLnReserveRatioULPBoundaries(t *testing.T) {
 	}
 }
 
-func TestLnReserveRatioMagnitudeSweep(t *testing.T) {
-	r := rand.New(rand.NewSource(testSeed))
-	for i := 0; i < 10_000; i++ {
-		e1 := uint64(1) << uint(r.Intn(63)+1)
-		e2 := uint64(1) << uint(r.Intn(63)+1)
-		a := e1
-		b := e2
+func TestLnReserveRatioULPBoundaries(t *testing.T) {
+	b := uint64(1 << 53)
+	for _, a := range []uint64{b + 1, b - 1} {
 		want := math.Log(float64(a) / float64(b))
 		got := LnReserveRatio(a, b)
 		if math.Abs(got-want) > 1e-5 {
-			t.Fatalf("LnReserveRatio magnitude sweep (%d,%d): want %.12g got %.12g", a, b, want, got)
+			t.Fatalf("ULP(%d,%d): want %.12g got %.12g", a, b, want, got)
+		}
+	}
+}
+
+func TestLnReserveRatioMagnitudeSweep(t *testing.T) {
+	r := rand.New(rand.NewSource(testSeed))
+	for i := 0; i < 10_000; i++ {
+		a := uint64(1) << uint(r.Intn(63)+1)
+		b := uint64(1) << uint(r.Intn(63)+1)
+		want := math.Log(float64(a) / float64(b))
+		got := LnReserveRatio(a, b)
+		if math.Abs(got-want) > 1e-5 {
+			t.Fatalf("LnReserveRatio sweep(%d,%d): want %.12g got %.12g", a, b, want, got)
 		}
 	}
 }
@@ -175,7 +154,7 @@ func TestLnReserveRatioMonotonicity(t *testing.T) {
 	for a := uint64(1); a <= 1000; a++ {
 		val := LnReserveRatio(a, 1)
 		if val <= prev {
-			t.Fatalf("LnReserveRatio not monotonic at a=%d: %.12g ≤ %.12g", a, val, prev)
+			t.Fatalf("monotonicity fail at a=%d: %.12g ≤ %.12g", a, val, prev)
 		}
 		prev = val
 	}
@@ -185,11 +164,11 @@ func TestSeedDeterminism(t *testing.T) {
 	a := rand.New(rand.NewSource(testSeed)).Uint64()
 	b := rand.New(rand.NewSource(testSeed)).Uint64()
 	if a != b {
-		t.Fatalf("testSeed not deterministic: %d vs %d", a, b)
+		t.Fatalf("testSeed mismatch: %d ≠ %d", a, b)
 	}
 }
 
-/*────────────────── micro‑benchmarks ──────────────────*/
+/*──────────────────── micro-benchmarks ───────────────────*/
 
 func BenchmarkLnReserveRatio(b *testing.B) {
 	r := rand.New(rand.NewSource(testSeed))
