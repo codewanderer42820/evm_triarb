@@ -208,6 +208,9 @@ func RegisterRoute(pid PairID, core uint8) { pair2cores[pid] |= 1 << core }
 // Hot / branch-free except for bitmap walk.
 func DispatchUpdate(v *types.LogView) {
 	pid := lookupPairID(v.Addr[addrHexStart:addrHexEnd])
+	if pid == 0 {
+		return // unknown pair — silently drop
+	}
 
 	// Extract±log2(reserveRatio) using the user’s hand-tuned fastuni impl.
 	r0 := utils.LoadBE64(v.Data[24:])
