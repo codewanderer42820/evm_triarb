@@ -350,8 +350,9 @@ func attachShard(ex *CoreExecutor, shard *PairShard, buf *[]CycleState) {
 
 /*──────────────────────────  Hot-path Loop  ───────────────────────────*/
 
-// handleTick pops profitable paths, fires trades, re-pushes, then propagates
-// the fresh tick to every dependent path.  Zero heap traffic; all temps stack.
+// handleTick pops profitable paths, executes them once, parks the entry at the
+// bottom of the heap, re-queues non-profitable ones with their real key, and
+// finally propagates the fresh tick to every dependent path.
 func handleTick(ex *CoreExecutor, upd *TickUpdate) {
 	/* 1️⃣ Polarity */
 	tick := upd.FwdTick
@@ -365,11 +366,12 @@ func handleTick(ex *CoreExecutor, upd *TickUpdate) {
 	hq := &ex.Heaps[lid]
 	fans := ex.Fanouts[lid]
 
-	/* 3️⃣ Profit-drain (PopMin → stash → onProfitable) */
+	/* 3️⃣ Profit-drain (PopMin → stash) */
 	const maxDrain = 64
 	type stashRec struct {
-		h  bucketqueue.Handle
-		cs *CycleState
+		h         bucketqueue.Handle
+		cs        *CycleState
+		wasProfit bool // true ⇒ executed this round
 	}
 	var stash [maxDrain]stashRec
 	n := 0
@@ -377,14 +379,19 @@ func handleTick(ex *CoreExecutor, upd *TickUpdate) {
 	if h, _, ptr := hq.PopMin(); ptr != nil {
 		for {
 			cs := (*CycleState)(ptr)
-			if tick+cs.Ticks[0]+cs.Ticks[1]+cs.Ticks[2] >= 0 {
-				stash[n] = stashRec{h, cs}
+			profit := tick + cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2]
+
+			if profit >= 0 { // first non-profitable ⇒ stop draining
+				stash[n] = stashRec{h, cs, false}
 				n++
 				break
 			}
-			onProfitable(cs)           // 🚀 fire trade
-			stash[n] = stashRec{h, cs} // keep for re-queue
+
+			// 🚀 one-shot execution, will be parked at bottom later
+			onProfitable(cs)
+			stash[n] = stashRec{h, cs, true}
 			n++
+
 			if n == maxDrain {
 				break
 			}
@@ -397,10 +404,14 @@ func handleTick(ex *CoreExecutor, upd *TickUpdate) {
 
 	/* 4️⃣ Re-push drained items BEFORE propagate */
 	for i := 0; i < n; i++ {
-		cs := stash[i].cs
-		h := stash[i].h
-		key := log2ToTick(cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2])
-		_ = hq.Push(key, h, unsafe.Pointer(cs))
+		rec := stash[i]
+		var key int64
+		if rec.wasProfit {
+			key = 4095 // park at bottom; will be updated after propagate
+		} else {
+			key = log2ToTick(rec.cs.Ticks[0] + rec.cs.Ticks[1] + rec.cs.Ticks[2])
+		}
+		_ = hq.Push(key, rec.h, unsafe.Pointer(rec.cs))
 	}
 
 	/* 5️⃣ Propagate new tick to all fan-outs */
