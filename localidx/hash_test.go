@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// localidx/hash_test.go — Unit-tests for the fixed-size Robin-Hood map
+// -----------------------------------------------------------------------------
+//
+//  • Verifies constructor invariants, insertion & overwrite semantics
+//  • Exercises collision clusters and wrap-around behaviour
+//  • Includes a targeted test for the early-exit “bound check” branch
+// -----------------------------------------------------------------------------
+
 package localidx
 
 import (
@@ -5,70 +14,75 @@ import (
 	"testing"
 )
 
-// TestNewHash checks that New allocates a power-of-two sized table
-// and correctly sets the mask for indexing.
+// -----------------------------------------------------------------------------
+// Constructor & basic behaviour
+// -----------------------------------------------------------------------------
+
+// TestNewHash ensures New() rounds capacity up to the next power-of-two
+// and initialises the mask & backing slices correctly.
 func TestNewHash(t *testing.T) {
 	h := New(8)
 	if h.mask == 0 {
-		t.Fatal("expected non-zero mask")
+		t.Fatal("mask should be non-zero")
 	}
-	if len(h.keys) != 16 {
-		t.Fatalf("expected keys length 16, got %d", len(h.keys))
-	}
-	if len(h.vals) != 16 {
-		t.Fatalf("expected vals length 16, got %d", len(h.vals))
+	if len(h.keys) != 16 || len(h.vals) != 16 {
+		t.Fatalf("expected 16-slot table, got %d/%d", len(h.keys), len(h.vals))
 	}
 }
 
-// TestPutAndGet inserts unique keys and confirms they can be retrieved.
+// TestPutAndGet inserts unique keys then retrieves them.
 func TestPutAndGet(t *testing.T) {
 	h := New(16)
 	for i := 1; i <= 16; i++ {
 		h.Put(uint32(i), uint32(i*10))
 	}
 	for i := 1; i <= 16; i++ {
-		val, ok := h.Get(uint32(i))
-		if !ok || val != uint32(i*10) {
-			t.Errorf("Get(%d) = %d, %v; want %d, true", i, val, ok, i*10)
+		v, ok := h.Get(uint32(i))
+		if !ok || v != uint32(i*10) {
+			t.Fatalf("Get(%d) = %d,%v ; want %d,true", i, v, ok, i*10)
 		}
 	}
 }
 
-// TestPutOverwrite ensures that inserting a key returns the inserted value,
-// and that attempting to insert the same key again returns the original (old) value.
+// -----------------------------------------------------------------------------
+// Overwrite semantics
+// -----------------------------------------------------------------------------
+
+// TestPutOverwrite confirms that Put returns the *old* value when overwriting
+// an existing key, and that the stored value remains unchanged afterwards.
 func TestPutOverwrite(t *testing.T) {
 	h := New(8)
 
-	// First insertion should return the inserted val
-	existing := h.Put(42, 100)
-	if existing != 100 {
-		t.Errorf("initial Put returned %d, want 100", existing)
+	first := h.Put(42, 100)
+	if first != 100 {
+		t.Fatalf("1st Put returned %d, want 100", first)
 	}
 
-	// Second insertion (same key) should return the old value (100)
 	old := h.Put(42, 200)
 	if old != 100 {
-		t.Errorf("Put overwrite returned %d, want 100", old)
+		t.Fatalf("overwrite returned %d, want 100", old)
 	}
 
-	// The stored value should remain the original
-	val, ok := h.Get(42)
-	if !ok || val != 100 {
-		t.Errorf("Get(42) = %d, %v; want 100, true", val, ok)
+	if v, ok := h.Get(42); !ok || v != 100 {
+		t.Fatalf("Get(42) = %d,%v ; want 100,true", v, ok)
 	}
 }
 
-// TestGetMiss confirms that a missing key returns (0, false).
+// TestGetMiss checks that a missing key yields (0,false).
 func TestGetMiss(t *testing.T) {
 	h := New(4)
-	h.Put(1, 100)
+	h.Put(1, 123)
 	if _, ok := h.Get(99); ok {
-		t.Error("expected Get(99) to miss, got true")
+		t.Fatal("Get(99) should miss")
 	}
 }
 
-// TestCollisionAndRobinHood inserts colliding keys to trigger
-// Robin Hood displacement and ensures all keys remain retrievable.
+// -----------------------------------------------------------------------------
+// Collision / clustering scenarios
+// -----------------------------------------------------------------------------
+
+// TestCollisionAndRobinHood builds a deliberate collision chain and confirms
+// all keys remain reachable.
 func TestCollisionAndRobinHood(t *testing.T) {
 	h := New(4)
 	base := uint32(0xDEADBEEF)
@@ -76,72 +90,66 @@ func TestCollisionAndRobinHood(t *testing.T) {
 		h.Put(base+uint32(i), uint32(i))
 	}
 	for i := 0; i < 4; i++ {
-		val, ok := h.Get(base + uint32(i))
-		if !ok || val != uint32(i) {
-			t.Errorf("Get(%d) = %d, %v; want %d, true", base+uint32(i), val, ok, i)
+		v, ok := h.Get(base + uint32(i))
+		if !ok || v != uint32(i) {
+			t.Fatalf("Get(%d) = %d,%v ; want %d,true", base+uint32(i), v, ok, i)
 		}
 	}
 }
 
-// TestWraparound ensures probing wraps around the end of the table correctly.
+// TestWraparound ensures probes wrap past the table end correctly.
 func TestWraparound(t *testing.T) {
 	h := New(4)
-	// Keys shifted into high bits to collide at table edges
 	for i := 1; i <= 4; i++ {
 		h.Put(uint32(i)<<29, uint32(i))
 	}
 	for i := 1; i <= 4; i++ {
-		key := uint32(i) << 29
-		val, ok := h.Get(key)
-		if !ok || val != uint32(i) {
-			t.Errorf("Get(%d) = %d, %v; want %d, true", key, val, ok, i)
+		k := uint32(i) << 29
+		v, ok := h.Get(k)
+		if !ok || v != uint32(i) {
+			t.Fatalf("Get(%d) = %d,%v ; want %d,true", k, v, ok, i)
 		}
 	}
 }
 
-// TestRandomStress inserts many random keys and verifies retrieval
-// to stress-test table behavior under load.
+// -----------------------------------------------------------------------------
+// Randomised stress test
+// -----------------------------------------------------------------------------
+
 func TestRandomStress(t *testing.T) {
 	h := New(1 << 10)
-	m := make(map[uint32]uint32)
-	rnd := rand.New(rand.NewSource(12345))
+	ref := make(map[uint32]uint32)
+	r := rand.New(rand.NewSource(12345))
 
 	for i := 0; i < 900; i++ {
-		k := uint32(rnd.Intn(1_000_000)) + 1 // never zero
-		v := uint32(i)
-		m[k] = v
-		h.Put(k, v)
+		k := uint32(r.Intn(1_000_000)) + 1
+		ref[k] = uint32(i)
+		h.Put(k, uint32(i))
 	}
 
-	for k, v := range m {
-		got, ok := h.Get(k)
-		if !ok || got != v {
-			t.Errorf("Get(%d) = %d, %v; want %d, true", k, got, ok, v)
+	for k, want := range ref {
+		if got, ok := h.Get(k); !ok || got != want {
+			t.Fatalf("Get(%d) = %d,%v ; want %d,true", k, got, ok, want)
 		}
 	}
 }
 
-// TestGetRobinHoodBound specifically exercises the Robin Hood
-// "bound check" branch (kDist < dist) in Get, ensuring a miss
-// when probe distance exceeds the stored key's distance.
+// -----------------------------------------------------------------------------
+// Bound-check miss branch
+// -----------------------------------------------------------------------------
+
 func TestGetRobinHoodBound(t *testing.T) {
-	// Small table (size=8, mask=7) to force a tight cluster.
 	h := New(4)
 
-	// Build a collision cluster at positions 1→4:
-	//   key=1  maps to idx=1, dist=0
-	//   key=9  maps to idx=1, displaced to idx=2, dist=1
-	//   key=17 maps to idx=1, displaced to idx=3, dist=2
-	//   key=4  maps to idx=4, dist=0
-	h.Put(1, 10)
-	h.Put(9, 20)
-	h.Put(17, 30)
-	h.Put(4, 40)
+	// Build cluster at slots 1-3 (probe distances 0,1,2) then a short 0-dist key
+	h.Put(1, 10)  // idx=1
+	h.Put(9, 20)  // idx=1→2 (dist 1)
+	h.Put(17, 30) // idx=1→3 (dist 2)
+	h.Put(4, 40)  // idx=4
 
-	// Lookup a missing key=33 (maps to idx=1), which will
-	// probe through slots 1,2,3 and at slot 4 find a shorter
-	// existing probe distance and trigger the bound check miss.
+	// Missing key=33 maps to idx=1; its dist grows to 3, but slot 4 has dist=0
+	// → bound-check triggers early miss.
 	if v, ok := h.Get(33); ok {
-		t.Fatalf("expected Get(33) to miss via bound check, got %d, true", v)
+		t.Fatalf("expected miss via bound-check, got %d,true", v)
 	}
 }
