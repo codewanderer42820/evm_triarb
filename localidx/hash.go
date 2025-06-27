@@ -21,11 +21,11 @@ type Hash struct {
 	_pad [56]byte // cacheline isolation for high-throughput (was [4]byte)
 }
 
-//go:nosplit
-//go:inline
-
 // nextPow2 rounds an integer up to the next power-of-two.
 // Used to compute table capacity and mask.
+//
+//go:nosplit
+//go:inline
 func nextPow2(n int) uint32 {
 	s := uint32(1)
 	for s < uint32(n) {
@@ -34,11 +34,11 @@ func nextPow2(n int) uint32 {
 	return s
 }
 
-//go:nosplit
-//go:inline
-
 // New creates a new Hash with enough capacity to store 'capacity' entries
 // with a ~50% load factor. Underlying slices are allocated as power-of-two.
+//
+//go:nosplit
+//go:inline
 func New(capacity int) Hash {
 	sz := nextPow2(capacity * 2) // doubled → leaves 50% headroom
 	return Hash{
@@ -47,8 +47,6 @@ func New(capacity int) Hash {
 		mask: sz - 1,
 	}
 }
-
-//go:nosplit
 
 // Put inserts a key with associated value.
 // If the key already exists, it returns the existing value.
@@ -60,6 +58,8 @@ func New(capacity int) Hash {
 //   - Probing continues until an empty slot or match is found.
 //   - Empty slot → insert and return.
 //   - Match → return current value (no overwrite).
+//
+//go:nosplit
 func (h Hash) Put(key, val uint32) uint32 {
 	i := key & h.mask // initial bucket index
 	dist := uint32(0) // distance from original hashed bucket
@@ -98,14 +98,14 @@ func (h Hash) Put(key, val uint32) uint32 {
 	}
 }
 
-//go:nosplit
-
 // Get returns the value associated with the key if present.
 // Otherwise, it returns (0, false).
 //
 // Optimizations:
 //   - Early exit via “bound check”: if current slot's probe distance is
 //     smaller than ours, key must be missing (Robin-Hood guarantee).
+//
+//go:nosplit
 func (h Hash) Get(key uint32) (uint32, bool) {
 	i := key & h.mask
 	dist := uint32(0)
