@@ -285,7 +285,7 @@ func installShard(rt *CoreRouter, sh *Shard, buf *[]PathState) {
 
 		// Each PathState gets its own handle inside the pair’s min-heap bucket
 		handle, _ := rt.Buckets[lid].Borrow()
-		_ = rt.Buckets[lid].Push(0, handle, unsafe.Pointer(ps))
+		_ = rt.Buckets[lid].Push(4095, handle, unsafe.Pointer(ps))
 
 		// Encode Lid | EdgeIdx into a 32-bit meta field (lid<<16 | edge)
 		meta := uint32(lid)<<16 | uint32(ref.EdgeIdx)
