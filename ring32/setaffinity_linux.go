@@ -1,23 +1,5 @@
+// setaffinity_linux.go — Linux-only binding for sched_setaffinity(2)
 //go:build linux && !tinygo
-
-// setaffinity_linux.go
-//
-// Linux-only binding for `sched_setaffinity(2)` that pins **this** OS thread
-// to a single logical CPU.  The helper is intentionally ultra-lightweight:
-// no heap allocations, no per-call masks built on the stack.
-//
-// Design notes
-// ------------
-//   • A compile-time array `cpuMasks` pre-defines one `uintptr` bitmask for
-//     every logical CPU 0–63.  Each mask lives in read-only data so the
-//     Go compiler can embed it directly; the kernel sees a contiguous
-//     8-byte buffer, exactly what `sched_setaffinity` expects on 64-bit.
-//   • We ignore CPUs ≥ 64—on such systems users can still benchmark with the
-//     first 64 cores, and the fast path stays allocation-free.
-//   • Errors are deliberately swallowed: on a containerised or cgroup-heavy
-//     system the call might be EPERM/EINVAL; the fallback is simply “no pin”.
-//
-// This file is built only when `GOOS=linux` and **not** under TinyGo.
 
 package ring32
 
@@ -26,7 +8,8 @@ import (
 	"unsafe"
 )
 
-// Pre-computed one-word affinity masks for logical CPUs 0-63.
+// cpuMasks holds precomputed one-word masks (bit = 1 << cpu) for CPUs 0–63.
+// Each is statically initialized so it can be passed directly to the syscall.
 var cpuMasks = [...][1]uintptr{
 	{1 << 0}, {1 << 1}, {1 << 2}, {1 << 3}, {1 << 4}, {1 << 5}, {1 << 6}, {1 << 7},
 	{1 << 8}, {1 << 9}, {1 << 10}, {1 << 11}, {1 << 12}, {1 << 13}, {1 << 14}, {1 << 15},
@@ -38,17 +21,20 @@ var cpuMasks = [...][1]uintptr{
 	{1 << 56}, {1 << 57}, {1 << 58}, {1 << 59}, {1 << 60}, {1 << 61}, {1 << 62}, {1 << 63},
 }
 
-// setAffinity pins the *current thread* to `cpu` (0-based).  Out-of-range
-// indices are ignored for portability.
+//go:nosplit
+//go:inline
 func setAffinity(cpu int) {
+	// Bounds check to ensure we don't access invalid mask
 	if cpu < 0 || cpu >= len(cpuMasks) {
 		return
 	}
 	mask := &cpuMasks[cpu]
+
+	// sched_setaffinity(pid=0 → this thread, len=8, mask=ptr)
 	_, _, _ = syscall.RawSyscall(
 		syscall.SYS_SCHED_SETAFFINITY,
-		0,                               // pid 0 → current thread
-		uintptr(unsafe.Sizeof(mask[0])), // mask length (8 bytes)
+		0,                               // current thread
+		uintptr(unsafe.Sizeof(mask[0])), // 8-byte bitmask
 		uintptr(unsafe.Pointer(mask)),
 	)
 }
