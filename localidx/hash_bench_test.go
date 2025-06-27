@@ -6,8 +6,8 @@ import (
 )
 
 const (
-	insertSize = 1 << 16        // 65,536 → ~256 KiB table, fits in L2
-	lookupSize = insertSize / 2 // 32,768 → ensures 50% hit-rate in mixed tests
+	insertSize = 1 << 17        // 131,072 → ~512 KiB table, fits in L2/L3 for most cores
+	lookupSize = insertSize / 2 // 65,536 → maintains 50% hit/miss balance
 )
 
 var rnd = rand.New(rand.NewSource(1337)) // deterministic RNG for reproducibility
@@ -150,17 +150,22 @@ func BenchmarkHashGetTightLoop(b *testing.B) {
 // ░░ Benchmark: Table small enough to fully fit in L1 ░░
 // -----------------------------------------------------------------------------
 
-// BenchmarkHashGetTinyMap measures ultra-low latency in tables where
-// the entire working set fits in L1 (128 entries = 512 bytes).
+// BenchmarkHashGetTinyMap measures ultra-low latency when the entire
+// working set fits within L1 cache. With 256 entries, the table occupies
+// approximately 1 KiB, making it ideal for single-cycle access tests.
 func BenchmarkHashGetTinyMap(b *testing.B) {
-	h := New(128)
-	for i := 0; i < 128; i++ {
+	const size = 256
+	h := New(size)
+
+	// Populate table with deterministic keys and values
+	for i := 0; i < size; i++ {
 		h.Put(uint32(i+1), uint32(i+100))
 	}
-	b.ResetTimer()
 
+	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
-		_, _ = h.Get(uint32((n & 127) + 1))
+		k := uint32((n & (size - 1)) + 1) // loop over [1, 256]
+		_, _ = h.Get(k)
 	}
 }
 
