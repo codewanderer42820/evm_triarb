@@ -127,7 +127,8 @@ type TickUpdate struct {
 // Compile-time layout assertion (panics at init if size drifts).
 const _tickUpdateSize = unsafe.Sizeof(TickUpdate{})
 
-func init() { const want = 32; _ = [want - int(_tickUpdateSize)]byte{} }
+// Compile-time size check: TickUpdate must be exactly 32 bytes
+var _TickUpdateSizeCheck [32 - int(_tickUpdateSize)]byte
 
 /*──────────────────────  Package-level scratch  ───────────────────────*/
 
