@@ -1,21 +1,14 @@
-// ring_test.go
+// ring_test.go — Unit-test suite for 32-byte ring queue
 //
-// Unit-test suite for the SPSC ring, validating:
-//   - constructor invariants and parameter checking
-//   - single-threaded Push/Pop paths
-//   - wrap-around arithmetic with a small capacity
-//   - PopWait busy-spin semantics
-//   - pinned consumer helper correctness
-//
-// The tests purposefully use unsafe.Pointer to mirror how the library is
-// expected to be used when every nanosecond matters.
+// This validates constructor behavior, push/pop edge cases,
+// wraparound logic, and PopWait blocking.
+// All paths now use *[32]byte directly.
 
 package ring
 
 import (
 	"testing"
 	"time"
-	"unsafe"
 )
 
 // -----------------------------------------------------------------------------
@@ -37,71 +30,63 @@ func TestNewPanicsOnBadSize(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// Single-threaded Push / Pop path
+// Push/Pop round trip: single item push-pop
 // -----------------------------------------------------------------------------
 
 func TestPushPopRoundTrip(t *testing.T) {
 	r := New(8)
-	p := unsafe.Pointer(new(int))
+	val := &[32]byte{1, 2, 3}
 
-	if !r.Push(p) {
+	if !r.Push(val) {
 		t.Fatal("first push must succeed")
 	}
-	if got := r.Pop(); got != p {
-		t.Fatalf("got %p, want %p", got, p)
+	got := r.Pop()
+	if got == nil || *got != *val {
+		t.Fatalf("got %v, want %v", got, val)
 	}
 	if r.Pop() != nil {
 		t.Fatal("ring should now be empty")
 	}
 }
 
+// -----------------------------------------------------------------------------
+// Push fails when full
+// -----------------------------------------------------------------------------
+
 func TestPushFailsWhenFull(t *testing.T) {
 	r := New(4)
-	ptr := unsafe.Pointer(new(int))
+	val := &[32]byte{7}
 	for i := 0; i < 4; i++ {
-		if !r.Push(ptr) {
+		if !r.Push(val) {
 			t.Fatalf("push %d unexpectedly failed", i)
 		}
 	}
-	if r.Push(ptr) {
+	if r.Push(val) {
 		t.Fatal("push into full ring should return false")
 	}
 }
 
+// -----------------------------------------------------------------------------
+// PopWait blocks and receives value
+// -----------------------------------------------------------------------------
+
 func TestPopWaitBlocksUntilItem(t *testing.T) {
 	r := New(2)
-	want := unsafe.Pointer(new(int))
+	want := &[32]byte{42}
 
-	done := make(chan struct{})
 	go func() {
-		time.Sleep(5 * time.Millisecond) // give PopWait time to block
+		time.Sleep(5 * time.Millisecond) // allow PopWait to block
 		r.Push(want)
 	}()
 
-	if got := r.PopWait(); got != want {
-		t.Fatalf("PopWait returned %p, want %p", got, want)
+	if got := r.PopWait(); got == nil || *got != *want {
+		t.Fatalf("PopWait returned %v, want %v", got, want)
 	}
-	close(done)
 }
 
 // -----------------------------------------------------------------------------
-// Unsafe-pointer helpers (no generics)
+// Pop returns nil on empty
 // -----------------------------------------------------------------------------
-
-func TestUnsafePushPop(t *testing.T) {
-	r := New(16)
-	val := &struct{ N int }{42}
-	p := unsafe.Pointer(val)
-
-	if !r.Push(p) {
-		t.Fatal("Push failed")
-	}
-	gotPtr := r.Pop()
-	got := (*struct{ N int })(gotPtr)
-	if got == nil || got.N != 42 {
-		t.Fatalf("Pop returned %#v, want N=42", got)
-	}
-}
 
 func TestPopNil(t *testing.T) {
 	r := New(4)
@@ -111,20 +96,21 @@ func TestPopNil(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// Wrap-around behaviour (exercise mask arithmetic)
+// Wrap-around test (masking correctness)
 // -----------------------------------------------------------------------------
 
 func TestWrapAround(t *testing.T) {
 	const size = 4
 	r := New(size)
 
-	for i := 0; i < 10; i++ { // more than twice the capacity
-		p := unsafe.Pointer(&[1]int{i}) // unique address each loop
-		if !r.Push(p) {
+	for i := 0; i < 10; i++ {
+		val := &[32]byte{byte(i)}
+		if !r.Push(val) {
 			t.Fatalf("push %d failed unexpectedly", i)
 		}
-		if got := r.Pop(); got != p {
-			t.Fatalf("iteration %d: got %p, want %p", i, got, p)
+		got := r.Pop()
+		if got == nil || got[0] != byte(i) {
+			t.Fatalf("iteration %d: got %v, want %v", i, got[0], val[0])
 		}
 	}
 }

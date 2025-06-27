@@ -7,7 +7,6 @@ package ring
 import (
 	"runtime"
 	"time"
-	"unsafe"
 )
 
 /*──────────────────── tuning knobs ────────────────────*/
@@ -15,9 +14,6 @@ import (
 const (
 	spinBudget = 128              // polls before cpuRelax()
 	hotWindow  = 15 * time.Second // keep spinning this long after traffic
-
-	// For tests that referenced the old name:
-	hotTimeout = hotWindow
 )
 
 /*──────────────── pinned goroutine ──────────────────*/
@@ -27,7 +23,7 @@ func PinnedConsumer(
 	r *Ring, // ring to consume
 	stop *uint32, // *stop !=0 → exit
 	hot *uint32, // producer toggles to 1 while active
-	handler func(unsafe.Pointer), // user callback per element
+	handler func(*[32]byte), // user callback per element
 	done chan<- struct{}, // closed on exit
 ) {
 	go func() {
