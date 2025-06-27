@@ -1,15 +1,22 @@
 # ethos
 
+> 🧼 **Depissified Node**  
+> This software contains no telemetry, no analytics, no phone-home traps, and no compromise.  
+> Built under surveillance. Hardened under fire.  
+> No pissie survived the pipeline.
+
 **ethos** is a zero-allocation, branch-minimized Ethereum log subscriber engineered for sub-microsecond latency. It connects directly to a WebSocket provider (e.g., Infura), decodes incoming logs in-place, deduplicates events across reorgs, and emits only unique results.
 
 This project was built for speed-critical environments — saturated CPU cores, pinned threads, and direct JSON parsing without a library.
 
+---
+
 ## Features
 
-- 🔁 **Reorg-tolerant deduplication ring** (L1 cache–resident, 32-byte slots)
-- 🧠 **Zero-alloc JSON parser** with fused key probes and 8-byte stride scan
-- 🌐 **Direct WebSocket parser** with RFC 6455 masking and custom framing
-- ⚙️ **Manual GC control**, TLS handling, and OS-specific syscall glue (`epoll` or `kqueue`)
+- 🔁 **Reorg-tolerant deduplication ring** (L1 cache–resident, 32-byte slots)  
+- 🧠 **Zero-alloc JSON parser** with fused key probes and 8-byte stride scan  
+- 🌐 **Direct WebSocket parser** with RFC 6455 masking and custom framing  
+- ⚙️ **Manual GC control**, TLS handling, and OS-specific syscall glue (`epoll` or `kqueue`)  
 - 🔐 Compatible with [Infura Polygon Mainnet](https://polygon.technology)
 
 ---
@@ -25,11 +32,10 @@ This project was built for speed-critical environments — saturated CPU cores, 
 ### Build
 
 #### macOS (kqueue):
-
 ```bash
 go build -o ethos_darwin ./main_darwin.go
 ./ethos_darwin
-```
+````
 
 #### Linux (epoll):
 
@@ -52,15 +58,19 @@ type dedupeSlot struct {
 }
 ```
 
-- **Reorg-safe** up to 12 blocks deep
-- Fast hashing via 64-bit mixer
-- O(1) overwrite with no branching
+* **Reorg-safe** up to 12 blocks deep
+* Fast hashing via 64-bit mixer
+* O(1) overwrite with no branching
+
+---
 
 ### WebSocket Handling
 
-- Frames decoded **in-place** via `readFrame()`
-- RFC 6455 masking applied manually
-- Fragmented frames rejected for simplicity and speed
+* Frames decoded **in-place** via `readFrame()`
+* RFC 6455 masking applied manually
+* Fragmented frames rejected for simplicity and speed
+
+---
 
 ### JSON Event Parsing
 
@@ -68,23 +78,23 @@ type dedupeSlot struct {
 handleFrame(p []byte)
 ```
 
-- Scans for 6 keys: `address`, `data`, `topics`, `blockNumber`, `transactionIndex`, `logIndex`
-- Extracts slices directly from WebSocket buffer (`wsBuf`)
-- Dedupe check applied via:
+* Scans for 6 keys: `address`, `data`, `topics`, `blockNumber`, `transactionIndex`, `logIndex`
+* Extracts slices directly from WebSocket buffer (`wsBuf`)
+* Dedupe check applied via:
 
 ```go
 if deduper.Check(blk32, tx32, log32, v.TagHi, v.TagLo, latestBlk)
 ```
 
-- Emits logs only if **new** under current canonical block
+* Emits logs only if **new** under current canonical block
 
 ---
 
 ## Performance Notes
 
-- All `[]byte`→`string` coercions are zero-copy (`b2s`)
-- All string/number slicing is bounds-safe but allocation-free
-- Manual GC triggers based on soft/hard heap thresholds
+* All `[]byte` → `string` coercions are zero-copy (`b2s`)
+* All string/number slicing is bounds-safe but allocation-free
+* Manual GC triggers based on soft/hard heap thresholds
 
 ---
 
@@ -92,10 +102,10 @@ if deduper.Check(blk32, tx32, log32, v.TagHi, v.TagLo, latestBlk)
 
 ```go
 const (
-  ringBits     = 14        // 2^14 = 16K slots
-  maxReorg     = 12        // tolerate 12-block forks
-  heapSoftLimit = 32 << 20 // 32 MiB
-  wsDialAddr   = "polygon-mainnet.infura.io:443"
+  ringBits      = 14         // 2^14 = 16K slots
+  maxReorg      = 12         // tolerate 12-block forks
+  heapSoftLimit = 32 << 20   // 32 MiB
+  wsDialAddr    = "polygon-mainnet.infura.io:443"
   ...
 )
 ```
