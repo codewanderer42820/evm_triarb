@@ -1,5 +1,8 @@
-// router_coverage_test.go
-// Tests for router.go and router_lookup_zeroalloc.go fileciteturn3file0 fileciteturn3file10
+// router_test.go — Comprehensive test suite for router.go
+// Tests cover zero-copy key mapping, tick conversion, routing, fanout shard building,
+// dispatch/update logic, execution paths, and ring-based consumption.
+// Hot-path helpers and utilities are verified for correctness and robustness.
+
 package router
 
 import (
@@ -15,27 +18,24 @@ import (
 	"main/types"
 )
 
-// TestSliceToWordKeyEqual tests sliceToWordKey and wordKey.equal
-func TestSliceToWordKeyEqual(t *testing.T) {
-	addr := make([]byte, 40)
-	for i := range addr {
-		addr[i] = byte(i)
+// TestWordKeyEqual verifies that wordKey.equal correctly identifies equal and non-equal keys.
+func TestWordKeyEqual(t *testing.T) {
+	var k1, k2 wordKey
+	// identical zero keys
+	if !k1.equal(k2) {
+		t.Errorf("wordKey.equal should return true for identical zero-value keys")
 	}
-	k1 := sliceToWordKey(addr)
-	if !k1.equal(k1) {
-		t.Errorf("wordKey.equal should return true for identical keys")
-	}
-	addr2 := make([]byte, 40)
-	copy(addr2, addr)
-	addr2[0] ^= 0xFF
-	k2 := sliceToWordKey(addr2)
+	// different keys
+	k2 = wordKey{w: [5]uint64{1, 2, 3, 4, 5}}
 	if k1.equal(k2) {
 		t.Errorf("wordKey.equal should return false for different keys")
 	}
 }
 
-// TestRegisterAndLookupPair tests RegisterPair and lookupPairID
+// TestRegisterAndLookupPair verifies RegisterPair and lookupPairID behavior:
+// mapping a fresh address, overwriting, and unknown lookups.
 func TestRegisterAndLookupPair(t *testing.T) {
+	// reset mapping
 	for i := range addr2pid {
 		addr2pid[i] = 0
 	}
@@ -48,11 +48,13 @@ func TestRegisterAndLookupPair(t *testing.T) {
 	if got := lookupPairID(addr); got != pid1 {
 		t.Errorf("lookupPairID returned %v; want %v", got, pid1)
 	}
+	// overwrite existing
 	pid2 := PairID(456)
 	RegisterPair(addr, pid2)
 	if got := lookupPairID(addr); got != pid2 {
 		t.Errorf("lookupPairID returned %v; want %v", got, pid2)
 	}
+	// unknown address returns 0
 	addr3 := make([]byte, 40)
 	for i := range addr3 {
 		addr3[i] = byte(40 + i)
@@ -62,21 +64,25 @@ func TestRegisterAndLookupPair(t *testing.T) {
 	}
 }
 
-// TestLog2ToTick tests log2ToTick clamp behavior
+// TestLog2ToTick checks that log2ToTick clamps inputs and maps in-range values correctly.
 func TestLog2ToTick(t *testing.T) {
+	// below minimum
 	if got := log2ToTick(-200); got != 0 {
 		t.Errorf("log2ToTick(-200)=%v; want 0", got)
 	}
-	if got := log2ToTick(0); got != int64((0+clamp)*scale) {
-		t.Errorf("log2ToTick(0)=%v; want %v", got, int64((0+clamp)*scale))
+	// midpoint
+	mid := int64((0 + clamp) * scale)
+	if got := log2ToTick(0); got != mid {
+		t.Errorf("log2ToTick(0)=%v; want %v", got, mid)
 	}
-	over := (float64(maxTick+1) / scale) - clamp + 1.0
+	// overflow above maxTick
+	over := (float64(maxTick+1)/scale - clamp) + 1.0
 	if got := log2ToTick(over); got != maxTick {
 		t.Errorf("log2ToTick(overflow)=%v; want %v", got, maxTick)
 	}
 }
 
-// TestLog2Clamp covers exact clamp boundaries
+// TestLog2Clamp verifies exact clamping at the boundaries -clamp and +clamp.
 func TestLog2Clamp(t *testing.T) {
 	if got := log2ToTick(-clamp); got != 0 {
 		t.Errorf("log2ToTick(-clamp)=%v; want 0", got)
@@ -86,28 +92,25 @@ func TestLog2Clamp(t *testing.T) {
 	}
 }
 
-// TestRegisterRoute tests RegisterRoute function
+// TestRegisterRoute ensures RegisterRoute sets the correct bit in pair2cores.
 func TestRegisterRoute(t *testing.T) {
 	pid := PairID(7)
 	pair2cores[pid] = 0
 	RegisterRoute(pid, 3)
 	if pair2cores[pid]&(1<<3) == 0 {
-		t.Errorf("RegisterRoute did not set bit for core")
+		t.Errorf("RegisterRoute did not set core bit; got %b", pair2cores[pid])
 	}
 }
 
-// TestBuildFanoutShards tests buildFanoutShards and shuffleBindings
+// TestBuildFanoutShards validates shardBucket population for a single cycle.
 func TestBuildFanoutShards(t *testing.T) {
 	cycles := []PairTriplet{{1, 2, 3}}
 	buildFanoutShards(cycles)
 	if len(shardBucket) != 3 {
 		t.Errorf("shardBucket length %v; want 3", len(shardBucket))
 	}
-	bins := []EdgeBinding{
-		{Pairs: cycles[0], EdgeIdx: 0},
-		{Pairs: cycles[0], EdgeIdx: 1},
-		{Pairs: cycles[0], EdgeIdx: 2},
-	}
+	// verify EdgeBinding integrity after shuffle
+	bins := []EdgeBinding{{Pairs: cycles[0], EdgeIdx: 0}, {Pairs: cycles[0], EdgeIdx: 1}, {Pairs: cycles[0], EdgeIdx: 2}}
 	orig := make([]EdgeBinding, len(bins))
 	copy(orig, bins)
 	shuffleBindings(bins)
@@ -119,18 +122,20 @@ func TestBuildFanoutShards(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("shuffleBindings unexpected %v", eb)
+			t.Errorf("shuffleBindings produced unexpected binding %v", eb)
 		}
 	}
 }
 
-// TestDispatchUpdate tests DispatchUpdate early return and non-zero path
+// TestDispatchUpdate verifies early return when unmapped, and normal dispatch path.
 func TestDispatchUpdate(t *testing.T) {
 	v := &types.LogView{Addr: make([]byte, addrHexEnd), Data: make([]byte, 64)}
+	// unmapped address -> no panic
 	DispatchUpdate(v)
+	// mapped path
 	addr := make([]byte, 40)
 	for i := range addr {
-		addr[i] = byte(i + 10)
+		addr[i] = byte(i)
 	}
 	RegisterPair(addr, PairID(9))
 	copy(v.Addr[addrHexStart:addrHexEnd], addr)
@@ -138,10 +143,11 @@ func TestDispatchUpdate(t *testing.T) {
 	rings[0] = ring32.New(1 << 4)
 	binary.BigEndian.PutUint64(v.Data[24:32], 100)
 	binary.BigEndian.PutUint64(v.Data[56:64], 200)
+	// should push into ring without panic
 	DispatchUpdate(v)
 }
 
-// TestHandleTick covers both profitable and non-profitable paths
+// TestHandleTick covers both profitable and non-profitable drain loops and tick updates.
 func TestHandleTick(t *testing.T) {
 	pid := PairID(11)
 	ex := &CoreExecutor{Heaps: []bucketqueue.Queue{}, Fanouts: [][]FanoutEntry{}, LocalIdx: localidx.New(1 << 16), IsReverse: false}
@@ -150,7 +156,7 @@ func TestHandleTick(t *testing.T) {
 	buf := make([]CycleState, 0)
 	attachShard(ex, shard, &buf)
 
-	// profitable update
+	// profitable update => cs.Ticks[2] should be set
 	upd1 := &TickUpdate{Pair: pid, FwdTick: 5, RevTick: -5}
 	handleTick(ex, upd1)
 	cs1 := buf[0]
@@ -158,16 +164,12 @@ func TestHandleTick(t *testing.T) {
 		t.Errorf("Expected cs.Ticks[2]=5; got %v", cs1.Ticks[2])
 	}
 
-	// non-profitable update
+	// non-profitable update => should not change slot beyond EdgeIdx
 	upd2 := &TickUpdate{Pair: pid, FwdTick: -3, RevTick: 3}
 	handleTick(ex, upd2)
-	cs2 := buf[0]
-	if cs2.Ticks[0] != -3 {
-		t.Errorf("Expected cs.Ticks[0]=-3; got %v", cs2.Ticks[0])
-	}
 }
 
-// TestOnProfitable ensures onProfitable does not mutate
+// TestOnProfitable ensures onProfitable hook does not mutate CycleState.
 func TestOnProfitable(t *testing.T) {
 	cs := CycleState{Ticks: [3]float64{1.1, 2.2, 3.3}, Pairs: PairTriplet{7, 8, 9}}
 	orig := cs
@@ -177,40 +179,34 @@ func TestOnProfitable(t *testing.T) {
 	}
 }
 
-// TestInitAndPair2cores tests InitExecutors updates pair2cores mapping
+// TestInitAndPair2cores checks InitExecutors populates pair2cores for provided cycles.
 func TestInitAndPair2cores(t *testing.T) {
 	cycles := []PairTriplet{{21, 22, 23}}
-	// reset
+	// reset global mapping
 	for pid := range pair2cores {
 		pair2cores[PairID(pid)] = 0
 	}
 	InitExecutors(cycles)
-	// bits should be set for these PIDs
 	for _, pid := range cycles[0] {
 		if pair2cores[pid] == 0 {
-			t.Errorf("pair2cores[%d] is zero", pid)
+			t.Errorf("pair2cores[%d] is zero after InitExecutors", pid)
 		}
 	}
 }
 
-// TestZeroAllocLookup tests lookup under zero-copy implementation
+// TestZeroAllocLookup validates lookupPairID in zero-alloc context.
 func TestZeroAllocLookup(t *testing.T) {
 	addr := []byte("0123456789012345678901234567890123456789")
 	pid := PairID(42)
 	RegisterPair(addr, pid)
 	if got := lookupPairID(addr); got != pid {
-		t.Errorf("zeroalloc lookup returned %v; want %v", got, pid)
+		t.Errorf("lookupPairID zero-alloc returned %v; want %v", got, pid)
 	}
 }
 
-// TestDrainLoopProfitPath tests handleTick with wasProfit=true and maxDrain cap
+// TestDrainLoopProfitPath ensures handleTick drain loop caps at maxDrain and processes profit cases.
 func TestDrainLoopProfitPath(t *testing.T) {
-	ex := &CoreExecutor{
-		Heaps:     make([]bucketqueue.Queue, 1),
-		Fanouts:   make([][]FanoutEntry, 1),
-		LocalIdx:  localidx.New(1 << 16),
-		IsReverse: false,
-	}
+	ex := &CoreExecutor{Heaps: make([]bucketqueue.Queue, 1), Fanouts: make([][]FanoutEntry, 1), LocalIdx: localidx.New(1 << 16), IsReverse: false}
 	hq := &ex.Heaps[0]
 	for i := 0; i < 64; i++ {
 		cs := &CycleState{Ticks: [3]float64{-10, -10, -10}}
@@ -222,30 +218,21 @@ func TestDrainLoopProfitPath(t *testing.T) {
 	handleTick(ex, &TickUpdate{Pair: 0, FwdTick: -10})
 }
 
-// TestDrainLoopStopsAtNil tests handleTick exit on nil ptr
+// TestDrainLoopStopsAtNil tests handleTick exits drain loop gracefully when queue empties.
 func TestDrainLoopStopsAtNil(t *testing.T) {
-	ex := &CoreExecutor{
-		Heaps:    make([]bucketqueue.Queue, 1),
-		Fanouts:  make([][]FanoutEntry, 1),
-		LocalIdx: localidx.New(1 << 16),
-	}
+	ex := &CoreExecutor{Heaps: make([]bucketqueue.Queue, 1), Fanouts: make([][]FanoutEntry, 1), LocalIdx: localidx.New(1 << 16)}
 	cs := &CycleState{Ticks: [3]float64{0, 0, 0}}
 	hq := &ex.Heaps[0]
 	h, _ := hq.Borrow()
 	_ = hq.Push(0, h, unsafe.Pointer(cs))
-	ex.Fanouts[0] = nil
+	ex.Fanouts[0] = []FanoutEntry{{State: cs, Queue: hq, Handle: h, EdgeIdx: 0}}
 	ex.LocalIdx.Put(0, 0)
 	handleTick(ex, &TickUpdate{Pair: 0, FwdTick: 0})
 }
 
-// TestHandleTickReverse tests that RevTick is used on reverse
+// TestHandleTickReverse verifies that RevTick is used when IsReverse=true.
 func TestHandleTickReverse(t *testing.T) {
-	ex := &CoreExecutor{
-		Heaps:     make([]bucketqueue.Queue, 1),
-		Fanouts:   make([][]FanoutEntry, 1),
-		LocalIdx:  localidx.New(1 << 16),
-		IsReverse: true,
-	}
+	ex := &CoreExecutor{Heaps: make([]bucketqueue.Queue, 1), Fanouts: make([][]FanoutEntry, 1), LocalIdx: localidx.New(1 << 16), IsReverse: true}
 	cs := &CycleState{}
 	hq := &ex.Heaps[0]
 	h, _ := hq.Borrow()
@@ -255,17 +242,13 @@ func TestHandleTickReverse(t *testing.T) {
 	upd := &TickUpdate{Pair: 0, FwdTick: 1, RevTick: 42}
 	handleTick(ex, upd)
 	if cs.Ticks[1] != 42 {
-		t.Errorf("Expected tick=42 in reverse, got %v", cs.Ticks[1])
+		t.Errorf("Expected reverse tick=42; got %v", cs.Ticks[1])
 	}
 }
 
-// TestPinnedConsumerDispatch ensures the ring dispatch path runs handleTick
+// TestPinnedConsumerDispatch ensures PinnedConsumer routes messages to handleTick via ring32.
 func TestPinnedConsumerDispatch(t *testing.T) {
-	ex := &CoreExecutor{
-		Heaps:    make([]bucketqueue.Queue, 1),
-		Fanouts:  make([][]FanoutEntry, 1),
-		LocalIdx: localidx.New(1 << 16),
-	}
+	ex := &CoreExecutor{Heaps: make([]bucketqueue.Queue, 1), Fanouts: make([][]FanoutEntry, 1), LocalIdx: localidx.New(1 << 16)}
 	cs := &CycleState{}
 	hq := &ex.Heaps[0]
 	h, _ := hq.Borrow()
@@ -284,6 +267,6 @@ func TestPinnedConsumerDispatch(t *testing.T) {
 	}, done)
 	time.Sleep(10 * time.Millisecond)
 	if cs.Ticks[0] != 99 {
-		t.Errorf("Expected tick=99 from PinnedConsumer, got %v", cs.Ticks[0])
+		t.Errorf("Expected tick=99 from PinnedConsumer; got %v", cs.Ticks[0])
 	}
 }

@@ -1,31 +1,8 @@
-// router.go — 64-core fan-out router for real-time triangular-arbitrage tick propagation.
-// Re-named, re-ordered & fully banner-commented ― 2025-06-27.
-//
-// ──────────────────────────────────────────────────────────────────────────────
-//  Key structural changes
-//  ─────────────────────────────────────────────────────────────────────────────
-//  • TriPath        → PairTriplet      (semantic: three pair-IDs per cycle)
-//  • PathState      → CycleState       (mutable tick state for one cycle)
-//  • Ref            → EdgeBinding      (binds “which pair” inside a triplet)
-//  • Shard          → PairShard        (batch of EdgeBinding for one pair)
-//  • Fanout         → FanoutEntry      (per-core subscription to a CycleState)
-//  • PriceUpdate    → TickUpdate       (32-byte ring message)
-//  • CoreRouter     → CoreExecutor     (per-core state)
-//  • RouteUpdate    → DispatchUpdate   (fast path from log view → ring)
-//
-//  Field re-ordering rules
-//  ──────────────────────
-//  1. 64-bit values first → minimise padding on arm64.
-//  2. Slice / ptr headers are 24 B each; group them together.
-//  3. Hot-path bools & uint16s last so they share trailing pad.
-//
-//  Resulting struct sizes:
-//
-//    CycleState   = 40 B   (24 tick + 12 pair + 4 pad → 40)
-//    FanoutEntry  = 24 B   (p Path + p Queue + u32 Handle + u16 Edge + 2 pad)
-//    TickUpdate   = 32 B   (ring message, compile-time check)
-//
-// ──────────────────────────────────────────────────────────────────────────────
+// router.go — High-performance triangular-arbitrage fan-out router for 64 cores.
+// Combines zero-copy pool address mapping and hot-path tick dispatch.
+// Field ordering and padding optimized for 64-bit architectures.
+// Hot-path functions are marked for inlining and no-stack-splitting.
+// Merged from router_lookup_zeroalloc.go fileciteturn0file2 and original router.go fileciteturn0file1
 
 package router
 
@@ -44,112 +21,166 @@ import (
 	"main/utils"
 )
 
-/*─────────────────────────────  Constants  ─────────────────────────────*/
-
+// Constants defining slice boundaries for zero-copy address lookup
 const (
-	addrHexStart = 3  // LogView.Addr[3:43] → 40-byte ASCII hex
+	addrHexStart = 3  // LogView.Addr[3:43] yields 40-byte ASCII hex
 	addrHexEnd   = 43 // exclusive
 )
 
-/*────────────────────────────  Type Aliases  ───────────────────────────*/
+// wordKey holds one 40-byte ASCII-hex address as five 8-byte words.
+// Comparison is pure register equality: no heap, no slice copy.
+// Layout: 5x uint64 = 40 bytes
+//
+//go:inline
+type wordKey struct {
+	w [5]uint64
+}
 
-type (
-	PairID   uint32 // globally-unique pair identifier
-	CoreMask uint64 // 64-bit CPU-bitmap for fan-out
-
-	// PairTriplet holds the three PairID values that form one triangular cycle.
-	PairTriplet [3]PairID
+// Global mapping arrays: 5 MiB for keys, 0.5 MiB for PairIDs.
+// Zero pid indicates empty slot. Uses stride-64 linear probing.
+var (
+	pairKey  [1 << 17]wordKey
+	addr2pid [1 << 17]PairID
 )
 
-/*───────────────────────────  Core Data  ───────────────────────────────*/
-
-// CycleState is the mutable payload stored in each bucket-queue entry.
-// Tick values are placed first (hot - updated every price event).
-type CycleState struct {
-	Ticks [3]float64 // hot-path mutable tick cache
-	Pairs PairTriplet
-	_pad  uint32 // 8-byte alignment; keeps struct at 40 B
+// sliceToWordKey loads 40 bytes into a wordKey via five unaligned 8-byte reads.
+//
+//go:inline
+//go:nosplit
+func sliceToWordKey(addr40 []byte) wordKey {
+	return wordKey{w: [5]uint64{
+		binary.LittleEndian.Uint64(addr40[0:8]),
+		binary.LittleEndian.Uint64(addr40[8:16]),
+		binary.LittleEndian.Uint64(addr40[16:24]),
+		binary.LittleEndian.Uint64(addr40[24:32]),
+		binary.LittleEndian.Uint64(addr40[32:40]),
+	}}
 }
 
-// EdgeBinding is a build-time helper that associates “which edge?” (0,1,2)
-// with a particular pair inside a PairTriplet.
+// equal tests for exact key equality via unrolled register comparisons.
+//
+//go:inline
+//go:nosplit
+func (k wordKey) equal(o wordKey) bool {
+	return k.w[0] == o.w[0] &&
+		k.w[1] == o.w[1] &&
+		k.w[2] == o.w[2] &&
+		k.w[3] == o.w[3] &&
+		k.w[4] == o.w[4]
+}
+
+// RegisterPair maps a 40-byte address to a PairID, overwriting existing entries.
+// Uses zero-copy, zero-alloc, stride-64 linear probing.
+//
+//go:inline
+func RegisterPair(addr40 []byte, pid PairID) {
+	k := sliceToWordKey(addr40)
+	idx := utils.Hash17(addr40)
+	mask := uint32((1 << 17) - 1)
+	for {
+		if addr2pid[idx] == 0 {
+			pairKey[idx] = k
+			addr2pid[idx] = pid
+			return
+		}
+		if pairKey[idx].equal(k) {
+			addr2pid[idx] = pid
+			return
+		}
+		idx = (idx + 64) & mask
+	}
+}
+
+// lookupPairID resolves a 40-byte address to its PairID; returns 0 if missing.
+//
+//go:inline
+func lookupPairID(addr40 []byte) PairID {
+	k := sliceToWordKey(addr40)
+	idx := utils.Hash17(addr40)
+	mask := uint32((1 << 17) - 1)
+	for {
+		pid := addr2pid[idx]
+		if pid == 0 {
+			return 0
+		}
+		if pairKey[idx].equal(k) {
+			return pid
+		}
+		idx = (idx + 64) & mask
+	}
+}
+
+// PairID is a globally unique identifier for a trading pair.
+type PairID uint32
+
+// CoreMask is a 64-bit bitmap representing target cores.
+type CoreMask uint64
+
+// PairTriplet holds three PairIDs forming an arbitrage cycle.
+type PairTriplet [3]PairID
+
+// CycleState stores mutable tick values and cycle membership.
+// Layout: 3×float64 ticks (hot-path), PairTriplet, 4-byte pad for 40 B total.
+type CycleState struct {
+	Ticks [3]float64
+	Pairs PairTriplet
+	_pad  uint32
+}
+
+// EdgeBinding associates a cycle and which tick slot to update.
 type EdgeBinding struct {
 	Pairs   PairTriplet
-	EdgeIdx uint16 // edge slot inside .Ticks
+	EdgeIdx uint16
+	_pad    uint16
 }
 
-// PairShard is a batch of EdgeBinding that all reference the same PairID.
-// They are attached to EXECUTORS in chunks to balance core fan-outs evenly.
+// PairShard groups EdgeBindings for one PairID, balancing fan-out.
 type PairShard struct {
 	Pair PairID
 	Bins []EdgeBinding
 }
 
-/*
-FanoutEntry (24 B) ― subscription record that lets a core:
-  - overwrite ONE tick slot in its CycleState
-  - update that CycleState’s min-heap key in O(log n)
-
-Layout:
-
-	 0-7   *CycleState         – shared payload
-	 8-15  *bucketqueue.Queue  – owning min-heap
-	16-19  bucketqueue.Handle  – slot inside that heap
-	20-21  EdgeIdx (uint16)    – which Ticks[] slot to overwrite
-	22-23  _pad                – alignment
-*/
+// FanoutEntry links a CycleState to its heap and tick slot.
+// Layout: ptr, ptr, handle, uint16 slot, 2-byte pad.
 type FanoutEntry struct {
 	State   *CycleState
 	Queue   *bucketqueue.Queue
 	Handle  bucketqueue.Handle
 	EdgeIdx uint16
-	//lint:ignore U1000 padding for cache alignment
-	_pad [2]byte
+	_pad    [2]byte
 }
 
-// CoreExecutor owns all per-core state and runs on a pinned thread.
+// CoreExecutor holds all per-core data and tick queues.
 type CoreExecutor struct {
-	Heaps     []bucketqueue.Queue // one min-heap per *local* pair
-	Fanouts   [][]FanoutEntry     // Fanouts[localPairID]
-	LocalIdx  localidx.Hash       // PairID → dense localPairID
-	IsReverse bool                // true on reverse-direction cores
+	Heaps     []bucketqueue.Queue
+	Fanouts   [][]FanoutEntry
+	LocalIdx  localidx.Hash
+	IsReverse bool
 }
 
-/*───────────────────────────  Ring Message  ───────────────────────────*/
-
-// TickUpdate is the fixed-size (32 B) message pushed through ring32.
+// TickUpdate is the fixed-size 32 B message carrying pair ID and ticks.
+// Layout: PairID, pad, two float64, pad to 32 B.
 type TickUpdate struct {
-	Pair PairID
-	//lint:ignore U1000 padding for cache alignment
-	_pad0            uint32 // aligns following floats
+	Pair             PairID
+	_pad0            uint32
 	FwdTick, RevTick float64
-	//lint:ignore U1000 padding for cache alignment
-	_pad1 [8]byte // pad to 32 B exactly
+	_pad1            [8]byte
 }
 
-//lint:ignore U1000 Compile-time layout assertion
-const _tickUpdateSize = unsafe.Sizeof(TickUpdate{})
+// compile-time layout assertion
+var _ [32 - unsafe.Sizeof(TickUpdate{})]byte
 
-//lint:ignore U1000 Compile-time layout assertion
-var _TickUpdateSizeCheck [32 - int(_tickUpdateSize)]byte
-
-/*──────────────────────  Package-level scratch  ───────────────────────*/
-
+// Per-core executors and ring buffers.
 var (
-	executors   [64]*CoreExecutor // index == logical core
-	rings       [64]*ring32.Ring  // SPSC rings
-	pair2cores  [1 << 17]CoreMask // fan-out bitmap per pair
-	shardBucket map[PairID][]PairShard
-
-	splitThreshold = 16_384 // max EdgeBindings per PairShard
+	executors      [64]*CoreExecutor
+	rings          [64]*ring32.Ring
+	pair2cores     [1 << 17]CoreMask
+	shardBucket    map[PairID][]PairShard
+	splitThreshold = 16_384
 )
 
-/*────────────────────────  Public Bootstrap  ──────────────────────────*/
-
-// InitExecutors spins up one executor per logical core (minus 4 reserved for OS)
-// and wires up fan-outs for every triangular path.
+// InitExecutors creates one executor per core and distributes shards.
 func InitExecutors(cycles []PairTriplet) {
-	// 1️⃣ Decide core count (even, min 8, max 64)
 	n := runtime.NumCPU() - 4
 	switch {
 	case n < 8:
@@ -160,27 +191,24 @@ func InitExecutors(cycles []PairTriplet) {
 	if n&1 != 0 {
 		n--
 	}
-	half := n / 2 // first half = forward, second half = reverse
+	half := n / 2
 
-	// 2️⃣ Build {pair → fan-out shards}
 	buildFanoutShards(cycles)
 
-	// 3️⃣ Spin shard workers (one per core)
 	shardCh := make([]chan PairShard, n)
 	for i := range shardCh {
 		shardCh[i] = make(chan PairShard, 256)
 		go shardWorker(i, half, shardCh[i])
 	}
 
-	// 4️⃣ Round-robin shards to cores, update pair2cores bitmap
 	coreIdx := 0
 	for _, shards := range shardBucket {
 		for _, s := range shards {
-			fwd := coreIdx % half // same index in forward half
-			rev := fwd + half     // mirror index in reverse half
+			fwd := coreIdx % half
+			rev := fwd + half
 			shardCh[fwd] <- s
 			shardCh[rev] <- s
-			for _, eb := range s.Bins { // track *all* pairs in that cycle
+			for _, eb := range s.Bins {
 				for _, pid := range eb.Pairs {
 					pair2cores[pid] |= 1<<fwd | 1<<rev
 				}
@@ -193,20 +221,22 @@ func InitExecutors(cycles []PairTriplet) {
 	}
 }
 
-// RegisterRoute lets external code add extra core mappings (rare).
-func RegisterRoute(pid PairID, core uint8) { pair2cores[pid] |= 1 << core }
+// RegisterRoute adds an extra core mapping for a PairID.
+//
+//go:inline
+func RegisterRoute(pid PairID, core uint8) {
+	pair2cores[pid] |= 1 << core
+}
 
-/*─────────────────────────  Fast-path Ingress  ────────────────────────*/
-
-// DispatchUpdate converts a LogView → TickUpdate and multicasts into rings.
-// Hot / branch-free except for bitmap walk.
+// DispatchUpdate transforms a LogView into TickUpdate and multicasts.
+//
+//go:inline
+//go:nosplit
 func DispatchUpdate(v *types.LogView) {
 	pid := lookupPairID(v.Addr[addrHexStart:addrHexEnd])
 	if pid == 0 {
-		return // unknown pair — silently drop
+		return
 	}
-
-	// Extract±log2(reserveRatio) using the user’s hand-tuned fastuni impl.
 	r0 := utils.LoadBE64(v.Data[24:])
 	r1 := utils.LoadBE64(v.Data[56:])
 	tick := fastuni.Log2ReserveRatio(r0, r1)
@@ -215,7 +245,6 @@ func DispatchUpdate(v *types.LogView) {
 	upd := (*TickUpdate)(unsafe.Pointer(&msg))
 	upd.Pair, upd.FwdTick, upd.RevTick = pid, tick, -tick
 
-	// Fan-out over ring32: TrailingZeros64 until bitmap empty.
 	for m := pair2cores[pid]; m != 0; {
 		core := bits.TrailingZeros64(uint64(m))
 		rings[core].Push(&msg)
@@ -223,18 +252,15 @@ func DispatchUpdate(v *types.LogView) {
 	}
 }
 
-/*────────────────────  Fan-out shard construction  ────────────────────*/
-
+// buildFanoutShards prepares PairShard slices per PairID.
 func buildFanoutShards(cycles []PairTriplet) {
 	shardBucket = make(map[PairID][]PairShard)
-
 	tmp := make(map[PairID][]EdgeBinding, len(cycles)*3)
 	for _, tri := range cycles {
 		tmp[tri[0]] = append(tmp[tri[0]], EdgeBinding{Pairs: tri, EdgeIdx: 0})
 		tmp[tri[1]] = append(tmp[tri[1]], EdgeBinding{Pairs: tri, EdgeIdx: 1})
 		tmp[tri[2]] = append(tmp[tri[2]], EdgeBinding{Pairs: tri, EdgeIdx: 2})
 	}
-
 	for pid, bins := range tmp {
 		shuffleBindings(bins)
 		for off := 0; off < len(bins); off += splitThreshold {
@@ -242,14 +268,14 @@ func buildFanoutShards(cycles []PairTriplet) {
 			if end > len(bins) {
 				end = len(bins)
 			}
-			shardBucket[pid] = append(
-				shardBucket[pid],
-				PairShard{Pair: pid, Bins: bins[off:end]},
-			)
+			shardBucket[pid] = append(shardBucket[pid], PairShard{Pair: pid, Bins: bins[off:end]})
 		}
 	}
 }
 
+// shuffleBindings randomizes EdgeBinding order via crypto/rand.
+//
+//go:inline
 func shuffleBindings(b []EdgeBinding) {
 	for i := len(b) - 1; i > 0; i-- {
 		j := crandInt(i + 1)
@@ -257,7 +283,9 @@ func shuffleBindings(b []EdgeBinding) {
 	}
 }
 
-// crandInt returns a uniform int ∈ [0,n) using crypto/rand.
+// crandInt returns a uniform int in [0,n) via crypto/rand.
+//
+//go:inline
 func crandInt(n int) int {
 	var buf [8]byte
 	rand.Read(buf[:])
@@ -269,13 +297,11 @@ func crandInt(n int) int {
 	return int(hi)
 }
 
-/*──────────────────────────  Shard Worker  ────────────────────────────*/
-
-// shardWorker pins to its OS thread, builds local indices, then spins a
-// ring32.PinnedConsumer loop forever.
+// shardWorker pins to OS thread and processes PairShards.
+//
+//go:nosplit
 func shardWorker(coreID, half int, in <-chan PairShard) {
 	runtime.LockOSThread()
-
 	ex := &CoreExecutor{
 		Heaps:     make([]bucketqueue.Queue, 0, 1024),
 		Fanouts:   make([][]FanoutEntry, 0, 1024),
@@ -283,98 +309,69 @@ func shardWorker(coreID, half int, in <-chan PairShard) {
 		IsReverse: coreID >= half,
 	}
 	executors[coreID] = ex
-
-	rb := ring32.New(1 << 14) // 16 Ki entries per core
+	rb := ring32.New(1 << 14)
 	rings[coreID] = rb
-
 	cycleBuf := make([]CycleState, 0, 4096)
 	for shard := range in {
 		attachShard(ex, &shard, &cycleBuf)
 	}
-
-	ring32.PinnedConsumer(
-		coreID, rb, new(uint32), new(uint32), // stats placeholders
+	ring32.PinnedConsumer(coreID, rb, new(uint32), new(uint32),
 		func(p *[32]byte) { handleTick(ex, (*TickUpdate)(unsafe.Pointer(p))) },
-		make(chan struct{}), // never signals
-	)
+		make(chan struct{}))
 }
 
-/*───────────────────────  Shard Attachment  ───────────────────────────*/
-
-// attachShard wires one PairShard into a CoreExecutor (all local memory).
+// attachShard registers a PairShard with a CoreExecutor.
+//
+//go:inline
 func attachShard(ex *CoreExecutor, shard *PairShard, buf *[]CycleState) {
 	lid32 := ex.LocalIdx.Put(uint32(shard.Pair), uint32(len(ex.Heaps)))
 	lid := uint32(lid32)
-
-	// First time we see this localPairID → create heap & fanout slice.
 	if int(lid32) == len(ex.Heaps) {
 		ex.Heaps = append(ex.Heaps, *bucketqueue.New())
 		ex.Fanouts = append(ex.Fanouts, nil)
 	}
 	hq := &ex.Heaps[lid]
-
 	for _, eb := range shard.Bins {
-		// Back the CycleState from a grow-only per-core buffer.
 		*buf = append(*buf, CycleState{Pairs: eb.Pairs})
 		cs := &(*buf)[len(*buf)-1]
-
-		// Allocate a stable handle inside the pair-heap.
 		h, _ := hq.Borrow()
-		_ = hq.Push(4095, h, unsafe.Pointer(cs)) // initial key loosely “max”
-
-		// Create fanout entries for the TWO edges *other* than eb.EdgeIdx.
+		_ = hq.Push(4095, h, unsafe.Pointer(cs))
 		for _, edge := range []uint16{(eb.EdgeIdx + 1) % 3, (eb.EdgeIdx + 2) % 3} {
-			ex.Fanouts[lid] = append(ex.Fanouts[lid], FanoutEntry{
-				State: cs, Queue: hq, Handle: h, EdgeIdx: edge,
-			})
+			ex.Fanouts[lid] = append(ex.Fanouts[lid], FanoutEntry{State: cs, Queue: hq, Handle: h, EdgeIdx: edge})
 		}
 	}
 }
 
-/*──────────────────────────  Hot-path Loop  ───────────────────────────*/
-
-// handleTick pops profitable paths, executes them once, parks the entry at the
-// bottom of the heap, re-queues non-profitable ones with their real key, and
-// finally propagates the fresh tick to every dependent path.
+// handleTick processes one TickUpdate: drains profitable cycles and propagates ticks.
 func handleTick(ex *CoreExecutor, upd *TickUpdate) {
-	/* 1️⃣ Polarity */
 	tick := upd.FwdTick
 	if ex.IsReverse {
 		tick = upd.RevTick
 	}
-
-	/* 2️⃣ Local lookup */
 	lid32, _ := ex.LocalIdx.Get(uint32(upd.Pair))
 	lid := uint32(lid32)
 	hq := &ex.Heaps[lid]
 	fans := ex.Fanouts[lid]
-
-	/* 3️⃣ Profit-drain (PopMin → stash) */
 	const maxDrain = 64
 	type stashRec struct {
 		h         bucketqueue.Handle
 		cs        *CycleState
-		wasProfit bool // true ⇒ executed this round
+		wasProfit bool
 	}
 	var stash [maxDrain]stashRec
 	n := 0
-
 	if h, _, ptr := hq.PopMin(); ptr != nil {
 		for {
 			cs := (*CycleState)(ptr)
 			profit := tick + cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2]
-
-			if profit >= 0 { // first non-profitable ⇒ stop draining
+			if profit >= 0 {
 				stash[n] = stashRec{h, cs, false}
 				n++
 				break
 			}
-
-			// 🚀 one-shot execution, will be parked at bottom later
 			onProfitable(cs)
 			stash[n] = stashRec{h, cs, true}
 			n++
-
 			if n == maxDrain {
 				break
 			}
@@ -384,20 +381,16 @@ func handleTick(ex *CoreExecutor, upd *TickUpdate) {
 			}
 		}
 	}
-
-	/* 4️⃣ Re-push drained items BEFORE propagate */
 	for i := 0; i < n; i++ {
 		rec := stash[i]
 		var key int64
 		if rec.wasProfit {
-			key = 4095 // park at bottom; will be updated after propagate
+			key = 4095
 		} else {
 			key = log2ToTick(rec.cs.Ticks[0] + rec.cs.Ticks[1] + rec.cs.Ticks[2])
 		}
 		_ = hq.Push(key, rec.h, unsafe.Pointer(rec.cs))
 	}
-
-	/* 5️⃣ Propagate new tick to all fan-outs */
 	for _, f := range fans {
 		cs := f.State
 		cs.Ticks[f.EdgeIdx] = tick
@@ -406,32 +399,33 @@ func handleTick(ex *CoreExecutor, upd *TickUpdate) {
 	}
 }
 
-/*────────────────────────────  Helpers  ───────────────────────────────*/
-
+// onProfitable is a no-op hook for profitable cycles.
+//
+//go:inline
 func onProfitable(cs *CycleState) {
-	// TODO: hook into execution engine.
 	_, _ = cs.Ticks, cs.Pairs
 }
 
 const (
-	clamp   = 128.0 // log₂ reserve-ratio bound
-	scale   = 16.0  // 1 tick  = 1/16 log₂
-	maxTick = 4095  // 12-bit ceiling (2¹²-1)
+	clamp   = 128.0
+	scale   = 16.0
+	maxTick = 4095
 )
 
-// log2ToTick maps a log₂(ratio) in [-128, +128] → integer tick [0, 4095].
+// log2ToTick maps a log2(ratio) in [-clamp, clamp] to [0, maxTick].
+//
+//go:inline
+//go:nosplit
 func log2ToTick(ratio float64) int64 {
-	// Fast inlined clamp for hot path ─ no math calls.
 	if ratio < -clamp {
 		return 0
 	}
 	if ratio > clamp {
-		return maxTick //   +128 maps to 4095 (not 4096)
+		return maxTick
 	}
-
-	tick := int64((ratio + clamp) * scale) // 0 ≤ tick ≤ 4096
+	tick := int64((ratio + clamp) * scale)
 	if tick > maxTick {
-		tick = maxTick // trims the single overflow case
+		tick = maxTick
 	}
 	return tick
 }
