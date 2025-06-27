@@ -5,7 +5,6 @@
 // This implementation uses a fixed arena allocator, intrusive linked lists,
 // and compact handle management for high-throughput applications such as
 // schedulers, simulation engines, or event queues.
-
 package bucketqueue
 
 import (
@@ -15,83 +14,57 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Tunable compile‑time constants.
+// Tunable compile-time constants.
 // ---------------------------------------------------------------------------
 
 const (
-	// numBuckets must stay a power‑of‑two so we can use bit‑twiddling instead
-	// of integer division when mapping absolute ticks → circular bucket index.
-	numBuckets = 4096 // one full 4 096‑tick window (≈ 2¹²)
+	// numBuckets must be a power-of-two to allow cheap modulus operations via bitmasking.
+	numBuckets = 4096
 
-	// Each uint64 inside groupBits tracks a *block* of 64 buckets, so the total
-	// number of groups is numBuckets/64.  That allows PopMin/PeepMin to skip
-	// entire empty 64‑bucket spans in one TrailingZeros64() call.
+	// Each uint64 in groupBits maps to 64 consecutive buckets. This reduces scanning cost
+	// during PeepMin and PopMin to a 2-level bitmap traversal.
 	numGroups = numBuckets / 64
 
-	// Hard cap on concurrently borrowed handles.  2¹⁶ fits naturally into a
-	// uint16, but we keep idx32 for alignment reasons.
-	capItems = 1 << 16 // 65 536 – plenty for real‑time order books
+	// Max number of simultaneously active handles in the arena. Fits cleanly in a uint16 index.
+	capItems = 1 << 16
 )
 
-// idx32 is *only* used as an array index inside the private arena; it never
-// escapes the package, so we can rely on pointer‑sized ints for public Handle.
-//
-// The nil index uses the all‑ones pattern so a zero value is considered valid –
-// that choice keeps the initial arena slot ‘0’ usable without extra checks.
-// ---------------------------------------------------------------------------
+// idx32 is the internal arena index type for tracking bucket nodes.
+// A sentinel value of all-ones represents nil (invalid).
 type idx32 uint32
 
 const nilIdx idx32 = ^idx32(0)
 
 // ---------------------------------------------------------------------------
-// node – internal per‑handle metadata
-// ---------------------------------------------------------------------------
-// Layout rationale (all sizes on a 64‑bit platform):
-//
-//	tick  int64          8  ┐ keep the two 64‑bit fields together → fewer
-//	data  *unsafe.Pointer 8 │    cache lines touched when PopMin only needs
-//	next  idx32          4 │    the timestamp + payload pointer.
-//	prev  idx32          4 │ –––––––––––––––––––––––––→ 24 B
-//	count uint32         4 │ count rarely used, so we pay one 4‑byte hole…
-//	_pad                4  ┘ so the struct still fits snugly into 32 bytes.
-//
-// The total fits exactly into half a typical L1 cache line (64 B), meaning two
-// nodes map nicely and none spans a line boundary.
+// node stores metadata for each handle in the arena.
+// Structured to occupy 32 bytes for cache locality (fits 2 per 64-byte line).
 // ---------------------------------------------------------------------------
 type node struct {
-	tick  int64          // absolute tick for this bucket element
-	data  unsafe.Pointer // latest value pushed for the handle at this tick
-	next  idx32          // next node within the same bucket list (nilIdx = end)
-	prev  idx32          // previous node within the bucket list (nilIdx = head)
-	count uint32         // multiplicity when same handle pushed N times at tick
-	//lint:ignore U1000 padding for cache alignment
-	_pad uint32 // forces 8‑byte alignment of the whole struct
+	tick  int64          // absolute tick this node is scheduled for
+	data  unsafe.Pointer // user-supplied payload
+	next  idx32          // linked-list next within bucket
+	prev  idx32          // linked-list prev within bucket
+	count uint32         // count of pushes at same tick (used for de-duplication)
+	_pad  uint32         // padding for 8-byte alignment (U1000 ignored)
 }
 
 // ---------------------------------------------------------------------------
-// Queue – the public, lock‑free 4 096‑bucket timing wheel.
+// Queue represents a fixed-capacity, lock-free, multi-bucket timing wheel.
 // ---------------------------------------------------------------------------
-// Field order chosen so the hot, mutated scalars live together at the end – the
-// large arrays never move once allocated and therefore do not penalise access
-// to those scalars through additional offset calculations on every use.
-// ---------------------------------------------------------------------------
-
-//lint:ignore U1000  we export the type; unused‑field linter disabled deliberately
-//nolint:structcheck // we know some fields are mutated only on slow paths.
 type Queue struct {
-	arena     [capItems]node    // fixed arena – no per‑node heap allocs
-	buckets   [numBuckets]idx32 // circular linked‑list heads for 4 096 slots
-	groupBits [numGroups]uint64 // bitmap of non‑empty buckets per group
+	arena     [capItems]node    // preallocated arena for node handles
+	buckets   [numBuckets]idx32 // circular bucket list heads
+	groupBits [numGroups]uint64 // 64-bit bitmap per 64 buckets
 
-	baseTick uint64 // absolute tick represented by bucket 0
-	summary  uint64 // bitmap of non‑empty *groups* (top‑level accelerator)
+	baseTick uint64 // absolute tick for bucket index 0
+	summary  uint64 // top-level bitmap summarizing non-empty groups
 
-	size     int   // total number of enqueued (handle,tick) records
-	freeHead idx32 // head of single‑linked free‑list inside arena
+	size     int   // total number of scheduled entries
+	freeHead idx32 // index of next free node in arena
 }
 
 // ---------------------------------------------------------------------------
-// Error values – callers treat them as sentinels; do NOT compare the message.
+// Public error sentinels — do not rely on string contents.
 // ---------------------------------------------------------------------------
 var (
 	ErrFull         = errors.New("bucketqueue: no free handles")
@@ -100,38 +73,29 @@ var (
 	ErrItemNotFound = errors.New("bucketqueue: invalid handle")
 )
 
-// Handle is an opaque index handed to the caller after Borrow().
-//
-// The zero value (nilIdx) is intentionally *invalid* so misuse is easy to spot.
-// ---------------------------------------------------------------------------
+// Handle is an opaque identifier for queued items.
+// Zero value is invalid (reserved for nilIdx).
 //
 //go:inline
-//lint:ignore U1000 exported for users of the package
-//nolint:revive // we want a short name for ergonomics
+//go:nosplit
+//nolint:revive
+//lint:ignore U1000 exported type used by consumers
+
 type Handle idx32
 
-// New returns an empty Queue ready for use.
-//
-// It never allocates at runtime — the entire arena and bucket array are
-// embedded directly in the struct, so the GC does not track individual
-// handle allocations and the queue stays entirely off-heap.
-//
-// This version also skips Handle(0), reserving it as an invalid sentinel
-// (nilIdx), so all valid handles begin at index 1.
+// New creates a fresh empty Queue.
+// All internal memory is preallocated — no GC pressure.
 func New() *Queue {
 	q := &Queue{}
 
-	// Build freelist backwards, starting from highest index.
-	// We explicitly skip index 0 so that Handle(0) is never returned
-	// from Borrow(). This allows zero-value Handle to be considered invalid.
+	// Initialize freelist backwards (skip Handle 0).
 	for i := capItems - 1; i > 1; i-- {
 		q.arena[i-1].next = idx32(i)
 	}
-	q.arena[capItems-1].next = nilIdx // final node terminates the freelist
-	q.freeHead = 1                    // first available handle is index 1
+	q.arena[capItems-1].next = nilIdx
+	q.freeHead = 1
 
-	// Mark all buckets as empty.
-	// Each bucket head stores an idx32 into the arena or nilIdx if empty.
+	// Clear all bucket heads.
 	for i := range q.buckets {
 		q.buckets[i] = nilIdx
 	}
@@ -139,13 +103,10 @@ func New() *Queue {
 	return q
 }
 
-// ---------------------------------------------------------------------------
-// Borrow — acquire a free Handle from the pool. O(1).
+// Borrow acquires a free handle from the arena.
 //
-// ---------------------------------------------------------------------------
-//
-//go:nosplit  // no calls into runtime; safe to run on the system stack
-//go:inline   // trivial enough that the compiler will happily inline it anyway
+//go:nosplit
+//go:inline
 func (q *Queue) Borrow() (Handle, error) {
 	if q.freeHead == nilIdx {
 		return Handle(nilIdx), ErrFull
@@ -153,29 +114,18 @@ func (q *Queue) Borrow() (Handle, error) {
 	h := q.freeHead
 	n := &q.arena[h]
 	q.freeHead = n.next
-
-	// Reset linkage so stale pointers never leak user data across ticks.
 	n.next, n.prev, n.count = nilIdx, nilIdx, 0
 	return Handle(h), nil
 }
 
-// ---------------------------------------------------------------------------
-// Push — enqueue (or re‑enqueue) a handle at `tick`.
+// Push schedules a handle for execution at a specified tick.
+// If the same handle is pushed to the same tick again, it increments a count.
 //
-// Fast‑path handles the common case where the same handle is pushed repeatedly
-// into the same bucket (update‑in‑place).  Otherwise we detach any existing
-// node and splice it into the new bucket.
-//
-// ---------------------------------------------------------------------------
-//
-//go:nosplit   // tail‑calls only; never allocates, never triggers stack grow
+//go:nosplit
 func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	if h >= Handle(capItems) {
 		return ErrItemNotFound
 	}
-
-	// Tick sanity checks without extra branches: convert to unsigned so we can
-	// detect negative deltas via the sign‑bit (delta >= 1<<63).
 	delta := uint64(tick) - q.baseTick
 	switch {
 	case delta >= 1<<63:
@@ -187,20 +137,17 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	idx := idx32(h)
 	n := &q.arena[idx]
 
-	// -------------------------------- fast path: in‑bucket count bump --------
 	if n.count != 0 && n.tick == tick {
 		n.count++
 		q.size++
-		n.data = val // overwrite payload pointer so PeepMin sees the latest
+		n.data = val
 		return nil
 	}
 
-	// -------------------------------- slow path: detach from old bucket ------
 	if n.count != 0 {
 		if n.prev != nilIdx {
 			q.arena[n.prev].next = n.next
 		} else {
-			// Node was bucket head → update bucket→group→summary cascading bits
 			old := uint64(n.tick) - q.baseTick
 			q.buckets[old] = n.next
 			if q.buckets[old] == nilIdx {
@@ -218,8 +165,7 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 		n.next, n.prev = nilIdx, nilIdx
 	}
 
-	// -------------------------------- attach into new bucket -----------------
-	bkt := delta // unsigned, guaranteed < numBuckets here
+	bkt := delta
 	n.next, n.prev = q.buckets[bkt], nilIdx
 	if n.next != nilIdx {
 		q.arena[n.next].prev = idx
@@ -227,21 +173,17 @@ func (q *Queue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	q.buckets[bkt] = idx
 	n.tick, n.count, n.data = tick, 1, val
 
-	// Update summarising hierarchic bitmaps
 	g := bkt >> 6
 	if (q.groupBits[g] & (1 << (bkt & 63))) == 0 {
 		q.groupBits[g] |= 1 << (bkt & 63)
 		q.summary |= 1 << g
 	}
+
 	q.size++
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// Update — move an already‑queued handle to a new tick.  Internally calls Push
-// after unlinking, thereby reusing the exact same bucket/bit management.
-//
-// ---------------------------------------------------------------------------
+// Update changes the tick of a handle that is already in the queue.
 //
 //go:nosplit
 func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
@@ -254,7 +196,6 @@ func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 		return ErrItemNotFound
 	}
 
-	// Detach from current bucket – largely identical to the branch in Push()
 	old := uint64(n.tick) - q.baseTick
 	q.size -= int(n.count)
 	if n.prev != nilIdx {
@@ -273,14 +214,10 @@ func (q *Queue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 		q.arena[n.next].prev = n.prev
 	}
 	n.next, n.prev, n.count = nilIdx, nilIdx, 0
-	// Re‑insert via Push – that already updates all counters and bitmaps.
 	return q.Push(tick, h, val)
 }
 
-// ---------------------------------------------------------------------------
-// PeepMin — read the front element without dequeuing. O(1).
-//
-// ---------------------------------------------------------------------------
+// PeepMin reads the next earliest entry without removing it.
 //
 //go:nosplit
 //go:inline
@@ -297,49 +234,32 @@ func (q *Queue) PeepMin() (Handle, int64, unsafe.Pointer) {
 	return Handle(h), n.tick, n.data
 }
 
-// PopMin removes and returns the handle at the earliest non-empty tick.
-//
-// If multiple copies of the same handle exist at that tick (count > 1),
-// only one is dequeued and the node remains in-place.
-// If this is the last copy (count == 1), the node is removed from the
-// bucket list and returned to the freelist.
-//
-// O(1) worst-case, due to 2-level bitmap hierarchy for fast bucket lookup.
-//
-// Returns (invalid, 0, nil) if the queue is empty.
-//
-// ---------------------------------------------------------------------------
+// PopMin removes and returns the earliest enqueued entry.
 //
 //go:nosplit
 func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	if q.size == 0 || q.summary == 0 {
 		return Handle(nilIdx), 0, nil
 	}
-
-	// Step 1: Find the first non-empty group and bucket via trailing zero scan.
 	g := bits.TrailingZeros64(q.summary)
 	b := bits.TrailingZeros64(q.groupBits[g])
-	bkt := uint64(g<<6 | b) // absolute bucket index (0..4095)
+	bkt := uint64(g<<6 | b)
 
-	// Step 2: Fetch head of the bucket list.
 	h := q.buckets[bkt]
 	n := &q.arena[h]
 
-	// Step 3: Fast path for multiple items — decrement count, return.
 	if n.count > 1 {
 		n.count--
 		q.size--
 		return Handle(h), n.tick, n.data
 	}
 
-	// Step 4: This is the last copy → unlink node from the bucket list.
 	q.buckets[bkt] = n.next
 	if n.next != nilIdx {
 		q.arena[n.next].prev = nilIdx
 	}
 	q.size--
 
-	// Step 5: If bucket is now empty, update group and summary bitmaps.
 	if q.buckets[bkt] == nilIdx {
 		q.groupBits[g] &^= 1 << (bkt & 63)
 		if q.groupBits[g] == 0 {
@@ -347,26 +267,23 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 		}
 	}
 
-	// Step 6: Capture data *before* clearing the node, since .data is returned.
 	retData := n.data
 	retTick := n.tick
 
-	// Step 7: Clear the node and return it to the freelist.
 	n.next, n.prev, n.count, n.data = nilIdx, nilIdx, 0, nil
 	q.freeHead, n.next = h, q.freeHead
 
-	// Step 8: Return the handle, tick, and stored data pointer.
 	return Handle(h), retTick, retData
 }
 
-// ---------------------------------------------------------------------------
-// Const‑time helpers
-// ---------------------------------------------------------------------------
+// Size returns the total number of entries in the queue.
 //
 //go:nosplit
 //go:inline
 func (q *Queue) Size() int { return q.size }
 
+// Empty returns true if the queue contains no entries.
+//
 //go:nosplit
 //go:inline
 func (q *Queue) Empty() bool { return q.size == 0 }

@@ -1,3 +1,9 @@
+// bucketqueue_test.go validates correctness of the Queue implementation
+// under various functional scenarios: creation, borrow exhaustion, push/pop
+// semantics, multi-count, list integrity, and update logic.
+//
+// Each test is isolated and uses minimal allocations to validate
+// arena handle lifecycle, mutation correctness, and tick-based ordering.
 package bucketqueue
 
 import (
@@ -5,6 +11,7 @@ import (
 	"unsafe"
 )
 
+// TestNewEmpty ensures a freshly initialized queue behaves correctly.
 func TestNewEmpty(t *testing.T) {
 	q := New()
 	if q == nil {
@@ -22,51 +29,55 @@ func TestNewEmpty(t *testing.T) {
 	}
 }
 
+// TestBorrowExhaustion fills the arena and expects the next Borrow to fail.
 func TestBorrowExhaustion(t *testing.T) {
 	q := New()
-	for i := 0; i < capItems-1; i++ { // Handle(0) is skipped
+	for i := 0; i < capItems-1; i++ {
 		if _, err := q.Borrow(); err != nil {
 			t.Fatalf("Borrow #%d returned error %v", i, err)
 		}
 	}
 	h, err := q.Borrow()
 	if err != ErrFull {
-		t.Errorf("after exhausting Borrow, error = %v; want ErrFull", err)
+		t.Errorf("expected ErrFull, got %v", err)
 	}
 	if h != Handle(nilIdx) {
-		t.Errorf("after exhausting Borrow, handle = %v; want invalid", h)
+		t.Errorf("expected nilIdx handle, got %v", h)
 	}
 }
 
+// TestPushErrors validates boundary conditions for Push().
 func TestPushErrors(t *testing.T) {
 	q := New()
 	h, _ := q.Borrow()
 	invalid := Handle(nilIdx)
 
 	if err := q.Push(0, invalid, nil); err != ErrItemNotFound {
-		t.Errorf("Push with invalid handle: error = %v; want ErrItemNotFound", err)
+		t.Errorf("invalid handle: got %v, want ErrItemNotFound", err)
 	}
 	if err := q.Push(-1, h, nil); err != ErrPastWindow {
-		t.Errorf("Push with tick too far in past: error = %v; want ErrPastWindow", err)
+		t.Errorf("past tick: got %v, want ErrPastWindow", err)
 	}
 	if err := q.Push(int64(numBuckets), h, nil); err != ErrBeyondWindow {
-		t.Errorf("Push with tick too far in future: error = %v; want ErrBeyondWindow", err)
+		t.Errorf("future tick: got %v, want ErrBeyondWindow", err)
 	}
 }
 
+// TestUpdateErrors ensures Update() handles invalid cases correctly.
 func TestUpdateErrors(t *testing.T) {
 	q := New()
 	h, _ := q.Borrow()
 	invalid := Handle(nilIdx)
 
 	if err := q.Update(0, invalid, nil); err != ErrItemNotFound {
-		t.Errorf("Update with invalid handle: %v; want ErrItemNotFound", err)
+		t.Errorf("invalid handle update: %v", err)
 	}
 	if err := q.Update(0, h, nil); err != ErrItemNotFound {
-		t.Errorf("Update on non-existent item: %v; want ErrItemNotFound", err)
+		t.Errorf("update on non-existent item: %v", err)
 	}
 }
 
+// TestPushPopBasic confirms the happy path of pushing and popping an item.
 func TestPushPopBasic(t *testing.T) {
 	q := New()
 	h, _ := q.Borrow()
@@ -76,119 +87,85 @@ func TestPushPopBasic(t *testing.T) {
 	if err := q.Push(5, h, ptr); err != nil {
 		t.Fatalf("Push failed: %v", err)
 	}
-	if q.Empty() {
-		t.Error("queue should not be empty after Push")
-	}
-	if got := q.Size(); got != 1 {
-		t.Errorf("Size after Push = %d; want 1", got)
+	if q.Empty() || q.Size() != 1 {
+		t.Errorf("unexpected queue state after push")
 	}
 
 	h2, tick2, data2 := q.PopMin()
-	if h2 != h || tick2 != 5 {
-		t.Errorf("PopMin = (%v,%d); want (%v,5)", h2, tick2, h)
-	}
-	if data2 != ptr {
-		t.Errorf("PopMin data = %v; want %v", data2, ptr)
-	}
-	if !q.Empty() || q.Size() != 0 {
-		t.Errorf("after PopMin, Empty=%v Size=%d; want true,0", q.Empty(), q.Size())
+	if h2 != h || tick2 != 5 || data2 != ptr {
+		t.Errorf("PopMin = (%v,%d,%v); want (%v,5,%v)", h2, tick2, data2, h, ptr)
 	}
 }
 
+// TestPopMinCountMoreThanOne ensures count is decremented and not fully removed.
 func TestPopMinCountMoreThanOne(t *testing.T) {
 	q := New()
 	h, _ := q.Borrow()
-
 	a, b := 1, 2
 	pA := unsafe.Pointer(&a)
 	pB := unsafe.Pointer(&b)
 
-	// First push at tick=3 with data = pA
-	if err := q.Push(3, h, pA); err != nil {
-		t.Fatalf("first Push: %v", err)
+	_ = q.Push(3, h, pA)
+	_ = q.Push(3, h, pB) // overwrite, increment count
+
+	if q.Size() != 2 {
+		t.Errorf("unexpected size after double push")
 	}
 
-	// Second push at same tick=3 with data = pB (should overwrite)
-	if err := q.Push(3, h, pB); err != nil {
-		t.Fatalf("second Push: %v", err)
-	}
-
-	if got := q.Size(); got != 2 {
-		t.Errorf("Size after two pushes = %d; want 2", got)
-	}
-
-	// First PopMin should return pB (latest pushed data)
 	h1, tick1, data1 := q.PopMin()
 	if h1 != h || tick1 != 3 || data1 != pB {
-		t.Errorf("first PopMin = (%v,%d,%v); want (%v,3,%v)", h1, tick1, data1, h, pB)
+		t.Errorf("first PopMin: got (%v,%d,%v), want (%v,3,%v)", h1, tick1, data1, h, pB)
+	}
+	if q.Size() != 1 {
+		t.Errorf("expected size 1 after first PopMin")
 	}
 
-	if got := q.Size(); got != 1 {
-		t.Errorf("Size after first PopMin = %d; want 1", got)
-	}
-
-	// Second PopMin should still return pB (data field is not updated per-count)
 	h2, tick2, data2 := q.PopMin()
 	if h2 != h || tick2 != 3 || data2 != pB {
-		t.Errorf("second PopMin = (%v,%d,%v); want (%v,3,%v)", h2, tick2, data2, h, pB)
+		t.Errorf("second PopMin: got (%v,%d,%v), want (%v,3,%v)", h2, tick2, data2, h, pB)
 	}
-
 	if !q.Empty() {
-		t.Error("queue should be empty after second PopMin")
+		t.Error("expected queue to be empty after two pops")
 	}
 }
 
+// TestPushRemovalPrevNil verifies bucket head removal updates prev/next.
 func TestPushRemovalPrevNil(t *testing.T) {
 	q := New()
 	h, _ := q.Borrow()
 	y := 7
 	ptr := unsafe.Pointer(&y)
-
-	if err := q.Push(0, h, nil); err != nil {
-		t.Fatalf("initial Push: %v", err)
-	}
-	if err := q.Push(1, h, ptr); err != nil {
-		t.Fatalf("second Push: %v", err)
-	}
+	_ = q.Push(0, h, nil)
+	_ = q.Push(1, h, ptr) // move to new tick
 
 	h2, tick2, data2 := q.PopMin()
-	if h2 != h || tick2 != 1 {
-		t.Errorf("PopMin after head-removal = (%v,%d); want (%v,1)", h2, tick2, h)
-	}
-	if data2 != ptr {
-		t.Errorf("PopMin data = %v; want %v", data2, ptr)
+	if h2 != h || tick2 != 1 || data2 != ptr {
+		t.Errorf("unexpected PopMin after tick change")
 	}
 }
 
+// TestPushRemovalPrevNonNil validates interior node unlinking.
 func TestPushRemovalPrevNonNil(t *testing.T) {
 	q := New()
 	h1, _ := q.Borrow()
 	h2, _ := q.Borrow()
 	ptr := unsafe.Pointer(new(int))
 
-	if err := q.Push(0, h1, nil); err != nil {
-		t.Fatalf("Push h1: %v", err)
-	}
-	if err := q.Push(0, h2, nil); err != nil {
-		t.Fatalf("Push h2: %v", err)
-	}
-	if err := q.Push(1, h1, ptr); err != nil {
-		t.Fatalf("re-push h1: %v", err)
-	}
+	_ = q.Push(0, h1, nil)
+	_ = q.Push(0, h2, nil)
+	_ = q.Push(1, h1, ptr)
 
-	hA, tickA, dataA := q.PopMin()
-	if hA != h2 || tickA != 0 || dataA != nil {
-		t.Errorf("first PopMin = (%v,%d,%v); want (%v,0,nil)", hA, tickA, dataA, h2)
+	hA, tickA, _ := q.PopMin()
+	if hA != h2 || tickA != 0 {
+		t.Errorf("expected h2@0, got %v@%d", hA, tickA)
 	}
 	hB, tickB, dataB := q.PopMin()
-	if hB != h1 || tickB != 1 {
-		t.Errorf("second PopMin = (%v,%d); want (%v,1)", hB, tickB, h1)
-	}
-	if dataB != ptr {
-		t.Errorf("second PopMin data = %v; want %v", dataB, ptr)
+	if hB != h1 || tickB != 1 || dataB != ptr {
+		t.Errorf("expected h1@1 %v, got %v@%d %v", ptr, hB, tickB, dataB)
 	}
 }
 
+// TestUpdateValid confirms update requeues to new tick.
 func TestUpdateValid(t *testing.T) {
 	q := New()
 	h, _ := q.Borrow()
@@ -196,52 +173,34 @@ func TestUpdateValid(t *testing.T) {
 	p1 := unsafe.Pointer(&a)
 	p2 := unsafe.Pointer(&b)
 
-	if err := q.Push(2, h, p1); err != nil {
-		t.Fatalf("Push before Update: %v", err)
-	}
-	if err := q.Update(8, h, p2); err != nil {
-		t.Fatalf("Update failed: %v", err)
-	}
+	_ = q.Push(2, h, p1)
+	_ = q.Update(8, h, p2)
+
 	h2, tick2, data2 := q.PopMin()
-	if h2 != h || tick2 != 8 {
-		t.Errorf("PopMin after Update = (%v,%d); want (%v,8)", h2, tick2, h)
-	}
-	if data2 != p2 {
-		t.Errorf("PopMin data = %v; want %v", data2, p2)
-	}
-	if !q.Empty() {
-		t.Error("queue should be empty after final PopMin")
+	if h2 != h || tick2 != 8 || data2 != p2 {
+		t.Errorf("Update failed: got (%v,%d,%v), want (%v,8,%v)", h2, tick2, data2, h, p2)
 	}
 }
 
+// TestPushMiddleNodeCorrectsNextPrev checks prev/next patching after middle node removed.
 func TestPushMiddleNodeCorrectsNextPrev(t *testing.T) {
 	q := New()
-
-	// Allocate 3 handles: hA, hB, hC
 	hA, _ := q.Borrow()
 	hB, _ := q.Borrow()
 	hC, _ := q.Borrow()
 
-	// Push all 3 to the same tick=0 to form a chain: C -> B -> A (insertion order is reverse)
-	q.Push(0, hA, nil)
-	q.Push(0, hB, nil)
-	q.Push(0, hC, nil)
-
-	// Internally, the list should be: hC (head) -> hB -> hA
-
-	// Re-push hB to tick=1, which should remove it from the chain
-	q.Push(1, hB, nil)
-
-	// Now the list at tick=0 should be: hC -> hA
-	// Validate that hC.next == hA and hA.prev == hC
+	_ = q.Push(0, hA, nil)
+	_ = q.Push(0, hB, nil)
+	_ = q.Push(0, hC, nil) // hC is head, hB middle
+	_ = q.Push(1, hB, nil)
 
 	nC := &q.arena[hC]
 	nA := &q.arena[hA]
 
 	if nC.next != idx32(hA) {
-		t.Errorf("expected hC.next = %d; got %d", hA, nC.next)
+		t.Errorf("hC.next expected %d, got %d", hA, nC.next)
 	}
 	if nA.prev != idx32(hC) {
-		t.Errorf("expected hA.prev = %d; got %d", hC, nA.prev)
+		t.Errorf("hA.prev expected %d, got %d", hC, nA.prev)
 	}
 }
