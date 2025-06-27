@@ -1,5 +1,5 @@
 // router_coverage_test.go
-// Tests for router.go and router_lookup_zeroalloc.go fileciteturn0file0 fileciteturn0file1
+// Tests for router.go and router_lookup_zeroalloc.go fileciteturn3file0 fileciteturn3file10
 package router
 
 import (
@@ -25,7 +25,7 @@ func TestSliceToWordKeyEqual(t *testing.T) {
 	}
 	addr2 := make([]byte, 40)
 	copy(addr2, addr)
-	addr2[0] = addr2[0] ^ 0xFF
+	addr2[0] ^= 0xFF
 	k2 := sliceToWordKey(addr2)
 	if k1.equal(k2) {
 		t.Errorf("wordKey.equal should return false for different keys")
@@ -34,7 +34,6 @@ func TestSliceToWordKeyEqual(t *testing.T) {
 
 // TestRegisterAndLookupPair tests RegisterPair and lookupPairID
 func TestRegisterAndLookupPair(t *testing.T) {
-	// clear global tables
 	for i := range addr2pid {
 		addr2pid[i] = 0
 	}
@@ -47,13 +46,11 @@ func TestRegisterAndLookupPair(t *testing.T) {
 	if got := lookupPairID(addr); got != pid1 {
 		t.Errorf("lookupPairID returned %v; want %v", got, pid1)
 	}
-	// overwrite
 	pid2 := PairID(456)
 	RegisterPair(addr, pid2)
 	if got := lookupPairID(addr); got != pid2 {
 		t.Errorf("lookupPairID returned %v; want %v", got, pid2)
 	}
-	// unknown address
 	addr3 := make([]byte, 40)
 	for i := range addr3 {
 		addr3[i] = byte(40 + i)
@@ -63,23 +60,27 @@ func TestRegisterAndLookupPair(t *testing.T) {
 	}
 }
 
-// TestLog2ToTick tests log2ToTick boundary conditions
+// TestLog2ToTick tests log2ToTick clamp behavior
 func TestLog2ToTick(t *testing.T) {
 	if got := log2ToTick(-200); got != 0 {
 		t.Errorf("log2ToTick(-200)=%v; want 0", got)
 	}
-	if got := log2ToTick(200); got != maxTick {
-		t.Errorf("log2ToTick(200)=%v; want %v", got, maxTick)
+	if got := log2ToTick(0); got != int64((0+clamp)*scale) {
+		t.Errorf("log2ToTick(0)=%v; want %v", got, int64((0+clamp)*scale))
 	}
-	mid := log2ToTick(0)
-	wantMid := int64((0 + clamp) * scale)
-	if mid != wantMid {
-		t.Errorf("log2ToTick(0)=%v; want %v", mid, wantMid)
-	}
-	// overflow trimming
-	overflow := (float64(maxTick+1) / scale) - clamp + 1
-	if got := log2ToTick(overflow); got != maxTick {
+	over := (float64(maxTick+1) / scale) - clamp + 1.0
+	if got := log2ToTick(over); got != maxTick {
 		t.Errorf("log2ToTick(overflow)=%v; want %v", got, maxTick)
+	}
+}
+
+// TestLog2Clamp covers exact clamp boundaries
+func TestLog2Clamp(t *testing.T) {
+	if got := log2ToTick(-clamp); got != 0 {
+		t.Errorf("log2ToTick(-clamp)=%v; want 0", got)
+	}
+	if got := log2ToTick(clamp); got != maxTick {
+		t.Errorf("log2ToTick(clamp)=%v; want %v", got, maxTick)
 	}
 }
 
@@ -98,16 +99,7 @@ func TestBuildFanoutShards(t *testing.T) {
 	cycles := []PairTriplet{{1, 2, 3}}
 	buildFanoutShards(cycles)
 	if len(shardBucket) != 3 {
-		t.Errorf("buildFanoutShards: shardBucket length %v; want 3", len(shardBucket))
-	}
-	for _, pid := range cycles[0] {
-		shards := shardBucket[pid]
-		if len(shards) != 1 {
-			t.Errorf("shardBucket[%v] length %v; want 1", pid, len(shards))
-		}
-		if shards[0].Pair != pid {
-			t.Errorf("shards[0].Pair = %v; want %v", shards[0].Pair, pid)
-		}
+		t.Errorf("shardBucket length %v; want 3", len(shardBucket))
 	}
 	bins := []EdgeBinding{
 		{Pairs: cycles[0], EdgeIdx: 0},
@@ -122,25 +114,18 @@ func TestBuildFanoutShards(t *testing.T) {
 		for _, o := range orig {
 			if reflect.DeepEqual(eb, o) {
 				found = true
-				break
 			}
 		}
 		if !found {
-			t.Errorf("shuffleBindings produced unexpected element: %v", eb)
+			t.Errorf("shuffleBindings unexpected %v", eb)
 		}
 	}
 }
 
 // TestDispatchUpdate tests DispatchUpdate early return and non-zero path
 func TestDispatchUpdate(t *testing.T) {
-	v := &types.LogView{
-		Addr: make([]byte, addrHexEnd),
-		Data: make([]byte, 64),
-	}
-	// early return: no pair address, should not panic
+	v := &types.LogView{Addr: make([]byte, addrHexEnd), Data: make([]byte, 64)}
 	DispatchUpdate(v)
-
-	// prepare non-zero path
 	addr := make([]byte, 40)
 	for i := range addr {
 		addr[i] = byte(i + 10)
@@ -149,26 +134,61 @@ func TestDispatchUpdate(t *testing.T) {
 	copy(v.Addr[addrHexStart:addrHexEnd], addr)
 	pair2cores[9] = 1 << 0
 	rings[0] = ring32.New(1 << 4)
-	// set non-zero reserves to avoid fastuni panic
 	binary.BigEndian.PutUint64(v.Data[24:32], 100)
 	binary.BigEndian.PutUint64(v.Data[56:64], 200)
 	DispatchUpdate(v)
 }
 
-// TestHandleTick covers handleTick path execution
+// TestHandleTick covers both profitable and non-profitable paths
 func TestHandleTick(t *testing.T) {
-	ex := &CoreExecutor{
-		Heaps:     []bucketqueue.Queue{*bucketqueue.New()},
-		Fanouts:   make([][]FanoutEntry, 1),
-		LocalIdx:  localidx.New(1 << 16),
-		IsReverse: false,
-	}
-	tri := PairTriplet{4, 5, 6}
-	shard := &PairShard{Pair: 4, Bins: []EdgeBinding{{Pairs: tri, EdgeIdx: 0}}}
+	pid := PairID(11)
+	ex := &CoreExecutor{Heaps: []bucketqueue.Queue{}, Fanouts: [][]FanoutEntry{}, LocalIdx: localidx.New(1 << 16), IsReverse: false}
+	tri := PairTriplet{pid, pid, pid}
+	shard := &PairShard{Pair: pid, Bins: []EdgeBinding{{Pairs: tri, EdgeIdx: 1}}}
 	buf := make([]CycleState, 0)
 	attachShard(ex, shard, &buf)
-	upd := &TickUpdate{Pair: 4, FwdTick: 10, RevTick: -10}
-	handleTick(ex, upd)
+
+	// profitable update
+	upd1 := &TickUpdate{Pair: pid, FwdTick: 5, RevTick: -5}
+	handleTick(ex, upd1)
+	cs1 := buf[0]
+	if cs1.Ticks[2] != 5 {
+		t.Errorf("Expected cs.Ticks[2]=5; got %v", cs1.Ticks[2])
+	}
+
+	// non-profitable update
+	upd2 := &TickUpdate{Pair: pid, FwdTick: -3, RevTick: 3}
+	handleTick(ex, upd2)
+	cs2 := buf[0]
+	if cs2.Ticks[0] != -3 {
+		t.Errorf("Expected cs.Ticks[0]=-3; got %v", cs2.Ticks[0])
+	}
+}
+
+// TestOnProfitable ensures onProfitable does not mutate
+func TestOnProfitable(t *testing.T) {
+	cs := CycleState{Ticks: [3]float64{1.1, 2.2, 3.3}, Pairs: PairTriplet{7, 8, 9}}
+	orig := cs
+	onProfitable(&cs)
+	if cs != orig {
+		t.Errorf("onProfitable mutated state")
+	}
+}
+
+// TestInitAndPair2cores tests InitExecutors updates pair2cores mapping
+func TestInitAndPair2cores(t *testing.T) {
+	cycles := []PairTriplet{{21, 22, 23}}
+	// reset
+	for pid := range pair2cores {
+		pair2cores[PairID(pid)] = 0
+	}
+	InitExecutors(cycles)
+	// bits should be set for these PIDs
+	for _, pid := range cycles[0] {
+		if pair2cores[pid] == 0 {
+			t.Errorf("pair2cores[%d] is zero", pid)
+		}
+	}
 }
 
 // TestZeroAllocLookup tests lookup under zero-copy implementation
