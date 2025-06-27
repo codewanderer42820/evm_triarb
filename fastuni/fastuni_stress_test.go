@@ -1,4 +1,4 @@
-// fastuni_delta_test.go — Massive randomized sweeps (1 M / 1 B / 1 T).
+// fastuni_stress_test.go — Massive randomized sweeps (1 M / 1 B / 1 T).
 //
 // Synopsis
 // --------
