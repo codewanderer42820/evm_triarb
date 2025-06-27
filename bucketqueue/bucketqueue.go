@@ -110,25 +110,32 @@ var (
 //nolint:revive // we want a short name for ergonomics
 type Handle idx32
 
-// New returns an empty Queue ready for use.  It never allocates at runtime –
-// the entire arena and bucket heads live in the struct itself so the GC does
-// not even notice them.
-// ---------------------------------------------------------------------------
+// New returns an empty Queue ready for use.
+//
+// It never allocates at runtime — the entire arena and bucket array are
+// embedded directly in the struct, so the GC does not track individual
+// handle allocations and the queue stays entirely off-heap.
+//
+// This version also skips Handle(0), reserving it as an invalid sentinel
+// (nilIdx), so all valid handles begin at index 1.
 func New() *Queue {
 	q := &Queue{}
 
-	// Build the free‑list backwards so Borrow() pops the lowest index first –
-	// this gives slightly better locality when users borrow a burst of handles
-	// and immediately push them into consecutive ticks.
-	for i := capItems - 1; i > 0; i-- {
+	// Build freelist backwards, starting from highest index.
+	// We explicitly skip index 0 so that Handle(0) is never returned
+	// from Borrow(). This allows zero-value Handle to be considered invalid.
+	for i := capItems - 1; i > 1; i-- {
 		q.arena[i-1].next = idx32(i)
 	}
-	q.arena[capItems-1].next = nilIdx
-	q.freeHead = 0
+	q.arena[capItems-1].next = nilIdx // final node terminates the freelist
+	q.freeHead = 1                    // first available handle is index 1
 
+	// Mark all buckets as empty.
+	// Each bucket head stores an idx32 into the arena or nilIdx if empty.
 	for i := range q.buckets {
 		q.buckets[i] = nilIdx
 	}
+
 	return q
 }
 
@@ -290,8 +297,16 @@ func (q *Queue) PeepMin() (Handle, int64, unsafe.Pointer) {
 	return Handle(h), n.tick, n.data
 }
 
-// ---------------------------------------------------------------------------
-// PopMin — remove & return the front element.  O(1).
+// PopMin removes and returns the handle at the earliest non-empty tick.
+//
+// If multiple copies of the same handle exist at that tick (count > 1),
+// only one is dequeued and the node remains in-place.
+// If this is the last copy (count == 1), the node is removed from the
+// bucket list and returned to the freelist.
+//
+// O(1) worst-case, due to 2-level bitmap hierarchy for fast bucket lookup.
+//
+// Returns (invalid, 0, nil) if the queue is empty.
 //
 // ---------------------------------------------------------------------------
 //
@@ -300,26 +315,31 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 	if q.size == 0 || q.summary == 0 {
 		return Handle(nilIdx), 0, nil
 	}
+
+	// Step 1: Find the first non-empty group and bucket via trailing zero scan.
 	g := bits.TrailingZeros64(q.summary)
 	b := bits.TrailingZeros64(q.groupBits[g])
-	bkt := uint64(g<<6 | b)
+	bkt := uint64(g<<6 | b) // absolute bucket index (0..4095)
 
+	// Step 2: Fetch head of the bucket list.
 	h := q.buckets[bkt]
 	n := &q.arena[h]
 
-	// Fast path: multiplicity >1, just decrement and keep node in place.
+	// Step 3: Fast path for multiple items — decrement count, return.
 	if n.count > 1 {
 		n.count--
 		q.size--
 		return Handle(h), n.tick, n.data
 	}
 
-	// Last copy – unlink node and propagate bitmap clears upwards.
+	// Step 4: This is the last copy → unlink node from the bucket list.
 	q.buckets[bkt] = n.next
 	if n.next != nilIdx {
 		q.arena[n.next].prev = nilIdx
 	}
 	q.size--
+
+	// Step 5: If bucket is now empty, update group and summary bitmaps.
 	if q.buckets[bkt] == nilIdx {
 		q.groupBits[g] &^= 1 << (bkt & 63)
 		if q.groupBits[g] == 0 {
@@ -327,11 +347,16 @@ func (q *Queue) PopMin() (Handle, int64, unsafe.Pointer) {
 		}
 	}
 
-	// Return node to free‑list (LIFO to maximise locality for fresh Borrow()).
+	// Step 6: Capture data *before* clearing the node, since .data is returned.
+	retData := n.data
+	retTick := n.tick
+
+	// Step 7: Clear the node and return it to the freelist.
 	n.next, n.prev, n.count, n.data = nilIdx, nilIdx, 0, nil
 	q.freeHead, n.next = h, q.freeHead
 
-	return Handle(h), n.tick, n.data
+	// Step 8: Return the handle, tick, and stored data pointer.
+	return Handle(h), retTick, retData
 }
 
 // ---------------------------------------------------------------------------

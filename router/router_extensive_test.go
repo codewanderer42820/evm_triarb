@@ -15,7 +15,9 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"math"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -247,54 +249,6 @@ func TestRegisterRoute(t *testing.T) {
 	}
 }
 
-/*────────────────────────────── attachShard ──────────────────────────────*/
-
-// TestAttachShard wires a minimal PairShard into a fresh CoreExecutor and
-// ensures that fan‑out entries and heap handles are allocated as expected.
-func TestAttachShard(t *testing.T) {
-	t.Parallel()
-
-	ex := &CoreExecutor{
-		Heaps:    make([]bucketqueue.Queue, 0, 4),
-		Fanouts:  make([][]FanoutEntry, 0, 4),
-		LocalIdx: localidx.New(8),
-	}
-
-	shard := PairShard{
-		Pair: 1,
-		Bins: []EdgeBinding{
-			{Pairs: PairTriplet{1, 2, 3}, EdgeIdx: 0},
-			{Pairs: PairTriplet{1, 4, 5}, EdgeIdx: 0},
-		},
-	}
-
-	var buf []CycleState
-	attachShard(ex, &shard, &buf)
-
-	// One local pair ⇒ one heap and one fan‑out slice.
-	if len(ex.Heaps) != 1 {
-		t.Fatalf("attachShard produced %d heaps, want 1", len(ex.Heaps))
-	}
-	if len(ex.Fanouts) != 1 {
-		t.Fatalf("attachShard produced %d fanout slices, want 1", len(ex.Fanouts))
-	}
-
-	// Two EdgeBindings → four FanoutEntry (each binding subscribes the *other*
-	// two edges). Ensure that invariant holds.
-	if got := len(ex.Fanouts[0]); got != 4 {
-		t.Fatalf("fanout count = %d, want 4", got)
-	}
-
-	// CycleState buffer should grow by two and the pointers stored in fan‑out
-	// entries must be non‑nil.
-	if len(buf) != 2 {
-		t.Fatalf("cycle buffer len = %d, want 2", len(buf))
-	}
-	if ex.Fanouts[0][0].State == nil || unsafe.Pointer(ex.Fanouts[0][0].State) == nil {
-		t.Fatalf("fanout entry has nil State pointer")
-	}
-}
-
 /*────────────────────────── lookupPairID collision ───────────────────────*/
 
 // TestLookupPairIDCollision crafts two addresses that hash to the same bucket
@@ -324,5 +278,189 @@ func TestLookupPairIDCollision(t *testing.T) {
 	}
 	if got := lookupPairID(a2); got != pid2 {
 		t.Fatalf("lookupPairID collision mismatch for addr2: got %d, want %d", got, pid2)
+	}
+}
+
+/*──────────────────────── helpers & scaffolding ───────────────────────*/
+
+// newExec returns a minimally‑wired *CoreExecutor that owns exactly ONE local
+// pair (pid = 1).  The single CycleState lives in an arena‑style slice so its
+// address does not move.  The executor’s heap contains a single handle for
+// that CycleState and Fanouts[0] contains one entry that overwrites Ticks[1].
+func newExec() (*CoreExecutor, *CycleState) {
+	ex := &CoreExecutor{
+		Heaps:    make([]bucketqueue.Queue, 1),
+		Fanouts:  make([][]FanoutEntry, 1),
+		LocalIdx: localidx.New(16),
+	}
+
+	// One min‑heap per local pair.
+	hq := &ex.Heaps[0]
+
+	// One CycleState backed by a grow‑only slice so the pointer stays stable.
+	buf := make([]CycleState, 1)
+	cs := &buf[0]
+
+	// Borrow a handle and enqueue the CycleState with an arbitrary key.
+	h, _ := hq.Borrow()
+	_ = hq.Push(0, h, unsafe.Pointer(cs))
+
+	// Wire the local‑pair index.
+	ex.LocalIdx.Put(uint32(1), 0)
+
+	// Fanout entry updates edge #1 (index 1) of the CycleState.
+	ex.Fanouts[0] = append(ex.Fanouts[0], FanoutEntry{
+		State:   cs,
+		Queue:   hq,
+		Handle:  h,
+		EdgeIdx: 1,
+	})
+	return ex, cs
+}
+
+/*────────────────────────────  Unit tests  ────────────────────────────*/
+
+// TestAttachShard exercises attachShard directly, verifying that it correctly
+// grows the executor’s heap/fanout slices and that every CycleState ends up in
+// the heap with a placeholder key.
+func TestAttachShard(t *testing.T) {
+	t.Parallel()
+	resetGlobals()
+
+	ex := &CoreExecutor{
+		Heaps:    make([]bucketqueue.Queue, 0, 4),
+		Fanouts:  make([][]FanoutEntry, 0, 4),
+		LocalIdx: localidx.New(32),
+	}
+	cycleBuf := make([]CycleState, 0, 4)
+
+	// Craft a single‑bin PairShard for pair = 2.
+	shard := PairShard{
+		Pair: 2,
+		Bins: []EdgeBinding{{Pairs: PairTriplet{2, 3, 4}, EdgeIdx: 0}},
+	}
+
+	t.Logf("[INIT] Attaching shard for PairID %d with %d bin(s)", shard.Pair, len(shard.Bins))
+	attachShard(ex, &shard, &cycleBuf)
+	t.Logf("[POST] Total heaps: %d", len(ex.Heaps))
+	t.Logf("[POST] Total fanouts: %d", len(ex.Fanouts))
+	t.Logf("[POST] CycleState buffer len: %d", len(cycleBuf))
+
+	// Resolve correct heap index (local ID)
+	lid32, ok := ex.LocalIdx.Get(uint32(shard.Pair))
+	if !ok {
+		t.Fatalf("LocalIdx missing mapping for pair %d", shard.Pair)
+	}
+	lid := uint32(lid32)
+	t.Logf("[LOOKUP] LocalIdx returned lid=%d for PairID=%d", lid, shard.Pair)
+
+	if int(lid) >= len(ex.Heaps) {
+		t.Fatalf("LocalIdx returned lid=%d but Heaps only has %d entries", lid, len(ex.Heaps))
+	}
+	hq := &ex.Heaps[lid]
+
+	if hq.Empty() {
+		t.Fatalf("Heap at lid=%d is unexpectedly empty after attach", lid)
+	}
+
+	t.Logf("[PRE-POP] Heap size = %d", hq.Size())
+	h, key, ptr := hq.PopMin()
+	t.Logf("[POP] h=%v key=%d ptr=%v", h, key, ptr)
+
+	if ptr == nil {
+		t.Logf("[FAIL] ptr is nil — likely handle was invalid or Push failed silently.")
+	} else {
+		cs := (*CycleState)(ptr)
+		t.Logf("[DATA] CycleState: ticks=%v pairs=%v", cs.Ticks, cs.Pairs)
+	}
+
+	if ptr == nil || key != 4095 {
+		t.Fatalf("heap entry corrupt: key=%d ptr=%v h=%v", key, ptr, h)
+	}
+}
+
+// TestHandleTickForwardReverse drives handleTick through both forward and
+// reverse polarity branches and both profit / non‑profit paths.
+func TestHandleTickForwardReverse(t *testing.T) {
+	t.Parallel()
+	resetGlobals()
+
+	ex, cs := newExec() // fresh executor with PairID==1
+
+	// 1️⃣ Forward core, profitable (tick negative ⇒ profit<0).
+	upd := TickUpdate{Pair: 1, FwdTick: -10, RevTick: +10}
+	handleTick(ex, &upd)
+	if got := cs.Ticks[1]; got != -10 {
+		t.Fatalf("forward update failed: got tick %.1f want -10", got)
+	}
+
+	// 2️⃣ Forward core, non‑profitable (tick positive ⇒ profit>=0).
+	upd2 := TickUpdate{Pair: 1, FwdTick: +5, RevTick: -5}
+	handleTick(ex, &upd2)
+	if got := cs.Ticks[1]; got != +5 {
+		t.Fatalf("forward non‑profit update failed: got tick %.1f want +5", got)
+	}
+
+	// 3️⃣ Reverse polarity — same executor reused.
+	ex.IsReverse = true // flip polarity so handleTick uses RevTick
+	upd3 := TickUpdate{Pair: 1, FwdTick: +99, RevTick: -99}
+	handleTick(ex, &upd3)
+	if got := cs.Ticks[1]; got != -99 {
+		t.Fatalf("reverse update failed: got tick %.1f want -99", got)
+	}
+}
+
+// TestRegisterRouteBitmask verifies that the per‑pair bitmap is updated with
+// the correct core bit.
+func TestRegisterRouteBitmask(t *testing.T) {
+	t.Parallel()
+	resetGlobals()
+
+	const (
+		pid  = PairID(7)
+		core = uint8(3)
+	)
+	RegisterRoute(pid, core)
+	if pair2cores[pid]&(1<<core) == 0 {
+		t.Fatalf("RegisterRoute failed to set bit: bitmap=%064b", pair2cores[pid])
+	}
+}
+
+// TestHandleTickConcurrent spawns many goroutines, each with its own executor,
+// to ensure the hot path remains data‑race free.  Errors are aggregated via an
+// atomic flag so that T.Fatalf executes on the parent goroutine only.
+func TestHandleTickConcurrent(t *testing.T) {
+	const goroutines = 32
+	var wg sync.WaitGroup
+	var fail uint32
+
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			ex, cs := newExec()
+			ex.IsReverse = idx%2 == 1 // alternate polarity
+
+			tick := float64(idx)
+			upd := TickUpdate{Pair: 1, FwdTick: tick, RevTick: -tick}
+			handleTick(ex, &upd)
+
+			want := tick
+			if ex.IsReverse {
+				want = -tick
+			}
+			if cs.Ticks[1] != want {
+				atomic.StoreUint32(&fail, 1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if fail != 0 {
+		t.Fatalf("concurrent handleTick produced inconsistent results")
+	}
+
+	// Sanity‑check that goroutines did not leak OS threads excessively.
+	if got := runtime.NumGoroutine(); got > goroutines+16 { // generous headroom
+		t.Fatalf("goroutine leak detected: %d live goroutines", got)
 	}
 }

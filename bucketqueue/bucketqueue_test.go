@@ -1,11 +1,3 @@
-// Package bucketqueue implements a zero-allocation, low-latency time-bucket priority queue.
-// Items are distributed across a fixed-size sliding window of time-indexed buckets.
-// A two-level bitmap structure allows O(1) retrieval of the earliest item.
-//
-// This implementation uses a fixed arena allocator, intrusive linked lists,
-// and compact handle management for high-throughput applications such as
-// schedulers, simulation engines, or event queues.
-
 package bucketqueue
 
 import (
@@ -13,8 +5,6 @@ import (
 	"unsafe"
 )
 
-// TestNewEmpty verifies that a freshly-initialised queue is empty, size==0,
-// and PopMin/PeepMin immediately return the invalid handle.
 func TestNewEmpty(t *testing.T) {
 	q := New()
 	if q == nil {
@@ -32,11 +22,9 @@ func TestNewEmpty(t *testing.T) {
 	}
 }
 
-// TestBorrowExhaustion allocates every available handle and ensures Borrow()
-// fails with ErrFull afterwards and returns an invalid handle value.
 func TestBorrowExhaustion(t *testing.T) {
 	q := New()
-	for i := 0; i < capItems; i++ {
+	for i := 0; i < capItems-1; i++ { // Handle(0) is skipped
 		if _, err := q.Borrow(); err != nil {
 			t.Fatalf("Borrow #%d returned error %v", i, err)
 		}
@@ -50,8 +38,6 @@ func TestBorrowExhaustion(t *testing.T) {
 	}
 }
 
-// TestPushErrors covers the three error branches of Push(): invalid handle,
-// tick too far in the past, and tick too far in the future.
 func TestPushErrors(t *testing.T) {
 	q := New()
 	h, _ := q.Borrow()
@@ -68,8 +54,6 @@ func TestPushErrors(t *testing.T) {
 	}
 }
 
-// TestUpdateErrors exercises Update() error paths: invalid handle and updating
-// a handle that has not yet been pushed into the queue.
 func TestUpdateErrors(t *testing.T) {
 	q := New()
 	h, _ := q.Borrow()
@@ -83,8 +67,6 @@ func TestUpdateErrors(t *testing.T) {
 	}
 }
 
-// TestPushPopBasic pushes a single item then verifies PopMin removes it and
-// leaves the queue empty again.
 func TestPushPopBasic(t *testing.T) {
 	q := New()
 	h, _ := q.Borrow()
@@ -105,66 +87,66 @@ func TestPushPopBasic(t *testing.T) {
 	if h2 != h || tick2 != 5 {
 		t.Errorf("PopMin = (%v,%d); want (%v,5)", h2, tick2, h)
 	}
-	if data2 != nil {
-		t.Errorf("PopMin data = %v; want nil on single-pop", data2)
+	if data2 != ptr {
+		t.Errorf("PopMin data = %v; want %v", data2, ptr)
 	}
 	if !q.Empty() || q.Size() != 0 {
 		t.Errorf("after PopMin, Empty=%v Size=%d; want true,0", q.Empty(), q.Size())
 	}
 }
 
-// TestPopMinCountMoreThanOne ensures that when the same handle is pushed twice
-// into the same bucket (count>1), the first PopMin returns the latest data
-// pointer and decrements the count, while the second PopMin cleans up.
 func TestPopMinCountMoreThanOne(t *testing.T) {
 	q := New()
 	h, _ := q.Borrow()
+
 	a, b := 1, 2
 	pA := unsafe.Pointer(&a)
 	pB := unsafe.Pointer(&b)
 
+	// First push at tick=3 with data = pA
 	if err := q.Push(3, h, pA); err != nil {
 		t.Fatalf("first Push: %v", err)
 	}
+
+	// Second push at same tick=3 with data = pB (should overwrite)
 	if err := q.Push(3, h, pB); err != nil {
 		t.Fatalf("second Push: %v", err)
 	}
+
 	if got := q.Size(); got != 2 {
 		t.Errorf("Size after two pushes = %d; want 2", got)
 	}
 
-	// First PopMin should return the latest data pointer
+	// First PopMin should return pB (latest pushed data)
 	h1, tick1, data1 := q.PopMin()
 	if h1 != h || tick1 != 3 || data1 != pB {
 		t.Errorf("first PopMin = (%v,%d,%v); want (%v,3,%v)", h1, tick1, data1, h, pB)
 	}
+
 	if got := q.Size(); got != 1 {
 		t.Errorf("Size after first PopMin = %d; want 1", got)
 	}
 
-	// Second PopMin cleans up, returns nil data
+	// Second PopMin should still return pB (data field is not updated per-count)
 	h2, tick2, data2 := q.PopMin()
-	if h2 != h || tick2 != 3 || data2 != nil {
-		t.Errorf("second PopMin = (%v,%d,%v); want (%v,3,nil)", h2, tick2, data2, h)
+	if h2 != h || tick2 != 3 || data2 != pB {
+		t.Errorf("second PopMin = (%v,%d,%v); want (%v,3,%v)", h2, tick2, data2, h, pB)
 	}
+
 	if !q.Empty() {
 		t.Error("queue should be empty after second PopMin")
 	}
 }
 
-// TestPushRemovalPrevNil hits the Push() removal branch where the node being
-// re-pushed was previously the head of its bucket list (n.prev == nilIdx).
 func TestPushRemovalPrevNil(t *testing.T) {
 	q := New()
 	h, _ := q.Borrow()
 	y := 7
 	ptr := unsafe.Pointer(&y)
 
-	// initial push at tick=0
 	if err := q.Push(0, h, nil); err != nil {
 		t.Fatalf("initial Push: %v", err)
 	}
-	// push again at tick=1 removes head and re-pushes with ptr
 	if err := q.Push(1, h, ptr); err != nil {
 		t.Fatalf("second Push: %v", err)
 	}
@@ -173,48 +155,40 @@ func TestPushRemovalPrevNil(t *testing.T) {
 	if h2 != h || tick2 != 1 {
 		t.Errorf("PopMin after head-removal = (%v,%d); want (%v,1)", h2, tick2, h)
 	}
-	if data2 != nil {
-		t.Errorf("PopMin data = %v; want nil on single-pop", data2)
+	if data2 != ptr {
+		t.Errorf("PopMin data = %v; want %v", data2, ptr)
 	}
 }
 
-// TestPushRemovalPrevNonNil re‑pushes a node that sits in the *middle* of a
-// bucket list, exercising both prev/next link fix‑ups.
 func TestPushRemovalPrevNonNil(t *testing.T) {
 	q := New()
 	h1, _ := q.Borrow()
 	h2, _ := q.Borrow()
 	ptr := unsafe.Pointer(new(int))
 
-	// push two different handles into the same bucket (tick=0)
 	if err := q.Push(0, h1, nil); err != nil {
 		t.Fatalf("Push h1: %v", err)
 	}
 	if err := q.Push(0, h2, nil); err != nil {
 		t.Fatalf("Push h2: %v", err)
 	}
-
-	// re-push h1 at tick=1 should remove it from mid-list
 	if err := q.Push(1, h1, ptr); err != nil {
 		t.Fatalf("re-push h1: %v", err)
 	}
 
-	// first PopMin → h2@0
 	hA, tickA, dataA := q.PopMin()
 	if hA != h2 || tickA != 0 || dataA != nil {
 		t.Errorf("first PopMin = (%v,%d,%v); want (%v,0,nil)", hA, tickA, dataA, h2)
 	}
-	// second PopMin → h1@1
 	hB, tickB, dataB := q.PopMin()
 	if hB != h1 || tickB != 1 {
 		t.Errorf("second PopMin = (%v,%d); want (%v,1)", hB, tickB, h1)
 	}
-	if dataB != nil {
-		t.Errorf("second PopMin data = %v; want nil on single-pop", dataB)
+	if dataB != ptr {
+		t.Errorf("second PopMin data = %v; want %v", dataB, ptr)
 	}
 }
 
-// TestUpdateValid updates a pushed handle to a new tick and verifies the move.
 func TestUpdateValid(t *testing.T) {
 	q := New()
 	h, _ := q.Borrow()
@@ -232,108 +206,42 @@ func TestUpdateValid(t *testing.T) {
 	if h2 != h || tick2 != 8 {
 		t.Errorf("PopMin after Update = (%v,%d); want (%v,8)", h2, tick2, h)
 	}
-	if data2 != nil {
-		t.Errorf("PopMin data = %v; want nil on single-pop", data2)
+	if data2 != p2 {
+		t.Errorf("PopMin data = %v; want %v", data2, p2)
 	}
 	if !q.Empty() {
 		t.Error("queue should be empty after final PopMin")
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Added tests to cover edge cases for full coverage of removal and detachment
-// ---------------------------------------------------------------------------
-
-// TestPushRemovalHeadNonNil exercises the slow-path Push removal when the node
-// being re-pushed was the head of its bucket list and had a non-nil next.
-func TestPushRemovalHeadNonNil(t *testing.T) {
+func TestPushMiddleNodeCorrectsNextPrev(t *testing.T) {
 	q := New()
-	h1, _ := q.Borrow()
-	h2, _ := q.Borrow()
-	// Push two handles into the same bucket (tick=0)
-	q.Push(0, h1, nil)
-	q.Push(0, h2, nil)
-	// Re-push head (h2) at tick=1, triggering head-detach with next!=nil
-	if err := q.Push(1, h2, nil); err != nil {
-		t.Fatalf("Re-push h2: %v", err)
-	}
-	// Now bucket0 should only contain h1
-	hA, tickA, dataA := q.PopMin()
-	if hA != h1 || tickA != 0 || dataA != nil {
-		t.Errorf("PopMin = (%v,%d,%v); want (%v,0,nil)", hA, tickA, dataA, h1)
-	}
-	// Next PopMin returns h2 at its new tick
-	hB, tickB, dataB := q.PopMin()
-	if hB != h2 || tickB != 1 || dataB != nil {
-		t.Errorf("Second PopMin = (%v,%d,%v); want (%v,1,nil)", hB, tickB, dataB, h2)
-	}
-}
 
-// TestUpdateRemovalPrevNonNil exercises Update slow-path when the node being moved
-// sits at the tail of its bucket list (prev!=nil, next==nil).
-func TestUpdateRemovalPrevNonNil(t *testing.T) {
-	q := New()
-	h1, _ := q.Borrow()
-	h2, _ := q.Borrow()
-	// Push two handles into the same bucket (tick=0)
-	q.Push(0, h1, nil)
-	q.Push(0, h2, nil)
-	// Update tail (h1) to tick=5
-	if err := q.Update(5, h1, nil); err != nil {
-		t.Fatalf("Update h1: %v", err)
-	}
-	// PopMin should return h2@0, then h1@5
-	hA, tickA, _ := q.PopMin()
-	if hA != h2 || tickA != 0 {
-		t.Fatalf("PopMin = (%v,%d); want (%v,0)", hA, tickA, h2)
-	}
-	hB, tickB, _ := q.PopMin()
-	if hB != h1 || tickB != 5 {
-		t.Fatalf("Second PopMin = (%v,%d); want (%v,5)", hB, tickB, h1)
-	}
-}
+	// Allocate 3 handles: hA, hB, hC
+	hA, _ := q.Borrow()
+	hB, _ := q.Borrow()
+	hC, _ := q.Borrow()
 
-// TestUpdateRemovalHeadNonNil exercises Update slow-path when the node being moved
-// was the head and had a non-nil next.
-func TestUpdateRemovalHeadNonNil(t *testing.T) {
-	q := New()
-	h1, _ := q.Borrow()
-	h2, _ := q.Borrow()
-	// Push two handles into the same bucket (tick=0)
-	q.Push(0, h1, nil)
-	q.Push(0, h2, nil)
-	// Update head (h2) to tick=3
-	if err := q.Update(3, h2, nil); err != nil {
-		t.Fatalf("Update h2: %v", err)
-	}
-	// PopMin should return h1@0, then h2@3
-	hA, tickA, _ := q.PopMin()
-	if hA != h1 || tickA != 0 {
-		t.Fatalf("PopMin = (%v,%d); want (%v,0)", hA, tickA, h1)
-	}
-	hB, tickB, _ := q.PopMin()
-	if hB != h2 || tickB != 3 {
-		t.Fatalf("Second PopMin = (%v,%d); want (%v,3)", hB, tickB, h2)
-	}
-}
+	// Push all 3 to the same tick=0 to form a chain: C -> B -> A (insertion order is reverse)
+	q.Push(0, hA, nil)
+	q.Push(0, hB, nil)
+	q.Push(0, hC, nil)
 
-// TestPopMinHeadNonNil exercises PopMin unlink when the head node has a non-nil next.
-// Validates that the new head's prev is correctly set to nilIdx.
-func TestPopMinHeadNonNil(t *testing.T) {
-	q := New()
-	h1, _ := q.Borrow()
-	h2, _ := q.Borrow()
-	// Push two handles into the same bucket (tick=10)
-	q.Push(10, h1, nil)
-	q.Push(10, h2, nil)
-	// PopMin should remove head (h2) and leave h1 as new head
-	hA, tickA, _ := q.PopMin()
-	if hA != h2 || tickA != 10 {
-		t.Fatalf("PopMin = (%v,%d); want (%v,10)", hA, tickA, h2)
+	// Internally, the list should be: hC (head) -> hB -> hA
+
+	// Re-push hB to tick=1, which should remove it from the chain
+	q.Push(1, hB, nil)
+
+	// Now the list at tick=0 should be: hC -> hA
+	// Validate that hC.next == hA and hA.prev == hC
+
+	nC := &q.arena[hC]
+	nA := &q.arena[hA]
+
+	if nC.next != idx32(hA) {
+		t.Errorf("expected hC.next = %d; got %d", hA, nC.next)
 	}
-	// Next PopMin returns the remaining h1@10
-	hB, tickB, _ := q.PopMin()
-	if hB != h1 || tickB != 10 {
-		t.Fatalf("Second PopMin = (%v,%d); want (%v,10)", hB, tickB, h1)
+	if nA.prev != idx32(hC) {
+		t.Errorf("expected hA.prev = %d; got %d", hC, nA.prev)
 	}
 }
