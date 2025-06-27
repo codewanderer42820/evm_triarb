@@ -1,17 +1,31 @@
-// router.go — 64‑core fan‑out router for real‑time tri‑arbitrage tick propagation.
-// Pointer‑accurate Fanout edition — 2025‑06‑27.
+// router.go — 64-core fan-out router for real-time triangular-arbitrage tick propagation.
+// Re-named, re-ordered & fully banner-commented ― 2025-06-27.
 //
-// Key tweaks in this drop:
-//   • Fanout carries an **explicit pointer** to its owning bucketqueue.Queue so every
-//     Update() call touches the correct heap even when a PathState has three live
-//     handles (one per pair).
-//   • struct size grows from 16 B → 24 B but remains two cache lines for eight
-//     consecutive entries on arm64.
+// ──────────────────────────────────────────────────────────────────────────────
+//  Key structural changes
+//  ─────────────────────────────────────────────────────────────────────────────
+//  • TriPath        → PairTriplet      (semantic: three pair-IDs per cycle)
+//  • PathState      → CycleState       (mutable tick state for one cycle)
+//  • Ref            → EdgeBinding      (binds “which pair” inside a triplet)
+//  • Shard          → PairShard        (batch of EdgeBinding for one pair)
+//  • Fanout         → FanoutEntry      (per-core subscription to a CycleState)
+//  • PriceUpdate    → TickUpdate       (32-byte ring message)
+//  • CoreRouter     → CoreExecutor     (per-core state)
+//  • RouteUpdate    → DispatchUpdate   (fast path from log view → ring)
 //
-// Memory layout audits (Go 1.22, darwin/arm64):
-//   PathState  := 48 B  (Ticks[3] + Pairs[3])
-//   PriceUpdate:= 32 B  (compile‑time assert)
-//   Fanout     := 24 B  (2×ptr + u32 + u16 + pad)
+//  Field re-ordering rules
+//  ──────────────────────
+//  1. 64-bit values first → minimise padding on arm64.
+//  2. Slice / ptr headers are 24 B each; group them together.
+//  3. Hot-path bools & uint16s last so they share trailing pad.
+//
+//  Resulting struct sizes:
+//
+//    CycleState   = 40 B   (24 tick + 12 pair + 4 pad → 40)
+//    FanoutEntry  = 24 B   (p Path + p Queue + u32 Handle + u16 Edge + 2 pad)
+//    TickUpdate   = 32 B   (ring message, compile-time check)
+//
+// ──────────────────────────────────────────────────────────────────────────────
 
 package router
 
@@ -30,97 +44,110 @@ import (
 	"main/utils"
 )
 
-/*──────────────────────────  Constants  ──────────────────────────*/
+/*─────────────────────────────  Constants  ─────────────────────────────*/
 
 const (
-	addrHexStart = 3 // LogView.Addr[3:43] → 40‑byte ascii hex
-	addrHexEnd   = 43
+	addrHexStart = 3  // LogView.Addr[3:43] → 40-byte ASCII hex
+	addrHexEnd   = 43 // exclusive
 )
 
-/*────────────────────────  Data Structures  ────────────────────────*/
+/*────────────────────────────  Type Aliases  ───────────────────────────*/
 
 type (
-	PairID      uint32
-	LocalPairID uint32
-	CPUMask     uint64
+	PairID   uint32 // globally-unique pair identifier
+	CoreMask uint64 // 64-bit CPU-bitmap for fan-out
 
-	TriPath [3]PairID
-
-	// PathState is the payload stored in bucketqueue.  Ticks first for locality.
-	PathState struct {
-		Ticks [3]float64 // hot‑path mutable
-		Pairs TriPath    // rarely touched in on‑price
-	}
-
-	// Ref is a build‑time helper: binds one pair inside a TriPath.
-	Ref struct {
-		Pairs   TriPath
-		EdgeIdx uint16 // 0‑2
-	}
-
-	// Shard groups many refs for one PairID.
-	Shard struct {
-		Pair PairID
-		Refs []Ref
-	}
-
-	/*
-	   Fanout (24 B):
-	     0‑7   *PathState          – shared payload
-	     8‑15  *bucketqueue.Queue  – owning min‑heap
-	    16‑19  bucketqueue.Handle  – slot inside that heap
-	    20‑21  EdgeIdx (uint16)    – which Ticks[] slot we overwrite
-	    22‑23  _pad                – alignment
-	*/
-	Fanout struct {
-		Path   *PathState
-		Queue  *bucketqueue.Queue
-		Handle bucketqueue.Handle
-		Edge   uint16
-		_pad   [2]byte
-	}
-
-	CoreRouter struct {
-		Buckets   []bucketqueue.Queue // one per local pair
-		Fanouts   [][]Fanout          // Fanouts[lid] slice
-		Local     localidx.Hash       // PairID → LocalPairID
-		IsReverse bool                // true on reverse‑direction cores
-	}
+	// PairTriplet holds the three PairID values that form one triangular cycle.
+	PairTriplet [3]PairID
 )
 
-/*────────────────────────  Ring Message  ────────────────────────*/
+/*───────────────────────────  Core Data  ───────────────────────────────*/
 
-type PriceUpdate struct {
+// CycleState is the mutable payload stored in each bucket-queue entry.
+// Tick values are placed first (hot - updated every price event).
+type CycleState struct {
+	Ticks [3]float64 // hot-path mutable tick cache
+	Pairs PairTriplet
+	_pad  uint32 // 8-byte alignment; keeps struct at 40 B
+}
+
+// EdgeBinding is a build-time helper that associates “which edge?” (0,1,2)
+// with a particular pair inside a PairTriplet.
+type EdgeBinding struct {
+	Pairs   PairTriplet
+	EdgeIdx uint16 // edge slot inside .Ticks
+}
+
+// PairShard is a batch of EdgeBinding that all reference the same PairID.
+// They are attached to EXECUTORS in chunks to balance core fan-outs evenly.
+type PairShard struct {
+	Pair PairID
+	Bins []EdgeBinding
+}
+
+/*
+FanoutEntry (24 B) ― subscription record that lets a core:
+  - overwrite ONE tick slot in its CycleState
+  - update that CycleState’s min-heap key in O(log n)
+
+Layout:
+
+	 0-7   *CycleState         – shared payload
+	 8-15  *bucketqueue.Queue  – owning min-heap
+	16-19  bucketqueue.Handle  – slot inside that heap
+	20-21  EdgeIdx (uint16)    – which Ticks[] slot to overwrite
+	22-23  _pad                – alignment
+*/
+type FanoutEntry struct {
+	State  *CycleState
+	Queue  *bucketqueue.Queue
+	Handle bucketqueue.Handle
+	Edge   uint16
+	_pad   [2]byte
+}
+
+// CoreExecutor owns all per-core state and runs on a pinned thread.
+type CoreExecutor struct {
+	Heaps     []bucketqueue.Queue // one min-heap per *local* pair
+	Fanouts   [][]FanoutEntry     // Fanouts[localPairID]
+	LocalIdx  localidx.Hash       // PairID → dense localPairID
+	IsReverse bool                // true on reverse-direction cores
+}
+
+/*───────────────────────────  Ring Message  ───────────────────────────*/
+
+// TickUpdate is the fixed-size (32 B) message pushed through ring32.
+type TickUpdate struct {
 	Pair             PairID
-	_pad             uint32
+	_pad             uint32 // aligns following floats
 	FwdTick, RevTick float64
-	_                [8]byte // pad to 32 B
+	_                [8]byte // pad to 32 B exactly
 }
 
-const _priceUpdateSize = unsafe.Sizeof(PriceUpdate{})
+// Compile-time layout assertion (panics at init if size drifts).
+const _tickUpdateSize = unsafe.Sizeof(TickUpdate{})
 
-func init() {
-	const want = 32
-	_ = [want - int(_priceUpdateSize)]byte{}
-}
+func init() { const want = 32; _ = [want - int(_tickUpdateSize)]byte{} }
 
-/*────────────────────────  Package Globals  ────────────────────────*/
+/*──────────────────────  Package-level scratch  ───────────────────────*/
 
 var (
-	coreRouters [64]*CoreRouter
-	coreRings   [64]*ring32.Ring
+	executors   [64]*CoreExecutor // index == logical core
+	rings       [64]*ring32.Ring  // SPSC rings
+	addr2pair   [1 << 17]PairID   // 128 Ki × open addressing
+	pair2cores  [1 << 17]CoreMask // fan-out bitmap per pair
+	shardBucket map[PairID][]PairShard
 
-	addrToPairID [1 << 17]PairID
-	pairCoreMask [1 << 17]CPUMask
-	pairShards   map[PairID][]Shard
-
-	splitThreshold = 16_384
+	splitThreshold = 16_384 // max EdgeBindings per PairShard
 )
 
-/*────────────────────────  Public API  ────────────────────────*/
+/*────────────────────────  Public Bootstrap  ──────────────────────────*/
 
-func InitRouters(paths []TriPath) {
-	n := runtime.NumCPU() - 4 // reserve 4 cores for OS / I/O
+// InitExecutors spins up one executor per logical core (minus 4 reserved for OS)
+// and wires up fan-outs for every triangular path.
+func InitExecutors(cycles []PairTriplet) {
+	// 1️⃣ Decide core count (even, min 8, max 64)
+	n := runtime.NumCPU() - 4
 	switch {
 	case n < 8:
 		n = 8
@@ -130,28 +157,29 @@ func InitRouters(paths []TriPath) {
 	if n&1 != 0 {
 		n--
 	}
-	half := n / 2
+	half := n / 2 // first half = forward, second half = reverse
 
-	buildFanouts(paths)
+	// 2️⃣ Build {pair → fan-out shards}
+	buildFanoutShards(cycles)
 
-	shardCh := make([]chan Shard, n)
+	// 3️⃣ Spin shard workers (one per core)
+	shardCh := make([]chan PairShard, n)
 	for i := range shardCh {
-		shardCh[i] = make(chan Shard, 256)
-	}
-	for coreID := 0; coreID < n; coreID++ {
-		go shardWorker(coreID, half, shardCh[coreID])
+		shardCh[i] = make(chan PairShard, 256)
+		go shardWorker(i, half, shardCh[i])
 	}
 
+	// 4️⃣ Round-robin shards to cores, update pair2cores bitmap
 	coreIdx := 0
-	for _, shards := range pairShards {
+	for _, shards := range shardBucket {
 		for _, s := range shards {
-			fwd := coreIdx % half
-			rev := fwd + half
+			fwd := coreIdx % half // same index in forward half
+			rev := fwd + half     // mirror index in reverse half
 			shardCh[fwd] <- s
 			shardCh[rev] <- s
-			for _, ref := range s.Refs {
-				for _, pid := range ref.Pairs {
-					pairCoreMask[pid] |= 1<<fwd | 1<<rev
+			for _, eb := range s.Bins { // track *all* pairs in that cycle
+				for _, pid := range eb.Pairs {
+					pair2cores[pid] |= 1<<fwd | 1<<rev
 				}
 			}
 			coreIdx++
@@ -162,79 +190,91 @@ func InitRouters(paths []TriPath) {
 	}
 }
 
+// RegisterPair hashes the 40-byte hex address → PairID (inject at init).
 func RegisterPair(addr40 []byte, pid PairID) {
 	idx := utils.Hash17(addr40)
-	for addrToPairID[idx] != 0 {
-		idx = (idx + 64) & (1<<17 - 1)
+	for addr2pair[idx] != 0 {
+		idx = (idx + 64) & (1<<17 - 1) // 64-slot stride ≈ λ cache sets
 	}
-	addrToPairID[idx] = pid
+	addr2pair[idx] = pid
 }
 
-func RegisterRoute(pid PairID, core uint8) { pairCoreMask[pid] |= 1 << core }
+// RegisterRoute lets external code add extra core mappings (rare).
+func RegisterRoute(pid PairID, core uint8) { pair2cores[pid] |= 1 << core }
 
-func RouteUpdate(v *types.LogView) {
-	pair := lookupPairID(v.Addr[addrHexStart:addrHexEnd])
+/*─────────────────────────  Fast-path Ingress  ────────────────────────*/
 
+// DispatchUpdate converts a LogView → TickUpdate and multicasts into rings.
+// Hot / branch-free except for bitmap walk.
+func DispatchUpdate(v *types.LogView) {
+	pid := lookupPairID(v.Addr[addrHexStart:addrHexEnd])
+
+	// Extract±log2(reserveRatio) using the user’s hand-tuned fastuni impl.
 	r0 := utils.LoadBE64(v.Data[24:])
 	r1 := utils.LoadBE64(v.Data[56:])
 	tick := fastuni.Log2ReserveRatio(r0, r1)
 
 	var msg [32]byte
-	upd := (*PriceUpdate)(unsafe.Pointer(&msg))
-	upd.Pair, upd.FwdTick, upd.RevTick = pair, tick, -tick
+	upd := (*TickUpdate)(unsafe.Pointer(&msg))
+	upd.Pair, upd.FwdTick, upd.RevTick = pid, tick, -tick
 
-	for mask := pairCoreMask[pair]; mask != 0; {
-		core := bits.TrailingZeros64(uint64(mask))
-		coreRings[core].Push(&msg)
-		mask &^= 1 << core
+	// Fan-out over ring32: TrailingZeros64 until bitmap empty.
+	for m := pair2cores[pid]; m != 0; {
+		core := bits.TrailingZeros64(uint64(m))
+		rings[core].Push(&msg)
+		m &^= 1 << core
 	}
 }
 
-/*────────────────────────  Helper Lookup  ────────────────────────*/
+/*────────────────────────  Helper Look-ups  ───────────────────────────*/
 
 func lookupPairID(addr40 []byte) PairID {
 	idx := utils.Hash17(addr40)
-	for pid := addrToPairID[idx]; pid == 0; pid = addrToPairID[idx] {
+	for pid := addr2pair[idx]; pid == 0; pid = addr2pair[idx] {
 		idx = (idx + 64) & (1<<17 - 1)
 	}
-	return addrToPairID[idx]
+	return addr2pair[idx]
 }
 
-/*────────────────────────  Fan‑out Builder  ────────────────────────*/
+/*────────────────────  Fan-out shard construction  ────────────────────*/
 
-func buildFanouts(paths []TriPath) {
-	pairShards = make(map[PairID][]Shard)
+func buildFanoutShards(cycles []PairTriplet) {
+	shardBucket = make(map[PairID][]PairShard)
 
-	tmp := make(map[PairID][]Ref, len(paths)*3)
-	for _, tri := range paths {
-		tmp[tri[0]] = append(tmp[tri[0]], Ref{Pairs: tri, EdgeIdx: 0})
-		tmp[tri[1]] = append(tmp[tri[1]], Ref{Pairs: tri, EdgeIdx: 1})
-		tmp[tri[2]] = append(tmp[tri[2]], Ref{Pairs: tri, EdgeIdx: 2})
+	tmp := make(map[PairID][]EdgeBinding, len(cycles)*3)
+	for _, tri := range cycles {
+		tmp[tri[0]] = append(tmp[tri[0]], EdgeBinding{Pairs: tri, EdgeIdx: 0})
+		tmp[tri[1]] = append(tmp[tri[1]], EdgeBinding{Pairs: tri, EdgeIdx: 1})
+		tmp[tri[2]] = append(tmp[tri[2]], EdgeBinding{Pairs: tri, EdgeIdx: 2})
 	}
 
-	for pid, refs := range tmp {
-		shuffleRefs(refs)
-		for off := 0; off < len(refs); off += splitThreshold {
+	for pid, bins := range tmp {
+		shuffleBindings(bins)
+		for off := 0; off < len(bins); off += splitThreshold {
 			end := off + splitThreshold
-			if end > len(refs) {
-				end = len(refs)
+			if end > len(bins) {
+				end = len(bins)
 			}
-			pairShards[pid] = append(pairShards[pid], Shard{Pair: pid, Refs: refs[off:end]})
+			shardBucket[pid] = append(
+				shardBucket[pid],
+				PairShard{Pair: pid, Bins: bins[off:end]},
+			)
 		}
 	}
 }
 
-func shuffleRefs(refs []Ref) {
-	for i := len(refs) - 1; i > 0; i-- {
+func shuffleBindings(b []EdgeBinding) {
+	for i := len(b) - 1; i > 0; i-- {
 		j := crandInt(i + 1)
-		refs[i], refs[j] = refs[j], refs[i]
+		b[i], b[j] = b[j], b[i]
 	}
 }
 
+// crandInt returns a uniform int ∈ [0,n) using crypto/rand.
 func crandInt(n int) int {
-	var b [8]byte
-	rand.Read(b[:])
-	v := binary.LittleEndian.Uint64(b[:])
+	var buf [8]byte
+	rand.Read(buf[:])
+	v := binary.LittleEndian.Uint64(buf[:])
 	if n&(n-1) == 0 {
 		return int(v & uint64(n-1))
 	}
@@ -242,155 +282,142 @@ func crandInt(n int) int {
 	return int(hi)
 }
 
-/*────────────────────────  Bootstrap Worker  ────────────────────────*/
+/*──────────────────────────  Shard Worker  ────────────────────────────*/
 
-func shardWorker(coreID, half int, in <-chan Shard) {
+// shardWorker pins to its OS thread, builds local indices, then spins a
+// ring32.PinnedConsumer loop forever.
+func shardWorker(coreID, half int, in <-chan PairShard) {
 	runtime.LockOSThread()
 
-	rt := &CoreRouter{
-		Buckets:   make([]bucketqueue.Queue, 0, 1024),
-		Fanouts:   make([][]Fanout, 0, 1024),
-		Local:     localidx.New(1 << 16),
+	ex := &CoreExecutor{
+		Heaps:     make([]bucketqueue.Queue, 0, 1024),
+		Fanouts:   make([][]FanoutEntry, 0, 1024),
+		LocalIdx:  localidx.New(1 << 16),
 		IsReverse: coreID >= half,
 	}
-	coreRouters[coreID] = rt
+	executors[coreID] = ex
 
-	rb := ring32.New(1 << 14)
-	coreRings[coreID] = rb
+	rb := ring32.New(1 << 14) // 16 Ki entries per core
+	rings[coreID] = rb
 
-	buf := make([]PathState, 0, 4096)
-	for sh := range in {
-		installShard(rt, &sh, &buf)
+	cycleBuf := make([]CycleState, 0, 4096)
+	for shard := range in {
+		attachShard(ex, &shard, &cycleBuf)
 	}
 
 	ring32.PinnedConsumer(
-		coreID, rb, new(uint32), new(uint32),
-		func(p *[32]byte) { onPrice(rt, (*PriceUpdate)(unsafe.Pointer(p))) },
-		make(chan struct{}),
+		coreID, rb, new(uint32), new(uint32), // stats placeholders
+		func(p *[32]byte) { handleTick(ex, (*TickUpdate)(unsafe.Pointer(p))) },
+		make(chan struct{}), // never signals
 	)
 }
 
-/*────────────────────────  Shard Attach  ────────────────────────*/
+/*───────────────────────  Shard Attachment  ───────────────────────────*/
 
-// installShard attaches one shard (all refs for a single PairID) to a core.
-func installShard(rt *CoreRouter, sh *Shard, buf *[]PathState) {
-	lid32 := rt.Local.Put(uint32(sh.Pair), uint32(len(rt.Buckets)))
-	lid := LocalPairID(lid32)
+// attachShard wires one PairShard into a CoreExecutor (all local memory).
+func attachShard(ex *CoreExecutor, shard *PairShard, buf *[]CycleState) {
+	lid32 := ex.LocalIdx.Put(uint32(shard.Pair), uint32(len(ex.Heaps)))
+	lid := uint32(lid32)
 
-	// first encounter of this local‑pair id → allocate bucket & fanout slice
-	if int(lid32) == len(rt.Buckets) {
-		rt.Buckets = append(rt.Buckets, *bucketqueue.New())
-		rt.Fanouts = append(rt.Fanouts, nil)
+	// First time we see this localPairID → create heap & fanout slice.
+	if int(lid32) == len(ex.Heaps) {
+		ex.Heaps = append(ex.Heaps, *bucketqueue.New())
+		ex.Fanouts = append(ex.Fanouts, nil)
 	}
+	hq := &ex.Heaps[lid]
 
-	bq := &rt.Buckets[lid]
+	for _, eb := range shard.Bins {
+		// Back the CycleState from a grow-only per-core buffer.
+		*buf = append(*buf, CycleState{Pairs: eb.Pairs})
+		cs := &(*buf)[len(*buf)-1]
 
-	for _, ref := range sh.Refs {
-		// Persistent PathState lives in the per‑core buffer
-		*buf = append(*buf, PathState{Pairs: ref.Pairs})
-		ps := &(*buf)[len(*buf)-1]
+		// Allocate a stable handle inside the pair-heap.
+		h, _ := hq.Borrow()
+		_ = hq.Push(4095, h, unsafe.Pointer(cs)) // initial key loosely “max”
 
-		// Each PathState gets its own handle inside the pair’s min‑heap bucket
-		handle, _ := bq.Borrow()
-		_ = bq.Push(4095, handle, unsafe.Pointer(ps))
-
-		// Insert fanouts for the two *other* tick slots in this triangle
-		for _, edge := range []uint16{(ref.EdgeIdx + 1) % 3, (ref.EdgeIdx + 2) % 3} {
-			rt.Fanouts[lid] = append(rt.Fanouts[lid], Fanout{
-				Path: ps, Queue: bq, Handle: handle, Edge: edge,
+		// Create fanout entries for the TWO edges *other* than eb.EdgeIdx.
+		for _, edge := range []uint16{(eb.EdgeIdx + 1) % 3, (eb.EdgeIdx + 2) % 3} {
+			ex.Fanouts[lid] = append(ex.Fanouts[lid], FanoutEntry{
+				State: cs, Queue: hq, Handle: h, Edge: edge,
 			})
 		}
 	}
 }
 
-/*────────────────────────  Hot Path  ────────────────────────*/
+/*──────────────────────────  Hot-path Loop  ───────────────────────────*/
 
-// onPrice — PopMin profit‑drain (items re‑queued *before* propagate)
-// -----------------------------------------------------------------------------
-//   - All temporaries live on the stack (stash[64]) → zero heap traffic.
-//   - Drained paths are re‑pushed with their original handles **prior** to the
-//     fan‑out loop, guaranteeing that Update() can locate them.
-//
-// Queue may be empty; hard cap of 64 keeps the stack bounded.
-func onPrice(rt *CoreRouter, upd *PriceUpdate) {
-	/* 1️⃣  polarity -------------------------------------------------------- */
+// handleTick pops profitable paths, fires trades, re-pushes, then propagates
+// the fresh tick to every dependent path.  Zero heap traffic; all temps stack.
+func handleTick(ex *CoreExecutor, upd *TickUpdate) {
+	/* 1️⃣ Polarity */
 	tick := upd.FwdTick
-	if rt.IsReverse {
+	if ex.IsReverse {
 		tick = upd.RevTick
 	}
 
-	/* 2️⃣  local state ----------------------------------------------------- */
-	lid32, _ := rt.Local.Get(uint32(upd.Pair))
-	lid := LocalPairID(lid32)
-	bq := &rt.Buckets[lid]
-	fan := rt.Fanouts[lid]
+	/* 2️⃣ Local lookup */
+	lid32, _ := ex.LocalIdx.Get(uint32(upd.Pair))
+	lid := uint32(lid32)
+	hq := &ex.Heaps[lid]
+	fans := ex.Fanouts[lid]
 
-	/* 3️⃣  profit‑drain phase --------------------------------------------- */
-	const capDrain = 64
-	type popped struct {
+	/* 3️⃣ Profit-drain (PopMin → stash → onProfitable) */
+	const maxDrain = 64
+	type stashRec struct {
 		h  bucketqueue.Handle
-		ps *PathState
+		cs *CycleState
 	}
-	var stash [capDrain]popped
+	var stash [maxDrain]stashRec
 	n := 0
 
-	if h, _, ptr := bq.PopMin(); ptr != nil { // queue could be empty
+	if h, _, ptr := hq.PopMin(); ptr != nil {
 		for {
-			ps := (*PathState)(ptr)
-			if tick+ps.Ticks[0]+ps.Ticks[1]+ps.Ticks[2] >= 0 {
-				stash[n] = popped{h, ps} // first non‑profitable
+			cs := (*CycleState)(ptr)
+			if tick+cs.Ticks[0]+cs.Ticks[1]+cs.Ticks[2] >= 0 {
+				stash[n] = stashRec{h, cs}
 				n++
 				break
 			}
-			onProfitablePath(ps)     // 🚀 fire trade
-			stash[n] = popped{h, ps} // keep for re‑queue
+			onProfitable(cs)           // 🚀 fire trade
+			stash[n] = stashRec{h, cs} // keep for re-queue
 			n++
-			if n == capDrain {
-				break // stack guard
+			if n == maxDrain {
+				break
 			}
-			h, _, ptr = bq.PopMin()
+			h, _, ptr = hq.PopMin()
 			if ptr == nil {
-				break // queue drained
+				break
 			}
 		}
 	}
 
-	/* 4️⃣  push drained items back in BEFORE propagate -------------------- */
+	/* 4️⃣ Re-push drained items BEFORE propagate */
 	for i := 0; i < n; i++ {
-		ps := stash[i].ps
+		cs := stash[i].cs
 		h := stash[i].h
-		sum := ps.Ticks[0] + ps.Ticks[1] + ps.Ticks[2]
-		key := log2ToTick(sum)
-		_ = bq.Push(key, h, unsafe.Pointer(ps)) // same handle, no alloc
+		key := log2ToTick(cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2])
+		_ = hq.Push(key, h, unsafe.Pointer(cs))
 	}
 
-	/* 5️⃣  propagate fresh tick to every dependent path ------------------- */
-	for _, f := range fan { // fan slice is core‑local
-		ps := f.Path
-		ps.Ticks[f.Edge] = tick
-		sum := ps.Ticks[0] + ps.Ticks[1] + ps.Ticks[2]
-		key := log2ToTick(sum)
-		_ = f.Queue.Update(key, f.Handle, unsafe.Pointer(ps))
+	/* 5️⃣ Propagate new tick to all fan-outs */
+	for _, f := range fans {
+		cs := f.State
+		cs.Ticks[f.Edge] = tick
+		key := log2ToTick(cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2])
+		_ = f.Queue.Update(key, f.Handle, unsafe.Pointer(cs))
 	}
 }
 
-func onProfitablePath(p *PathState) {
-	// TODO: forward to execution engine.
-	_ = p
+/*────────────────────────────  Helpers  ───────────────────────────────*/
+
+func onProfitable(cs *CycleState) {
+	// TODO: hook into execution engine.
+	_, _ = cs.Ticks, cs.Pairs
 }
 
-// -----------------------------------------------------------------------------
-// log2ToTick — Quantises a base‑2 log‑ratio into a 4 096‑bucket tick index
-// -----------------------------------------------------------------------------
-//
-//	clamp = 128  → values beyond ±128 are saturated (covers worst‑case swings)
-//	scale = 16   → (2×clamp)×scale == 4 096 (12‑bit histogram)
-//
-// -----------------------------------------------------------------------------
+// log2ToTick quantises a base-2 log-ratio into a 4 096-bucket histogram index.
 func log2ToTick(r float64) int64 {
-	const clamp = 128.0 // ±range
-	const scale = 16.0  // buckets per unit
-
+	const clamp, scale = 128.0, 16.0 // (±128)×16 → [0,4096)
 	if r > clamp {
 		r = clamp
 	} else if r < -clamp {
