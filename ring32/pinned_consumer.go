@@ -7,11 +7,11 @@ import (
 )
 
 // hotWindow defines how long the consumer continues to spin after last traffic.
-const hotWindow = 15 * time.Second
+const hotWindow = 5 * time.Second // lower CPU burn for idle workloads
 
 // spinBudget defines how many consecutive empty-polls the consumer tolerates
 // before invoking cpuRelax to reduce contention and power usage.
-const spinBudget = 128
+const spinBudget = 256 // gives bursty workloads more leeway
 
 //go:nosplit
 //go:inline
