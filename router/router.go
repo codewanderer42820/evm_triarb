@@ -287,13 +287,16 @@ func installShard(rt *CoreRouter, sh *Shard, buf *[]PathState) {
 		handle, _ := rt.Buckets[lid].Borrow()
 		_ = rt.Buckets[lid].Push(4095, handle, unsafe.Pointer(ps))
 
-		// Encode Lid | EdgeIdx into a 32-bit meta field (lid<<16 | edge)
-		meta := uint32(lid)<<16 | uint32(ref.EdgeIdx)
-
-		rt.Fanouts[lid] = append(
-			rt.Fanouts[lid],
-			Fanout{Path: ps, Handle: handle, Meta: meta},
-		)
+		// Insert fanouts for the two *other* tick slots in this triangle
+		for _, edge := range []uint16{
+			(ref.EdgeIdx + 1) % 3,
+			(ref.EdgeIdx + 2) % 3,
+		} {
+			meta := uint32(lid)<<16 | uint32(edge)
+			rt.Fanouts[lid] = append(rt.Fanouts[lid], Fanout{
+				Path: ps, Handle: handle, Meta: meta,
+			})
+		}
 	}
 }
 
