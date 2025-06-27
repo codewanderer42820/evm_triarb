@@ -1,6 +1,6 @@
-// router.go — 64-core parallelized fanout router for real-time arbitrage updates.
-// This unified file handles the core infrastructure for dispatching price updates to
-// per-core consumer goroutines, managing per-pair tick queues, and maintaining arbitrage paths.
+// router.go — 64-core parallelised fan-out router for real-time arbitrage updates.
+// Core duties: dispatch price updates to per-core goroutines, manage per-pair
+// tick queues, and keep arbitrage paths.
 
 package router
 
@@ -32,50 +32,48 @@ type LocalPairID uint32
 // CPUMask: 64-bit bitmap of core targets for dispatch
 type CPUMask uint64
 
-// TriCycle: a 3-leg arbitrage path with three pair IDs
+// TriCycle: a 3-leg arbitrage path (three pair IDs)
 type TriCycle [3]PairID
 
-// ArbPath stores the tick values and global pair IDs for one cycle
+// ArbPath holds tick values and the cycle’s pair IDs
 type ArbPath struct {
 	Ticks [3]float64
 	Pairs TriCycle
 }
 
-// Ref links a TriCycle and a specific edge index [0,1,2]
+// Ref says: “for this pair I am edge <Edge> (0,1,2) of <Pairs>”.
+// We emit ONE Ref per (pair, tri) and reconstruct the two update
+// fan-outs locally during shard installation.
 type Ref struct {
 	Pairs TriCycle
-	Edge  uint16
-	//lint:ignore U1000 padding for cache alignment
-	_pad [2]byte // alignment padding
+	Edge  uint16 // the pair’s own position inside the triangle
 }
 
-// Shard contains refs grouped by a pair
+// Shard groups refs by pair
 type Shard struct {
 	Pair PairID
 	Refs []Ref
 }
 
-// PriceUpdate is passed between threads (via ring) and triggers updates
+// Passed between threads via ring
 type PriceUpdate struct {
 	Pair             PairID
 	FwdTick, RevTick float64
 }
 
-// Fanout links an ArbPath to its per-pair bucket queue and relevant tick leg
+// Fanout links an ArbPath to its per-pair queue and tick slot to update
 type Fanout struct {
 	Path  *ArbPath           // shared triangle object
-	Queue *bucketqueue.Queue // per-pair queue used for PeepMin/Update
-	Edge  uint16             // which of the 3 tick slots this edge updates
-	//lint:ignore U1000 padding for cache alignment
-	_pad uint16 // alignment
+	Queue *bucketqueue.Queue // per-pair queue (PeepMin / Update)
+	Edge  uint16             // tick slot we write on update (0-2)
 }
 
-// CoreRouter contains per-core router state
+// Per-core router state
 type CoreRouter struct {
 	Buckets   []bucketqueue.Queue // indexed by LocalPairID
-	Fanouts   [][]Fanout          // Fanouts per local pair
+	Fanouts   [][]Fanout          // fan-outs per local pair
 	Local     localidx.Hash       // global PairID → LocalPairID
-	IsReverse bool                // whether this core is for reverse propagation
+	IsReverse bool                // true if this core handles reverse ticks
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
@@ -85,21 +83,20 @@ type CoreRouter struct {
 var (
 	coreRouters   [64]*CoreRouter    // per-core logical routers
 	coreRings     [64]*ring.Ring     // SPSC ring per core
-	addrToPairID  [1 << 17]PairID    // fast address → pairID mapping
+	addrToPairID  [1 << 17]PairID    // fast address → pairID
 	routingBitmap [1 << 17]CPUMask   // bitmap of cores per pairID
-	rawShards     map[PairID][]Shard // precomputed fanout shards
+	rawShards     map[PairID][]Shard // pre-computed fan-out shards
 
 	splitThreshold = 16_384 // max refs per shard
 )
 
 /*──────────────────────────────────────────────────────────────────────────────
-   Fanout Planner
+   Fan-out Planner
 ──────────────────────────────────────────────────────────────────────────────*/
 
-// Resets shard registry
 func ResetFanouts() { rawShards = make(map[PairID][]Shard) }
 
-// In-place shuffle of refs to balance load
+// Fisher-Yates shuffle to balance load
 func shuffleRefs(refs []Ref) {
 	for i := len(refs) - 1; i > 0; i-- {
 		j := crandInt(i + 1)
@@ -107,7 +104,6 @@ func shuffleRefs(refs []Ref) {
 	}
 }
 
-// Random integer generator for shuffling
 func crandInt(n int) int {
 	var b [8]byte
 	rand.Read(b[:])
@@ -119,19 +115,17 @@ func crandInt(n int) int {
 	return int(hi)
 }
 
-// BuildFanouts expands TriCycle list into Ref shards by PairID
+// BuildFanouts: one Ref per (pair, edge) → split into shards
 func BuildFanouts(cycles []TriCycle) {
 	ResetFanouts()
 	tmp := make(map[PairID][]Ref, len(cycles)*3)
 
-	// 1. Expand cycles into Ref entries per edge
 	for _, tri := range cycles {
 		for pos, pair := range tri {
 			tmp[pair] = append(tmp[pair], Ref{Pairs: tri, Edge: uint16(pos)})
 		}
 	}
 
-	// 2. Shuffle and split
 	for pair, refs := range tmp {
 		shuffleRefs(refs)
 		for off := 0; off < len(refs); off += splitThreshold {
@@ -139,7 +133,9 @@ func BuildFanouts(cycles []TriCycle) {
 			if end > len(refs) {
 				end = len(refs)
 			}
-			rawShards[pair] = append(rawShards[pair], Shard{Pair: pair, Refs: refs[off:end]})
+			rawShards[pair] = append(rawShards[pair],
+				Shard{Pair: pair, Refs: refs[off:end]},
+			)
 		}
 	}
 }
@@ -148,7 +144,6 @@ func BuildFanouts(cycles []TriCycle) {
    CPU Bootstrap (Router Initialization)
 ──────────────────────────────────────────────────────────────────────────────*/
 
-// Creates SPSC rings and launches 64-core shard dispatch
 func InitCPURings(cycles []TriCycle) {
 	n := runtime.NumCPU() - 4
 	if n < 8 {
@@ -219,6 +214,7 @@ func InitCPURings(cycles []TriCycle) {
    Shard Attachment Logic
 ──────────────────────────────────────────────────────────────────────────────*/
 
+// One bucket per pair; two Fanouts (edges) per Ref.
 func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
 	lid := rt.Local.Put(uint32(sh.Pair), uint32(len(rt.Buckets)))
 
@@ -234,11 +230,14 @@ func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
 		*paths = append(*paths, ArbPath{Pairs: ref.Pairs})
 		pPtr := &(*paths)[len(*paths)-1]
 
-		rt.Fanouts[lid] = append(rt.Fanouts[lid], Fanout{
-			Path:  pPtr,
-			Queue: &rt.Buckets[lid],
-			Edge:  ref.Edge,
-		})
+		// Reconstruct the two legs that change when THIS pair updates.
+		a := (ref.Edge + 1) % 3
+		b := (ref.Edge + 2) % 3
+
+		rt.Fanouts[lid] = append(rt.Fanouts[lid],
+			Fanout{Path: pPtr, Queue: &rt.Buckets[lid], Edge: uint16(a)},
+			Fanout{Path: pPtr, Queue: &rt.Buckets[lid], Edge: uint16(b)},
+		)
 	}
 }
 
@@ -258,8 +257,7 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 
 	if _, _, ptr := b.PeepMin(); ptr != nil {
 		p := (*ArbPath)(ptr)
-		profit := tick + p.Ticks[0] + p.Ticks[1] + p.Ticks[2]
-		if profit < 0 {
+		if profit := tick + p.Ticks[0] + p.Ticks[1] + p.Ticks[2]; profit < 0 {
 			onProfitablePath(p, profit)
 		}
 	}
