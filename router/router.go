@@ -99,11 +99,11 @@ Layout:
 	22-23  _pad                – alignment
 */
 type FanoutEntry struct {
-	State  *CycleState
-	Queue  *bucketqueue.Queue
-	Handle bucketqueue.Handle
-	Edge   uint16
-	_pad   [2]byte
+	State   *CycleState
+	Queue   *bucketqueue.Queue
+	Handle  bucketqueue.Handle
+	EdgeIdx uint16
+	_pad    [2]byte
 }
 
 // CoreExecutor owns all per-core state and runs on a pinned thread.
@@ -341,7 +341,7 @@ func attachShard(ex *CoreExecutor, shard *PairShard, buf *[]CycleState) {
 		// Create fanout entries for the TWO edges *other* than eb.EdgeIdx.
 		for _, edge := range []uint16{(eb.EdgeIdx + 1) % 3, (eb.EdgeIdx + 2) % 3} {
 			ex.Fanouts[lid] = append(ex.Fanouts[lid], FanoutEntry{
-				State: cs, Queue: hq, Handle: h, Edge: edge,
+				State: cs, Queue: hq, Handle: h, EdgeIdx: edge,
 			})
 		}
 	}
@@ -405,7 +405,7 @@ func handleTick(ex *CoreExecutor, upd *TickUpdate) {
 	/* 5️⃣ Propagate new tick to all fan-outs */
 	for _, f := range fans {
 		cs := f.State
-		cs.Ticks[f.Edge] = tick
+		cs.Ticks[f.EdgeIdx] = tick
 		key := log2ToTick(cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2])
 		_ = f.Queue.Update(key, f.Handle, unsafe.Pointer(cs))
 	}
