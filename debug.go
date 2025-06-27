@@ -2,9 +2,19 @@ package main
 
 import "log"
 
-// dropError keeps the hot path allocation-free by avoiding fmt.Printf.
-// • When err ≠ nil  →  "prefix: err".
-// • When err == nil →  just "prefix" (acts like a lightweight trace).
+// dropError is a lightweight, allocation-free diagnostic logger used
+// in all non-hot paths (setup, errors, GC).
+//
+// It avoids fmt.Printf-style formatting on the hot path by branching on nil.
+//
+// Behavior:
+//   - If `err != nil`, prints:   "<prefix>: <error>"
+//   - If `err == nil`, prints:   "<prefix>" (used as a cheap trace or GC tag)
+//
+// It is intentionally unformatted and minimal — avoid extending.
+//
+//go:nosplit
+//go:inline
 func dropError(prefix string, err error) {
 	if err != nil {
 		log.Printf("%s: %v", prefix, err)
