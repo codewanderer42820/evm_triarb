@@ -153,6 +153,19 @@ func InitCPURings(cycles []TriCycle) {
 			rev := fwd + half
 			shardCh[fwd] <- s
 			shardCh[rev] <- s
+
+			// ────────────────────────────────────────────────
+			// NEW: mark *all* three legs of every triangle
+			// carried by this shard so RouteUpdate pushes
+			// ticks to the correct forward & reverse cores.
+			// ────────────────────────────────────────────────
+			for _, ref := range s.Refs { // each ref holds the tri-cycle
+				for _, pid := range ref.Pairs { // three pair IDs
+					routingBitmap[pid] |= 1 << fwd
+					routingBitmap[pid] |= 1 << rev
+				}
+			}
+
 			coreIdx++
 		}
 	}
