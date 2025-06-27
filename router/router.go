@@ -1,15 +1,17 @@
 // router.go — 64‑core fan‑out router for real‑time tri‑arbitrage tick propagation.
-// Min‑check + packed structs edition — 2025‑06‑27.
+// Pointer‑accurate Fanout edition — 2025‑06‑27.
 //
 // Key tweaks in this drop:
-//   • `Fanout` shrunk from 24 B → **16 B** (pointer + handle + meta uint32).
-//   • `meta` encodes Lid (high 16 b) | EdgeIdx (low 16 b).
-//   • All call‑sites updated; no extra padding remains in hot‑path structs.
+//   • Fanout carries an **explicit pointer** to its owning bucketqueue.Queue so every
+//     Update() call touches the correct heap even when a PathState has three live
+//     handles (one per pair).
+//   • struct size grows from 16 B → 24 B but remains two cache lines for eight
+//     consecutive entries on arm64.
 //
 // Memory layout audits (Go 1.22, darwin/arm64):
-//   PathState  :=  48 B  (Ticks[3] + Pairs[3])
-//   PriceUpdate:=  32 B  (compile‑time assert)
-//   Fanout     :=  16 B  (8 + 4 + 4)  // cache‑friendly
+//   PathState  := 48 B  (Ticks[3] + Pairs[3])
+//   PriceUpdate:= 32 B  (compile‑time assert)
+//   Fanout     := 24 B  (2×ptr + u32 + u16 + pad)
 
 package router
 
@@ -63,15 +65,19 @@ type (
 	}
 
 	/*
-	   Fanout (16 B):
-	     0‑7   *PathState        (pointer)
-	     8‑11  bucketqueue.Handle (uint32)
-	    12‑15  meta = lid<<16 | edgeIdx (uint32)
+	   Fanout (24 B):
+	     0‑7   *PathState          – shared payload
+	     8‑15  *bucketqueue.Queue  – owning min‑heap
+	    16‑19  bucketqueue.Handle  – slot inside that heap
+	    20‑21  EdgeIdx (uint16)    – which Ticks[] slot we overwrite
+	    22‑23  _pad                – alignment
 	*/
 	Fanout struct {
 		Path   *PathState
+		Queue  *bucketqueue.Queue
 		Handle bucketqueue.Handle
-		Meta   uint32
+		Edge   uint16
+		_pad   [2]byte
 	}
 
 	CoreRouter struct {
@@ -95,7 +101,7 @@ const _priceUpdateSize = unsafe.Sizeof(PriceUpdate{})
 
 func init() {
 	const want = 32
-	_ = [want - int(_priceUpdateSize)]byte{} // build‑time failure if size drift
+	_ = [want - int(_priceUpdateSize)]byte{}
 }
 
 /*────────────────────────  Package Globals  ────────────────────────*/
@@ -114,7 +120,7 @@ var (
 /*────────────────────────  Public API  ────────────────────────*/
 
 func InitRouters(paths []TriPath) {
-	n := runtime.NumCPU() - 4
+	n := runtime.NumCPU() - 4 // reserve 4 cores for OS / I/O
 	switch {
 	case n < 8:
 		n = 8
@@ -271,29 +277,27 @@ func installShard(rt *CoreRouter, sh *Shard, buf *[]PathState) {
 	lid32 := rt.Local.Put(uint32(sh.Pair), uint32(len(rt.Buckets)))
 	lid := LocalPairID(lid32)
 
-	// first encounter of this local-pair id → allocate bucket & fanout slice
+	// first encounter of this local‑pair id → allocate bucket & fanout slice
 	if int(lid32) == len(rt.Buckets) {
 		rt.Buckets = append(rt.Buckets, *bucketqueue.New())
 		rt.Fanouts = append(rt.Fanouts, nil)
 	}
 
+	bq := &rt.Buckets[lid]
+
 	for _, ref := range sh.Refs {
-		// Persistent PathState lives in the per-core buffer
+		// Persistent PathState lives in the per‑core buffer
 		*buf = append(*buf, PathState{Pairs: ref.Pairs})
 		ps := &(*buf)[len(*buf)-1]
 
-		// Each PathState gets its own handle inside the pair’s min-heap bucket
-		handle, _ := rt.Buckets[lid].Borrow()
-		_ = rt.Buckets[lid].Push(4095, handle, unsafe.Pointer(ps))
+		// Each PathState gets its own handle inside the pair’s min‑heap bucket
+		handle, _ := bq.Borrow()
+		_ = bq.Push(4095, handle, unsafe.Pointer(ps))
 
 		// Insert fanouts for the two *other* tick slots in this triangle
-		for _, edge := range []uint16{
-			(ref.EdgeIdx + 1) % 3,
-			(ref.EdgeIdx + 2) % 3,
-		} {
-			meta := uint32(lid)<<16 | uint32(edge)
+		for _, edge := range []uint16{(ref.EdgeIdx + 1) % 3, (ref.EdgeIdx + 2) % 3} {
 			rt.Fanouts[lid] = append(rt.Fanouts[lid], Fanout{
-				Path: ps, Handle: handle, Meta: meta,
+				Path: ps, Queue: bq, Handle: handle, Edge: edge,
 			})
 		}
 	}
@@ -301,11 +305,11 @@ func installShard(rt *CoreRouter, sh *Shard, buf *[]PathState) {
 
 /*────────────────────────  Hot Path  ────────────────────────*/
 
-// onPrice — PopMin profit-drain (items re-queued *before* propagate)
+// onPrice — PopMin profit‑drain (items re‑queued *before* propagate)
 // -----------------------------------------------------------------------------
 //   - All temporaries live on the stack (stash[64]) → zero heap traffic.
-//   - Drained paths are re-pushed with their original handles **prior** to the
-//     fan-out loop, guaranteeing that Update() can locate them.
+//   - Drained paths are re‑pushed with their original handles **prior** to the
+//     fan‑out loop, guaranteeing that Update() can locate them.
 //
 // Queue may be empty; hard cap of 64 keeps the stack bounded.
 func onPrice(rt *CoreRouter, upd *PriceUpdate) {
@@ -321,7 +325,7 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 	bq := &rt.Buckets[lid]
 	fan := rt.Fanouts[lid]
 
-	/* 3️⃣  profit-drain phase --------------------------------------------- */
+	/* 3️⃣  profit‑drain phase --------------------------------------------- */
 	const capDrain = 64
 	type popped struct {
 		h  bucketqueue.Handle
@@ -333,23 +337,21 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 	if h, _, ptr := bq.PopMin(); ptr != nil { // queue could be empty
 		for {
 			ps := (*PathState)(ptr)
-
 			if tick+ps.Ticks[0]+ps.Ticks[1]+ps.Ticks[2] >= 0 {
-				stash[n] = popped{h, ps} // first non-profitable
+				stash[n] = popped{h, ps} // first non‑profitable
 				n++
 				break
 			}
 			onProfitablePath(ps)     // 🚀 fire trade
-			stash[n] = popped{h, ps} // keep for re-queue
+			stash[n] = popped{h, ps} // keep for re‑queue
 			n++
 			if n == capDrain {
-				break
-			} // stack guard
-
-			h, _, ptr = bq.PopMin() // next item
+				break // stack guard
+			}
+			h, _, ptr = bq.PopMin()
 			if ptr == nil {
-				break
-			} // queue drained
+				break // queue drained
+			}
 		}
 	}
 
@@ -357,22 +359,18 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 	for i := 0; i < n; i++ {
 		ps := stash[i].ps
 		h := stash[i].h
-
 		sum := ps.Ticks[0] + ps.Ticks[1] + ps.Ticks[2]
 		key := log2ToTick(sum)
-
 		_ = bq.Push(key, h, unsafe.Pointer(ps)) // same handle, no alloc
 	}
 
 	/* 5️⃣  propagate fresh tick to every dependent path ------------------- */
-	for _, f := range fan { // fan slice is core-local
+	for _, f := range fan { // fan slice is core‑local
 		ps := f.Path
-		ps.Ticks[uint16(f.Meta)] = tick // low 16 b = EdgeIdx
-
+		ps.Ticks[f.Edge] = tick
 		sum := ps.Ticks[0] + ps.Ticks[1] + ps.Ticks[2]
 		key := log2ToTick(sum)
-
-		_ = bq.Update(key, f.Handle, unsafe.Pointer(ps))
+		_ = f.Queue.Update(key, f.Handle, unsafe.Pointer(ps))
 	}
 }
 
@@ -382,31 +380,21 @@ func onProfitablePath(p *PathState) {
 }
 
 // -----------------------------------------------------------------------------
-// log2ToTick — Quantises a base-2 log-ratio into a 4 096-bucket tick index
+// log2ToTick — Quantises a base‑2 log‑ratio into a 4 096‑bucket tick index
 // -----------------------------------------------------------------------------
 //
-//   - clamp = 128   → values beyond ±128 are saturated (covers worst-case swings)
-//
-//   - scale = 16    → (2 × clamp) × scale == 4 096  (12-bit histogram)
-//
-//   - Two-branch clamp compiles to a single compare+cmov on modern CPUs
-//     and is faster than math.{Min,Max} for scalar data.
-//
-//     r = −128  → 0
-//     r =    0  → 2 048
-//     r = +128  → 4 095
+//	clamp = 128  → values beyond ±128 are saturated (covers worst‑case swings)
+//	scale = 16   → (2×clamp)×scale == 4 096 (12‑bit histogram)
 //
 // -----------------------------------------------------------------------------
 func log2ToTick(r float64) int64 {
 	const clamp = 128.0 // ±range
 	const scale = 16.0  // buckets per unit
 
-	// Cheap saturating clamp
 	if r > clamp {
 		r = clamp
 	} else if r < -clamp {
 		r = -clamp
 	}
-	// Shift into [0,256] then scale → [0,4 096)
 	return int64((r + clamp) * scale)
 }
