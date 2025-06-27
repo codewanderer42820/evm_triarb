@@ -1,6 +1,6 @@
 // router.go — 64-core parallelised fan-out router for real-time arbitrage updates.
 // Core duties: dispatch price updates to per-core goroutines, manage per-pair
-// tick queues, and keep arbitrage paths.
+// tick queues, and maintain arbitrage paths.
 
 package router
 
@@ -41,12 +41,10 @@ type ArbPath struct {
 	Pairs TriCycle
 }
 
-// Ref says: “for this pair I am edge <Edge> (0,1,2) of <Pairs>”.
-// We emit ONE Ref per (pair, tri) and reconstruct the two update
-// fan-outs locally during shard installation.
+// Ref: one per (pair, triangle). CommonEdge = this pair’s position (0,1,2).
 type Ref struct {
-	Pairs TriCycle
-	Edge  uint16 // the pair’s own position inside the triangle
+	Pairs      TriCycle
+	CommonEdge uint16
 }
 
 // Shard groups refs by pair
@@ -61,11 +59,11 @@ type PriceUpdate struct {
 	FwdTick, RevTick float64
 }
 
-// Fanout links an ArbPath to its per-pair queue and tick slot to update
+// Fanout links an ArbPath to its per-pair queue and the tick slot to update
 type Fanout struct {
-	Path  *ArbPath           // shared triangle object
-	Queue *bucketqueue.Queue // per-pair queue (PeepMin / Update)
-	Edge  uint16             // tick slot we write on update (0-2)
+	Path       *ArbPath           // shared triangle object
+	Queue      *bucketqueue.Queue // per-pair queue (PeepMin / Update)
+	FanoutEdge uint16             // tick slot we write on update (0-2)
 }
 
 // Per-core router state
@@ -115,14 +113,14 @@ func crandInt(n int) int {
 	return int(hi)
 }
 
-// BuildFanouts: one Ref per (pair, edge) → split into shards
+// BuildFanouts: one Ref per (pair, CommonEdge) → split into shards
 func BuildFanouts(cycles []TriCycle) {
 	ResetFanouts()
 	tmp := make(map[PairID][]Ref, len(cycles)*3)
 
 	for _, tri := range cycles {
 		for pos, pair := range tri {
-			tmp[pair] = append(tmp[pair], Ref{Pairs: tri, Edge: uint16(pos)})
+			tmp[pair] = append(tmp[pair], Ref{Pairs: tri, CommonEdge: uint16(pos)})
 		}
 	}
 
@@ -214,7 +212,7 @@ func InitCPURings(cycles []TriCycle) {
    Shard Attachment Logic
 ──────────────────────────────────────────────────────────────────────────────*/
 
-// One bucket per pair; two Fanouts (edges) per Ref.
+// One bucket per pair; two Fanouts per Ref (for the other two legs).
 func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
 	lid := rt.Local.Put(uint32(sh.Pair), uint32(len(rt.Buckets)))
 
@@ -230,13 +228,13 @@ func installShard(rt *CoreRouter, sh *Shard, paths *[]ArbPath) {
 		*paths = append(*paths, ArbPath{Pairs: ref.Pairs})
 		pPtr := &(*paths)[len(*paths)-1]
 
-		// Reconstruct the two legs that change when THIS pair updates.
-		a := (ref.Edge + 1) % 3
-		b := (ref.Edge + 2) % 3
+		// The two legs that change when THIS pair updates.
+		a := uint16((ref.CommonEdge + 1) % 3)
+		b := uint16((ref.CommonEdge + 2) % 3)
 
 		rt.Fanouts[lid] = append(rt.Fanouts[lid],
-			Fanout{Path: pPtr, Queue: &rt.Buckets[lid], Edge: uint16(a)},
-			Fanout{Path: pPtr, Queue: &rt.Buckets[lid], Edge: uint16(b)},
+			Fanout{Path: pPtr, Queue: &rt.Buckets[lid], FanoutEdge: a},
+			Fanout{Path: pPtr, Queue: &rt.Buckets[lid], FanoutEdge: b},
 		)
 	}
 }
@@ -264,7 +262,7 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 
 	for _, f := range fan {
 		p := f.Path
-		p.Ticks[f.Edge] = tick
+		p.Ticks[f.FanoutEdge] = tick
 		sum := p.Ticks[0] + p.Ticks[1] + p.Ticks[2]
 		f.Queue.Update(l2Bucket(sum), 0, unsafe.Pointer(p))
 	}
