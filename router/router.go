@@ -433,13 +433,25 @@ func onProfitable(cs *CycleState) {
 	_, _ = cs.Ticks, cs.Pairs
 }
 
-// log2ToTick quantises a base-2 log-ratio into a 4 096-bucket histogram index.
-func log2ToTick(r float64) int64 {
-	const clamp, scale = 128.0, 16.0 // (±128)×16 → [0,4096)
-	if r > clamp {
-		r = clamp
-	} else if r < -clamp {
-		r = -clamp
+const (
+	clamp   = 128.0 // log₂ reserve-ratio bound
+	scale   = 16.0  // 1 tick  = 1/16 log₂
+	maxTick = 4095  // 12-bit ceiling (2¹²-1)
+)
+
+// log2ToTick maps a log₂(ratio) in [-128, +128] → integer tick [0, 4095].
+func log2ToTick(ratio float64) int64 {
+	// Fast inlined clamp for hot path ─ no math calls.
+	if ratio < -clamp {
+		return 0
 	}
-	return int64((r + clamp) * scale)
+	if ratio > clamp {
+		return maxTick //   +128 maps to 4095 (not 4096)
+	}
+
+	tick := int64((ratio + clamp) * scale) // 0 ≤ tick ≤ 4096
+	if tick > maxTick {
+		tick = maxTick // trims the single overflow case
+	}
+	return tick
 }
