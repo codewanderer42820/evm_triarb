@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// pinned_consumer_test.go — Unit-tests for the dedicated PinnedConsumer loop
+// -----------------------------------------------------------------------------
+//
+//  Verifies: callback delivery, graceful shutdown, hot-window spin behaviour,
+//  cold-back-off → wake-up sequence, and overall end-to-end latency invariants.
+//  These tests exercise the consumer both with and without concurrent producer
+//  activity to ensure the adaptive spin logic never deadlocks or starves.
+// -----------------------------------------------------------------------------
+
 package ring
 
 import (

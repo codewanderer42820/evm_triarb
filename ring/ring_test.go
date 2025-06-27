@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// ring_test.go — Functional sanity checks for the 32-byte SPSC ring
+// -----------------------------------------------------------------------------
+//
+//  Covers constructor invariants, push/pop round-trip, full-queue back-pressure,
+//  blocking PopWait, empty Pop semantics, and index wrap-around correctness.
+//  The suite keeps resource usage tiny so it can run inside `go test -race`.
+// -----------------------------------------------------------------------------
+
 package ring
 
 import (
