@@ -203,11 +203,6 @@ func TestZeroAllocLookup(t *testing.T) {
 	}
 }
 
-// Helper to extract tick sum
-func tickSum(cs *CycleState) float64 {
-	return cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2]
-}
-
 // TestDrainLoopProfitPath tests handleTick with wasProfit=true and maxDrain cap
 func TestDrainLoopProfitPath(t *testing.T) {
 	ex := &CoreExecutor{
@@ -217,21 +212,14 @@ func TestDrainLoopProfitPath(t *testing.T) {
 		IsReverse: false,
 	}
 	hq := &ex.Heaps[0]
-	var cs CycleState
-	cs.Ticks[0], cs.Ticks[1], cs.Ticks[2] = -10, -10, -10
-
-	// Fill heap with maxDrain = 64 entries all profitable
 	for i := 0; i < 64; i++ {
+		cs := &CycleState{Ticks: [3]float64{-10, -10, -10}}
 		h, _ := hq.Borrow()
-		_ = hq.Push(0, h, unsafe.Pointer(&cs))
+		_ = hq.Push(0, h, unsafe.Pointer(cs))
+		ex.Fanouts[0] = append(ex.Fanouts[0], FanoutEntry{State: cs, Queue: hq, Handle: h, EdgeIdx: 1})
 	}
-
-	ex.Fanouts[0] = []FanoutEntry{
-		{State: &cs, Queue: hq, Handle: 1, EdgeIdx: 1},
-	}
-	upd := &TickUpdate{Pair: 0, FwdTick: -10}
 	ex.LocalIdx.Put(0, 0)
-	handleTick(ex, upd)
+	handleTick(ex, &TickUpdate{Pair: 0, FwdTick: -10})
 }
 
 // TestDrainLoopStopsAtNil tests handleTick exit on nil ptr
@@ -247,8 +235,7 @@ func TestDrainLoopStopsAtNil(t *testing.T) {
 	_ = hq.Push(0, h, unsafe.Pointer(cs))
 	ex.Fanouts[0] = nil
 	ex.LocalIdx.Put(0, 0)
-	upd := &TickUpdate{Pair: 0, FwdTick: 0}
-	handleTick(ex, upd)
+	handleTick(ex, &TickUpdate{Pair: 0, FwdTick: 0})
 }
 
 // TestHandleTickReverse tests that RevTick is used on reverse
