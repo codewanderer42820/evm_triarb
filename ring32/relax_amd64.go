@@ -1,14 +1,13 @@
-//go:build amd64 && !noasm
-
-// relax_amd64.go
-//
-// Go declaration for cpuRelax on amd64.  The implementation lives in
-// relax_amd64.s and emits a single PAUSE instruction so busy-wait loops
-// back-off politely while remaining in userspace.
-
+// relax_amd64.go — Go-side declaration for cpuRelax used in spin loops
 package ring32
 
-// cpuRelax executes the x86_64 PAUSE instruction.
+// cpuRelax emits the x86-64 PAUSE instruction, acting as a polite hint to the CPU
+// that this thread is busy-spinning and should back off slightly.
+//
+// Used in spin loops to avoid excess power draw or wasting hyperthreaded sibling resources.
+// The actual implementation is provided in relax_amd64.s.
 //
 //go:noescape
+//go:nosplit
+//go:inline
 func cpuRelax()
