@@ -3,10 +3,12 @@ package utils
 import "unsafe"
 
 ///////////////////////////////////////////////////////////////////////////////
-// Tiny zero-alloc conversions & key probes
+// Conversion Utilities — Zero-Alloc Casts
 ///////////////////////////////////////////////////////////////////////////////
 
-// B2s converts a []byte to string without an allocation.
+// B2s converts a []byte to a string **without** allocation.
+// ⚠️ Caller must ensure the input slice remains valid and unchanged.
+// Used for human-readable print paths.
 //
 //go:nosplit
 //go:inline
@@ -14,14 +16,15 @@ func B2s(b []byte) string {
 	if len(b) == 0 {
 		return ""
 	}
-	return unsafe.String(&b[0], len(b)) // caller must keep b immutable
+	return unsafe.String(&b[0], len(b))
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// Micro-scanners used by the JSON fast path
+// JSON Micro-Scanners — For Field Detection & Slice Extraction
 ///////////////////////////////////////////////////////////////////////////////
 
-// FindQuote returns the index of the next '"' after the ':' in `"field":"`.
+// FindQuote locates the next '"' after a ':' in `"field":"value"` patterns.
+// It rejects malformed cases with non-space garbage after ':'.
 //
 //go:nosplit
 //go:inline
@@ -32,7 +35,7 @@ func FindQuote(b []byte) int {
 				switch c := b[j]; {
 				case c == '"':
 					return j
-				case c > ' ': // anything non-whitespace ⇒ malformed
+				case c > ' ': // malformed — non-whitespace, non-quote
 					return -1
 				}
 			}
@@ -41,7 +44,7 @@ func FindQuote(b []byte) int {
 	return -1
 }
 
-// FindBracket returns the index of the first '[' (for JSON topic arrays).
+// FindBracket returns the first index of '[' used in JSON arrays (e.g. topics).
 //
 //go:nosplit
 //go:inline
@@ -54,7 +57,8 @@ func FindBracket(b []byte) int {
 	return -1
 }
 
-// SliceASCII returns bytes between the two '"' that start at b[i].
+// SliceASCII returns the quoted string value starting at index i.
+// It expects b[i] to be a '"' and returns the span between opening/closing quotes.
 //
 //go:nosplit
 //go:inline
@@ -70,7 +74,7 @@ func SliceASCII(b []byte, i int) []byte {
 	return nil
 }
 
-// SliceJSONArray returns the bytes inside [...] (without the brackets).
+// SliceJSONArray extracts the payload between `[` and `]` starting at index i.
 //
 //go:nosplit
 //go:inline
@@ -87,13 +91,19 @@ func SliceJSONArray(b []byte, i int) []byte {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// Unaligned word loads (little-endian and big-endian)
+// Fast Loaders — Unaligned 64/128-Bit Reads
 ///////////////////////////////////////////////////////////////////////////////
 
+// Load64 reads an unaligned 64-bit word from a byte slice.
+//
 //go:nosplit
 //go:inline
-func Load64(b []byte) uint64 { return *(*uint64)(unsafe.Pointer(&b[0])) }
+func Load64(b []byte) uint64 {
+	return *(*uint64)(unsafe.Pointer(&b[0]))
+}
 
+// Load128 performs two consecutive unaligned 64-bit reads for fingerprinting.
+//
 //go:nosplit
 //go:inline
 func Load128(b []byte) (uint64, uint64) {
@@ -101,23 +111,23 @@ func Load128(b []byte) (uint64, uint64) {
 	return p[0], p[1]
 }
 
-// LoadBE64 performs a manual 64-bit big-endian load from a byte slice.
-// It avoids any dependency on binary.BigEndian and is inlinable, fast, and portable.
-// Equivalent to binary.BigEndian.Uint64(b) but ~30–40% faster in tight loops.
+// LoadBE64 performs a manual big-endian 64-bit read, avoiding dependency on binary.BigEndian.
 //
 //go:nosplit
 //go:inline
 func LoadBE64(b []byte) uint64 {
 	_ = b[7] // bounds check hint
-	return uint64(b[0])<<56 | uint64(b[1])<<48 | uint64(b[2])<<40 | uint64(b[3])<<32 |
-		uint64(b[4])<<24 | uint64(b[5])<<16 | uint64(b[6])<<8 | uint64(b[7])
+	return uint64(b[0])<<56 | uint64(b[1])<<48 | uint64(b[2])<<40 |
+		uint64(b[3])<<32 | uint64(b[4])<<24 | uint64(b[5])<<16 |
+		uint64(b[6])<<8 | uint64(b[7])
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// Fast hex decoders (no allocations, stop at first invalid nibble)
+// Hex Decoders — No Allocation, Early Exit on Malformed Input
 ///////////////////////////////////////////////////////////////////////////////
 
-// ParseHexU64 parses a (0x-optional) hex string into uint64.
+// ParseHexU64 parses a 64-bit uint from a (0x-optional) ASCII hex string.
+// Stops at first non-nibble. ~5x faster than strconv.ParseUint.
 //
 //go:nosplit
 //go:inline
@@ -127,21 +137,22 @@ func ParseHexU64(b []byte) uint64 {
 		j = 2
 	}
 	var u uint64
-	for ; j < len(b) && j < 18; j++ { // max 16 nibbles = 64 bits
+	for ; j < len(b) && j < 18; j++ {
 		c := b[j] | 0x20
 		if c < '0' || c > 'f' || (c > '9' && c < 'a') {
 			break
 		}
 		v := uint64(c - '0')
 		if c > '9' {
-			v -= 39 // 'a' → 10
+			v -= 39 // a/A -> 10
 		}
 		u = (u << 4) | v
 	}
 	return u
 }
 
-// ParseHexN handles any length hex string.
+// ParseHexN parses arbitrary-length hex input into a uint64.
+// Useful for short hash-based fingerprints (like address prefix).
 //
 //go:nosplit
 //go:inline
@@ -161,14 +172,21 @@ func ParseHexN(b []byte) uint64 {
 	return v
 }
 
+// ParseHexU32 is a wrapper to convert hex → uint32 directly.
+//
 //go:nosplit
 //go:inline
-func ParseHexU32(b []byte) uint32 { return uint32(ParseHexN(b)) }
+func ParseHexU32(b []byte) uint32 {
+	return uint32(ParseHexN(b))
+}
 
 ///////////////////////////////////////////////////////////////////////////////
-// Misc – 64-bit avalanche mixer (MurmurHash3 finalizer)
+// Hash & Mixers — For Dedupe Indexing & Key Rotation
 ///////////////////////////////////////////////////////////////////////////////
 
+// Mix64 applies a Murmur3-style avalanche to a 64-bit value.
+// Used to randomize index mapping inside dedupe ring.
+//
 //go:nosplit
 //go:inline
 func Mix64(x uint64) uint64 {
@@ -180,12 +198,8 @@ func Mix64(x uint64) uint64 {
 	return x
 }
 
-///////////////////////////////////////////////////////////////////////////////
-// Address hash → 17-bit bucket index (array lookup)
-///////////////////////////////////////////////////////////////////////////////
-
-// Hash17 maps the first 6 hex chars of a 40-byte lowercase address into 17 bits.
-// It is deterministic, zero-alloc, and <10 ns on modern CPUs.
+// Hash17 reduces a lowercase Ethereum address (40 ASCII hex bytes) to a 17-bit bucket index.
+// Uses the first 6 hex chars (3 bytes entropy), parsed and masked to 17 bits.
 //
 //go:nosplit
 //go:inline
@@ -193,6 +207,6 @@ func Hash17(addr []byte) uint32 {
 	if len(addr) < 6 {
 		return 0
 	}
-	raw := ParseHexN(addr[:6])           // 24-bit value
-	return uint32(raw) & ((1 << 17) - 1) // keep low 17 bits
+	raw := ParseHexN(addr[:6])           // parse first 3 bytes
+	return uint32(raw) & ((1 << 17) - 1) // mask to 17 bits
 }
