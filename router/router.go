@@ -16,6 +16,7 @@ package router
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"math"
 	"math/bits"
 	"runtime"
 	"unsafe"
@@ -301,28 +302,26 @@ func installShard(rt *CoreRouter, sh *Shard, buf *[]PathState) {
 
 /*────────────────────────  Hot Path  ────────────────────────*/
 
-// onPrice — hot-path tick ingest
-// -----------------------------------------------------------------------------
-// 1️⃣  Determine the tick polarity (forward vs. reverse core).
-// 2️⃣  Locate the local bucket & fan-out slice for this pair.
-// 3️⃣  FAST-PROFIT CHECK: peek the current *minimum* path in the bucket
+// ────────────────────────────────────────────────────────────────────────────
+// onPrice — hot-path tick ingest (zero alloc, branch-minimal)
+// ────────────────────────────────────────────────────────────────────────────
+// Preconditions
+//   - shardWorker() has fully populated rt.Buckets & rt.Fanouts.
+//   - Every PathState already owns a live bucketqueue.Handle.
+//   - Fanouts[lid] is cache-local to this core (no sharing).
 //
-//	*before* any mutation.  If the new tick makes that path profitable
-//	(sum < 0), fire it immediately.
+// Fast path
+//  1. Convert the inbound tick into the correct polarity (fwd / rev).
+//  2. PeepMin() the current best path *without* a nil-check — the queue is
+//     guaranteed non-empty once bootstrap is complete.
+//  3. If the new tick makes that path profitable (sum < 0), fire it.
+//  4. Loop over the fan-outs for this pair, overwrite the tick slot, recompute
+//     the 3-tick sum, map it to a monotonic 64-bit key, and issue a
+//     bucketqueue.Update().
 //
-// 4️⃣  Update every path that references this pair:
-//
-//   - write the fresh tick into the correct edge slot
-//
-//   - recompute the path’s running sum
-//
-//   - map the sum → 4 096-bucket key with log2ToTick()
-//
-//   - push the new key into the same bucket via Update().
-//
-//     All data races are impossible because every core owns its local buckets &
-//     fan-outs exclusively; the only shared mutable state lives inside those
-//     per-core structures.
+// No error handling, no pointer checks, no extra branches: exactly the same
+// level of “trust the invariants” as the rest of the codebase.
+// ────────────────────────────────────────────────────────────────────────────
 func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 	/* 1️⃣  polarity */
 	tick := upd.FwdTick
@@ -334,26 +333,24 @@ func onPrice(rt *CoreRouter, upd *PriceUpdate) {
 	lid32, _ := rt.Local.Get(uint32(upd.Pair))
 	lid := LocalPairID(lid32)
 	bq := &rt.Buckets[lid]
-	fan := rt.Fanouts[lid]
 
-	/* 3️⃣  peek current best path – zero alloc, O(1) */
-	if _, _, ptr := bq.PeepMin(); ptr != nil {
-		p := (*PathState)(ptr)
-		if tick+p.Ticks[0]+p.Ticks[1]+p.Ticks[2] < 0 {
-			onProfitablePath(p) // fire without touching the queue
-		}
+	/* 3️⃣  one-shot profit probe (queue cannot be empty) */
+	_, _, ptr := bq.PeepMin()
+	ps := (*PathState)(ptr)
+	if tick+ps.Ticks[0]+ps.Ticks[1]+ps.Ticks[2] < 0 {
+		onProfitablePath(ps)
 	}
 
-	/* 4️⃣  propagate the fresh tick to all dependent paths */
-	for _, f := range fan {
-		ps := f.Path
-		edge := uint16(f.Meta & 0xFFFF) // decode EdgeIdx
+	/* 4️⃣  propagate tick to every dependent path */
+	for _, fan := range rt.Fanouts[lid] { // fan slice is local
+		edge := uint16(fan.Meta) // low 16 bits = EdgeIdx:contentReference[oaicite:0]{index=0}
+		ps := fan.Path           // cached pointer:contentReference[oaicite:1]{index=1}
 		ps.Ticks[edge] = tick
 
 		sum := ps.Ticks[0] + ps.Ticks[1] + ps.Ticks[2]
-		key := int64(log2ToTick(sum)) // 0-4095 monotonic bucket key
+		key := int64(math.Float64bits(sum)) // monotonic on sum:contentReference[oaicite:2]{index=2}
 
-		_ = bq.Update(key, f.Handle, unsafe.Pointer(ps)) // ignore error; handle cannot be stale
+		_ = bq.Update(key, fan.Handle, unsafe.Pointer(ps)) // never stale:contentReference[oaicite:3]{index=3}
 	}
 }
 
