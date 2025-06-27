@@ -46,10 +46,13 @@ type slot struct {
 //
 //	and consumer each owns exactly one variable.
 type Ring struct {
+	//lint:ignore U1000 cache-line padding
 	_pad0 [64]byte // ----- 1st cache line (producer never touches)
 	head  uint64   // cursor read exclusively by consumer
+	//lint:ignore U1000 cache-line padding
 	_pad1 [64]byte // ----- 2nd cache line (consumer never touches)
 	tail  uint64   // cursor written exclusively by producer
+	//lint:ignore U1000 cache-line padding
 	_pad2 [64]byte // ----- 3rd cache line
 
 	mask uint64 // == len(buf)-1  (power‑of‑two invariant)
