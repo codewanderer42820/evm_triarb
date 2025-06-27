@@ -18,7 +18,7 @@ type Hash struct {
 	keys []uint32 // key slots; key=0 denotes empty
 	vals []uint32 // corresponding values
 	mask uint32   // bitmask for modulo (len(keys)-1)
-	_pad [4]byte  // padding for alignment (8-byte aligned for mask)
+	_pad [56]byte // cacheline isolation for high-throughput (was [4]byte)
 }
 
 //go:nosplit
@@ -90,7 +90,7 @@ func (h Hash) Put(key, val uint32) uint32 {
 
 		// Soft-prefetch next slot’s key to overlap memory latency
 		_ = *(*uint32)(unsafe.Pointer(
-			uintptr(unsafe.Pointer(&h.keys[0])) + uintptr(((i+1)&h.mask)<<2)))
+			uintptr(unsafe.Pointer(&h.keys[0])) + uintptr(((i+2)&h.mask)<<2)))
 
 		// Linear probe to next slot
 		i = (i + 1) & h.mask
@@ -127,7 +127,7 @@ func (h Hash) Get(key uint32) (uint32, bool) {
 
 		// Soft-prefetch ahead
 		_ = *(*uint32)(unsafe.Pointer(
-			uintptr(unsafe.Pointer(&h.keys[0])) + uintptr(((i+1)&h.mask)<<2)))
+			uintptr(unsafe.Pointer(&h.keys[0])) + uintptr(((i+2)&h.mask)<<2)))
 
 		i = (i + 1) & h.mask
 		dist++
