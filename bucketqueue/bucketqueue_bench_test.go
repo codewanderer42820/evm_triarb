@@ -1,11 +1,8 @@
-// Package bucketqueue implements a zero-allocation, low-latency time-bucket priority queue.
-// Items are distributed across a fixed-size sliding window of time-indexed buckets.
-// A two-level bitmap structure allows O(1) retrieval of the earliest item.
+// bucketqueue_bench_test.go benchmarks various hot paths of the Queue
+// including allocation, push-pop pairs, intra-bucket updates, and randomized mixes.
 //
-// This implementation uses a fixed arena allocator, intrusive linked lists,
-// and compact handle management for high-throughput applications such as
-// schedulers, simulation engines, or event queues.
-
+// Each benchmark isolates a specific access pattern to inform throughput and
+// latency under constrained and realistic load profiles.
 package bucketqueue
 
 import (
@@ -13,18 +10,18 @@ import (
 	"testing"
 )
 
-// BenchmarkBorrowReturn measures arena-handle borrow/return overhead.
+// BenchmarkBorrowReturn measures Borrow() cost under sustained throughput.
 func BenchmarkBorrowReturn(b *testing.B) {
 	q := New()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		h, _ := q.Borrow()
-		q.freeHead = idx32(h) // avoid Return logic for max speed
+		q.freeHead = idx32(h) // direct freelist patch avoids full Return()
 	}
 }
 
-// BenchmarkPushPopSameTick measures push+pop within the same bucket tick.
+// BenchmarkPushPopSameTick tests push/pop of one item within the same tick bucket.
 func BenchmarkPushPopSameTick(b *testing.B) {
 	q := New()
 	b.ReportAllocs()
@@ -36,7 +33,7 @@ func BenchmarkPushPopSameTick(b *testing.B) {
 	}
 }
 
-// BenchmarkPushPopIncrementTick tests pop after monotonic tick increment.
+// BenchmarkPushPopIncrementTick pushes items at increasing ticks and pops immediately.
 func BenchmarkPushPopIncrementTick(b *testing.B) {
 	q := New()
 	b.ReportAllocs()
@@ -48,7 +45,7 @@ func BenchmarkPushPopIncrementTick(b *testing.B) {
 	}
 }
 
-// BenchmarkPushMultipleBuckets stresses mapping across many buckets.
+// BenchmarkPushMultipleBuckets spreads pushes across many tick buckets.
 func BenchmarkPushMultipleBuckets(b *testing.B) {
 	const window = 4096
 	q := New()
@@ -60,18 +57,18 @@ func BenchmarkPushMultipleBuckets(b *testing.B) {
 	}
 }
 
-// BenchmarkPushCountedBucket benchmarks count‑increment path on colliding tick.
+// BenchmarkPushCountedBucket triggers the count++ fast-path inside Push().
 func BenchmarkPushCountedBucket(b *testing.B) {
 	q := New()
-	b.ReportAllocs()
 	h, _ := q.Borrow()
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = q.Push(0, h, nil)
 	}
 }
 
-// BenchmarkInPlaceUpdate measures Update on same bucket without movement.
+// BenchmarkInPlaceUpdate tests Update() where tick stays unchanged.
 func BenchmarkInPlaceUpdate(b *testing.B) {
 	q := New()
 	h, _ := q.Borrow()
@@ -83,7 +80,7 @@ func BenchmarkInPlaceUpdate(b *testing.B) {
 	}
 }
 
-// BenchmarkUpdateAfterPop benchmarks Update after item has been popped once.
+// BenchmarkUpdateAfterPop simulates updating an item after popping it once.
 func BenchmarkUpdateAfterPop(b *testing.B) {
 	q := New()
 	h, _ := q.Borrow()
@@ -96,7 +93,7 @@ func BenchmarkUpdateAfterPop(b *testing.B) {
 	}
 }
 
-// BenchmarkRandomMix simulates a realistic random mix of Borrow/Push/Update/Pop.
+// BenchmarkRandomMix exercises a probabilistic mixture of Borrow/Push/Update/Pop.
 func BenchmarkRandomMix(b *testing.B) {
 	const W = 1024
 	q := New()
