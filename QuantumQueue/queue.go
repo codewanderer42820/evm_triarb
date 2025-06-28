@@ -115,14 +115,16 @@ func validateDelta(delta uint64) uint {
 /*──────────────── Public API ─────────────*/
 
 func (q *QuantumQueue) PeepMin() (Handle, int64, unsafe.Pointer) {
-	if q.size == 0 {
+	if q.size == 0 || q.summary == 0 { // ★ new guard
 		return Handle(nilIdx), 0, nil
 	}
+
 	g := uint(bits.LeadingZeros64(q.summary))
 	gb := &q.groups[g]
 	lane := uint(bits.LeadingZeros64(gb.l1Summary))
 	bit := uint(bits.LeadingZeros64(gb.l2[lane]))
 	b := (g << 12) | (lane << 6) | bit
+
 	h := q.buckets[b]
 	n := &q.arena[h]
 	return Handle(h), n.tick, n.data
