@@ -2,7 +2,6 @@
 // Combines zero-copy pool address mapping and hot-path tick dispatch.
 // Field ordering and padding optimized for 64-bit architectures.
 // Hot-path functions are marked for inlining and no-stack-splitting.
-// Merged from router_lookup_zeroalloc.go fileciteturn0file2 and original router.go fileciteturn0file1
 
 package router
 
@@ -29,7 +28,7 @@ const (
 
 // wordKey holds one 40-byte ASCII-hex address as five 8-byte words.
 // Comparison is pure register equality: no heap, no slice copy.
-// Layout: 5x uint64 = 40 bytes
+// Layout: 5×uint64 = 40 bytes
 //
 //go:inline
 type wordKey struct {
@@ -172,19 +171,23 @@ var _ [32 - unsafe.Sizeof(TickUpdate{})]byte
 
 // Per-core executors and ring buffers.
 var (
-	executors      [64]*CoreExecutor
-	rings          [64]*ring32.Ring
-	pair2cores     [1 << 17]CoreMask
-	shardBucket    map[PairID][]PairShard
-	splitThreshold = 16_384
+	executors   [64]*CoreExecutor
+	rings       [64]*ring32.Ring
+	pair2cores  [1 << 17]CoreMask
+	shardBucket map[PairID][]PairShard
+
+	// Twice the default split to reduce shards under load
+	splitThreshold = 32_768
 )
 
 // InitExecutors creates one executor per core and distributes shards.
 func InitExecutors(cycles []PairTriplet) {
-	n := runtime.NumCPU() - 4
+	// Reserve just 1 core for OS/GC overhead
+	n := runtime.NumCPU() - 1
+	// Bound [4,64] and force even
 	switch {
-	case n < 8:
-		n = 8
+	case n < 4:
+		n = 4
 	case n > 64:
 		n = 64
 	}
@@ -197,7 +200,8 @@ func InitExecutors(cycles []PairTriplet) {
 
 	shardCh := make([]chan PairShard, n)
 	for i := range shardCh {
-		shardCh[i] = make(chan PairShard, 256)
+		// Deep buffer for bursty fan-out
+		shardCh[i] = make(chan PairShard, 8192)
 		go shardWorker(i, half, shardCh[i])
 	}
 
@@ -219,6 +223,145 @@ func InitExecutors(cycles []PairTriplet) {
 	for _, ch := range shardCh {
 		close(ch)
 	}
+}
+
+// shardWorker pins to OS thread and processes PairShards.
+//
+//go:nosplit
+func shardWorker(coreID, half int, in <-chan PairShard) {
+	runtime.LockOSThread()
+	ex := &CoreExecutor{
+		Heaps:     make([]bucketqueue.Queue, 0, 1024),
+		Fanouts:   make([][]FanoutEntry, 0, 1024),
+		LocalIdx:  localidx.New(1 << 16),
+		IsReverse: coreID >= half,
+	}
+	executors[coreID] = ex
+
+	// Larger ring to buffer ~50 ms @1 M/sec bursts
+	rb := ring32.New(1 << 16)
+	rings[coreID] = rb
+
+	// Pre-allocate per-shard cycle slice
+	cycleBuf := make([]CycleState, 0, 8192)
+	for shard := range in {
+		attachShard(ex, &shard, &cycleBuf)
+	}
+	ring32.PinnedConsumer(coreID, rb, new(uint32), new(uint32),
+		func(p *[32]byte) { handleTick(ex, (*TickUpdate)(unsafe.Pointer(p))) },
+		make(chan struct{}))
+}
+
+// attachShard registers a PairShard with a CoreExecutor.
+//
+//go:inline
+func attachShard(ex *CoreExecutor, shard *PairShard, buf *[]CycleState) {
+	lid32 := ex.LocalIdx.Put(uint32(shard.Pair), uint32(len(ex.Heaps)))
+	if int(lid32) == len(ex.Heaps) {
+		ex.Heaps = append(ex.Heaps, *bucketqueue.New())
+		ex.Fanouts = append(ex.Fanouts, nil)
+	}
+	hq := &ex.Heaps[lid32]
+	for _, eb := range shard.Bins {
+		*buf = append(*buf, CycleState{Pairs: eb.Pairs})
+		cs := &(*buf)[len(*buf)-1]
+		h, _ := hq.Borrow()
+		_ = hq.Push(4095, h, unsafe.Pointer(cs)) // retains original key range
+		for _, edge := range []uint16{(eb.EdgeIdx + 1) % 3, (eb.EdgeIdx + 2) % 3} {
+			ex.Fanouts[lid32] = append(ex.Fanouts[lid32], FanoutEntry{State: cs, Queue: hq, Handle: h, EdgeIdx: edge})
+		}
+	}
+}
+
+// handleTick processes one TickUpdate: drains profitable cycles and propagates ticks.
+func handleTick(ex *CoreExecutor, upd *TickUpdate) {
+	tick := upd.FwdTick
+	if ex.IsReverse {
+		tick = upd.RevTick
+	}
+	lid32, _ := ex.LocalIdx.Get(uint32(upd.Pair))
+	hq := &ex.Heaps[lid32]
+	fans := ex.Fanouts[lid32]
+
+	const maxDrain = 128
+	type stashRec struct {
+		h         bucketqueue.Handle
+		cs        *CycleState
+		wasProfit bool
+	}
+	var stash [maxDrain]stashRec
+
+	n := 0
+	if h, _, ptr := hq.PopMin(); ptr != nil {
+		for {
+			cs := (*CycleState)(ptr)
+			profit := tick + cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2]
+			if profit >= 0 {
+				stash[n] = stashRec{h, cs, false}
+				n++
+				break
+			}
+			onProfitable(cs)
+			stash[n] = stashRec{h, cs, true}
+			n++
+			if n == maxDrain {
+				break
+			}
+			h, _, ptr = hq.PopMin()
+			if ptr == nil {
+				break
+			}
+		}
+	}
+
+	for i := 0; i < n; i++ {
+		rec := stash[i]
+		var key int64
+		if rec.wasProfit {
+			key = 4095
+		} else {
+			key = log2ToTick(rec.cs.Ticks[0] + rec.cs.Ticks[1] + rec.cs.Ticks[2])
+		}
+		_ = hq.Push(key, rec.h, unsafe.Pointer(rec.cs))
+	}
+
+	for _, f := range fans {
+		cs := f.State
+		cs.Ticks[f.EdgeIdx] = tick
+		key := log2ToTick(cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2])
+		_ = f.Queue.Update(key, f.Handle, unsafe.Pointer(cs))
+	}
+}
+
+// onProfitable is a no-op hook for profitable cycles.
+//
+//go:inline
+func onProfitable(cs *CycleState) {
+	_, _ = cs.Ticks, cs.Pairs
+}
+
+const (
+	clamp   = 128.0
+	scale   = 16.0
+	maxTick = 4095
+)
+
+// log2ToTick maps a log2(ratio) in [-clamp, clamp] to [0, maxTick].
+//
+//go:inline
+//go:nosplit
+func log2ToTick(ratio float64) int64 {
+	if ratio < -clamp {
+		return 0
+	}
+	if ratio > clamp {
+		return maxTick
+	}
+	tick := int64((ratio + clamp) * scale)
+	if tick > maxTick {
+		tick = maxTick
+	}
+	return tick
 }
 
 // RegisterRoute adds an extra core mapping for a PairID.
@@ -288,144 +431,11 @@ func shuffleBindings(b []EdgeBinding) {
 //go:inline
 func crandInt(n int) int {
 	var buf [8]byte
-	rand.Read(buf[:])
+	_, _ = rand.Read(buf[:])
 	v := binary.LittleEndian.Uint64(buf[:])
 	if n&(n-1) == 0 {
 		return int(v & uint64(n-1))
 	}
 	hi, _ := bits.Mul64(v, uint64(n))
 	return int(hi)
-}
-
-// shardWorker pins to OS thread and processes PairShards.
-//
-//go:nosplit
-func shardWorker(coreID, half int, in <-chan PairShard) {
-	runtime.LockOSThread()
-	ex := &CoreExecutor{
-		Heaps:     make([]bucketqueue.Queue, 0, 1024),
-		Fanouts:   make([][]FanoutEntry, 0, 1024),
-		LocalIdx:  localidx.New(1 << 16),
-		IsReverse: coreID >= half,
-	}
-	executors[coreID] = ex
-	rb := ring32.New(1 << 14)
-	rings[coreID] = rb
-	cycleBuf := make([]CycleState, 0, 4096)
-	for shard := range in {
-		attachShard(ex, &shard, &cycleBuf)
-	}
-	ring32.PinnedConsumer(coreID, rb, new(uint32), new(uint32),
-		func(p *[32]byte) { handleTick(ex, (*TickUpdate)(unsafe.Pointer(p))) },
-		make(chan struct{}))
-}
-
-// attachShard registers a PairShard with a CoreExecutor.
-//
-//go:inline
-func attachShard(ex *CoreExecutor, shard *PairShard, buf *[]CycleState) {
-	lid32 := ex.LocalIdx.Put(uint32(shard.Pair), uint32(len(ex.Heaps)))
-	lid := uint32(lid32)
-	if int(lid32) == len(ex.Heaps) {
-		ex.Heaps = append(ex.Heaps, *bucketqueue.New())
-		ex.Fanouts = append(ex.Fanouts, nil)
-	}
-	hq := &ex.Heaps[lid]
-	for _, eb := range shard.Bins {
-		*buf = append(*buf, CycleState{Pairs: eb.Pairs})
-		cs := &(*buf)[len(*buf)-1]
-		h, _ := hq.Borrow()
-		_ = hq.Push(4095, h, unsafe.Pointer(cs))
-		for _, edge := range []uint16{(eb.EdgeIdx + 1) % 3, (eb.EdgeIdx + 2) % 3} {
-			ex.Fanouts[lid] = append(ex.Fanouts[lid], FanoutEntry{State: cs, Queue: hq, Handle: h, EdgeIdx: edge})
-		}
-	}
-}
-
-// handleTick processes one TickUpdate: drains profitable cycles and propagates ticks.
-func handleTick(ex *CoreExecutor, upd *TickUpdate) {
-	tick := upd.FwdTick
-	if ex.IsReverse {
-		tick = upd.RevTick
-	}
-	lid32, _ := ex.LocalIdx.Get(uint32(upd.Pair))
-	lid := uint32(lid32)
-	hq := &ex.Heaps[lid]
-	fans := ex.Fanouts[lid]
-	const maxDrain = 64
-	type stashRec struct {
-		h         bucketqueue.Handle
-		cs        *CycleState
-		wasProfit bool
-	}
-	var stash [maxDrain]stashRec
-	n := 0
-	if h, _, ptr := hq.PopMin(); ptr != nil {
-		for {
-			cs := (*CycleState)(ptr)
-			profit := tick + cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2]
-			if profit >= 0 {
-				stash[n] = stashRec{h, cs, false}
-				n++
-				break
-			}
-			onProfitable(cs)
-			stash[n] = stashRec{h, cs, true}
-			n++
-			if n == maxDrain {
-				break
-			}
-			h, _, ptr = hq.PopMin()
-			if ptr == nil {
-				break
-			}
-		}
-	}
-	for i := 0; i < n; i++ {
-		rec := stash[i]
-		var key int64
-		if rec.wasProfit {
-			key = 4095
-		} else {
-			key = log2ToTick(rec.cs.Ticks[0] + rec.cs.Ticks[1] + rec.cs.Ticks[2])
-		}
-		_ = hq.Push(key, rec.h, unsafe.Pointer(rec.cs))
-	}
-	for _, f := range fans {
-		cs := f.State
-		cs.Ticks[f.EdgeIdx] = tick
-		key := log2ToTick(cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2])
-		_ = f.Queue.Update(key, f.Handle, unsafe.Pointer(cs))
-	}
-}
-
-// onProfitable is a no-op hook for profitable cycles.
-//
-//go:inline
-func onProfitable(cs *CycleState) {
-	_, _ = cs.Ticks, cs.Pairs
-}
-
-const (
-	clamp   = 128.0
-	scale   = 16.0
-	maxTick = 4095
-)
-
-// log2ToTick maps a log2(ratio) in [-clamp, clamp] to [0, maxTick].
-//
-//go:inline
-//go:nosplit
-func log2ToTick(ratio float64) int64 {
-	if ratio < -clamp {
-		return 0
-	}
-	if ratio > clamp {
-		return maxTick
-	}
-	tick := int64((ratio + clamp) * scale)
-	if tick > maxTick {
-		tick = maxTick
-	}
-	return tick
 }
