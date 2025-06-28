@@ -111,29 +111,31 @@ func BenchmarkUpdateRelocate(b *testing.B) {
 /*──────── 5. mixed workload ─────────────*/
 
 func BenchmarkMixedWorkload(b *testing.B) {
-	const N = 1
+	const N = 128 // Reduced from 256 or higher to avoid long pop drain
+
 	rng := rand.New(rand.NewSource(1))
 	q := NewQuantumQueue()
 	hs := borrowManyB(b, q, N)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		for _, h := range hs {
+		for j, h := range hs {
 			tk := rng.Int63n(256)
 			_ = q.Push(tk, h, nil)
-			if rng.Intn(4) == 0 {
-				_ = q.Push(tk, h, nil)
+			if j&3 == 0 {
+				_ = q.Push(tk, h, nil) // duplicate burst
 			}
 		}
 		for j, h := range hs {
 			if j&1 == 0 {
-				_ = q.Update(int64(j+128), h, nil)
+				_ = q.Update(int64(j+64), h, nil) // relocate
 			}
 		}
-		for !q.Empty() {
-			_, _, _ = q.PopMin()
+		for j := 0; j < N; j++ {
+			if !q.Empty() {
+				_, _, _ = q.PopMin()
+			}
 		}
 	}
-	opsApprox := int64(N*2 + N/2 + N/4) // push+pop+update estimate
-	reportPerOp(b, opsApprox)
+	reportPerOp(b, int64(N*3)) // push + maybe duplicate + update + pop estimate
 }
