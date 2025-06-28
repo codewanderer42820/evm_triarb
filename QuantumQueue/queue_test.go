@@ -1,168 +1,86 @@
 package quantumqueue
 
-import (
-	"testing"
-	"unsafe"
-)
+import "testing"
 
-/*──────── helpers ───────*/
+/*── unlink path where prev != nilIdx ─*/
 
-func payload(i int) unsafe.Pointer { return unsafe.Pointer(&[]int{i}[0]) }
-
-func mustBorrow(t *testing.T, q *QuantumQueue) Handle {
-	h, err := q.Borrow()
-	if err != nil {
-		t.Fatalf("Borrow failed: %v", err)
-	}
-	return h
-}
-
-/*──────── construction / borrow ───────*/
-
-func TestBorrowAndErrFull(t *testing.T) {
+func TestUnlinkPrevBranch(t *testing.T) {
 	q := NewQuantumQueue()
+	h1 := mustBorrow(t, q)
+	h2 := mustBorrow(t, q)
 
-	var last Handle
-	for i := 1; i < CapItems; i++ { // handle 0 is reserved
-		h, err := q.Borrow()
-		if err != nil {
-			t.Fatalf("Borrow #%d errored: %v", i, err)
-		}
-		last = h
-	}
-	if h, err := q.Borrow(); err != ErrFull || h != Handle(nilIdx) {
-		t.Fatalf("want ErrFull, got (%v,%v)", h, err)
-	}
-
-	if err := q.Push(42, last, payload(0)); err != nil {
+	if err := q.Push(10, h1, payload(1)); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _ = q.PopMin()
-	if _, err := q.Borrow(); err != nil {
-		t.Fatalf("Borrow after recycle errored: %v", err)
-	}
-}
-
-/*──────── push / pop basics ───────*/
-
-func TestPushPopBasic(t *testing.T) {
-	q := NewQuantumQueue()
-	h := mustBorrow(t, q)
-
-	const tick = 10
-	wantPtr := payload(123)
-
-	if err := q.Push(tick, h, wantPtr); err != nil {
+	if err := q.Push(10, h2, payload(2)); err != nil {
 		t.Fatal(err)
-	}
-	if q.Empty() || q.Size() != 1 {
-		t.Fatalf("queue state wrong after push")
-	}
+	} // head
 
-	ph, pt, pv := q.PeepMin()
-	if ph != h || pt != tick || pv != wantPtr {
-		t.Fatalf("PeepMin got (%v,%d,%p)", ph, pt, pv)
-	}
-	popH, popT, popV := q.PopMin()
-	if popH != h || popT != tick || popV != wantPtr {
-		t.Fatalf("PopMin got (%v,%d,%p)", popH, popT, popV)
-	}
-	if !q.Empty() || q.Size() != 0 {
-		t.Fatalf("queue not empty after pop")
-	}
-}
-
-/*──────── duplicate-tick path ───────*/
-
-func TestDuplicateTickHandling(t *testing.T) {
-	q := NewQuantumQueue()
-	h := mustBorrow(t, q)
-
-	if err := q.Push(5, h, payload(1)); err != nil {
+	if err := q.Update(12, h1, payload(3)); err != nil {
 		t.Fatal(err)
-	}
-	if err := q.Push(5, h, payload(2)); err != nil {
-		t.Fatal(err)
-	} // dup
-	if q.Size() != 2 {
-		t.Fatalf("size want 2 got %d", q.Size())
-	}
+	} // unlink middle
 
-	_, _, _ = q.PopMin()
-	if q.Size() != 1 {
-		t.Fatalf("size after dup pop want 1 got %d", q.Size())
+	if _, tick, _ := q.PeepMin(); tick != 10 {
+		t.Fatalf("min tick want 10 got %d", tick)
 	}
-
-	_, _, _ = q.PopMin()
+	if next := q.arena[idx32(h2)].next; next != nilIdx {
+		t.Fatalf("unlink failed: h2.next = %d (want nilIdx)", next)
+	}
+	_, t1, _ := q.PopMin()
+	_, t2, _ := q.PopMin()
+	if t1 != 10 || t2 != 12 {
+		t.Fatalf("pop order wrong")
+	}
 	if !q.Empty() {
 		t.Fatalf("queue should be empty")
 	}
 }
 
-/*──────── update paths ───────*/
+/*── Push relocation path ─*/
 
-func TestUpdatePaths(t *testing.T) {
+func TestPushMoveExisting(t *testing.T) {
 	q := NewQuantumQueue()
 	h := mustBorrow(t, q)
 
-	/* same-tick payload patch */
-	ptr99 := payload(99)
-	if err := q.Push(20, h, payload(0)); err != nil {
+	if err := q.Push(5, h, payload(0)); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.Update(20, h, ptr99); err != nil {
-		t.Fatalf("Update same tick: %v", err)
+	if err := q.Push(8, h, payload(1)); err != nil {
+		t.Fatal(err)
 	}
 
-	if _, tick, ptr := q.PeepMin(); tick != 20 || ptr != ptr99 {
-		t.Fatalf("Update same tick failed")
+	_, tick, _ := q.PeepMin()
+	if tick != 8 {
+		t.Fatalf("tick after move want 8 got %d", tick)
 	}
-
-	/* move to later tick */
-	ptr42 := payload(42)
-	if err := q.Update(25, h, ptr42); err != nil {
-		t.Fatalf("Update move: %v", err)
-	}
-	ph, pt, pv := q.PeepMin()
-	if ph != h || pt != 25 || pv != ptr42 {
-		t.Fatalf("Update move got (%v,%d,%p)", ph, pt, pv)
+	if q.Size() != 1 {
+		t.Fatalf("size want 1 got %d", q.Size())
 	}
 }
 
-/*──────── sliding-window errors ───────*/
+/*── Update early-exit branches ─*/
 
-func TestWindowErrors(t *testing.T) {
+func TestUpdateEarlyExits(t *testing.T) {
 	q := NewQuantumQueue()
-	h := mustBorrow(t, q)
+	valid := mustBorrow(t, q)
 
-	if err := q.Push(-1, h, payload(0)); err != ErrPastWindow {
-		t.Fatalf("expect ErrPastWindow, got %v", err)
+	if err := q.Update(0, Handle(nilIdx), payload(0)); err != ErrNotFound {
+		t.Fatalf("nilIdx handle: %v", err)
 	}
-	if err := q.Push(int64(BucketCount)+1, h, payload(0)); err != ErrBeyondWindow {
-		t.Fatalf("expect ErrBeyondWindow, got %v", err)
+	if err := q.Update(0, Handle(idx32(CapItems)), payload(0)); err != ErrNotFound {
+		t.Fatalf("big handle: %v", err)
 	}
-}
-
-/*──────── invalid handles ───────*/
-
-func TestInvalidHandle(t *testing.T) {
-	q := NewQuantumQueue()
-
-	if err := q.Push(1, Handle(nilIdx), payload(0)); err != ErrNotFound {
-		t.Fatalf("want ErrNotFound for nilIdx, got %v", err)
+	if err := q.Update(0, valid, payload(0)); err != ErrNotFound {
+		t.Fatalf("inactive handle: %v", err)
 	}
-	h := Handle(idx32(CapItems + 10))
-	if err := q.Push(1, h, payload(0)); err != ErrNotFound {
-		t.Fatalf("want ErrNotFound for out-of-range, got %v", err)
+
+	if err := q.Push(0, valid, payload(0)); err != nil {
+		t.Fatal(err)
 	}
-}
-
-/*──────── pop empty ───────*/
-
-func TestPopEmptyQueue(t *testing.T) {
-	q := NewQuantumQueue()
-	h, tick, ptr := q.PopMin()
-	if h != Handle(nilIdx) || tick != 0 || ptr != nil {
-		t.Fatalf("PopMin empty got (%v,%d,%p)", h, tick, ptr)
+	if err := q.Update(-1, valid, payload(0)); err != ErrPastWindow {
+		t.Fatalf("past window: %v", err)
+	}
+	if err := q.Update(int64(BucketCount)+1, valid, payload(0)); err != ErrBeyondWindow {
+		t.Fatalf("beyond window: %v", err)
 	}
 }

@@ -1,19 +1,6 @@
-// SPDX: UNLICENSED ─ Ultra-Low-Latency QuantumQueue
-//
-// QuantumQueue is a branch-free, cache-aware, duplicate-tolerant,
-// time-bucket priority queue optimised for nanosecond-scale schedulers,
-// HFT order books, and simulation kernels.
-//
-//  Window           : 2²⁶ buckets  (262 144 logical ticks)
-//  Hierarchy        : 3-level reversed bitmaps
-//      summary      : 64-bit ➜ non-empty group
-//      l1Summary    : 64-bit ➜ non-empty lane
-//      l2[lane]     : 64-bit ➜ non-empty bucket
-//  Min lookup       : 3 × LZCNT  →  O(1)
-//  Group block size : 576 B (9 × 64 B cache lines)
-//  Duplicate ticks  : node.count > 1 (cheap counter bump)
-//  All node & bitmap ops are branch-free except for API validation.
-
+// Package quantumqueue implements a branch-free, duplicate-tolerant,
+// time-bucket priority queue with O(1) min lookup.  It is *single-threaded*;
+// shard or wrap it externally if you need concurrency.
 package quantumqueue
 
 import (
@@ -22,16 +9,16 @@ import (
 	"unsafe"
 )
 
-/*──────────────────── Tunables ────────────────────*/
+/*──────────────── Tunables ───────────────*/
 
 const (
 	GroupCount  = 64                                 // top-level groups
 	LaneCount   = 64                                 // lanes per group
-	BucketCount = GroupCount * LaneCount * LaneCount // 64³ = 262 144
-	CapItems    = 1 << 16                            // arena capacity
+	BucketCount = GroupCount * LaneCount * LaneCount // 64³ = 262 144 buckets
+	CapItems    = 1 << 16                            // arena / freelist capacity
 )
 
-/*──────────────────── Error Surface ───────────────*/
+/*──────────────── Errors ──────────────────*/
 
 var (
 	ErrFull         = errors.New("QuantumQueue: no free handles")
@@ -40,81 +27,75 @@ var (
 	ErrNotFound     = errors.New("QuantumQueue: invalid handle or removed")
 )
 
-/*──────────────────── Low-level Types ─────────────*/
+/*──────────────── Low-level types ─────────*/
 
 type idx32 uint32
 
-const nilIdx idx32 = ^idx32(0)
+const nilIdx idx32 = ^idx32(0) // −1 sentinel
 
-// Handle is the opaque identifier returned to callers.
+// Handle is the opaque ID returned to callers.
 type Handle idx32
 
-// groupBlock packs l1 + l2 bitmaps into 9 cache lines.
+/*──────────────── Internal structs ────────*/
+
 type groupBlock struct {
-	l1Summary uint64            // bit (63-lane) = 1 ➜ lane non-empty
-	_pad0     [7]uint64         // pad to 64 B
-	l2        [LaneCount]uint64 // bucket bitmaps (reversed)
+	l1Summary uint64            // bit 63-lane == 1  → lane non-empty
+	l2        [LaneCount]uint64 // per-lane bucket bitmaps (reversed)
 }
 
-// node holds per-handle metadata (32 B hot layout).
 type node struct {
-	tick  int64          // scheduled tick
-	data  unsafe.Pointer // payload
-	next  idx32          // next in bucket list
-	prev  idx32          // previous in bucket list
-	count uint32         // duplicate counter
-	_pad  uint32         // align to 32 B
+	tick  int64
+	data  unsafe.Pointer
+	next  idx32
+	prev  idx32
+	count uint32 // duplicate counter
 }
 
-/*──────────────────── Queue Structure ─────────────*/
+/*──────────────── Queue ───────────────────*/
 
 type QuantumQueue struct {
-	// Hot (1 cache line)
-	summary uint64
-	_padG   [7]uint64
-
-	// Warm
-	groups [GroupCount]groupBlock
-
-	// Cold
+	summary  uint64
+	groups   [GroupCount]groupBlock
 	buckets  [BucketCount]idx32
 	arena    [CapItems]node
 	freeHead idx32
 	size     int
-	baseTick uint64
+	baseTick uint64 // sliding-window origin (0 for now)
 }
 
-/*──────────────────── Construction ───────────────*/
+/*──────────────── Construction ───────────*/
 
 func NewQuantumQueue() *QuantumQueue {
 	q := new(QuantumQueue)
+
+	// Build freelist: CapItems-1 → 1  (index 0 and nilIdx never given out)
 	for i := CapItems - 1; i > 1; i-- {
 		q.arena[i].next = idx32(i - 1)
 	}
 	q.arena[1].next = nilIdx
 	q.freeHead = idx32(CapItems - 1)
+
+	// All bucket heads start at nilIdx (not zero)
+	for i := range q.buckets {
+		q.buckets[i] = nilIdx
+	}
 	return q
 }
 
-/*──────────────────── Borrow / Free ──────────────*/
+/*──────────────── Borrow / Free ──────────*/
 
-//go:inline
-//go:nosplit
 func (q *QuantumQueue) Borrow() (Handle, error) {
 	h := q.freeHead
 	if h == nilIdx {
 		return Handle(nilIdx), ErrFull
 	}
 	q.freeHead = q.arena[h].next
-	n := &q.arena[h]
-	n.next, n.prev, n.count = nilIdx, nilIdx, 0
+	q.arena[h] = node{next: nilIdx, prev: nilIdx} // zero hot fields
 	return Handle(h), nil
 }
 
-/*──────────────────── Min-lookup ──────────────────*/
+/*──────────────── Helpers ────────────────*/
 
-//go:inline
-//go:nosplit
 func (q *QuantumQueue) peekIndexes() (g, lane, bit uint) {
 	g = uint(bits.LeadingZeros64(q.summary))
 	gb := &q.groups[g]
@@ -123,7 +104,14 @@ func (q *QuantumQueue) peekIndexes() (g, lane, bit uint) {
 	return
 }
 
-// PeepMin – O(1) read-only peek.
+func validateDelta(delta uint64) uint {
+	past := uint(delta >> 63) // MSB → 1 if past
+	beyond := uint(((delta-BucketCount)>>63)^1) & 1
+	return past | (beyond << 1) // 0 ok, 1 past, 2 beyond
+}
+
+/*──────────────── Public API ─────────────*/
+
 func (q *QuantumQueue) PeepMin() (Handle, int64, unsafe.Pointer) {
 	if q.size == 0 {
 		return Handle(nilIdx), 0, nil
@@ -135,22 +123,6 @@ func (q *QuantumQueue) PeepMin() (Handle, int64, unsafe.Pointer) {
 	return Handle(h), n.tick, n.data
 }
 
-/*──────────────────── Delta Validation ───────────*/
-
-// validateDelta maps delta to {0 ok, 1 past, 2 beyond} branch-free.
-//
-//go:inline
-//go:nosplit
-func validateDelta(delta uint64) uint {
-	past := uint((delta >> 63) & 1)        // MSB set?
-	diff := delta - BucketCount            // wrap uint
-	beyond := uint(((diff >> 63) ^ 1) & 1) // invert
-	return past | (beyond << 1)
-}
-
-/*──────────────────── Public API ──────────────────*/
-
-//go:nosplit
 func (q *QuantumQueue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	idx := idx32(h)
 	if idx == nilIdx || idx >= CapItems {
@@ -165,13 +137,13 @@ func (q *QuantumQueue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	}
 
 	n := &q.arena[idx]
-	if n.count > 0 && n.tick == tick { // duplicate fast-path
+	if n.count > 0 && n.tick == tick { // duplicate fast path
 		n.count++
 		n.data = val
 		q.size++
 		return nil
 	}
-	if n.count > 0 { // moving existing handle
+	if n.count > 0 { // relocate
 		q.unlinkByIndex(idx, uint64(n.tick)-q.baseTick)
 		q.size -= int(n.count)
 	}
@@ -179,8 +151,6 @@ func (q *QuantumQueue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	return q.insertByDelta(idx, tick, delta, val)
 }
 
-//go:inline
-//go:nosplit
 func (q *QuantumQueue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 	idx := idx32(h)
 	if idx == nilIdx || idx >= CapItems {
@@ -199,7 +169,7 @@ func (q *QuantumQueue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 		return ErrBeyondWindow
 	}
 
-	if n.tick == tick { // same-tick payload patch
+	if n.tick == tick { // same-tick → patch payload only
 		n.data = val
 		return nil
 	}
@@ -208,11 +178,10 @@ func (q *QuantumQueue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 	if err := q.insertByDelta(idx, tick, delta, val); err != nil {
 		return err
 	}
-	q.size-- // compensate insertByDelta internal +1
+	q.size-- // compensate internal +1
 	return nil
 }
 
-//go:nosplit
 func (q *QuantumQueue) PopMin() (Handle, int64, unsafe.Pointer) {
 	h, t, v := q.PeepMin()
 	if h == Handle(nilIdx) {
@@ -221,7 +190,7 @@ func (q *QuantumQueue) PopMin() (Handle, int64, unsafe.Pointer) {
 	idx := idx32(h)
 	n := &q.arena[idx]
 
-	if n.count > 1 { // cheap duplicate decrement
+	if n.count > 1 { // duplicate decrement
 		n.count--
 		q.size--
 		return h, t, n.data
@@ -234,22 +203,20 @@ func (q *QuantumQueue) PopMin() (Handle, int64, unsafe.Pointer) {
 	return h, t, v
 }
 
-//go:inline
-//go:nosplit
-func (q *QuantumQueue) Size() int { return q.size }
+/*──────────────── Small helpers ──────────*/
 
-//go:inline
-//go:nosplit
+func (q *QuantumQueue) Size() int   { return q.size }
 func (q *QuantumQueue) Empty() bool { return q.size == 0 }
 
-/*──────────────────── Internals ───────────────────*/
+/*──────────────── Internals ──────────────*/
 
-//go:inline
-//go:nosplit
 func (q *QuantumQueue) unlinkByIndex(idx idx32, delta uint64) {
-	g, lane, bit := uint(delta>>12), uint((delta>>6)&0x3F), uint(delta&0x3F)
+	g := uint(delta >> 12)
+	lane := uint((delta >> 6) & 0x3F)
+	bit := uint(delta & 0x3F)
 	b := (g << 12) | (lane << 6) | bit
 
+	// linked-list removal
 	n := &q.arena[idx]
 	if n.prev != nilIdx {
 		q.arena[n.prev].next = n.next
@@ -260,26 +227,32 @@ func (q *QuantumQueue) unlinkByIndex(idx idx32, delta uint64) {
 		q.arena[n.next].prev = n.prev
 	}
 
+	// bucket not empty → keep bitmap bits
+	if q.buckets[b] != nilIdx {
+		return
+	}
+
+	// clear bitmap hierarchy
 	l2Mask := uint64(1) << (63 - bit)
+	l1Mask := uint64(1) << (63 - lane)
 	gb := &q.groups[g]
 
 	newL2 := gb.l2[lane] &^ l2Mask
 	gb.l2[lane] = newL2
 
-	clearL1 := ((newL2 - 1) >> 63) & l2Mask
-	gb.l1Summary &^= clearL1
+	gb.l1Summary &^= ((newL2 - 1) >> 63) & l1Mask
 
 	l1 := gb.l1Summary
 	gMask := uint64(1) << (63 - g)
-	clearG := ((l1 - 1) >> 63) & gMask
-	q.summary &^= clearG
+	q.summary &^= ((l1 - 1) >> 63) & gMask
 }
 
-//go:inline
-//go:nosplit
 func (q *QuantumQueue) insertByDelta(idx idx32, tick int64, delta uint64, val unsafe.Pointer) error {
-	g, lane, bit := uint(delta>>12), uint((delta>>6)&0x3F), uint(delta&0x3F)
+	g := uint(delta >> 12)
+	lane := uint((delta >> 6) & 0x3F)
+	bit := uint(delta & 0x3F)
 
+	// linked-list prepend
 	n := &q.arena[idx]
 	n.next = q.buckets[delta]
 	n.prev = nilIdx
@@ -291,14 +264,11 @@ func (q *QuantumQueue) insertByDelta(idx idx32, tick int64, delta uint64, val un
 	n.tick = tick
 	n.data = val
 
+	// bitmap sets
 	gb := &q.groups[g]
-	l2Mask := uint64(1) << (63 - bit)
-	l1Mask := uint64(1) << (63 - lane)
-	gMask := uint64(1) << (63 - g)
-
-	gb.l2[lane] |= l2Mask
-	gb.l1Summary |= l1Mask
-	q.summary |= gMask
+	gb.l2[lane] |= uint64(1) << (63 - bit)
+	gb.l1Summary |= uint64(1) << (63 - lane)
+	q.summary |= uint64(1) << (63 - g)
 
 	q.size++
 	return nil
