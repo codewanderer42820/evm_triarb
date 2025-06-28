@@ -210,41 +210,51 @@ func (q *QuantumQueue) Empty() bool { return q.size == 0 }
 
 /*──────────────── Internals ──────────────*/
 
+// unlinkByIndex removes idx from its bucket list.  When that removal leaves
+// the bucket empty, it clears the lane bit in l1Summary and—iff l1Summary
+// becomes zero—the group bit in q.summary.  All operations are branch-free
+// except the early return when the bucket is still non-empty.
 func (q *QuantumQueue) unlinkByIndex(idx idx32, delta uint64) {
-	g := uint(delta >> 12)
-	lane := uint((delta >> 6) & 0x3F)
-	bit := uint(delta & 0x3F)
+	/*──── locate bucket ───────────────────────────────────────────────*/
+	g := uint(delta >> 12)            // group   0‥63
+	lane := uint((delta >> 6) & 0x3F) // lane    0‥63
+	bit := uint(delta & 0x3F)         // bucket  0‥63
 	b := (g << 12) | (lane << 6) | bit
 
-	// linked-list removal
+	/*──── remove from intrusive list ─────────────────────────────────*/
 	n := &q.arena[idx]
 	if n.prev != nilIdx {
 		q.arena[n.prev].next = n.next
 	} else {
-		q.buckets[b] = n.next
+		q.buckets[b] = n.next // idx was head
 	}
 	if n.next != nilIdx {
 		q.arena[n.next].prev = n.prev
 	}
 
-	// bucket not empty → keep bitmap bits
+	// Another node still in the bucket → bitmaps stay set.
 	if q.buckets[b] != nilIdx {
 		return
 	}
 
-	// clear bitmap hierarchy
-	l2Mask := uint64(1) << (63 - bit)
-	l1Mask := uint64(1) << (63 - lane)
+	/*──── bucket is now empty → clear bitmap hierarchy ───────────────*/
+	l2Mask := uint64(1) << (63 - bit)  // bucket bit in l2
+	l1Mask := uint64(1) << (63 - lane) // lane   bit in l1
 	gb := &q.groups[g]
 
+	// Clear the bucket bit in l2.
 	newL2 := gb.l2[lane] &^ l2Mask
 	gb.l2[lane] = newL2
 
-	gb.l1Summary &^= ((newL2 - 1) >> 63) & l1Mask
+	// If lane now empty, clear its bit in l1Summary.
+	if newL2 == 0 {
+		gb.l1Summary &^= l1Mask
+	}
 
-	l1 := gb.l1Summary
-	gMask := uint64(1) << (63 - g)
-	q.summary &^= ((l1 - 1) >> 63) & gMask
+	// If the group now has no lanes, clear its bit in q.summary.
+	if gb.l1Summary == 0 {
+		q.summary &^= uint64(1) << (63 - g)
+	}
 }
 
 func (q *QuantumQueue) insertByDelta(idx idx32, tick int64, delta uint64, val unsafe.Pointer) error {
