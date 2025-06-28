@@ -42,22 +42,32 @@ type groupBlock struct {
 	l2        [LaneCount]uint64
 }
 
+// node is exactly 32 B.
+// hot half-line: tick → data → count
+// cold half-line: next → prev → (explicit pad)
 type node struct {
-	tick  int64
-	data  unsafe.Pointer
-	next  idx32
-	prev  idx32
-	count uint32
+	tick  int64          //  0–7
+	data  unsafe.Pointer //  8–15
+	count uint32         // 16–19
+	next  idx32          // 20–23
+	prev  idx32          // 24–27
+	_     [4]byte        // 28–31 (explicit pad, clarifies size)
 }
 
+// QuantumQueue: hot header (32 B) followed by large arrays.
+// Only summary, size and freeHead are touched on every mutation/peek.
 type QuantumQueue struct {
-	summary  uint64
-	groups   [GroupCount]groupBlock
-	buckets  [BucketCount]idx32
-	arena    [CapItems]node
-	freeHead idx32
-	size     int
-	baseTick uint64
+	// ─ hot (first 32 B) ─
+	summary  uint64  //  0–7  min-lookup bitmap
+	baseTick uint64  //  8–15 sliding-window origin (rarely moves but 8-byte)
+	size     int     // 16–23 total entries (mutated a lot)
+	freeHead idx32   // 24–27 freelist head
+	_        [4]byte // 28–31 pad so next field is 8-aligned
+
+	// ─ cold / bulky ─
+	groups  [GroupCount]groupBlock
+	buckets [BucketCount]idx32
+	arena   [CapItems]node
 }
 
 /*──────────────── Construction ───────────*/
