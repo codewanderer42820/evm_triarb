@@ -96,20 +96,23 @@ func validateDelta(d uint64) uint {
 
 /*──────── nano-hot path: min lookup ─────────*/
 
+// PeepMin returns the earliest element without removing it.
+// A single guard prevents the “summary == 0 but size > 0” panic.
+//
 //go:inline
 //go:nosplit
 func (q *QuantumQueue) PeepMin() (Handle, int64, unsafe.Pointer) {
-	if q.size == 0 {
+	if q.size == 0 || q.summary == 0 { // ← minimal safety net
 		return Handle(nilIdx), 0, nil
 	}
 
-	g := uint(bits.LeadingZeros64(q.summary)) // 0‥63 (summary ≠ 0)
+	g := uint(bits.LeadingZeros64(q.summary)) // safe: summary ≠ 0
 	gb := &q.groups[g]
-	l := uint(bits.LeadingZeros64(gb.l1Summary))
-	b := uint(bits.LeadingZeros64(gb.l2[l]))
-	idx := (g << 12) | (l << 6) | b
+	lane := uint(bits.LeadingZeros64(gb.l1Summary))
+	bit := uint(bits.LeadingZeros64(gb.l2[lane]))
+	bIdx := (g << 12) | (lane << 6) | bit
 
-	h := q.buckets[idx]
+	h := q.buckets[bIdx]
 	n := &q.arena[h]
 	return Handle(h), n.tick, n.data
 }
