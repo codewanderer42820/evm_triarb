@@ -40,7 +40,7 @@ type node struct {
 	count uint32   // 4 B
 	prev  Handle   // 4 B
 	next  Handle   // 4 B
-	data  [48]byte // ← 48 B payload, no explicit pad
+	data  [44]byte // ← 44 B payload
 }
 
 type groupBlock struct {
