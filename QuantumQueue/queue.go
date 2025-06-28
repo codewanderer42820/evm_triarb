@@ -1,13 +1,11 @@
-// Package quantumqueue implements a branch-free, duplicate-tolerant,
-// time-bucket priority queue with O(1) min lookup.
+// SPDX-Free:  Public-Domain
+// Ultra-low-latency QuantumQueue (final tuned edition)
 package quantumqueue
 
 import (
 	"math/bits"
 	"unsafe"
 )
-
-/*──────────────── Tunables ───────────────*/
 
 const (
 	GroupCount  = 64
@@ -16,8 +14,7 @@ const (
 	CapItems    = 1 << 16
 )
 
-/*──────────────── Compact errors ─────────*/
-
+/*──────── errors (compact) ───────*/
 type queueErr struct{ msg string }
 
 func (e queueErr) Error() string { return e.msg }
@@ -29,16 +26,14 @@ var (
 	ErrNotFound     = queueErr{"notfound"}
 )
 
-/*──────────────── Value types ────────────*/
-
+/*──────── tiny types ─────────────*/
 type idx32 uint32
 
 const nilIdx idx32 = ^idx32(0)
 
 type Handle idx32
 
-/*──────────────── Packed structs ─────────*/
-
+/*──────── packed structs ─────────*/
 type node struct {
 	tick  int64
 	data  unsafe.Pointer
@@ -54,21 +49,19 @@ type groupBlock struct {
 }
 
 type QuantumQueue struct {
-	/* hot header */
-	summary  uint64
-	baseTick uint64
-	size     int
-	freeHead idx32
-	_        [4]byte
+	// hot header (fits in one 64 B line)
+	summary, baseTick uint64
+	size              int
+	freeHead          idx32
+	_                 [4]byte
 
-	/* cold / bulky */
+	// cold
 	groups  [GroupCount]groupBlock
 	buckets [BucketCount]idx32
 	arena   [CapItems]node
 }
 
-/*──────────────── Construction ───────────*/
-
+/*──────── construction ───────────*/
 func NewQuantumQueue() *QuantumQueue {
 	q := new(QuantumQueue)
 	for i := CapItems - 1; i > 1; i-- {
@@ -82,8 +75,7 @@ func NewQuantumQueue() *QuantumQueue {
 	return q
 }
 
-/*──────────────── Borrow / Free ──────────*/
-
+/*──────── freelist ───────────────*/
 func (q *QuantumQueue) Borrow() (Handle, error) {
 	h := q.freeHead
 	if h == nilIdx {
@@ -94,42 +86,38 @@ func (q *QuantumQueue) Borrow() (Handle, error) {
 	return Handle(h), nil
 }
 
-/*──────────────── Helpers ───────────────*/
-
-// validateDelta categorises the 64-bit unsigned distance between
-// tick and baseTick:
-//
-//	0 → inside window         0 ≤ delta < BucketCount
-//	1 → past (MSB set)        delta’s MSB = 1
-//	2 → beyond future window  delta ≥ BucketCount
-func validateDelta(delta uint64) uint {
-	past := uint(delta >> 63) // 1 if MSB set
-
-	// If delta < BucketCount:  (delta - BucketCount) underflows, MSB == 1
-	// If delta ≥ BucketCount: (delta - BucketCount) MSB == 0
-	beyond := uint(((delta-BucketCount)>>63)^1) & 1
-
-	return past | beyond<<1 // 0 / 1 / 2
+/*──────── helpers ───────────────*/
+//go:nosplit
+func validateDelta(d uint64) uint {
+	past := uint(d >> 63)
+	beyond := uint(^((d - BucketCount) >> 63) & 1) // 1 if ≥BucketCount
+	return past | beyond<<1
 }
 
-/*──────────────── Public API ─────────────*/
+/*──────── nano-hot path: min lookup ─────────*/
 
+//go:inline
+//go:nosplit
 func (q *QuantumQueue) PeepMin() (Handle, int64, unsafe.Pointer) {
-	if q.size == 0 || q.summary == 0 { // ★ new guard
+	if q.size == 0 {
 		return Handle(nilIdx), 0, nil
 	}
 
-	g := uint(bits.LeadingZeros64(q.summary))
+	g := uint(bits.LeadingZeros64(q.summary)) // 0‥63 (summary ≠ 0)
 	gb := &q.groups[g]
-	lane := uint(bits.LeadingZeros64(gb.l1Summary))
-	bit := uint(bits.LeadingZeros64(gb.l2[lane]))
-	b := (g << 12) | (lane << 6) | bit
+	l := uint(bits.LeadingZeros64(gb.l1Summary))
+	b := uint(bits.LeadingZeros64(gb.l2[l]))
+	idx := (g << 12) | (l << 6) | b
 
-	h := q.buckets[b]
+	h := q.buckets[idx]
 	n := &q.arena[h]
 	return Handle(h), n.tick, n.data
 }
 
+/*──────── Push ───────────────────*/
+
+//go:inline
+//go:nosplit
 func (q *QuantumQueue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	idx := idx32(h)
 	if idx == nilIdx || idx >= CapItems {
@@ -145,19 +133,18 @@ func (q *QuantumQueue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	}
 
 	n := &q.arena[idx]
-	if n.count > 0 && n.tick == tick {
+	if n.count > 0 && n.tick == tick { // duplicate fast-path
 		n.count++
 		n.data = val
 		q.size++
 		return nil
 	}
-	if n.count > 0 {
+	if n.count > 0 { // relocate
 		q.unlinkByIndex(idx, uint64(n.tick)-q.baseTick)
 		q.size -= int(n.count)
 	}
 
-	g, lane, bit := uint(delta>>12), uint((delta>>6)&0x3F), uint(delta&0x3F)
-
+	g, l, b := uint(delta>>12), uint((delta>>6)&0x3F), uint(delta&0x3F)
 	n.next, n.prev = q.buckets[delta], nilIdx
 	if n.next != nilIdx {
 		q.arena[n.next].prev = idx
@@ -166,14 +153,17 @@ func (q *QuantumQueue) Push(tick int64, h Handle, val unsafe.Pointer) error {
 	n.tick, n.data, n.count = tick, val, 1
 
 	gb := &q.groups[g]
-	gb.l2[lane] |= 1 << (63 - bit)
-	gb.l1Summary |= 1 << (63 - lane)
+	gb.l2[l] |= 1 << (63 - b)
+	gb.l1Summary |= 1 << (63 - l)
 	q.summary |= 1 << (63 - g)
-
 	q.size++
 	return nil
 }
 
+/*──────── Update ─────────────────*/
+
+//go:inline
+//go:nosplit
 func (q *QuantumQueue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 	idx := idx32(h)
 	if idx == nilIdx || idx >= CapItems {
@@ -196,10 +186,10 @@ func (q *QuantumQueue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 		n.data = val
 		return nil
 	}
+
 	q.unlinkByIndex(idx, uint64(n.tick)-q.baseTick)
 
-	g, lane, bit := uint(delta>>12), uint((delta>>6)&0x3F), uint(delta&0x3F)
-
+	g, l, b := uint(delta>>12), uint((delta>>6)&0x3F), uint(delta&0x3F)
 	n.next, n.prev = q.buckets[delta], nilIdx
 	if n.next != nilIdx {
 		q.arena[n.next].prev = idx
@@ -208,17 +198,22 @@ func (q *QuantumQueue) Update(tick int64, h Handle, val unsafe.Pointer) error {
 	n.tick, n.data = tick, val
 
 	gb := &q.groups[g]
-	gb.l2[lane] |= 1 << (63 - bit)
-	gb.l1Summary |= 1 << (63 - lane)
+	gb.l2[l] |= 1 << (63 - b)
+	gb.l1Summary |= 1 << (63 - l)
 	q.summary |= 1 << (63 - g)
 	return nil
 }
 
+/*──────── PopMin ─────────────────*/
+
+//go:inline
+//go:nosplit
 func (q *QuantumQueue) PopMin() (Handle, int64, unsafe.Pointer) {
 	h, t, v := q.PeepMin()
 	if h == Handle(nilIdx) {
 		return h, 0, nil
 	}
+
 	idx := idx32(h)
 	n := &q.arena[idx]
 	if n.count > 1 {
@@ -234,59 +229,49 @@ func (q *QuantumQueue) PopMin() (Handle, int64, unsafe.Pointer) {
 	return h, t, v
 }
 
-/*──────────────── Stats ────────────────*/
-
+/*──────── stats ─────────────*/
 func (q *QuantumQueue) Size() int   { return q.size }
 func (q *QuantumQueue) Empty() bool { return q.size == 0 }
 
-/*──────────────── Internal unlink ───────*/
+/*──────── unlink & bitmap maintenance ─────*/
 
-// unlinkByIndex removes idx from its bucket list and updates the three-level
-// bitmap hierarchy.  After this call the invariants hold:
-//
-//   - if any buckets remain in lane  → lane-bit is 1
-//   - if any lanes   remain in group → group-bit is 1
-//   - otherwise both bits are 0
+//go:inline
+//go:nosplit
 func (q *QuantumQueue) unlinkByIndex(idx idx32, delta uint64) {
-	/*──── decode bucket coordinates ─────────────────────────────*/
-	g := uint(delta >> 12)            // group   0‥63
-	lane := uint((delta >> 6) & 0x3F) // lane    0‥63
-	bit := uint(delta & 0x3F)         // bucket  0‥63
-	bIdx := (g << 12) | (lane << 6) | bit
+	g := uint(delta >> 12)
+	l := uint((delta >> 6) & 0x3F)
+	b := uint(delta & 0x3F)
+	bIdx := (g << 12) | (l << 6) | b
 
-	/*──── unlink node from intrusive list ───────────────────────*/
+	// list unlink
 	n := &q.arena[idx]
 	if n.prev != nilIdx {
 		q.arena[n.prev].next = n.next
 	} else {
-		q.buckets[bIdx] = n.next // idx was head
+		q.buckets[bIdx] = n.next
 	}
 	if n.next != nilIdx {
 		q.arena[n.next].prev = n.prev
 	}
 
-	// bucket still non-empty → bitmap already correct
 	if q.buckets[bIdx] != nilIdx {
 		return
 	}
 
-	/*──── bucket became empty → update bitmaps ──────────────────*/
 	gb := &q.groups[g]
+	gb.l2[l] &^= 1 << (63 - b) // clear bucket bit
 
-	// 1) clear bucket bit in L2
-	gb.l2[lane] &^= 1 << (63 - bit)
-
-	// 2) set/clear lane bit in L1 depending on lane occupancy
-	if gb.l2[lane] == 0 {
-		gb.l1Summary &^= 1 << (63 - lane) // lane now empty
+	// synchronise lane bit
+	if gb.l2[l] == 0 {
+		gb.l1Summary &^= 1 << (63 - l)
 	} else {
-		gb.l1Summary |= 1 << (63 - lane) // lane still has buckets
+		gb.l1Summary |= 1 << (63 - l)
 	}
 
-	// 3) set/clear group bit in summary depending on group occupancy
+	// synchronise group bit
 	if gb.l1Summary == 0 {
-		q.summary &^= 1 << (63 - g) // group empty
+		q.summary &^= 1 << (63 - g)
 	} else {
-		q.summary |= 1 << (63 - g) // group non-empty
+		q.summary |= 1 << (63 - g)
 	}
 }
