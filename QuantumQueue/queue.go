@@ -1,16 +1,15 @@
 // SPDX‑Free: Public‑Domain
-// Ultra‑low‑latency **QuantumQueue** — branch‑budget trimmed
-// Optional safety branches (delta clamp, size underflow, unlink guard, error returns) removed.
-// Duplicate‑tick handling **kept**. Hot path unchanged.
+// Ultra‑low‑latency QuantumQueue — peak‑performance minimal version
+// • Inline 44 B payload per node
+// • Three‑LZCNT hot path, branch‑free bitmaps
+// • Only essential sliding‑window & duplicate‑tick checks
 package quantumqueue
 
-import "math/bits"
+import (
+	"math/bits"
+)
 
-/*──────── errors ─────────────*/
-type queueErr struct{ msg string }
-
-func (e queueErr) Error() string { return e.msg }
-
+// error definitions
 var (
 	ErrFull         = queueErr{"full"}
 	ErrPastWindow   = queueErr{"past"}
@@ -18,29 +17,31 @@ var (
 	ErrNotFound     = queueErr{"notfound"}
 )
 
-/*──────── constants ──────────*/
+type queueErr struct{ msg string }
+
+func (e queueErr) Error() string { return e.msg }
+
+// constants
 const (
 	GroupCount  = 64
 	LaneCount   = 64
-	BucketCount = GroupCount * LaneCount * LaneCount // 262 144
+	BucketCount = GroupCount * LaneCount * LaneCount // 262144
 	CapItems    = 1 << 16
+	PayloadSize = 44
 )
 
-/*──────── tiny types ─────────*/
-type idx32 uint32
+type Handle uint32
 
-const nilIdx idx32 = ^idx32(0)
+const nilIdx Handle = ^Handle(0)
 
-type Handle idx32
-
-/*──────── packed structs ─────*/
+type idx32 = Handle
 
 type node struct {
 	tick  int64
 	count uint32
-	next  idx32
-	prev  idx32
-	data  [44]byte
+	prev  Handle
+	next  Handle
+	data  [PayloadSize]byte
 }
 
 type groupBlock struct {
@@ -48,236 +49,182 @@ type groupBlock struct {
 	l2        [LaneCount]uint64
 }
 
-/*──────── queue struct ───────*/
-
 type QuantumQueue struct {
 	summary  uint64
 	baseTick uint64
 	size     int
-	freeHead idx32
-	_        [40]byte // pad to 64B header
+	freeHead Handle
+	buckets  [BucketCount]Handle
 	groups   [GroupCount]groupBlock
 	arena    [CapItems]node
-	buckets  [BucketCount]idx32
 }
 
-/*──────── helpers ────────────*/
-// mask64 returns all‑ones if b==true else 0.
-//go:inline
-func mask64(b bool) uint64 {
-	if b {
-		return ^uint64(0)
-	}
-	return 0
-}
-
-// validateDelta: 0=ok,1=past,2=beyond.
-// Unsigned math avoids sign issues when baseTick ≥ 2^63.
-//
-//go:inline
-func validateDelta(d uint64) uint {
-	past := uint(d >> 63)                          // tick < baseTick → wrap → high bit =1
-	beyond := uint(^((d - BucketCount) >> 63) & 1) // d>=BucketCount ⇒ beyond=1
-	return past | beyond<<1
-}
-
-/*──────── constructor ───────*/
+// NewQuantumQueue creates an empty queue.
 func NewQuantumQueue() *QuantumQueue {
-	q := &QuantumQueue{freeHead: 1}
-	for i := idx32(1); i < CapItems-1; i++ {
+	q := &QuantumQueue{freeHead: 0}
+	for i := Handle(0); i < CapItems-1; i++ {
 		q.arena[i].next = i + 1
 	}
 	q.arena[CapItems-1].next = nilIdx
+	for i := range q.buckets {
+		q.buckets[i] = nilIdx
+	}
 	return q
 }
 
-/*──────── public API ─────────*/
+// Borrow a handle from the free list.
 func (q *QuantumQueue) Borrow() (Handle, error) {
 	if q.freeHead == nilIdx {
-		return Handle(nilIdx), ErrFull
+		return nilIdx, ErrFull
 	}
-	idx := q.freeHead
-	q.freeHead = q.arena[idx].next
-	return Handle(idx), nil
-}
-
-func (q *QuantumQueue) Push(tick int64, h Handle, data []byte) error {
-	idx := idx32(h)
-	if idx == nilIdx || idx >= CapItems {
-		return ErrNotFound
-	}
-	n := &q.arena[idx]
-
-	// duplicate fast path
-	if n.count > 0 && n.tick == tick {
-		n.count++
-		copy(n.data[:], data)
-		return nil
-	}
-
-	// window validation
-	delta := uint64(tick) - q.baseTick
-	switch validateDelta(delta) {
-	case 1:
-		return ErrPastWindow
-	case 2:
-		return ErrBeyondWindow
-	}
-
-	// new insert
-	g := delta >> 12
-	l := (delta >> 6) & 0x3F
-	b := delta & 0x3F
-	bIdx := g*LaneCount*LaneCount + l*LaneCount + b
-
-	n.tick = tick
-	n.count = 1
-	copy(n.data[:], data)
-
-	// intrusive list insert at bucket head
-	n.next = q.buckets[bIdx]
-	n.prev = nilIdx
-	if n.next != nilIdx {
-		q.arena[n.next].prev = idx
-	}
-	q.buckets[bIdx] = idx
-
-	// set bitmaps
-	gb := &q.groups[g]
-	if gb.l2[l] == 0 {
-		gb.l1Summary |= 1 << (63 - l)
-	}
-	gb.l2[l] |= 1 << (63 - b)
-	q.summary |= 1 << (63 - g)
-
-	q.size++
-	return nil
-}
-
-func (q *QuantumQueue) Update(tick int64, h Handle, data []byte) error {
-	idx := idx32(h)
-	if idx == nilIdx || idx >= CapItems {
-		return ErrNotFound
-	}
-	n := &q.arena[idx]
-	if n.count == 0 {
-		return ErrNotFound
-	}
-	// same‑tick fast path
-	if n.tick == tick {
-		copy(n.data[:], data)
-		return nil
-	}
-	deltaOld := uint64(n.tick) - q.baseTick
-	gOld := deltaOld >> 12
-	lOld := (deltaOld >> 6) & 0x3F
-	bOld := deltaOld & 0x3F
-	bIdxOld := gOld*LaneCount*LaneCount + lOld*LaneCount + bOld
-
-	// remove from old bucket list
-	if n.prev != nilIdx {
-		q.arena[n.prev].next = n.next
-	} else {
-		q.buckets[bIdxOld] = n.next
-	}
-	if n.next != nilIdx {
-		q.arena[n.next].prev = n.prev
-	}
-
-	// bitmap clears if bucket empty
-	if q.buckets[bIdxOld] == nilIdx {
-		gbOld := &q.groups[gOld]
-		gbOld.l2[lOld] &^= 1 << (63 - bOld)
-		if gbOld.l2[lOld] == 0 {
-			gbOld.l1Summary &^= 1 << (63 - lOld)
-			if gbOld.l1Summary == 0 {
-				q.summary &^= 1 << (63 - gOld)
-			}
-		}
-	}
-
-	// insert at new bucket
-	delta := uint64(tick) - q.baseTick
-	switch validateDelta(delta) {
-	case 1:
-		return ErrPastWindow
-	case 2:
-		return ErrBeyondWindow
-	}
-	g := delta >> 12
-	l := (delta >> 6) & 0x3F
-	b := delta & 0x3F
-	bIdx := g*LaneCount*LaneCount + l*LaneCount + b
-
-	n.tick = tick
-	copy(n.data[:], data)
-
-	n.next = q.buckets[bIdx]
-	n.prev = nilIdx
-	if n.next != nilIdx {
-		q.arena[n.next].prev = idx
-	}
-	q.buckets[bIdx] = idx
-
-	gb := &q.groups[g]
-	if gb.l2[l] == 0 {
-		gb.l1Summary |= 1 << (63 - l)
-	}
-	gb.l2[l] |= 1 << (63 - b)
-	q.summary |= 1 << (63 - g)
-	return nil
-}
-
-func (q *QuantumQueue) PeepMin() (Handle, int64, []byte) {
-	if q.size == 0 || q.summary == 0 {
-		return Handle(nilIdx), 0, nil
-	}
-	g := bits.LeadingZeros64(q.summary)
-	gb := &q.groups[g]
-	l := bits.LeadingZeros64(gb.l1Summary)
-	b := bits.LeadingZeros64(gb.l2[l])
-	bIdx := uint64(g)*LaneCount*LaneCount + uint64(l)*LaneCount + uint64(b)
-	idx := q.buckets[bIdx]
-	n := &q.arena[idx]
-	return Handle(idx), n.tick, n.data[:]
-}
-
-func (q *QuantumQueue) PopMin() (Handle, int64, []byte) {
-	if q.size == 0 || q.summary == 0 {
-		return Handle(nilIdx), 0, nil
-	}
-	g := bits.LeadingZeros64(q.summary)
-	gb := &q.groups[g]
-	l := bits.LeadingZeros64(gb.l1Summary)
-	b := bits.LeadingZeros64(gb.l2[l])
-	bIdx := uint64(g)*LaneCount*LaneCount + uint64(l)*LaneCount + uint64(b)
-	idx := q.buckets[bIdx]
-	n := &q.arena[idx]
-	if n.count > 1 {
-		n.count--
-		return Handle(idx), n.tick, n.data[:]
-	}
-	// unlink node fully
-	q.buckets[bIdx] = n.next
-	if n.next != nilIdx {
-		q.arena[n.next].prev = nilIdx
-	}
-	// bitmap clear masks
-	gb.l2[l] &^= 1 << (63 - b)
-	if gb.l2[l] == 0 {
-		gb.l1Summary &^= 1 << (63 - l)
-		if gb.l1Summary == 0 {
-			q.summary &^= 1 << (63 - g)
-		}
-	}
-
-	q.size--
-	// free handle back to freelist
-	n.count = 0
-	n.next = q.freeHead
-	q.freeHead = idx
-	return Handle(idx), n.tick, n.data[:]
+	h := q.freeHead
+	q.freeHead = q.arena[h].next
+	q.arena[h] = node{next: nilIdx, prev: nilIdx} // resets node
+	return h, nil
 }
 
 func (q *QuantumQueue) Size() int   { return q.size }
 func (q *QuantumQueue) Empty() bool { return q.size == 0 }
+
+// Push inserts or duplicates a handle at tick with payload.
+func (q *QuantumQueue) Push(tick int64, h Handle, val []byte) error {
+	if h >= CapItems {
+		return ErrNotFound
+	}
+	idx := h
+	n := &q.arena[idx]
+	if n.count > 0 && n.tick == tick {
+		copy(n.data[:], val)
+		n.count++
+		return nil
+	}
+	delta := uint64(tick) - q.baseTick
+	if delta>>63 == 1 {
+		return ErrPastWindow
+	} else if (delta-BucketCount)>>63 == 0 {
+		return ErrBeyondWindow
+	}
+	if n.count > 0 {
+		q.unlinkByIndex(idx, uint64(n.tick)-q.baseTick)
+		q.size -= int(n.count)
+	}
+	g := delta >> 12
+	l := (delta >> 6) & 0x3F
+	b := delta & 0x3F
+	bucket := idx32((g << 12) | (l << 6) | b)
+	n.next = q.buckets[bucket]
+	if n.next != nilIdx {
+		q.arena[n.next].prev = idx
+	}
+	n.prev = nilIdx
+	q.buckets[bucket] = idx
+	gb := &q.groups[g]
+	gb.l2[l] |= 1 << (63 - b)
+	gb.l1Summary |= 1 << (63 - l)
+	q.summary |= 1 << (63 - g)
+	n.tick = tick
+	n.count = 1
+	copy(n.data[:], val)
+	q.size++
+	return nil
+}
+
+// Update moves an active handle to a new tick with new payload or duplicates.
+func (q *QuantumQueue) Update(tick int64, h Handle, val []byte) error {
+	if h >= CapItems {
+		return ErrNotFound
+	}
+	idx := h
+	n := &q.arena[idx]
+	if n.count == 0 {
+		return ErrNotFound
+	}
+	if n.tick == tick {
+		copy(n.data[:], val)
+		return nil
+	}
+	q.unlinkByIndex(idx, uint64(n.tick)-q.baseTick)
+	q.size -= int(n.count)
+	delta := uint64(tick) - q.baseTick
+	if delta>>63 == 1 {
+		return ErrPastWindow
+	} else if (delta-BucketCount)>>63 == 0 {
+		return ErrBeyondWindow
+	}
+	g := delta >> 12
+	l := (delta >> 6) & 0x3F
+	b := delta & 0x3F
+	bucket := idx32((g << 12) | (l << 6) | b)
+	n.next = q.buckets[bucket]
+	if n.next != nilIdx {
+		q.arena[n.next].prev = idx
+	}
+	n.prev = nilIdx
+	q.buckets[bucket] = idx
+	gb := &q.groups[g]
+	gb.l2[l] |= 1 << (63 - b)
+	gb.l1Summary |= 1 << (63 - l)
+	q.summary |= 1 << (63 - g)
+	n.tick = tick
+	n.count = 1
+	copy(n.data[:], val)
+	q.size++
+	return nil
+}
+
+// PeepMin returns the minimum without removing.
+func (q *QuantumQueue) PeepMin() (Handle, int64, []byte) {
+	if q.size == 0 || q.summary == 0 {
+		return nilIdx, 0, nil
+	}
+	g := bits.LeadingZeros64(q.summary)
+	gb := &q.groups[g]
+	l := bits.LeadingZeros64(gb.l1Summary)
+	b := bits.LeadingZeros64(gb.l2[l])
+	bucket := idx32((uint64(g) << 12) | (uint64(l) << 6) | uint64(b))
+	idx := q.buckets[bucket]
+	n := &q.arena[idx]
+	return idx, n.tick, n.data[:]
+}
+
+// PopMin removes and returns the minimum handle/value.
+func (q *QuantumQueue) PopMin() (Handle, int64, []byte) {
+	h, t, v := q.PeepMin()
+	if h == nilIdx {
+		return nilIdx, 0, nil
+	}
+	delta := uint64(t) - q.baseTick
+	q.unlinkByIndex(h, delta)
+	q.size--
+	return h, t, v
+}
+
+// unlinkByIndex detaches a node from its bucket and clears bitmaps.
+func (q *QuantumQueue) unlinkByIndex(idx Handle, delta uint64) {
+	g := delta >> 12
+	l := (delta >> 6) & 0x3F
+	b := delta & 0x3F
+	bucket := idx32((g << 12) | (l << 6) | b)
+	n := &q.arena[idx]
+	if n.prev != nilIdx {
+		q.arena[n.prev].next = n.next
+	} else {
+		q.buckets[bucket] = n.next
+	}
+	if n.next != nilIdx {
+		q.arena[n.next].prev = n.prev
+	}
+	if q.buckets[bucket] == nilIdx {
+		gb := &q.groups[g]
+		gb.l2[l] &^= 1 << (63 - b)
+		if gb.l2[l] == 0 {
+			gb.l1Summary &^= 1 << (63 - l)
+			if gb.l1Summary == 0 {
+				q.summary &^= 1 << (63 - g)
+			}
+		}
+	}
+	n.count = 0
+	n.next = q.freeHead
+	q.freeHead = idx
+}
