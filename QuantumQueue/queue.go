@@ -26,7 +26,7 @@ const (
 	GroupCount  = 64
 	LaneCount   = 64
 	BucketCount = GroupCount * LaneCount * LaneCount // 262144
-	CapItems    = 1 << 16
+	CapItems    = 1 << 14
 	PayloadSize = 44
 )
 
