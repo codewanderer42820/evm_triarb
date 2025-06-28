@@ -26,7 +26,7 @@ const (
 	numGroups = numBuckets / 64
 
 	// Max number of simultaneously active handles in the arena. Fits cleanly in a uint16 index.
-	capItems = 1 << 16
+	capItems = 1 << 12
 )
 
 // idx32 is the internal arena index type for tracking bucket nodes.
