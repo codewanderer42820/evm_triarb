@@ -1,6 +1,3 @@
-// Refactored tests for the footgun edition of QuantumQueue
-// This file contains both unit and benchmark tests updated to match the current API.
-
 // -------------------------
 // File: queue_test.go
 // -------------------------
@@ -54,7 +51,6 @@ func TestDuplicatePush(t *testing.T) {
 	if !bytes.Equal(pdata[:1], p2) {
 		t.Fatalf("payload after duplicate push = %v, want %v", pdata[:1], p2)
 	}
-	// clean up
 	ph, pt, _ := q.PeepMin()
 	q.UnlinkMin(ph, pt)
 }
@@ -70,7 +66,6 @@ func TestPushIfFree(t *testing.T) {
 	if ok2 || q.Size() != 1 {
 		t.Fatalf("PushIfFree second = (%v, size=%d), want false and size=1", ok2, q.Size())
 	}
-	// clean up
 	ph, pt, _ := q.PeepMin()
 	q.UnlinkMin(ph, pt)
 }
@@ -85,6 +80,47 @@ func TestMoveTick(t *testing.T) {
 		t.Fatalf("after MoveTick = (%v,%v,%v), want (%v,5,%v)", ph, pt, pdata[:1], h, payload(3))
 	}
 	q.UnlinkMin(ph, pt)
+}
+
+// Test that moving two handles to the same new tick works correctly.
+func TestMoveTickDuplicate(t *testing.T) {
+	q := NewQuantumQueue()
+	h1, _ := q.Borrow()
+	h2, _ := q.Borrow()
+	origTick := int64(5)
+	newTick := int64(10)
+	q.Push(origTick, h1, payload(1))
+	q.Push(origTick, h2, payload(2))
+	// move both to newTick
+	q.MoveTick(h1, newTick)
+	q.MoveTick(h2, newTick)
+	// pop first
+	ph1, pt1, data1 := q.PeepMin()
+	if pt1 != newTick {
+		t.Fatalf("first pop tick = %d, want %d", pt1, newTick)
+	}
+	if ph1 != h2 && ph1 != h1 {
+		t.Fatalf("first pop handle = %v, want one of {%v,%v}", ph1, h1, h2)
+	}
+	if data1 == nil {
+		t.Fatal("first pop data is nil")
+	}
+	q.UnlinkMin(ph1, pt1)
+	// pop second
+	ph2, pt2, data2 := q.PeepMin()
+	if pt2 != newTick {
+		t.Fatalf("second pop tick = %d, want %d", pt2, newTick)
+	}
+	if (ph2 != h1 && ph2 != h2) || ph2 == ph1 {
+		t.Fatalf("second pop handle = %v, want the other handle", ph2)
+	}
+	if data2 == nil {
+		t.Fatal("second pop data is nil")
+	}
+	q.UnlinkMin(ph2, pt2)
+	if !q.Empty() {
+		t.Fatal("queue not empty after popping both entries")
+	}
 }
 
 func TestSizeEmpty(t *testing.T) {

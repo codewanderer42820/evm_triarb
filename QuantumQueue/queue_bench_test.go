@@ -39,11 +39,9 @@ func BenchmarkPushPopSequential(b *testing.B) {
 	hs := borrowMany(b, q, N)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// Push sequential ticks
 		for j, h := range hs {
 			q.Push(int64(j), h, nil)
 		}
-		// Pop all safely
 		popAllSafe(q, N)
 	}
 	totalOps := int64(2 * N)
@@ -58,11 +56,9 @@ func BenchmarkPushPopRandom(b *testing.B) {
 	hs := borrowMany(b, q, N)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// Push random ticks
 		for _, h := range hs {
 			q.Push(int64(rng.Intn(1<<13)), h, nil)
 		}
-		// Pop all safely
 		popAllSafe(q, N)
 	}
 	totalOps := int64(2 * N)
@@ -76,11 +72,9 @@ func BenchmarkDuplicateBurst(b *testing.B) {
 	h := mustBorrow(b, q)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// Push duplicates
 		for j := 0; j < Dups; j++ {
 			q.Push(42, h, nil)
 		}
-		// Pop Dups items safely
 		popAllSafe(q, Dups)
 	}
 	totalOps := int64(2 * Dups)
@@ -92,18 +86,15 @@ func BenchmarkUpdateRelocate(b *testing.B) {
 	const N = 1 << 12
 	q := NewQuantumQueue()
 	hs := borrowMany(b, q, N)
-	// Pre-populate queue
 	for i, h := range hs {
 		q.Push(int64(i), h, nil)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// Relocate each element twice
 		for j, h := range hs {
 			q.Push(int64(j+8), h, nil)
 			q.Push(int64(j), h, nil)
 		}
-		// Pop all safely
 		popAllSafe(q, N)
 	}
 	totalOps := int64(2 * N)
@@ -119,7 +110,6 @@ func BenchmarkMixedWorkload(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		totalPush := 0
-		// Mixed pushes
 		for j, h := range hs {
 			tk := rng.Int63n(256)
 			q.Push(tk, h, nil)
@@ -135,10 +125,33 @@ func BenchmarkMixedWorkload(b *testing.B) {
 				totalPush++
 			}
 		}
-		// Pop all safely
 		popAllSafe(q, totalPush)
 	}
 	totalOps := int64(N * 3)
 	perOp := float64(b.Elapsed().Nanoseconds()) / float64(int64(b.N)*totalOps)
+	b.ReportMetric(perOp, "queue_ns/op")
+}
+
+// BenchmarkMoveTick measures the cost of relocating existing elements via MoveTick
+func BenchmarkMoveTick(b *testing.B) {
+	const N = 1 << 12
+	q := NewQuantumQueue()
+	hs := borrowMany(b, q, N)
+	// Pre-populate queue
+	for i, h := range hs {
+		q.Push(int64(i), h, nil)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for j, h := range hs {
+			q.MoveTick(h, int64((j+1)%N))
+		}
+	}
+	// verify size unchanged
+	if sz := q.Size(); sz != N {
+		b.Fatalf("expected size=%d, got=%d", N, sz)
+	}
+	totalOps := int64(b.N) * int64(N)
+	perOp := float64(b.Elapsed().Nanoseconds()) / float64(totalOps)
 	b.ReportMetric(perOp, "queue_ns/op")
 }

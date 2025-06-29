@@ -115,26 +115,43 @@ func (q *QuantumQueue) PushIfFree(tick int64, h Handle, val []byte) bool {
 	return true
 }
 
+// MoveTick atomically “moves” an existing handle to a new tick.
+// It captures the old count, unlinks the node, adjusts size,
+// then relinks it into the correct bucket and restores size.
 func (q *QuantumQueue) MoveTick(h Handle, newTick int64) {
+	// 1) grab the node and its old count
 	n := &q.arena[h]
-	deltaOld := uint64(n.tick - int64(q.baseTick))
+	oldCount := n.count
+
+	// 2) unlink from its old bucket
+	//    compute delta = n.tick - baseTick
+	deltaOld := uint64(n.tick) - q.baseTick
 	q.unlinkByIndex(h, deltaOld)
-	q.size -= int(n.count)
+	q.size -= int(oldCount)
+
+	// 3) compute the new bucket index
+	//    top‐level groups of 4096 ticks (2^12), lanes of 64 ticks (2^6)
 	delta := uint64(newTick) - q.baseTick
-	g := delta >> 12
-	l := (delta >> 6) & 63
-	b := delta & 63
-	bucket := idx32((g << 12) | (l << 6) | b)
-	n.next = q.buckets[bucket]
+	g := delta >> 12       // which of the 64 groups
+	l := (delta >> 6) & 63 // which of the 64 lanes within that group
+	b := delta & 63        // which of the 64 buckets within that lane
+	idx := idx32((g << 12) | (l << 6) | b)
+
+	// 4) splice into the head of the new bucket
+	n.next = q.buckets[idx]
 	if n.next != nilIdx {
 		q.arena[n.next].prev = h
 	}
 	n.prev = nilIdx
-	q.buckets[bucket] = h
+	q.buckets[idx] = h
+
+	// 5) flip the three summary bits
 	gb := &q.groups[g]
 	gb.l2[l] |= 1 << (63 - b)
 	gb.l1Summary |= 1 << (63 - l)
 	q.summary |= 1 << (63 - g)
+
+	// 6) update the node and restore its size contribution
 	n.tick = newTick
 	n.count = 1
 	q.size++
