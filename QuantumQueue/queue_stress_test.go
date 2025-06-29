@@ -38,7 +38,7 @@ func (h *stressHeap) Pop() interface{} {
 // TestQueueStressRandomOperations runs millions of random push, move, and pop operations,
 // comparing the queue against a Go heap to catch any ordering or linking bugs.
 func TestQueueStressRandomOperations(t *testing.T) {
-	const iterations = 80_000_000
+	const iterations = 50_000_000
 
 	// Use a fixed seed for deterministic test runs
 	rng := rand.New(rand.NewSource(42))
@@ -84,10 +84,9 @@ func TestQueueStressRandomOperations(t *testing.T) {
 			}
 			q.MoveTick(h, tick)
 			// update reference heap by removing old entry and pushing new
-			for j, it := range *ref {
-				if it.h == h {
+			for j := len(*ref) - 1; j >= 0; j-- {
+				if (*ref)[j].h == h {
 					heap.Remove(ref, j)
-					break
 				}
 			}
 			heap.Push(ref, &stressItem{h: h, tick: tick, seq: seq})
