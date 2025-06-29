@@ -4,255 +4,248 @@ import (
 	"testing"
 )
 
-func TestNewQuantumQueueEmpty(t *testing.T) {
+func TestNewQueueEmptyAndSize(t *testing.T) {
 	q := NewQuantumQueue()
 	if !q.Empty() {
-		t.Errorf("New queue should be empty")
+		t.Error("New queue should be empty")
 	}
 	if got := q.Size(); got != 0 {
-		t.Errorf("Size = %d; want 0", got)
-	}
-
-	// PeepMinSafe on empty
-	h, tick, data := q.PeepMinSafe()
-	if h != nilIdx {
-		t.Errorf("PeepMinSafe handle = %v; want nilIdx", h)
-	}
-	if tick != 0 {
-		t.Errorf("PeepMinSafe tick = %d; want 0", tick)
-	}
-	if *data != zeroPayload {
-		t.Errorf("PeepMinSafe payload = %v; want all zeros", *data)
-	}
-}
-
-func TestBorrowAndBorrowSafe(t *testing.T) {
-	q := NewQuantumQueue()
-
-	h1, err := q.Borrow()
-	if err != nil {
-		t.Fatalf("Borrow error: %v", err)
-	}
-	if h1 == nilIdx {
-		t.Errorf("Borrow returned nilIdx")
-	}
-
-	// BorrowSafe same on fresh queue
-	h2, err := q.BorrowSafe()
-	if err != nil {
-		t.Fatalf("BorrowSafe error: %v", err)
-	}
-	if h2 == nilIdx {
-		t.Errorf("BorrowSafe returned nilIdx on non-exhausted arena")
+		t.Errorf("Size of new queue = %d; want 0", got)
 	}
 }
 
 func TestBorrowSafeExhaustion(t *testing.T) {
 	q := NewQuantumQueue()
-	// exhaust the arena
-	for i := Handle(0); i < CapItems; i++ {
-		_, err := q.BorrowSafe()
+	// Exhaust all handles
+	for i := 0; i < CapItems; i++ {
+		h, err := q.BorrowSafe()
 		if err != nil {
-			t.Fatalf("BorrowSafe failed at iteration %d: %v", i, err)
+			t.Fatalf("unexpected error at borrow #%d: %v", i, err)
+		}
+		if h == nilIdx {
+			t.Fatalf("BorrowSafe returned nilIdx at iteration %d", i)
 		}
 	}
-	// one more should error
+	// Next borrow should fail
 	if _, err := q.BorrowSafe(); err == nil {
-		t.Errorf("BorrowSafe expected error on exhaustion, got nil")
+		t.Error("expected error after exhausting handles, got nil")
 	}
 }
 
-func TestPushAndPeepMin(t *testing.T) {
+func TestBorrowResetsNode(t *testing.T) {
 	q := NewQuantumQueue()
-	h, err := q.BorrowSafe()
+	h1, err := q.Borrow()
 	if err != nil {
-		t.Fatalf("BorrowSafe: %v", err)
+		t.Fatalf("Borrow returned unexpected error: %v", err)
 	}
-
-	val := []byte{1, 2, 3}
-	q.Push(10, h, val)
-
-	if q.Empty() {
-		t.Errorf("Queue should not be empty after Push")
+	// Node fields reset
+	n1 := &q.arena[h1]
+	if n1.tick != -1 {
+		t.Errorf("Borrow did not reset tick; got %d; want -1", n1.tick)
 	}
-	if got := q.Size(); got != 1 {
-		t.Errorf("Size = %d; want 1", got)
+	if n1.prev != nilIdx || n1.next != nilIdx {
+		t.Errorf("Borrow did not reset pointers; prev=%v next=%v; want both nilIdx", n1.prev, n1.next)
 	}
-
-	// direct PeepMin
-	h2, tick2, data2 := q.PeepMin()
-	if h2 != h {
-		t.Errorf("PeepMin handle = %v; want %v", h2, h)
-	}
-	if tick2 != 10 {
-		t.Errorf("PeepMin tick = %d; want 10", tick2)
-	}
-	arr := *data2
-	for i, b := range val {
-		if arr[i] != b {
-			t.Errorf("data[%d] = %d; want %d", i, arr[i], b)
-		}
-	}
-	// rest should be zero
-	for i := len(val); i < len(arr); i++ {
-		if arr[i] != 0 {
-			t.Errorf("data[%d] = %d; want 0", i, arr[i])
-		}
+	// Next free handle should be h1+1
+	h2, _ := q.Borrow()
+	if h2 != h1+1 {
+		t.Errorf("Borrow order wrong; second handle = %v; want %v", h2, h1+1)
 	}
 }
 
-func TestPushOverwrite(t *testing.T) {
-	q := NewQuantumQueue()
-	h, _ := q.BorrowSafe()
-	first := []byte{9, 9}
-	second := []byte{4, 5, 6}
-
-	q.Push(42, h, first)
-	if q.Size() != 1 {
-		t.Fatalf("Size after first push = %d; want 1", q.Size())
-	}
-	q.Push(42, h, second) // same tick: overwrite
-	if q.Size() != 1 {
-		t.Errorf("Size after overwrite = %d; want still 1", q.Size())
-	}
-
-	h2, tick2, data2 := q.PeepMin()
-	if h2 != h || tick2 != 42 {
-		t.Errorf("PeepMin after overwrite = (%v,%d); want (%v,42)", h2, tick2, h)
-	}
-	arr := *data2
-	for i, b := range second {
-		if arr[i] != b {
-			t.Errorf("overwritten data[%d] = %d; want %d", i, arr[i], b)
-		}
-	}
-}
-
-func TestPushReplaceDifferentTick(t *testing.T) {
-	q := NewQuantumQueue()
-	h, _ := q.BorrowSafe()
-
-	// First push to tick 100
-	q.Push(100, h, []byte{7})
-	if q.Size() != 1 {
-		t.Fatalf("after first push, Size = %d; want 1", q.Size())
-	}
-	_, t1, _ := q.PeepMin()
-	if t1 != 100 {
-		t.Fatalf("first PeepMin tick = %d; want 100", t1)
-	}
-	// verify bucket for 100 is set
-	if q.buckets[idx32(100)] != h {
-		t.Errorf("bucket[100] = %v; want %v", q.buckets[idx32(100)], h)
-	}
-
-	// Now push same handle to tick 200 ⇒ should remove old tick=100 (covers the n.tick>=0 branch)
-	q.Push(200, h, []byte{9})
-	if q.Size() != 1 {
-		t.Fatalf("after replace push, Size = %d; want still 1", q.Size())
-	}
-
-	// old bucket must have been cleared
-	if q.buckets[idx32(100)] != nilIdx {
-		t.Errorf("bucket[100] not cleared; got %v", q.buckets[idx32(100)])
-	}
-
-	// PeepMin now returns tick=200
-	h2, t2, data := q.PeepMin()
-	if h2 != h || t2 != 200 {
-		t.Errorf("PeepMin = (%v,%d); want (%v,200)", h2, t2, h)
-	}
-	if (*data)[0] != 9 {
-		t.Errorf("payload first byte = %d; want 9", (*data)[0])
-	}
-}
-
-func TestMultiplePushAndUnlink(t *testing.T) {
+func TestBasicPushPeepMinMoveTickUnlink(t *testing.T) {
 	q := NewQuantumQueue()
 	h1, _ := q.BorrowSafe()
 	h2, _ := q.BorrowSafe()
 
-	q.Push(20, h2, []byte{2})
-	q.Push(10, h1, []byte{1})
+	// Push h1 at tick 10 with "foo"
+	q.Push(10, h1, []byte("foo"))
+	if q.Empty() {
+		t.Error("queue should not be empty after first push")
+	}
+	if got := q.Size(); got != 1 {
+		t.Errorf("Size after one push = %d; want 1", got)
+	}
+	h, tick, data := q.PeepMin()
+	if h != h1 || tick != 10 {
+		t.Errorf("PeepMin = (%v, %d); want (%v, 10)", h, tick, h1)
+	}
+	if string(data[:3]) != "foo" {
+		t.Errorf("PeepMin data = %q; want 'foo'", data[:3])
+	}
+
+	// Push h2 at tick 5 with "bar"
+	q.Push(5, h2, []byte("bar"))
 	if got := q.Size(); got != 2 {
-		t.Fatalf("Size after two pushes = %d; want 2", got)
+		t.Errorf("Size after two pushes = %d; want 2", got)
+	}
+	h, tick, data = q.PeepMin()
+	if h != h2 || tick != 5 {
+		t.Errorf("PeepMin = (%v, %d); want (%v, 5)", h, tick, h2)
+	}
+	if string(data[:3]) != "bar" {
+		t.Errorf("PeepMin data = %q; want 'bar'", data[:3])
 	}
 
-	// first min should be h1
-	hm, tm, _ := q.PeepMin()
-	if hm != h1 || tm != 10 {
-		t.Errorf("First PeepMin = (%v,%d); want (%v,10)", hm, tm, h1)
+	// Move h2 to tick 20
+	q.MoveTick(h2, 20)
+	if got := q.Size(); got != 2 {
+		t.Errorf("Size after MoveTick = %d; want 2", got)
+	}
+	h, tick, _ = q.PeepMin()
+	if h != h1 || tick != 10 {
+		t.Errorf("PeepMin after MoveTick = (%v, %d); want (%v, 10)", h, tick, h1)
 	}
 
-	// remove it
-	q.UnlinkMin(hm, tm)
+	// UnlinkMin h1
+	q.UnlinkMin(h1, 10)
 	if got := q.Size(); got != 1 {
 		t.Errorf("Size after UnlinkMin = %d; want 1", got)
 	}
+	h, tick, _ = q.PeepMin()
+	if h != h2 || tick != 20 {
+		t.Errorf("PeepMin after UnlinkMin = (%v, %d); want (%v, 20)", h, tick, h2)
+	}
 
-	// next min
-	hm2, tm2, _ := q.PeepMin()
-	if hm2 != h2 || tm2 != 20 {
-		t.Errorf("Second PeepMin = (%v,%d); want (%v,20)", hm2, tm2, h2)
+	// UnlinkMin h2 leaves queue empty
+	q.UnlinkMin(h2, 20)
+	if !q.Empty() || q.Size() != 0 {
+		t.Errorf("Queue not empty after removing all entries: Empty=%v, Size=%d", q.Empty(), q.Size())
 	}
 }
 
-func TestUnlinkMinNoop(t *testing.T) {
-	q := NewQuantumQueue()
-	origHead := q.freeHead
-	// tick<0 should do nothing
-	q.UnlinkMin(0, -1)
-	if q.freeHead != origHead {
-		t.Errorf("UnlinkMin with tick<0 changed freeHead")
-	}
-}
-
-func TestUnlinkMin(t *testing.T) {
+func TestUpdateSameTick(t *testing.T) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
-	q.Push(5, h, []byte{7})
-	q.UnlinkMin(h, 5)
-	if !q.Empty() {
-		t.Errorf("Queue should be empty after UnlinkMin")
+	q.Push(3, h, []byte("abc"))
+	sz := q.Size()
+	q.Push(3, h, []byte("xyz"))
+	if got := q.Size(); got != sz {
+		t.Errorf("Size after update Push = %d; want %d", got, sz)
 	}
-	if q.Size() != 0 {
-		t.Errorf("Size after UnlinkMin = %d; want 0", q.Size())
+	ph, _, data := q.PeepMin()
+	if ph != h {
+		t.Errorf("PeepMin handle = %v; want %v", ph, h)
 	}
-}
-
-func TestMoveTick(t *testing.T) {
-	q := NewQuantumQueue()
-	h, _ := q.BorrowSafe()
-	// initial insert via Push
-	q.Push(15, h, []byte{8})
-
-	// move to a new tick
-	q.MoveTick(h, 25)
-	if q.Size() != 1 {
-		t.Errorf("Size after MoveTick = %d; want 1", q.Size())
-	}
-	hm, tm, data := q.PeepMin()
-	if hm != h || tm != 25 {
-		t.Errorf("PeepMin after MoveTick = (%v,%d); want (%v,25)", hm, tm, h)
-	}
-	if (*data)[0] != 8 {
-		t.Errorf("payload after MoveTick = %v; want first byte 8", (*data)[0])
-	}
-
-	// moving again to same tick should do nothing
-	q.MoveTick(h, 25)
-	if q.Size() != 1 {
-		t.Errorf("Size after redundant MoveTick = %d; want still 1", q.Size())
+	if string(data[:3]) != "xyz" {
+		t.Errorf("Updated data = %q; want 'xyz'", data[:3])
 	}
 }
 
-func TestPeepMinSafeOnNonEmpty(t *testing.T) {
+func TestPushReassignExistingHandle(t *testing.T) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
-	q.Push(33, h, []byte{3})
-	h2, t2, d2 := q.PeepMinSafe()
-	h3, t3, d3 := q.PeepMin()
-	if h2 != h3 || t2 != t3 || d2 != d3 {
-		t.Errorf("PeepMinSafe != PeepMin on non-empty")
+	q.Push(30, h, []byte("old"))
+	sz := q.Size()
+	// Reassign to new tick
+	q.Push(40, h, []byte("new"))
+	if q.Size() != sz {
+		t.Errorf("Size after reassign Push = %d; want %d", q.Size(), sz)
+	}
+	oldB := idx32(30)
+	newB := idx32(40)
+	if q.buckets[oldB] != nilIdx {
+		t.Errorf("Old bucket not emptied; got %v; want nilIdx", q.buckets[oldB])
+	}
+	if q.buckets[newB] != h {
+		t.Errorf("New bucket head = %v; want %v", q.buckets[newB], h)
+	}
+	ph, tick, data := q.PeepMin()
+	if ph != h || tick != 40 {
+		t.Errorf("PeepMin after reassign = (%v, %d); want (%v, 40)", ph, tick, h)
+	}
+	if string(data[:3]) != "new" {
+		t.Errorf("Reassigned data = %q; want 'new'", data[:3])
+	}
+	n := &q.arena[h]
+	if n.prev != nilIdx || n.next != nilIdx {
+		t.Errorf("Node pointers not reset on reassign; prev=%v next=%v; want nilIdx", n.prev, n.next)
+	}
+}
+
+func TestDuplicateTicks_UnlinkAndMoveTick(t *testing.T) {
+	q := NewQuantumQueue()
+	h1, _ := q.BorrowSafe()
+	h2, _ := q.BorrowSafe()
+	q.Push(7, h1, []byte("A"))
+	q.Push(7, h2, []byte("B"))
+	if got := q.Size(); got != 2 {
+		t.Fatalf("Size with duplicates = %d; want 2", got)
+	}
+	h, tick, data := q.PeepMin()
+	if h != h2 || tick != 7 || string(data[:1]) != "B" {
+		t.Errorf("PeepMin duplicate head = (%v, %d, %q); want (%v, 7, 'B')", h, tick, data[:1], h2)
+	}
+
+	q.UnlinkMin(h1, 7)
+	if got := q.Size(); got != 1 {
+		t.Errorf("Size after UnlinkMin non-head = %d; want 1", got)
+	}
+	h, tick, _ = q.PeepMin()
+	if h != h2 || tick != 7 {
+		t.Errorf("Remaining after UnlinkMin = (%v, %d); want (%v, 7)", h, tick, h2)
+	}
+
+	h3, _ := q.BorrowSafe()
+	if h3 != h1 {
+		t.Fatalf("Expected reuse of freed handle %v; got %v", h1, h3)
+	}
+	q.Push(7, h3, []byte("A2"))
+
+	q.MoveTick(h2, 8)
+	if got := q.Size(); got != 2 {
+		t.Errorf("Size after MoveTick non-head = %d; want 2", got)
+	}
+	h, tick, _ = q.PeepMin()
+	if h != h3 || tick != 7 {
+		t.Errorf("PeepMin after MoveTick non-head = (%v, %d); want (%v, 7)", h, tick, h3)
+	}
+}
+
+func TestUnlinkDoublyLinkedPrevAfterRemove(t *testing.T) {
+	q := NewQuantumQueue()
+	h1, _ := q.BorrowSafe()
+	h2, _ := q.BorrowSafe()
+	h3, _ := q.BorrowSafe()
+	// Build chain h1->h2->h3
+	q.Push(100, h1, []byte{1})
+	q.Push(100, h2, []byte{2})
+	q.Push(100, h3, []byte{3})
+	// Validate chain
+	if q.arena[h2].prev != h3 || q.arena[h2].next != h1 {
+		t.Fatalf("Initial chain incorrect: prev=%v next=%v; want prev=%v next=%v", q.arena[h2].prev, q.arena[h2].next, h3, h1)
+	}
+	// Remove middle
+	q.UnlinkMin(h2, 100)
+	b := idx32(100)
+	if q.buckets[b] != h3 {
+		t.Errorf("Bucket head after removal = %v; want %v", q.buckets[b], h3)
+	}
+	// Check new links
+	if q.arena[h3].next != h1 {
+		t.Errorf("After unlink, h3.next = %v; want %v", q.arena[h3].next, h1)
+	}
+	if q.arena[h1].prev != h3 {
+		t.Errorf("After unlink, h1.prev = %v; want %v", q.arena[h1].prev, h3)
+	}
+	// Freed handle reused
+	h4, _ := q.BorrowSafe()
+	if h4 != h2 {
+		t.Errorf("Expected freed handle %v reused; got %v", h2, h4)
+	}
+}
+
+func TestMoveTickNoOp(t *testing.T) {
+	q := NewQuantumQueue()
+	h, _ := q.BorrowSafe()
+	q.Push(5, h, []byte("Z"))
+	sz := q.Size()
+	q.MoveTick(h, 5)
+	if got := q.Size(); got != sz {
+		t.Errorf("Size after MoveTick no-op = %d; want %d", got, sz)
+	}
+	h2, tick2, data := q.PeepMin()
+	if h2 != h || tick2 != 5 || string(data[:1]) != "Z" {
+		t.Errorf("PeepMin after MoveTick no-op = (%v, %d, %q); want (%v, 5, 'Z')", h2, tick2, data[:1], h)
 	}
 }
