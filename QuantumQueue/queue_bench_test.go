@@ -1,93 +1,135 @@
 package quantumqueue
 
 import (
+	"math/rand"
 	"testing"
+	"time"
 )
 
-var benchPayload = [52]byte{}
+const benchSize = CapItems // from queue.go fileciteturn1file0
 
-// BenchmarkBorrowSafe measures safe handle allocation with exhaustion check.
-// Once exhaustion occurs, BorrowSafe returns an error, which we ignore, so this
-// loop never panics and measures the common-case path.
-func BenchmarkBorrowSafe(b *testing.B) {
+// BenchmarkEmpty measures the cost of checking emptiness.
+func BenchmarkEmpty(b *testing.B) {
 	q := NewQuantumQueue()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = q.BorrowSafe()
+		_ = q.Empty()
 	}
 }
 
-// BenchmarkPush tests pushing into an otherwise-empty queue.
-func BenchmarkPush(b *testing.B) {
+// BenchmarkSize measures the cost of querying size.
+func BenchmarkSize(b *testing.B) {
 	q := NewQuantumQueue()
-	h, _ := q.BorrowSafe()
-	data := benchPayload[:]
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		q.Push(int64(i%BucketCount), h, data)
+		_ = q.Size()
 	}
 }
 
-// BenchmarkPushUnique tests pushing into distinct slots.
+// BenchmarkPushUnique benchmarks Push on unique ticks (cold insert).
 func BenchmarkPushUnique(b *testing.B) {
 	q := NewQuantumQueue()
-	handles := make([]Handle, BucketCount)
+	handles := make([]Handle, benchSize)
 	for i := range handles {
-		handles[i], _ = q.BorrowSafe()
-	}
-	data := benchPayload[:]
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		idx := i % BucketCount
-		tick := int64(idx)
-		q.Push(tick, handles[idx], data)
-	}
-}
-
-// BenchmarkMoveTick moves M items around to new ticks.
-func BenchmarkMoveTick(b *testing.B) {
-	const M = 1000
-	q := NewQuantumQueue()
-	handles := make([]Handle, M)
-	for i := 0; i < M; i++ {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
-		q.Push(int64(i), h, benchPayload[:])
 	}
+	val := make([]byte, 48)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		h := handles[i%M]
-		newTick := int64((i + 1) % M)
-		q.MoveTick(h, newTick)
+		h := handles[i%benchSize]
+		q.Push(int64(i%benchSize), h, val)
 	}
 }
 
-// BenchmarkPeepMin repeatedly peeks the minimum in an N-item queue.
-func BenchmarkPeepMin(b *testing.B) {
-	const N = 10000
+// BenchmarkPushUpdate benchmarks Push for in-place update (same tick).
+func BenchmarkPushUpdate(b *testing.B) {
 	q := NewQuantumQueue()
-	for i := 0; i < N; i++ {
+	handles := make([]Handle, benchSize)
+	for i := range handles {
 		h, _ := q.BorrowSafe()
-		q.Push(int64(i), h, benchPayload[:])
+		handles[i] = h
+		q.Push(int64(i), h, make([]byte, 48))
 	}
+	val := make([]byte, 48)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _, _ = q.PeepMin()
+		h := handles[i%benchSize]
+		q.Push(int64(i%benchSize), h, val)
 	}
 }
 
-// BenchmarkPeepAndUnlink simulates continuous pop/push at tick 0 using a fixed bucket range.
-func BenchmarkPeepAndUnlink(b *testing.B) {
+// BenchmarkPushSameTickZero benchmarks repeated Push on tick 0.
+func BenchmarkPushSameTickZero(b *testing.B) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
-	q.Push(0, h, benchPayload[:])
+	val := make([]byte, 48)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// Pop current min
-		h0, t0, _ := q.PeepMin()
-		q.UnlinkMin(h0, t0)
-		// Push back into a valid bucket range to avoid out-of-bounds
-		newTick := int64(i % BucketCount)
-		q.Push(newTick, h0, benchPayload[:])
+		q.Push(0, h, val)
+	}
+}
+
+// BenchmarkPushSameTickMax benchmarks repeated Push on max tick (CapItems-1).
+func BenchmarkPushSameTickMax(b *testing.B) {
+	q := NewQuantumQueue()
+	h, _ := q.BorrowSafe()
+	val := make([]byte, 48)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		q.Push(int64(benchSize-1), h, val)
+	}
+}
+
+// BenchmarkPeepMin benchmarks retrieving the minimum element.
+func BenchmarkPeepMin(b *testing.B) {
+	q := NewQuantumQueue()
+	handles := make([]Handle, benchSize)
+	for i := range handles {
+		h, _ := q.BorrowSafe()
+		handles[i] = h
+		q.Push(int64(i), h, make([]byte, 48))
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		q.PeepMin()
+	}
+}
+
+// BenchmarkMoveTick benchmarks moving existing handles to new ticks.
+func BenchmarkMoveTick(b *testing.B) {
+	q := NewQuantumQueue()
+	handles := make([]Handle, benchSize)
+	for i := range handles {
+		h, _ := q.BorrowSafe()
+		handles[i] = h
+		q.Push(int64(i), h, make([]byte, 48))
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		h := handles[i%benchSize]
+		q.MoveTick(h, int64((i+1)%benchSize))
+	}
+}
+
+// BenchmarkPushRandom benchmarks Push on random ticks.
+func BenchmarkPushRandom(b *testing.B) {
+	q := NewQuantumQueue()
+	handles := make([]Handle, benchSize)
+	for i := range handles {
+		h, _ := q.BorrowSafe()
+		handles[i] = h
+	}
+	rand.Seed(time.Now().UnixNano())
+
+	ticks := make([]int64, benchSize)
+	for i := range ticks {
+		ticks[i] = rand.Int63n(benchSize)
+	}
+	val := make([]byte, 48)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		h := handles[i%benchSize]
+		q.Push(ticks[i%benchSize], h, val)
 	}
 }
