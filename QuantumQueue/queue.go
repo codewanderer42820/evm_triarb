@@ -1,8 +1,8 @@
 // SPDX-Free: Public-Domain
-// Ultra-low-latency QuantumQueue — field-aligned and padded for optimal access
-// • Struct layout re-ordered to match hot-path access patterns
-// • Arena nodes padded for cacheline alignment and minimized false sharing
-// • Fast field access (tick, data, next) grouped early in structs
+// Ultra-low-latency QuantumQueue — footgun edition (no safety checks)
+// • Tick range assumed valid
+// • Handle assumed valid and in-use
+// • Full speed, no guards — caller must enforce constraints
 
 package quantumqueue
 
@@ -13,8 +13,8 @@ import (
 const (
 	GroupCount  = 64
 	LaneCount   = 64
-	BucketCount = GroupCount * LaneCount * LaneCount // 262144
-	CapItems    = 1 << 14                            // 16384
+	BucketCount = GroupCount * LaneCount * LaneCount
+	CapItems    = 1 << 14
 )
 
 type Handle uint32
@@ -24,44 +24,31 @@ const nilIdx Handle = ^Handle(0)
 type idx32 = Handle
 
 type node struct {
-	// Hot fields first for PopMin/Push/Update
-	tick  int64    // 8 B - used in delta calc
-	data  [44]byte // 44 B - value payload
-	next  Handle   // 4 B - used for traversal
-	prev  Handle   // 4 B - used for unlink
-	count uint32   // 4 B - rarely used, after fast fields
-	_     [4]byte  // pad to 64 B cacheline total
+	tick  int64
+	data  [44]byte
+	next  Handle
+	prev  Handle
+	count uint32
+	_     [4]byte
 }
 
 type groupBlock struct {
-	l1Summary uint64            // hot-path access
-	l2        [LaneCount]uint64 // sparse
-	_         [448]byte         // pad to 512 B block size
+	l1Summary uint64
+	l2        [LaneCount]uint64
+	_         [448]byte
 }
 
 type QuantumQueue struct {
-	// Fast path summary
 	summary  uint64
 	baseTick uint64
 	size     int
 	freeHead Handle
-	_        [6]byte // padding to align arena
+	_        [6]byte
 
-	buckets [BucketCount]Handle    // 1:1 mapping of tick → head
-	groups  [GroupCount]groupBlock // 64 groups × 512 B = 32 KB total
-	arena   [CapItems]node         // intrusive handle allocator
+	buckets [BucketCount]Handle
+	groups  [GroupCount]groupBlock
+	arena   [CapItems]node
 }
-
-var (
-	ErrFull         = queueErr{"full"}
-	ErrPastWindow   = queueErr{"past"}
-	ErrBeyondWindow = queueErr{"future"}
-	ErrNotFound     = queueErr{"notfound"}
-)
-
-type queueErr struct{ msg string }
-
-func (e queueErr) Error() string { return e.msg }
 
 func NewQuantumQueue() *QuantumQueue {
 	q := &QuantumQueue{freeHead: 0}
@@ -76,9 +63,6 @@ func NewQuantumQueue() *QuantumQueue {
 }
 
 func (q *QuantumQueue) Borrow() (Handle, error) {
-	if q.freeHead == nilIdx {
-		return nilIdx, ErrFull
-	}
 	h := q.freeHead
 	q.freeHead = q.arena[h].next
 	q.arena[h] = node{next: nilIdx, prev: nilIdx}
@@ -88,33 +72,21 @@ func (q *QuantumQueue) Borrow() (Handle, error) {
 func (q *QuantumQueue) Size() int   { return q.size }
 func (q *QuantumQueue) Empty() bool { return q.size == 0 }
 
-func (q *QuantumQueue) Push(tick int64, h Handle, val []byte) error {
-	if uint32(h) >= CapItems {
-		return ErrNotFound
-	}
+func (q *QuantumQueue) Push(tick int64, h Handle, val []byte) {
 	n := &q.arena[h]
 	if n.count > 0 && n.tick == tick {
 		copy(n.data[:], val)
 		n.count++
-		return nil // Fast path: duplicate tick
+		return
 	}
 
-	delta := uint64(tick) - q.baseTick
-	if delta>>18 != 0 {
-		if int64(delta) < 0 {
-			return ErrPastWindow
-		}
-		return ErrBeyondWindow
-	}
-
-	// Handle relocation if already linked
 	if n.count > 0 {
 		deltaOld := uint64(n.tick - int64(q.baseTick))
 		q.unlinkByIndex(h, deltaOld)
 		q.size -= int(n.count)
 	}
 
-	// Fast-path bucket insertion
+	delta := uint64(tick) - q.baseTick
 	g := delta >> 12
 	l := (delta >> 6) & 63
 	b := delta & 63
@@ -136,20 +108,13 @@ func (q *QuantumQueue) Push(tick int64, h Handle, val []byte) error {
 	n.count = 1
 	copy(n.data[:], val)
 	q.size++
-	return nil
 }
 
-func (q *QuantumQueue) Update(tick int64, h Handle, val []byte) error {
-	if uint32(h) >= CapItems {
-		return ErrNotFound
-	}
+func (q *QuantumQueue) Update(tick int64, h Handle, val []byte) {
 	n := &q.arena[h]
-	if n.count == 0 {
-		return ErrNotFound
-	}
 	if n.tick == tick {
 		copy(n.data[:], val)
-		return nil // Fast path: in-place update
+		return
 	}
 
 	deltaOld := uint64(n.tick - int64(q.baseTick))
@@ -157,13 +122,6 @@ func (q *QuantumQueue) Update(tick int64, h Handle, val []byte) error {
 	q.size -= int(n.count)
 
 	delta := uint64(tick) - q.baseTick
-	if delta>>18 != 0 {
-		if int64(delta) < 0 {
-			return ErrPastWindow
-		}
-		return ErrBeyondWindow
-	}
-
 	g := delta >> 12
 	l := (delta >> 6) & 63
 	b := delta & 63
@@ -185,13 +143,9 @@ func (q *QuantumQueue) Update(tick int64, h Handle, val []byte) error {
 	n.count = 1
 	copy(n.data[:], val)
 	q.size++
-	return nil
 }
 
 func (q *QuantumQueue) PeepMin() (Handle, int64, []byte) {
-	if q.size == 0 || q.summary == 0 {
-		return nilIdx, 0, nil
-	}
 	g := bits.LeadingZeros64(q.summary)
 	gb := &q.groups[g]
 	l := bits.LeadingZeros64(gb.l1Summary)
@@ -204,9 +158,6 @@ func (q *QuantumQueue) PeepMin() (Handle, int64, []byte) {
 
 func (q *QuantumQueue) PopMin() (Handle, int64, []byte) {
 	h, t, v := q.PeepMin()
-	if h == nilIdx {
-		return nilIdx, 0, nil
-	}
 	delta := uint64(t - int64(q.baseTick))
 	q.unlinkByIndex(h, delta)
 	q.size--
