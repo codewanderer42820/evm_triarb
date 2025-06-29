@@ -38,10 +38,6 @@ type idx32 = Handle
 //go:notinheap
 //go:align 64
 //go:inline
-//go:nosplit
-//go:noescape
-//go:nocheckptr
-//go:registerparams
 type node struct {
 	tick int64    // assigned tick value, -1 if unused
 	data [52]byte // inline payload (zero-copy)
@@ -55,9 +51,6 @@ type node struct {
 //
 //go:align 576
 //go:inline
-//go:nosplit
-//go:noescape
-//go:registerparams
 type groupBlock struct {
 	l1Summary uint64
 	l2        [LaneCount]uint64
@@ -103,7 +96,6 @@ func NewQuantumQueue() *QuantumQueue {
 //
 //go:inline
 //go:nosplit
-//go:noescape
 //go:registerparams
 func (q *QuantumQueue) Borrow() (Handle, error) {
 	h := q.freeHead
@@ -119,7 +111,6 @@ func (q *QuantumQueue) Borrow() (Handle, error) {
 //
 //go:inline
 //go:nosplit
-//go:noescape
 //go:registerparams
 func (q *QuantumQueue) BorrowSafe() (Handle, error) {
 	h := q.freeHead
@@ -151,7 +142,6 @@ func (q *QuantumQueue) Empty() bool { return q.size == 0 }
 //
 //go:inline
 //go:nosplit
-//go:noescape
 //go:registerparams
 func (q *QuantumQueue) unlink(h Handle) {
 	n := &q.arena[h]
@@ -194,7 +184,6 @@ func (q *QuantumQueue) unlink(h Handle) {
 //
 //go:inline
 //go:nosplit
-//go:noescape
 //go:registerparams
 func (q *QuantumQueue) linkAtHead(h Handle, tick int64) {
 	n := &q.arena[h]
