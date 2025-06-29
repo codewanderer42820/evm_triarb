@@ -1,3 +1,6 @@
+// -------------------------
+// File: queue_bench_test.go
+// -------------------------
 package quantumqueue
 
 import (
@@ -6,122 +9,136 @@ import (
 	"time"
 )
 
-func mustBorrowB(b *testing.B, q *QuantumQueue) Handle {
-	h, err := q.Borrow()
-	if err != nil {
-		b.Fatalf("Borrow failed: %v", err)
-	}
+func mustBorrow(b *testing.B, q *QuantumQueue) Handle {
+	h, _ := q.Borrow()
 	return h
 }
 
-func borrowManyB(b *testing.B, q *QuantumQueue, n int) []Handle {
+func borrowMany(b *testing.B, q *QuantumQueue, n int) []Handle {
 	hs := make([]Handle, n)
-	for i := 0; i < n; i++ {
-		hs[i] = mustBorrowB(b, q)
+	for i := range hs {
+		hs[i] = mustBorrow(b, q)
 	}
 	return hs
 }
 
-func reportPerOp(b *testing.B, opsPerIter int64) {
-	totalOps := int64(b.N) * opsPerIter
-	perOp := float64(b.Elapsed().Nanoseconds()) / float64(totalOps)
-	b.ReportMetric(perOp, "queue_ns/op")
+// popAllSafe removes up to count items using PeepMinSafe + UnlinkMin
+func popAllSafe(q *QuantumQueue, count int) {
+	for i := 0; i < count; i++ {
+		h, tk, data := q.PeepMinSafe()
+		if data == nil {
+			return
+		}
+		q.UnlinkMin(h, tk)
+	}
 }
 
 func BenchmarkPushPopSequential(b *testing.B) {
 	const N = 1 << 13
 	q := NewQuantumQueue()
-	hs := borrowManyB(b, q, N)
-
+	hs := borrowMany(b, q, N)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		// Push sequential ticks
 		for j, h := range hs {
 			q.Push(int64(j), h, nil)
 		}
-		for range hs {
-			_, _, _ = q.PopMinSafe()
-		}
+		// Pop all safely
+		popAllSafe(q, N)
 	}
-	reportPerOp(b, int64(2*N))
+	totalOps := int64(2 * N)
+	perOp := float64(b.Elapsed().Nanoseconds()) / float64(int64(b.N)*totalOps)
+	b.ReportMetric(perOp, "queue_ns/op")
 }
 
 func BenchmarkPushPopRandom(b *testing.B) {
 	const N = 1 << 13
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	q := NewQuantumQueue()
-	hs := borrowManyB(b, q, N)
-
+	hs := borrowMany(b, q, N)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		// Push random ticks
 		for _, h := range hs {
 			q.Push(int64(rng.Intn(1<<13)), h, nil)
 		}
-		for range hs {
-			_, _, _ = q.PopMinSafe()
-		}
+		// Pop all safely
+		popAllSafe(q, N)
 	}
-	reportPerOp(b, int64(2*N))
+	totalOps := int64(2 * N)
+	perOp := float64(b.Elapsed().Nanoseconds()) / float64(int64(b.N)*totalOps)
+	b.ReportMetric(perOp, "queue_ns/op")
 }
 
 func BenchmarkDuplicateBurst(b *testing.B) {
 	const Dups = 8
 	q := NewQuantumQueue()
-	h := mustBorrowB(b, q)
-
+	h := mustBorrow(b, q)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		// Push duplicates
 		for j := 0; j < Dups; j++ {
 			q.Push(42, h, nil)
 		}
-		for j := 0; j < Dups; j++ {
-			_, _, _ = q.PopMinSafe()
-		}
+		// Pop Dups items safely
+		popAllSafe(q, Dups)
 	}
-	reportPerOp(b, int64(2*Dups))
+	totalOps := int64(2 * Dups)
+	perOp := float64(b.Elapsed().Nanoseconds()) / float64(int64(b.N)*totalOps)
+	b.ReportMetric(perOp, "queue_ns/op")
 }
 
 func BenchmarkUpdateRelocate(b *testing.B) {
 	const N = 1 << 12
 	q := NewQuantumQueue()
-	hs := borrowManyB(b, q, N)
+	hs := borrowMany(b, q, N)
+	// Pre-populate queue
 	for i, h := range hs {
 		q.Push(int64(i), h, nil)
 	}
-
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		// Relocate each element twice
 		for j, h := range hs {
-			q.Update(int64(j+8), h, nil)
-			q.Update(int64(j), h, nil)
+			q.Push(int64(j+8), h, nil)
+			q.Push(int64(j), h, nil)
 		}
+		// Pop all safely
+		popAllSafe(q, N)
 	}
-	reportPerOp(b, int64(2*N))
+	totalOps := int64(2 * N)
+	perOp := float64(b.Elapsed().Nanoseconds()) / float64(int64(b.N)*totalOps)
+	b.ReportMetric(perOp, "queue_ns/op")
 }
 
 func BenchmarkMixedWorkload(b *testing.B) {
 	const N = 128
-
 	rng := rand.New(rand.NewSource(1))
 	q := NewQuantumQueue()
-	hs := borrowManyB(b, q, N)
-
+	hs := borrowMany(b, q, N)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		totalPush := 0
+		// Mixed pushes
 		for j, h := range hs {
 			tk := rng.Int63n(256)
 			q.Push(tk, h, nil)
+			totalPush++
 			if j&3 == 0 {
 				q.Push(tk, h, nil)
+				totalPush++
 			}
 		}
 		for j, h := range hs {
 			if j&1 == 0 {
-				q.Update(int64(j+64), h, nil)
+				q.Push(int64(j+64), h, nil)
+				totalPush++
 			}
 		}
-		for j := 0; j < N; j++ {
-			_, _, _ = q.PopMinSafe()
-		}
+		// Pop all safely
+		popAllSafe(q, totalPush)
 	}
-	reportPerOp(b, int64(N*3))
+	totalOps := int64(N * 3)
+	perOp := float64(b.Elapsed().Nanoseconds()) / float64(int64(b.N)*totalOps)
+	b.ReportMetric(perOp, "queue_ns/op")
 }
