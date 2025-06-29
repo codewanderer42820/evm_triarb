@@ -35,9 +35,8 @@ type idx32 = Handle
 //go:inline
 type node struct {
 	tick int64
-	data [44]byte
+	data [52]byte
 	next Handle
-	_    [16]byte
 }
 
 // groupBlock holds two-level bitmaps per group (4096 ticks).
