@@ -40,7 +40,7 @@ type idx32 = Handle
 //go:inline
 type node struct {
 	tick int64    // assigned tick value, -1 if unused
-	data [52]byte // inline payload (zero-copy)
+	data [48]byte // inline payload (zero-copy)
 	prev Handle   // previous in same bucket
 	next Handle   // next in same bucket
 }
@@ -231,7 +231,7 @@ func (q *QuantumQueue) Push(tick int64, h Handle, val []byte) {
 //
 //go:inline
 //go:registerparams
-func (q *QuantumQueue) PeepMin() (Handle, int64, *[52]byte) {
+func (q *QuantumQueue) PeepMin() (Handle, int64, *[48]byte) {
 	g := bits.LeadingZeros64(q.summary)
 	gb := &q.groups[g]
 	l := bits.LeadingZeros64(gb.l1Summary)
