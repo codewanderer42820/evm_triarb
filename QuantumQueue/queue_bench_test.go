@@ -96,6 +96,24 @@ func BenchmarkPeepMin(b *testing.B) {
 	}
 }
 
+// BenchmarkUnlinkMin benchmarks removing the minimum element.
+func BenchmarkUnlinkMin(b *testing.B) {
+	q := NewQuantumQueue()
+	handles := make([]Handle, benchSize)
+	for i := range handles {
+		h, _ := q.BorrowSafe()
+		handles[i] = h
+		q.Push(int64(i), h, make([]byte, 48))
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		h, tick, _ := q.PeepMin()
+		q.UnlinkMin(h, tick)
+		q.Push((tick+benchSize)%CapItems, h, make([]byte, 48))
+	}
+}
+
 // BenchmarkMoveTick benchmarks moving existing handles to new ticks.
 func BenchmarkMoveTick(b *testing.B) {
 	q := NewQuantumQueue()
