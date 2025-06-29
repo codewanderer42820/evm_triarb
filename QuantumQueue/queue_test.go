@@ -128,6 +128,45 @@ func TestPushOverwrite(t *testing.T) {
 	}
 }
 
+func TestPushReplaceDifferentTick(t *testing.T) {
+	q := NewQuantumQueue()
+	h, _ := q.BorrowSafe()
+
+	// First push to tick 100
+	q.Push(100, h, []byte{7})
+	if q.Size() != 1 {
+		t.Fatalf("after first push, Size = %d; want 1", q.Size())
+	}
+	_, t1, _ := q.PeepMin()
+	if t1 != 100 {
+		t.Fatalf("first PeepMin tick = %d; want 100", t1)
+	}
+	// verify bucket for 100 is set
+	if q.buckets[idx32(100)] != h {
+		t.Errorf("bucket[100] = %v; want %v", q.buckets[idx32(100)], h)
+	}
+
+	// Now push same handle to tick 200 ⇒ should remove old tick=100 (covers the n.tick>=0 branch)
+	q.Push(200, h, []byte{9})
+	if q.Size() != 1 {
+		t.Fatalf("after replace push, Size = %d; want still 1", q.Size())
+	}
+
+	// old bucket must have been cleared
+	if q.buckets[idx32(100)] != nilIdx {
+		t.Errorf("bucket[100] not cleared; got %v", q.buckets[idx32(100)])
+	}
+
+	// PeepMin now returns tick=200
+	h2, t2, data := q.PeepMin()
+	if h2 != h || t2 != 200 {
+		t.Errorf("PeepMin = (%v,%d); want (%v,200)", h2, t2, h)
+	}
+	if (*data)[0] != 9 {
+		t.Errorf("payload first byte = %d; want 9", (*data)[0])
+	}
+}
+
 func TestMultiplePushAndUnlink(t *testing.T) {
 	q := NewQuantumQueue()
 	h1, _ := q.BorrowSafe()
