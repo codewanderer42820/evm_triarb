@@ -8,25 +8,35 @@ import (
 	"testing"
 )
 
+// stressItem represents an entry in the heap-based reference model.
+// Stores handle, tick, and a sequence number to disambiguate tie-breaks.
 type stressItem struct {
 	h    Handle // queue handle
 	tick int64  // associated tick value
-	seq  int    // sequence number to break ties
+	seq  int    // sequence number to break ties (newer = higher)
 }
 
+// stressHeap is a heap of stressItems used as a correctness reference.
 type stressHeap []*stressItem
 
-// Implement heap.Interface for stressHeap:
+// Len returns the number of elements in the heap.
 func (h stressHeap) Len() int { return len(h) }
+
+// Less implements the ordering: lowest tick first, then newest seq (LIFO for equal ticks).
 func (h stressHeap) Less(i, j int) bool {
-	// Primary sort by smallest tick, then by sequence (LIFO on equal ticks)
 	if h[i].tick != h[j].tick {
 		return h[i].tick < h[j].tick
 	}
-	return h[i].seq > h[j].seq
+	return h[i].seq > h[j].seq // newer seq wins for insert-at-head match
 }
-func (h stressHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+
+// Swap swaps elements i and j in the heap.
+func (h stressHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+// Push appends a new element to the heap.
 func (h *stressHeap) Push(x interface{}) { *h = append(*h, x.(*stressItem)) }
+
+// Pop removes and returns the minimum element from the heap.
 func (h *stressHeap) Pop() interface{} {
 	old := *h
 	n := len(old) - 1
@@ -51,12 +61,12 @@ func TestQueueStressRandomOperations(t *testing.T) {
 	for i := range free {
 		free[i] = Handle(i)
 	}
-	live := make(map[Handle]bool)
-	seq := 0 // monotonically increasing sequence number
+	live := make(map[Handle]bool) // tracks handles currently in queue
+	seq := 0                      // monotonically increasing sequence number
 
 	for i := 0; i < iterations; i++ {
-		op := rng.Intn(3) // choose operation type randomly: 0=push,1=move,2=pop
-		tick := int64(rng.Intn(BucketCount))
+		op := rng.Intn(3)                    // randomly choose operation: 0=push,1=move,2=pop
+		tick := int64(rng.Intn(BucketCount)) // random tick within valid range
 
 		switch op {
 		case 0:
@@ -76,14 +86,14 @@ func TestQueueStressRandomOperations(t *testing.T) {
 			if len(live) == 0 {
 				continue
 			}
-			// select any handle from live set
+			// Select any handle from live set
 			var h Handle
 			for hh := range live {
 				h = hh
 				break
 			}
 			q.MoveTick(h, tick)
-			// update reference heap by removing old entry and pushing new
+			// Remove all stale versions of h from reference heap (reverse order)
 			for j := len(*ref) - 1; j >= 0; j-- {
 				if (*ref)[j].h == h {
 					heap.Remove(ref, j)
@@ -112,7 +122,7 @@ func TestQueueStressRandomOperations(t *testing.T) {
 		}
 	}
 
-	// Drain any leftover items and verify ordering until empty
+	// Drain any remaining elements and verify heap/queue stay consistent
 	for !q.Empty() {
 		h, poppedTick, _ := q.PeepMin()
 		exp := heap.Pop(ref).(*stressItem)
@@ -125,7 +135,7 @@ func TestQueueStressRandomOperations(t *testing.T) {
 		free = append(free, h)
 	}
 
-	// Ensure reference heap is also empty
+	// Ensure reference heap is empty
 	if ref.Len() != 0 {
 		t.Fatalf("Reference heap not empty after drain: %d items left", ref.Len())
 	}
