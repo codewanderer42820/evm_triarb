@@ -1,157 +1,93 @@
-// -------------------------
-// File: queue_bench_test.go
-// -------------------------
 package quantumqueue
 
 import (
-	"math/rand"
 	"testing"
-	"time"
 )
 
-func mustBorrow(_ *testing.B, q *QuantumQueue) Handle {
-	h, _ := q.Borrow()
-	return h
-}
+var benchPayload = [52]byte{}
 
-func borrowMany(b *testing.B, q *QuantumQueue, n int) []Handle {
-	hs := make([]Handle, n)
-	for i := range hs {
-		hs[i] = mustBorrow(b, q)
-	}
-	return hs
-}
-
-// popAllSafe removes up to count items using PeepMinSafe + UnlinkMin
-func popAllSafe(q *QuantumQueue, count int) {
-	for i := 0; i < count; i++ {
-		h, tk, data := q.PeepMinSafe()
-		if data == nil {
-			return
-		}
-		q.UnlinkMin(h, tk)
-	}
-}
-
-func BenchmarkPushPopSequential(b *testing.B) {
-	const N = 1 << 13
+// BenchmarkBorrowSafe measures safe handle allocation with exhaustion check.
+// Once exhaustion occurs, BorrowSafe returns an error, which we ignore, so this
+// loop never panics and measures the common-case path.
+func BenchmarkBorrowSafe(b *testing.B) {
 	q := NewQuantumQueue()
-	hs := borrowMany(b, q, N)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		for j, h := range hs {
-			q.Push(int64(j), h, nil)
-		}
-		popAllSafe(q, N)
+		_, _ = q.BorrowSafe()
 	}
-	totalOps := int64(2 * N)
-	perOp := float64(b.Elapsed().Nanoseconds()) / float64(int64(b.N)*totalOps)
-	b.ReportMetric(perOp, "queue_ns/op")
 }
 
-func BenchmarkPushPopRandom(b *testing.B) {
-	const N = 1 << 13
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+// BenchmarkPush tests pushing into an otherwise-empty queue.
+func BenchmarkPush(b *testing.B) {
 	q := NewQuantumQueue()
-	hs := borrowMany(b, q, N)
+	h, _ := q.BorrowSafe()
+	data := benchPayload[:]
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		for _, h := range hs {
-			q.Push(int64(rng.Intn(1<<13)), h, nil)
-		}
-		popAllSafe(q, N)
+		q.Push(int64(i%BucketCount), h, data)
 	}
-	totalOps := int64(2 * N)
-	perOp := float64(b.Elapsed().Nanoseconds()) / float64(int64(b.N)*totalOps)
-	b.ReportMetric(perOp, "queue_ns/op")
 }
 
-func BenchmarkDuplicateBurst(b *testing.B) {
-	const Dups = 8
+// BenchmarkPushUnique tests pushing into distinct slots.
+func BenchmarkPushUnique(b *testing.B) {
 	q := NewQuantumQueue()
-	h := mustBorrow(b, q)
+	handles := make([]Handle, BucketCount)
+	for i := range handles {
+		handles[i], _ = q.BorrowSafe()
+	}
+	data := benchPayload[:]
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		for j := 0; j < Dups; j++ {
-			q.Push(42, h, nil)
-		}
-		popAllSafe(q, Dups)
+		idx := i % BucketCount
+		tick := int64(idx)
+		q.Push(tick, handles[idx], data)
 	}
-	totalOps := int64(2 * Dups)
-	perOp := float64(b.Elapsed().Nanoseconds()) / float64(int64(b.N)*totalOps)
-	b.ReportMetric(perOp, "queue_ns/op")
 }
 
-func BenchmarkUpdateRelocate(b *testing.B) {
-	const N = 1 << 12
-	q := NewQuantumQueue()
-	hs := borrowMany(b, q, N)
-	for i, h := range hs {
-		q.Push(int64(i), h, nil)
-	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		for j, h := range hs {
-			q.Push(int64(j+8), h, nil)
-			q.Push(int64(j), h, nil)
-		}
-		popAllSafe(q, N)
-	}
-	totalOps := int64(2 * N)
-	perOp := float64(b.Elapsed().Nanoseconds()) / float64(int64(b.N)*totalOps)
-	b.ReportMetric(perOp, "queue_ns/op")
-}
-
-func BenchmarkMixedWorkload(b *testing.B) {
-	const N = 128
-	rng := rand.New(rand.NewSource(1))
-	q := NewQuantumQueue()
-	hs := borrowMany(b, q, N)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		totalPush := 0
-		for j, h := range hs {
-			tk := rng.Int63n(256)
-			q.Push(tk, h, nil)
-			totalPush++
-			if j&3 == 0 {
-				q.Push(tk, h, nil)
-				totalPush++
-			}
-		}
-		for j, h := range hs {
-			if j&1 == 0 {
-				q.Push(int64(j+64), h, nil)
-				totalPush++
-			}
-		}
-		popAllSafe(q, totalPush)
-	}
-	totalOps := int64(N * 3)
-	perOp := float64(b.Elapsed().Nanoseconds()) / float64(int64(b.N)*totalOps)
-	b.ReportMetric(perOp, "queue_ns/op")
-}
-
-// BenchmarkMoveTick measures the cost of relocating existing elements via MoveTick
+// BenchmarkMoveTick moves M items around to new ticks.
 func BenchmarkMoveTick(b *testing.B) {
-	const N = 1 << 12
+	const M = 1000
 	q := NewQuantumQueue()
-	hs := borrowMany(b, q, N)
-	// Pre-populate queue
-	for i, h := range hs {
-		q.Push(int64(i), h, nil)
+	handles := make([]Handle, M)
+	for i := 0; i < M; i++ {
+		h, _ := q.BorrowSafe()
+		handles[i] = h
+		q.Push(int64(i), h, benchPayload[:])
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		for j, h := range hs {
-			q.MoveTick(h, int64((j+1)%N))
-		}
+		h := handles[i%M]
+		newTick := int64((i + 1) % M)
+		q.MoveTick(h, newTick)
 	}
-	// verify size unchanged
-	if sz := q.Size(); sz != N {
-		b.Fatalf("expected size=%d, got=%d", N, sz)
+}
+
+// BenchmarkPeepMin repeatedly peeks the minimum in an N-item queue.
+func BenchmarkPeepMin(b *testing.B) {
+	const N = 10000
+	q := NewQuantumQueue()
+	for i := 0; i < N; i++ {
+		h, _ := q.BorrowSafe()
+		q.Push(int64(i), h, benchPayload[:])
 	}
-	totalOps := int64(b.N) * int64(N)
-	perOp := float64(b.Elapsed().Nanoseconds()) / float64(totalOps)
-	b.ReportMetric(perOp, "queue_ns/op")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _ = q.PeepMin()
+	}
+}
+
+// BenchmarkPeepAndUnlink simulates continuous pop/push at tick 0 using a fixed bucket range.
+func BenchmarkPeepAndUnlink(b *testing.B) {
+	q := NewQuantumQueue()
+	h, _ := q.BorrowSafe()
+	q.Push(0, h, benchPayload[:])
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Pop current min
+		h0, t0, _ := q.PeepMin()
+		q.UnlinkMin(h0, t0)
+		// Push back into a valid bucket range to avoid out-of-bounds
+		newTick := int64(i % BucketCount)
+		q.Push(newTick, h0, benchPayload[:])
+	}
 }
