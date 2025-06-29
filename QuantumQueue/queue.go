@@ -23,7 +23,6 @@ type idx32 = Handle
 //
 //go:notinheap
 //go:align 64
-//go:nosplit
 //go:inline
 type node struct {
 	tick int64    // 8B: active tick or -1 if unused
@@ -35,7 +34,6 @@ type node struct {
 // Layout is 9×64B cache lines (576 bytes total).
 //
 //go:notinheap
-//go:nosplit
 //go:inline
 type groupBlock struct {
 	l1Summary uint64            // 8B: summary of active lanes in group
@@ -48,7 +46,6 @@ type groupBlock struct {
 // arena → buckets → groups → metadata.
 //
 //go:notinheap
-//go:nosplit
 //go:inline
 type QuantumQueue struct {
 	arena    [CapItems]node         // HOT: payload and tick storage
