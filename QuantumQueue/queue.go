@@ -1,10 +1,12 @@
 // SPDX-Free: Public-Domain
-// Ultra-low-latency QuantumQueue — footgun edition (no safety checks)
-// Includes safe test helpers and test cases inside this file
+// Ultra-low-latency QuantumQueue — Apex Edition
+// • Adds PushIfFree(h) to skip push if handle already in use
 
 package quantumqueue
 
-import "math/bits"
+import (
+	"math/bits"
+)
 
 const (
 	GroupCount  = 64
@@ -105,16 +107,21 @@ func (q *QuantumQueue) Push(tick int64, h Handle, val []byte) {
 	q.size++
 }
 
-func (q *QuantumQueue) Update(tick int64, h Handle, val []byte) {
+func (q *QuantumQueue) PushIfFree(tick int64, h Handle, val []byte) bool {
 	n := &q.arena[h]
-	if n.tick == tick {
-		copy(n.data[:], val)
-		return
+	if n.count > 0 {
+		return false
 	}
+	q.Push(tick, h, val)
+	return true
+}
+
+func (q *QuantumQueue) MoveTick(h Handle, newTick int64) {
+	n := &q.arena[h]
 	deltaOld := uint64(n.tick - int64(q.baseTick))
 	q.unlinkByIndex(h, deltaOld)
 	q.size -= int(n.count)
-	delta := uint64(tick) - q.baseTick
+	delta := uint64(newTick) - q.baseTick
 	g := delta >> 12
 	l := (delta >> 6) & 63
 	b := delta & 63
@@ -129,13 +136,12 @@ func (q *QuantumQueue) Update(tick int64, h Handle, val []byte) {
 	gb.l2[l] |= 1 << (63 - b)
 	gb.l1Summary |= 1 << (63 - l)
 	q.summary |= 1 << (63 - g)
-	n.tick = tick
+	n.tick = newTick
 	n.count = 1
-	copy(n.data[:], val)
 	q.size++
 }
 
-func (q *QuantumQueue) PeepMin() (Handle, int64, []byte) {
+func (q *QuantumQueue) PeepMin() (Handle, int64, *[44]byte) {
 	g := bits.LeadingZeros64(q.summary)
 	gb := &q.groups[g]
 	l := bits.LeadingZeros64(gb.l1Summary)
@@ -143,29 +149,20 @@ func (q *QuantumQueue) PeepMin() (Handle, int64, []byte) {
 	bucket := idx32((uint64(g) << 12) | (uint64(l) << 6) | uint64(b))
 	idx := q.buckets[bucket]
 	n := &q.arena[idx]
-	return idx, n.tick, n.data[:]
+	return idx, n.tick, &n.data
 }
 
-func (q *QuantumQueue) PopMin() (Handle, int64, []byte) {
-	h, t, v := q.PeepMin()
-	delta := uint64(t - int64(q.baseTick))
-	q.unlinkByIndex(h, delta)
-	q.size--
-	return h, t, v
-}
-
-func (q *QuantumQueue) PeepMinSafe() (Handle, int64, []byte) {
+func (q *QuantumQueue) PeepMinSafe() (Handle, int64, *[44]byte) {
 	if q.Size() == 0 || q.summary == 0 {
 		return nilIdx, 0, nil
 	}
 	return q.PeepMin()
 }
 
-func (q *QuantumQueue) PopMinSafe() (Handle, int64, []byte) {
-	if q.Size() == 0 || q.summary == 0 {
-		return nilIdx, 0, nil
-	}
-	return q.PopMin()
+func (q *QuantumQueue) UnlinkMin(h Handle, tick int64) {
+	delta := uint64(tick - int64(q.baseTick))
+	q.unlinkByIndex(h, delta)
+	q.size--
 }
 
 func (q *QuantumQueue) unlinkByIndex(idx Handle, delta uint64) {
