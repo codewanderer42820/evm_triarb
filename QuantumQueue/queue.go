@@ -1,4 +1,3 @@
-// SPDX-Free: Public-Domain
 // Ultra-low-latency QuantumQueue — Apex Edition
 // • Adds PushIfFree(h) to skip push if handle already in use
 
