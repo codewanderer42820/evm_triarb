@@ -75,3 +75,74 @@ func TestBorrowResetsNode(t *testing.T) {
 		t.Errorf("Second borrow handle = %v; want %v", h2, h1+1)
 	}
 }
+
+// TestPushSameTickCopiesData verifies that pushing on the same tick
+// updates the payload in place without changing queue membership or size.
+func TestPushSameTickCopiesData(t *testing.T) {
+	q := NewQuantumQueue()
+	h, err := q.BorrowSafe()
+	if err != nil {
+		t.Fatalf("BorrowSafe error: %v", err)
+	}
+
+	// Initial push
+	val1 := []byte("firstValue")
+	q.Push(123, h, val1)
+	// Confirm data set
+	if got := string(q.arena[h].data[:len(val1)]); got != "firstValue" {
+		t.Errorf("Initial data = %q; want %q", got, "firstValue")
+	}
+	sizeBefore := q.Size()
+
+	// Push again on same tick with new data
+	val2 := []byte("secondValue")
+	q.Push(123, h, val2)
+
+	// Size must not change
+	if got := q.Size(); got != sizeBefore {
+		t.Errorf("Size after same-tick Push = %d; want %d", got, sizeBefore)
+	}
+
+	// Data must have been updated in place
+	if got := string(q.arena[h].data[:len(val2)]); got != "secondValue" {
+		t.Errorf("Data after same-tick Push = %q; want %q", got, "secondValue")
+	}
+}
+
+// TestPushExistingHandleUnlink ensures that pushing an existing handle to a different tick
+// removes it from its previous bucket and links it at the new tick.
+func TestPushExistingHandleUnlink(t *testing.T) {
+	q := NewQuantumQueue()
+	h, err := q.BorrowSafe()
+	if err != nil {
+		t.Fatalf("BorrowSafe error: %v", err)
+	}
+
+	// First push to tickA
+	tickA := int64(100)
+	q.Push(tickA, h, nil)
+	bucketA := idx32(uint64(tickA))
+	if q.buckets[bucketA] != h {
+		t.Fatalf("Bucket head for tickA = %v; want %v", q.buckets[bucketA], h)
+	}
+
+	// Push again to a different tickB
+	tickB := int64(200)
+	q.Push(tickB, h, nil)
+	bucketB := idx32(uint64(tickB))
+
+	// Old bucket must be emptied
+	if q.buckets[bucketA] != nilIdx {
+		t.Errorf("Old bucket not emptied; got %v; want nilIdx", q.buckets[bucketA])
+	}
+
+	// New bucket must head with h
+	if q.buckets[bucketB] != h {
+		t.Errorf("New bucket head = %v; want %v", q.buckets[bucketB], h)
+	}
+
+	// Queue size should remain 1
+	if got := q.Size(); got != 1 {
+		t.Errorf("Size after reassign Push = %d; want 1", got)
+	}
+}
