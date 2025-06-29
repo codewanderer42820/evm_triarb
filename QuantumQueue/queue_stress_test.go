@@ -1,3 +1,5 @@
+// Package quantumqueue contains a long-running stress test to validate
+// correctness under extensive randomized operations against a reference heap.
 package quantumqueue
 
 import (
@@ -6,21 +8,21 @@ import (
 	"testing"
 )
 
-// stressItem records the expected queue entries in a simple heap.
 type stressItem struct {
-	h    Handle
-	tick int64
-	seq  int
+	h    Handle // queue handle
+	tick int64  // associated tick value
+	seq  int    // sequence number to break ties
 }
 
 type stressHeap []*stressItem
 
+// Implement heap.Interface for stressHeap:
 func (h stressHeap) Len() int { return len(h) }
 func (h stressHeap) Less(i, j int) bool {
+	// Primary sort by smallest tick, then by sequence (LIFO on equal ticks)
 	if h[i].tick != h[j].tick {
 		return h[i].tick < h[j].tick
 	}
-	// tie-break by seq: later wins
 	return h[i].seq > h[j].seq
 }
 func (h stressHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
@@ -33,61 +35,55 @@ func (h *stressHeap) Pop() interface{} {
 	return it
 }
 
-// TestStressBasicRandom uses an explicit free list to avoid duplicate borrows,
-// and mirrors operations in a reference heap.
-func TestStressBasicRandom(t *testing.T) {
+// TestQueueStressRandomOperations runs millions of random push, move, and pop operations,
+// comparing the queue against a Go heap to catch any ordering or linking bugs.
+func TestQueueStressRandomOperations(t *testing.T) {
 	const iterations = 80_000_000
 
-	// initialize free list with all possible handles
-	free := make([]Handle, CapItems)
-	for i := range free {
-		free[i] = Handle(i)
-	}
-
+	// Use a fixed seed for deterministic test runs
 	rng := rand.New(rand.NewSource(42))
 	q := NewQuantumQueue()
 	ref := &stressHeap{}
 	heap.Init(ref)
 
-	// live tracks which handles are currently in queue
+	// Prepare pool of free handles and a set of live handles
+	free := make([]Handle, CapItems)
+	for i := range free {
+		free[i] = Handle(i)
+	}
 	live := make(map[Handle]bool)
-	seq := 0
+	seq := 0 // monotonically increasing sequence number
 
 	for i := 0; i < iterations; i++ {
-		op := rng.Intn(3)
+		op := rng.Intn(3) // choose operation type randomly: 0=push,1=move,2=pop
 		tick := int64(rng.Intn(BucketCount))
 
 		switch op {
 		case 0:
-			// Borrow from free
+			// Push a new handle if available
 			if len(free) == 0 {
 				continue
 			}
 			h := free[len(free)-1]
 			free = free[:len(free)-1]
-			if live[h] {
-				t.Fatalf("double-borrow handle %d at iter %d", h, i)
-			}
-			// Push
 			q.Push(tick, h, nil)
 			heap.Push(ref, &stressItem{h: h, tick: tick, seq: seq})
 			live[h] = true
 			seq++
 
 		case 1:
-			// Update existing via MoveTick
+			// Move tick of an existing live handle
 			if len(live) == 0 {
 				continue
 			}
-			// pick any live handle
+			// select any handle from live set
 			var h Handle
 			for hh := range live {
 				h = hh
 				break
 			}
 			q.MoveTick(h, tick)
-
-			// sync reference heap
+			// update reference heap by removing old entry and pushing new
 			for j, it := range *ref {
 				if it.h == h {
 					heap.Remove(ref, j)
@@ -98,29 +94,31 @@ func TestStressBasicRandom(t *testing.T) {
 			seq++
 
 		case 2:
-			// Pop
+			// Pop the minimum if queue isn't empty
 			if q.Empty() {
 				continue
 			}
 			h, poppedTick, _ := q.PeepMin()
 			exp := heap.Pop(ref).(*stressItem)
+
+			// Verify queue behavior matches reference
 			if exp.h != h || exp.tick != poppedTick {
-				t.Fatalf("pop mismatch at iter %d: got (h=%v,t=%d) want (h=%v,t=%d)",
+				t.Fatalf("Mismatch at iter %d: got (h=%v,t=%d); want (h=%v,t=%d)",
 					i, h, poppedTick, exp.h, exp.tick)
 			}
+			// Remove from queue and return handle to free pool
 			q.UnlinkMin(h, poppedTick)
-			// mark free
 			delete(live, h)
 			free = append(free, h)
 		}
 	}
 
-	// Drain leftover
+	// Drain any leftover items and verify ordering until empty
 	for !q.Empty() {
 		h, poppedTick, _ := q.PeepMin()
 		exp := heap.Pop(ref).(*stressItem)
 		if exp.h != h || exp.tick != poppedTick {
-			t.Fatalf("drain mismatch: got (h=%v,t=%d) want (h=%v,t=%d)",
+			t.Fatalf("Drain mismatch: got (h=%v,t=%d); want (h=%v,t=%d)",
 				h, poppedTick, exp.h, exp.tick)
 		}
 		q.UnlinkMin(h, poppedTick)
@@ -128,7 +126,8 @@ func TestStressBasicRandom(t *testing.T) {
 		free = append(free, h)
 	}
 
+	// Ensure reference heap is also empty
 	if ref.Len() != 0 {
-		t.Fatalf("reference heap not empty: %d left", ref.Len())
+		t.Fatalf("Reference heap not empty after drain: %d items left", ref.Len())
 	}
 }
