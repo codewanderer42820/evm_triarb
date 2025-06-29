@@ -1,8 +1,3 @@
-// Zero-allocation fixed-range priority queue
-// • Tick range: 0..262143 (18-bit)
-// • O(1) operations: Push, MoveTick, PeepMin, UnlinkMin
-// • 64B cache-aligned nodes, zero GC pressure, single-element buckets
-
 package quantumqueue
 
 import (
@@ -23,54 +18,47 @@ const nilIdx Handle = ^Handle(0)
 
 type idx32 = Handle
 
-// node is a 64B structure per tick slot:
-//   - tick: active tick or -1 if free
-//   - data: inline 44-byte payload
-//   - next: free-list link or bucket occupant
-//   - padding: align to 64B
+// node is a fixed-size arena entry for one tick.
+// Layout is optimized for cache line alignment (64B).
 //
 //go:notinheap
 //go:align 64
 //go:nosplit
 //go:inline
 type node struct {
-	tick int64
-	data [52]byte
-	next Handle
+	tick int64    // 8B: active tick or -1 if unused
+	data [52]byte // 52B: inline payload
+	next Handle   // 4B: freelist or bucket link
 }
 
-// groupBlock holds two-level bitmaps per group (4096 ticks).
+// groupBlock holds two-level bitmaps for 4096 ticks.
+// Layout is 9×64B cache lines (576 bytes total).
 //
 //go:notinheap
 //go:nosplit
 //go:inline
 type groupBlock struct {
-	l1Summary uint64
-	l2        [LaneCount]uint64
-	_         [56]byte
+	l1Summary uint64            // 8B: summary of active lanes in group
+	l2        [LaneCount]uint64 // 512B: per-lane bucket occupancy
+	_         [56]byte          // 56B padding to reach 576B total
 }
 
-// QuantumQueue is the static arena-backed queue.
-//
-//	summary: group bitmap
-//	size: number of active ticks
-//	freeHead: head of arena freelist
-//	buckets: direct tick->handle mapping
-//	groups: bitmaps for min search
-//	arena: preallocated nodes
+// QuantumQueue is the arena-backed fixed-priority queue.
+// Field layout is optimized for hot-path locality:
+// arena → buckets → groups → metadata.
 //
 //go:notinheap
 //go:nosplit
 //go:inline
 type QuantumQueue struct {
-	summary  uint64
-	size     int
-	freeHead Handle
-	_        [4]byte
-	_        [40]byte
-	buckets  [BucketCount]Handle
-	groups   [GroupCount]groupBlock
-	arena    [CapItems]node
+	arena    [CapItems]node         // HOT: payload and tick storage
+	buckets  [BucketCount]Handle    // HOT: direct tick→handle mapping
+	groups   [GroupCount]groupBlock // MODERATE: bitmap summary layers
+	summary  uint64                 // metadata: top-level group bitmap
+	size     int                    // metadata: number of active entries
+	freeHead Handle                 // metadata: freelist head
+	_        [4]byte                // align to 8B
+	_        [40]byte               // pad to full 64B header
 }
 
 // NewQuantumQueue initializes an empty queue.
@@ -120,13 +108,17 @@ func (q *QuantumQueue) BorrowSafe() (Handle, error) {
 //
 //go:inline
 //go:nosplit
-func (q *QuantumQueue) Size() int { return q.size }
+func (q *QuantumQueue) Size() int {
+	return q.size
+}
 
 // Empty reports if queue is empty.
 //
 //go:inline
 //go:nosplit
-func (q *QuantumQueue) Empty() bool { return q.size == 0 }
+func (q *QuantumQueue) Empty() bool {
+	return q.size == 0
+}
 
 // Push sets or updates handle to tick with payload.
 // Caller must avoid tick collisions.
@@ -205,7 +197,7 @@ func (q *QuantumQueue) MoveTick(h Handle, newTick int64) {
 //
 //go:inline
 //go:nosplit
-func (q *QuantumQueue) PeepMin() (Handle, int64, *[44]byte) {
+func (q *QuantumQueue) PeepMin() (Handle, int64, *[52]byte) {
 	g := bits.LeadingZeros64(q.summary)
 	gb := &q.groups[g]
 	l := bits.LeadingZeros64(gb.l1Summary)
@@ -216,13 +208,13 @@ func (q *QuantumQueue) PeepMin() (Handle, int64, *[44]byte) {
 	return h, n.tick, &n.data
 }
 
-var zeroPayload [44]byte
+var zeroPayload [52]byte
 
 // PeepMinSafe returns nilIdx and zero payload when empty.
 //
 //go:inline
 //go:nosplit
-func (q *QuantumQueue) PeepMinSafe() (Handle, int64, *[44]byte) {
+func (q *QuantumQueue) PeepMinSafe() (Handle, int64, *[52]byte) {
 	if q.size == 0 {
 		return nilIdx, 0, &zeroPayload
 	}
