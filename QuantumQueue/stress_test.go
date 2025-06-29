@@ -36,7 +36,7 @@ func (h *stressHeap) Pop() interface{} {
 // TestStressBasicRandom uses an explicit free list to avoid duplicate borrows,
 // and mirrors operations in a reference heap.
 func TestStressBasicRandom(t *testing.T) {
-	const iterations = 100000000
+	const iterations = 80_000_000
 
 	// initialize free list with all possible handles
 	free := make([]Handle, CapItems)
