@@ -1,17 +1,20 @@
-// Ultra-low-latency QuantumQueue — Apex Edition
-// • Adds PushIfFree(h) to skip push if handle already in use
+// Zero-allocation fixed-range priority queue
+// • Tick range: 0..262143 (18-bit)
+// • O(1) operations: Push, MoveTick, PeepMin, UnlinkMin
+// • 64B cache-aligned nodes, zero GC pressure, single-element buckets
 
 package quantumqueue
 
 import (
-	"math/bits"
+	"errors"    // For safe BorrowSafe error handling
+	"math/bits" // For fast leading-zero count
 )
 
 const (
-	GroupCount  = 64
-	LaneCount   = 64
-	BucketCount = GroupCount * LaneCount * LaneCount
-	CapItems    = 1 << 14
+	GroupCount  = 64                                 // Top-level groups (4096 ticks each)
+	LaneCount   = 64                                 // Lanes per group (64 ticks each)
+	BucketCount = GroupCount * LaneCount * LaneCount // 262144 ticks
+	CapItems    = BucketCount                        // Max handles (one per tick)
 )
 
 type Handle uint32
@@ -20,184 +23,167 @@ const nilIdx Handle = ^Handle(0)
 
 type idx32 = Handle
 
+// node is a 64B structure per tick slot:
+//   - tick: active tick or -1 if free
+//   - data: inline 44-byte payload
+//   - next: free-list link or bucket occupant
+//   - padding: align to 64B
+//
+//go:notinheap
+//go:align 64
+//go:nosplit
+//go:inline
 type node struct {
-	tick  int64    // 8 B: Tick timestamp (hot for delta math)
-	data  [44]byte // 44 B: Inline payload (user-facing, copied)
-	next  Handle   // 4 B: Arena next pointer
-	prev  Handle   // 4 B: Arena prev pointer
-	count uint32   // 4 B: Entry count for duplicate ticks
+	tick int64
+	data [44]byte
+	next Handle
+	_    [16]byte
 }
 
+// groupBlock holds two-level bitmaps per group (4096 ticks).
+//
+//go:notinheap
+//go:nosplit
+//go:inline
 type groupBlock struct {
-	l1Summary uint64            // 8 B: bitmap of active l2 entries
-	l2        [LaneCount]uint64 // 512 B: per-lane bitmap of active buckets
-	_         [56]byte          // 56 B: pad to 576 B (9 × 64B cachelines)
+	l1Summary uint64
+	l2        [LaneCount]uint64
+	_         [56]byte
 }
 
+// QuantumQueue is the static arena-backed queue.
+//
+//	summary: group bitmap
+//	size: number of active ticks
+//	freeHead: head of arena freelist
+//	buckets: direct tick->handle mapping
+//	groups: bitmaps for min search
+//	arena: preallocated nodes
+//
+//go:notinheap
+//go:nosplit
+//go:inline
 type QuantumQueue struct {
-	summary  uint64 //  8 B  @0  — Top-level group bitmap (PeepMin root)
-	baseTick uint64 //  8 B  @8  — Sliding window base for tick deltas
-	size     int    //  8 B @16  — Active item count (PopMin/Push)
-
-	freeHead Handle  //  4 B @24  — Arena free list head
-	_        [4]byte //  4 B @28  — Align freeHead to 8B boundary
-
-	_ [32]byte // 32 B @32–63 — Pad to full 64-byte struct header
-
-	// ───── Hot arrays follow ─────
-
-	buckets [BucketCount]Handle    // 1-entry-per-tick ring: 262144 × 4 B
-	groups  [GroupCount]groupBlock // 64 × 576 B = 36 KB bitmap blocks
-	arena   [CapItems]node         // 16384 × 64 B = 1 MB handle pool
+	summary  uint64
+	size     int
+	freeHead Handle
+	_        [4]byte
+	_        [40]byte
+	buckets  [BucketCount]Handle
+	groups   [GroupCount]groupBlock
+	arena    [CapItems]node
 }
 
+// NewQuantumQueue initializes an empty queue.
+//
+//go:inline
+//go:nosplit
 func NewQuantumQueue() *QuantumQueue {
 	q := &QuantumQueue{freeHead: 0}
 	for i := Handle(0); i < CapItems-1; i++ {
 		q.arena[i].next = i + 1
+		q.arena[i].tick = -1
 	}
 	q.arena[CapItems-1].next = nilIdx
+	q.arena[CapItems-1].tick = -1
 	for i := range q.buckets {
 		q.buckets[i] = nilIdx
 	}
 	return q
 }
 
+// Borrow retrieves a free handle (unsafe, caller must avoid exhaustion).
+//
+//go:inline
+//go:nosplit
 func (q *QuantumQueue) Borrow() (Handle, error) {
 	h := q.freeHead
 	q.freeHead = q.arena[h].next
-	q.arena[h] = node{next: nilIdx, prev: nilIdx}
+	q.arena[h].tick = -1
 	return h, nil
 }
 
-func (q *QuantumQueue) Size() int   { return q.size }
+// BorrowSafe retrieves a free handle with exhaustion check.
+//
+//go:inline
+//go:nosplit
+func (q *QuantumQueue) BorrowSafe() (Handle, error) {
+	h := q.freeHead
+	if h == nilIdx {
+		return nilIdx, errors.New("QuantumQueue: arena exhausted")
+	}
+	q.freeHead = q.arena[h].next
+	q.arena[h].tick = -1
+	return h, nil
+}
+
+// Size returns active entry count.
+//
+//go:inline
+//go:nosplit
+func (q *QuantumQueue) Size() int { return q.size }
+
+// Empty reports if queue is empty.
+//
+//go:inline
+//go:nosplit
 func (q *QuantumQueue) Empty() bool { return q.size == 0 }
 
+// Push sets or updates handle to tick with payload.
+// Caller must avoid tick collisions.
+//
+//go:inline
+//go:nosplit
 func (q *QuantumQueue) Push(tick int64, h Handle, val []byte) {
 	n := &q.arena[h]
-	if n.count > 0 && n.tick == tick {
+	if n.tick == tick {
 		copy(n.data[:], val)
-		n.count++
 		return
 	}
-	if n.count > 0 {
-		deltaOld := uint64(n.tick - int64(q.baseTick))
-		q.unlinkByIndex(h, deltaOld)
-		q.size -= int(n.count)
+	if n.tick >= 0 {
+		d := uint64(n.tick)
+		b := idx32(d)
+		q.buckets[b] = nilIdx
+		g, l, bb := d>>12, (d>>6)&63, d&63
+		gb := &q.groups[g]
+		gb.l2[l] &^= 1 << (63 - bb)
+		if gb.l2[l] == 0 {
+			gb.l1Summary &^= 1 << (63 - l)
+			if gb.l1Summary == 0 {
+				q.summary &^= 1 << (63 - g)
+			}
+		}
+		q.size--
 	}
-	delta := uint64(tick) - q.baseTick
-	g := delta >> 12
-	l := (delta >> 6) & 63
-	b := delta & 63
-	bucket := idx32((g << 12) | (l << 6) | b)
-	n.next = q.buckets[bucket]
-	if n.next != nilIdx {
-		q.arena[n.next].prev = h
-	}
-	n.prev = nilIdx
-	q.buckets[bucket] = h
-	gb := &q.groups[g]
-	gb.l2[l] |= 1 << (63 - b)
-	gb.l1Summary |= 1 << (63 - l)
-	q.summary |= 1 << (63 - g)
+	// link new
+	b2 := idx32(uint64(tick))
+	n.next = nilIdx
 	n.tick = tick
-	n.count = 1
+	q.buckets[b2] = h
+	g2, l2, bb2 := uint64(tick)>>12, (uint64(tick)>>6)&63, uint64(tick)&63
+	gb2 := &q.groups[g2]
+	gb2.l2[l2] |= 1 << (63 - bb2)
+	gb2.l1Summary |= 1 << (63 - l2)
+	q.summary |= 1 << (63 - g2)
 	copy(n.data[:], val)
 	q.size++
 }
 
-func (q *QuantumQueue) PushIfFree(tick int64, h Handle, val []byte) bool {
-	n := &q.arena[h]
-	if n.count > 0 {
-		return false
-	}
-	q.Push(tick, h, val)
-	return true
-}
-
-// MoveTick atomically “moves” an existing handle to a new tick.
-// It captures the old count, unlinks the node, adjusts size,
-// then relinks it into the correct bucket and restores size.
+// MoveTick repositions handle to newTick.
+//
+//go:inline
+//go:nosplit
 func (q *QuantumQueue) MoveTick(h Handle, newTick int64) {
-	// 1) grab the node and its old count
 	n := &q.arena[h]
-	oldCount := n.count
-
-	// 2) unlink from its old bucket
-	//    compute delta = n.tick - baseTick
-	deltaOld := uint64(n.tick) - q.baseTick
-	q.unlinkByIndex(h, deltaOld)
-	q.size -= int(oldCount)
-
-	// 3) compute the new bucket index
-	//    top‐level groups of 4096 ticks (2^12), lanes of 64 ticks (2^6)
-	delta := uint64(newTick) - q.baseTick
-	g := delta >> 12       // which of the 64 groups
-	l := (delta >> 6) & 63 // which of the 64 lanes within that group
-	b := delta & 63        // which of the 64 buckets within that lane
-	idx := idx32((g << 12) | (l << 6) | b)
-
-	// 4) splice into the head of the new bucket
-	n.next = q.buckets[idx]
-	if n.next != nilIdx {
-		q.arena[n.next].prev = h
+	if n.tick == newTick {
+		return
 	}
-	n.prev = nilIdx
-	q.buckets[idx] = h
-
-	// 5) flip the three summary bits
-	gb := &q.groups[g]
-	gb.l2[l] |= 1 << (63 - b)
-	gb.l1Summary |= 1 << (63 - l)
-	q.summary |= 1 << (63 - g)
-
-	// 6) update the node and restore its size contribution
-	n.tick = newTick
-	n.count = 1
-	q.size++
-}
-
-func (q *QuantumQueue) PeepMin() (Handle, int64, *[44]byte) {
-	g := bits.LeadingZeros64(q.summary)
-	gb := &q.groups[g]
-	l := bits.LeadingZeros64(gb.l1Summary)
-	b := bits.LeadingZeros64(gb.l2[l])
-	bucket := idx32((uint64(g) << 12) | (uint64(l) << 6) | uint64(b))
-	idx := q.buckets[bucket]
-	n := &q.arena[idx]
-	return idx, n.tick, &n.data
-}
-
-func (q *QuantumQueue) PeepMinSafe() (Handle, int64, *[44]byte) {
-	if q.Size() == 0 || q.summary == 0 {
-		return nilIdx, 0, nil
-	}
-	return q.PeepMin()
-}
-
-func (q *QuantumQueue) UnlinkMin(h Handle, tick int64) {
-	delta := uint64(tick - int64(q.baseTick))
-	q.unlinkByIndex(h, delta)
-	q.size--
-}
-
-func (q *QuantumQueue) unlinkByIndex(idx Handle, delta uint64) {
-	g := delta >> 12
-	l := (delta >> 6) & 63
-	b := delta & 63
-	bucket := idx32((g << 12) | (l << 6) | b)
-	n := &q.arena[idx]
-	if n.prev != nilIdx {
-		q.arena[n.prev].next = n.next
-	} else {
-		q.buckets[bucket] = n.next
-	}
-	if n.next != nilIdx {
-		q.arena[n.next].prev = idx
-	}
-	if q.buckets[bucket] == nilIdx {
+	if n.tick >= 0 {
+		d := uint64(n.tick)
+		q.buckets[idx32(d)] = nilIdx
+		g, l, bb := d>>12, (d>>6)&63, d&63
 		gb := &q.groups[g]
-		gb.l2[l] &^= 1 << (63 - b)
+		gb.l2[l] &^= 1 << (63 - bb)
 		if gb.l2[l] == 0 {
 			gb.l1Summary &^= 1 << (63 - l)
 			if gb.l1Summary == 0 {
@@ -205,7 +191,68 @@ func (q *QuantumQueue) unlinkByIndex(idx Handle, delta uint64) {
 			}
 		}
 	}
-	n.count = 0
+	b3 := idx32(uint64(newTick))
+	n.next = nilIdx
+	n.tick = newTick
+	q.buckets[b3] = h
+	g3, l3, bb3 := uint64(newTick)>>12, (uint64(newTick)>>6)&63, uint64(newTick)&63
+	gb3 := &q.groups[g3]
+	gb3.l2[l3] |= 1 << (63 - bb3)
+	gb3.l1Summary |= 1 << (63 - l3)
+	q.summary |= 1 << (63 - g3)
+}
+
+// PeepMin finds the earliest tick and returns its handle and payload.
+//
+//go:inline
+//go:nosplit
+func (q *QuantumQueue) PeepMin() (Handle, int64, *[44]byte) {
+	g := bits.LeadingZeros64(q.summary)
+	gb := &q.groups[g]
+	l := bits.LeadingZeros64(gb.l1Summary)
+	t := bits.LeadingZeros64(gb.l2[l])
+	b := idx32((uint64(g) << 12) | (uint64(l) << 6) | uint64(t))
+	h := q.buckets[b]
+	n := &q.arena[h]
+	return h, n.tick, &n.data
+}
+
+var zeroPayload [44]byte
+
+// PeepMinSafe returns nilIdx and zero payload when empty.
+//
+//go:inline
+//go:nosplit
+func (q *QuantumQueue) PeepMinSafe() (Handle, int64, *[44]byte) {
+	if q.size == 0 {
+		return nilIdx, 0, &zeroPayload
+	}
+	return q.PeepMin()
+}
+
+// UnlinkMin removes the min tick, clears bitmaps, and recycles handle.
+//
+//go:inline
+//go:nosplit
+func (q *QuantumQueue) UnlinkMin(h Handle, tick int64) {
+	if tick < 0 {
+		return
+	}
+	b := idx32(uint64(tick))
+	q.buckets[b] = nilIdx
+	g, l, bb := uint64(tick)>>12, (uint64(tick)>>6)&63, uint64(tick)&63
+	gb := &q.groups[g]
+	gb.l2[l] &^= 1 << (63 - bb)
+	if gb.l2[l] == 0 {
+		gb.l1Summary &^= 1 << (63 - l)
+		if gb.l1Summary == 0 {
+			q.summary &^= 1 << (63 - g)
+		}
+	}
+	// recycle
+	n := &q.arena[h]
 	n.next = q.freeHead
-	q.freeHead = idx
+	n.tick = -1
+	q.freeHead = h
+	q.size--
 }

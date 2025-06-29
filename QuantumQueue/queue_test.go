@@ -161,17 +161,19 @@ func TestPush_DuplicateReplacesOldEntry(t *testing.T) {
 	}
 
 	// Push again with a later tick: this should unlink the old entry
-	// (size goes back to 0) then insert the new one (size == 1).
+	// then insert the new one (size == 1).
 	secondTick := firstTick + 5
 	q.Push(secondTick, h, data)
 	if got := q.Size(); got != 1 {
 		t.Errorf("after duplicate Push, Size() = %d; want 1", got)
 	}
 
-	// And PeepMin should reflect the new tick
+	// And PeepMin should reflect the new tick and data
 	ph, pt, pd := q.PeepMin()
-	if ph != h || pt != secondTick || !bytes.Equal(pd, data) {
-		t.Errorf("PeepMin = (%v,%d,%v); want (%v,%d,%v)", ph, pt, pd, h, secondTick, data)
+	pdBytes := (*pd)[:len(data)] // <-- convert pointer-to-array to slice
+	if ph != h || pt != secondTick || !bytes.Equal(pdBytes, data) {
+		t.Errorf("PeepMin = (%v,%d,%v); want (%v,%d,%v)",
+			ph, pt, pdBytes, h, secondTick, data)
 	}
 }
 
@@ -180,12 +182,14 @@ func TestPush_DuplicateReplacesOldEntry(t *testing.T) {
 func TestPeepMinSafe_EquivalentToPeepMin(t *testing.T) {
 	q := NewQuantumQueue()
 
-	// On an empty queue, both should return the identical zero-value result.
+	// Empty queue: results must match
 	h1, t1, d1 := q.PeepMin()
 	h2, t2, d2 := q.PeepMinSafe()
-	if h1 != h2 || t1 != t2 || !bytes.Equal(d1, d2) {
+	d1Slice := (*d1)[:] // full 44-byte slice of zeros
+	d2Slice := (*d2)[:]
+	if h1 != h2 || t1 != t2 || !bytes.Equal(d1Slice, d2Slice) {
 		t.Errorf("empty queue: PeepMinSafe = (%v,%d,%v); want same as PeepMin = (%v,%d,%v)",
-			h2, t2, d2, h1, t1, d1)
+			h2, t2, d2Slice, h1, t1, d1Slice)
 	}
 
 	// Now push one item
@@ -200,8 +204,10 @@ func TestPeepMinSafe_EquivalentToPeepMin(t *testing.T) {
 	// On non-empty, PeepMinSafe must match PeepMin
 	ph1, pt1, pd1 := q.PeepMin()
 	ph2, pt2, pd2 := q.PeepMinSafe()
-	if ph1 != ph2 || pt1 != pt2 || !bytes.Equal(pd1, pd2) {
-		t.Errorf("after one Push: PeepMinSafe = (%v,%d,%v); want same as PeepMin = (%v,%d,%v)",
-			ph2, pt2, pd2, ph1, pt1, pd1)
+	pd1Slice := (*pd1)[:len(payload)]
+	pd2Slice := (*pd2)[:len(payload)]
+	if ph1 != ph2 || pt1 != pt2 || !bytes.Equal(pd1Slice, pd2Slice) {
+		t.Errorf("after Push: PeepMinSafe = (%v,%d,%v); want same as PeepMin = (%v,%d,%v)",
+			ph2, pt2, pd2Slice, ph1, pt1, pd1Slice)
 	}
 }
