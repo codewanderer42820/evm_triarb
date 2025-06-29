@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func mustBorrow(b *testing.B, q *QuantumQueue) Handle {
+func mustBorrow(_ *testing.B, q *QuantumQueue) Handle {
 	h, _ := q.Borrow()
 	return h
 }
