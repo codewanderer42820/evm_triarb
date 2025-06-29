@@ -42,7 +42,7 @@ type QuantumQueue struct {
 	freeHead Handle  //  4 B @24  — Arena free list head
 	_        [4]byte //  4 B @28  — Align freeHead to 8B boundary
 
-	_ [28]byte // 28 B @32–59 — Pad to full 64-byte struct header
+	_ [32]byte // 32 B @32–63 — Pad to full 64-byte struct header
 
 	// ───── Hot arrays follow ─────
 
