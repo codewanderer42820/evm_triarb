@@ -139,3 +139,69 @@ func TestSizeEmpty(t *testing.T) {
 		t.Fatalf("after unlink: Empty=%v, Size=%d; want true,0", q.Empty(), q.Size())
 	}
 }
+
+// TestPush_DuplicateReplacesOldEntry ensures that pushing the same handle twice
+// will unlink the old bucket and keep the queue size at 1.
+func TestPush_DuplicateReplacesOldEntry(t *testing.T) {
+	q := NewQuantumQueue()
+
+	// Borrow a handle
+	h, err := q.Borrow()
+	if err != nil {
+		t.Fatalf("unexpected error on Borrow: %v", err)
+	}
+
+	data := []byte{0xAA}
+	firstTick := int64(10)
+
+	// First push should increase size to 1
+	q.Push(firstTick, h, data)
+	if got := q.Size(); got != 1 {
+		t.Fatalf("after first Push, Size() = %d; want 1", got)
+	}
+
+	// Push again with a later tick: this should unlink the old entry
+	// (size goes back to 0) then insert the new one (size == 1).
+	secondTick := firstTick + 5
+	q.Push(secondTick, h, data)
+	if got := q.Size(); got != 1 {
+		t.Errorf("after duplicate Push, Size() = %d; want 1", got)
+	}
+
+	// And PeepMin should reflect the new tick
+	ph, pt, pd := q.PeepMin()
+	if ph != h || pt != secondTick || !bytes.Equal(pd, data) {
+		t.Errorf("PeepMin = (%v,%d,%v); want (%v,%d,%v)", ph, pt, pd, h, secondTick, data)
+	}
+}
+
+// TestPeepMinSafe_EquivalentToPeepMin verifies that PeepMinSafe()
+// is a drop-in for PeepMin() on both empty and non-empty queues.
+func TestPeepMinSafe_EquivalentToPeepMin(t *testing.T) {
+	q := NewQuantumQueue()
+
+	// On an empty queue, both should return the identical zero-value result.
+	h1, t1, d1 := q.PeepMin()
+	h2, t2, d2 := q.PeepMinSafe()
+	if h1 != h2 || t1 != t2 || !bytes.Equal(d1, d2) {
+		t.Errorf("empty queue: PeepMinSafe = (%v,%d,%v); want same as PeepMin = (%v,%d,%v)",
+			h2, t2, d2, h1, t1, d1)
+	}
+
+	// Now push one item
+	h, err := q.Borrow()
+	if err != nil {
+		t.Fatalf("unexpected error on Borrow: %v", err)
+	}
+	payload := []byte{0x01, 0x02}
+	tick := int64(42)
+	q.Push(tick, h, payload)
+
+	// On non-empty, PeepMinSafe must match PeepMin
+	ph1, pt1, pd1 := q.PeepMin()
+	ph2, pt2, pd2 := q.PeepMinSafe()
+	if ph1 != ph2 || pt1 != pt2 || !bytes.Equal(pd1, pd2) {
+		t.Errorf("after one Push: PeepMinSafe = (%v,%d,%v); want same as PeepMin = (%v,%d,%v)",
+			ph2, pt2, pd2, ph1, pt1, pd1)
+	}
+}
