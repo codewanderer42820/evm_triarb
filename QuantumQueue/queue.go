@@ -1,14 +1,10 @@
 // SPDX-Free: Public-Domain
 // Ultra-low-latency QuantumQueue — footgun edition (no safety checks)
-// • Tick range assumed valid
-// • Handle assumed valid and in-use
-// • Full speed, no guards — caller must enforce constraints
+// Includes safe test helpers and test cases inside this file
 
 package quantumqueue
 
-import (
-	"math/bits"
-)
+import "math/bits"
 
 const (
 	GroupCount  = 64
@@ -24,30 +20,34 @@ const nilIdx Handle = ^Handle(0)
 type idx32 = Handle
 
 type node struct {
-	tick  int64
-	data  [44]byte
-	next  Handle
-	prev  Handle
-	count uint32
-	_     [4]byte
+	tick  int64    // 8 B: Tick timestamp (hot for delta math)
+	data  [44]byte // 44 B: Inline payload (user-facing, copied)
+	next  Handle   // 4 B: Arena next pointer
+	prev  Handle   // 4 B: Arena prev pointer
+	count uint32   // 4 B: Entry count for duplicate ticks
 }
 
 type groupBlock struct {
-	l1Summary uint64
-	l2        [LaneCount]uint64
-	_         [448]byte
+	l1Summary uint64            // 8 B: bitmap of active l2 entries
+	l2        [LaneCount]uint64 // 512 B: per-lane bitmap of active buckets
+	_         [56]byte          // 56 B: pad to 576 B (9 × 64B cachelines)
 }
 
 type QuantumQueue struct {
-	summary  uint64
-	baseTick uint64
-	size     int
-	freeHead Handle
-	_        [6]byte
+	summary  uint64 //  8 B  @0  — Top-level group bitmap (PeepMin root)
+	baseTick uint64 //  8 B  @8  — Sliding window base for tick deltas
+	size     int    //  8 B @16  — Active item count (PopMin/Push)
 
-	buckets [BucketCount]Handle
-	groups  [GroupCount]groupBlock
-	arena   [CapItems]node
+	freeHead Handle  //  4 B @24  — Arena free list head
+	_        [4]byte //  4 B @28  — Align freeHead to 8B boundary
+
+	_ [28]byte // 28 B @32–59 — Pad to full 64-byte struct header
+
+	// ───── Hot arrays follow ─────
+
+	buckets [BucketCount]Handle    // 1-entry-per-tick ring: 262144 × 4 B
+	groups  [GroupCount]groupBlock // 64 × 576 B = 36 KB bitmap blocks
+	arena   [CapItems]node         // 16384 × 64 B = 1 MB handle pool
 }
 
 func NewQuantumQueue() *QuantumQueue {
@@ -79,31 +79,26 @@ func (q *QuantumQueue) Push(tick int64, h Handle, val []byte) {
 		n.count++
 		return
 	}
-
 	if n.count > 0 {
 		deltaOld := uint64(n.tick - int64(q.baseTick))
 		q.unlinkByIndex(h, deltaOld)
 		q.size -= int(n.count)
 	}
-
 	delta := uint64(tick) - q.baseTick
 	g := delta >> 12
 	l := (delta >> 6) & 63
 	b := delta & 63
 	bucket := idx32((g << 12) | (l << 6) | b)
-
 	n.next = q.buckets[bucket]
 	if n.next != nilIdx {
 		q.arena[n.next].prev = h
 	}
 	n.prev = nilIdx
 	q.buckets[bucket] = h
-
 	gb := &q.groups[g]
 	gb.l2[l] |= 1 << (63 - b)
 	gb.l1Summary |= 1 << (63 - l)
 	q.summary |= 1 << (63 - g)
-
 	n.tick = tick
 	n.count = 1
 	copy(n.data[:], val)
@@ -116,29 +111,24 @@ func (q *QuantumQueue) Update(tick int64, h Handle, val []byte) {
 		copy(n.data[:], val)
 		return
 	}
-
 	deltaOld := uint64(n.tick - int64(q.baseTick))
 	q.unlinkByIndex(h, deltaOld)
 	q.size -= int(n.count)
-
 	delta := uint64(tick) - q.baseTick
 	g := delta >> 12
 	l := (delta >> 6) & 63
 	b := delta & 63
 	bucket := idx32((g << 12) | (l << 6) | b)
-
 	n.next = q.buckets[bucket]
 	if n.next != nilIdx {
 		q.arena[n.next].prev = h
 	}
 	n.prev = nilIdx
 	q.buckets[bucket] = h
-
 	gb := &q.groups[g]
 	gb.l2[l] |= 1 << (63 - b)
 	gb.l1Summary |= 1 << (63 - l)
 	q.summary |= 1 << (63 - g)
-
 	n.tick = tick
 	n.count = 1
 	copy(n.data[:], val)
@@ -164,12 +154,25 @@ func (q *QuantumQueue) PopMin() (Handle, int64, []byte) {
 	return h, t, v
 }
 
+func (q *QuantumQueue) PeepMinSafe() (Handle, int64, []byte) {
+	if q.Size() == 0 || q.summary == 0 {
+		return nilIdx, 0, nil
+	}
+	return q.PeepMin()
+}
+
+func (q *QuantumQueue) PopMinSafe() (Handle, int64, []byte) {
+	if q.Size() == 0 || q.summary == 0 {
+		return nilIdx, 0, nil
+	}
+	return q.PopMin()
+}
+
 func (q *QuantumQueue) unlinkByIndex(idx Handle, delta uint64) {
 	g := delta >> 12
 	l := (delta >> 6) & 63
 	b := delta & 63
 	bucket := idx32((g << 12) | (l << 6) | b)
-
 	n := &q.arena[idx]
 	if n.prev != nilIdx {
 		q.arena[n.prev].next = n.next

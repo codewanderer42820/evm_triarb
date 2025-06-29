@@ -6,8 +6,6 @@ import (
 	"time"
 )
 
-/*──────── helpers ───────*/
-
 func mustBorrowB(b *testing.B, q *QuantumQueue) Handle {
 	h, err := q.Borrow()
 	if err != nil {
@@ -15,6 +13,7 @@ func mustBorrowB(b *testing.B, q *QuantumQueue) Handle {
 	}
 	return h
 }
+
 func borrowManyB(b *testing.B, q *QuantumQueue, n int) []Handle {
 	hs := make([]Handle, n)
 	for i := 0; i < n; i++ {
@@ -23,14 +22,11 @@ func borrowManyB(b *testing.B, q *QuantumQueue, n int) []Handle {
 	return hs
 }
 
-// reportPerOp prints an extra metric already divided by queue-op count.
 func reportPerOp(b *testing.B, opsPerIter int64) {
 	totalOps := int64(b.N) * opsPerIter
 	perOp := float64(b.Elapsed().Nanoseconds()) / float64(totalOps)
 	b.ReportMetric(perOp, "queue_ns/op")
 }
-
-/*──────── 1. sequential push → pop ───────*/
 
 func BenchmarkPushPopSequential(b *testing.B) {
 	const N = 1 << 13
@@ -40,16 +36,14 @@ func BenchmarkPushPopSequential(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for j, h := range hs {
-			_ = q.Push(int64(j), h, nil)
+			q.Push(int64(j), h, nil)
 		}
 		for range hs {
-			_, _, _ = q.PopMin()
+			_, _, _ = q.PopMinSafe()
 		}
 	}
 	reportPerOp(b, int64(2*N))
 }
-
-/*──────── 2. random push → pop ───────────*/
 
 func BenchmarkPushPopRandom(b *testing.B) {
 	const N = 1 << 13
@@ -60,16 +54,14 @@ func BenchmarkPushPopRandom(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for _, h := range hs {
-			_ = q.Push(int64(rng.Intn(1<<13)), h, nil)
+			q.Push(int64(rng.Intn(1<<13)), h, nil)
 		}
 		for range hs {
-			_, _, _ = q.PopMin()
+			_, _, _ = q.PopMinSafe()
 		}
 	}
 	reportPerOp(b, int64(2*N))
 }
-
-/*──────── 3. duplicate-tick burst ────────*/
 
 func BenchmarkDuplicateBurst(b *testing.B) {
 	const Dups = 8
@@ -79,39 +71,35 @@ func BenchmarkDuplicateBurst(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for j := 0; j < Dups; j++ {
-			_ = q.Push(42, h, nil)
+			q.Push(42, h, nil)
 		}
 		for j := 0; j < Dups; j++ {
-			_, _, _ = q.PopMin()
+			_, _, _ = q.PopMinSafe()
 		}
 	}
 	reportPerOp(b, int64(2*Dups))
 }
-
-/*──────── 4. heavy relocate ─────────────*/
 
 func BenchmarkUpdateRelocate(b *testing.B) {
 	const N = 1 << 12
 	q := NewQuantumQueue()
 	hs := borrowManyB(b, q, N)
 	for i, h := range hs {
-		_ = q.Push(int64(i), h, nil)
+		q.Push(int64(i), h, nil)
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for j, h := range hs {
-			_ = q.Update(int64(j+8), h, nil)
-			_ = q.Update(int64(j), h, nil)
+			q.Update(int64(j+8), h, nil)
+			q.Update(int64(j), h, nil)
 		}
 	}
-	reportPerOp(b, int64(2*N)) // two Updates per handle
+	reportPerOp(b, int64(2*N))
 }
 
-/*──────── 5. mixed workload ─────────────*/
-
 func BenchmarkMixedWorkload(b *testing.B) {
-	const N = 128 // Reduced from 256 or higher to avoid long pop drain
+	const N = 128
 
 	rng := rand.New(rand.NewSource(1))
 	q := NewQuantumQueue()
@@ -121,21 +109,19 @@ func BenchmarkMixedWorkload(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		for j, h := range hs {
 			tk := rng.Int63n(256)
-			_ = q.Push(tk, h, nil)
+			q.Push(tk, h, nil)
 			if j&3 == 0 {
-				_ = q.Push(tk, h, nil) // duplicate burst
+				q.Push(tk, h, nil)
 			}
 		}
 		for j, h := range hs {
 			if j&1 == 0 {
-				_ = q.Update(int64(j+64), h, nil) // relocate
+				q.Update(int64(j+64), h, nil)
 			}
 		}
 		for j := 0; j < N; j++ {
-			if !q.Empty() {
-				_, _, _ = q.PopMin()
-			}
+			_, _, _ = q.PopMinSafe()
 		}
 	}
-	reportPerOp(b, int64(N*3)) // push + maybe duplicate + update + pop estimate
+	reportPerOp(b, int64(N*3))
 }
