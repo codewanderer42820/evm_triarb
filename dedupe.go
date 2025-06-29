@@ -16,7 +16,7 @@ type dedupeSlot struct {
 
 	// padding to enforce 32-byte alignment and cache line pairing
 	//lint:ignore U1000 unused but required to avoid misalignment
-	_pad uint32
+	_ uint32
 }
 
 // Deduper maintains a fixed-size ring for high-speed, branch-free deduplication.

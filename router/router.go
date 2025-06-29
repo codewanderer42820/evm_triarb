@@ -123,14 +123,14 @@ type PairTriplet [3]PairID
 type CycleState struct {
 	Ticks [3]float64
 	Pairs PairTriplet
-	_pad  uint32
+	_     uint32
 }
 
 // EdgeBinding associates a cycle and which tick slot to update.
 type EdgeBinding struct {
 	Pairs   PairTriplet
 	EdgeIdx uint16
-	_pad    uint16
+	_       uint16
 }
 
 // PairShard groups EdgeBindings for one PairID, balancing fan-out.
@@ -146,7 +146,7 @@ type FanoutEntry struct {
 	Queue   *bucketqueue.Queue
 	Handle  bucketqueue.Handle
 	EdgeIdx uint16
-	_pad    [2]byte
+	_       [2]byte
 }
 
 // CoreExecutor holds all per-core data and tick queues.
@@ -161,9 +161,9 @@ type CoreExecutor struct {
 // Layout: PairID, pad, two float64, pad to 32 B.
 type TickUpdate struct {
 	Pair             PairID
-	_pad0            uint32
+	_                uint32
 	FwdTick, RevTick float64
-	_pad1            [8]byte
+	_                [8]byte
 }
 
 // compile-time layout assertion

@@ -6,17 +6,17 @@ import (
 )
 
 type slot struct {
-	val  [32]byte // fixed-size payload
-	seq  uint64   // slot ticket number
-	_pad [24]byte // pad to 64 bytes total, prevents false sharing
+	val [32]byte // fixed-size payload
+	seq uint64   // slot ticket number
+	_   [24]byte // pad to 64 bytes total, prevents false sharing
 }
 
 type Ring struct {
-	_pad0 [64]byte // cache-line isolation (consumer head)
-	head  uint64   // consumer cursor
-	_pad1 [64]byte // cache-line isolation (producer tail)
-	tail  uint64   // producer cursor
-	_pad2 [64]byte // further isolation
+	_    [64]byte // cache-line isolation (consumer head)
+	head uint64   // consumer cursor
+	_    [64]byte // cache-line isolation (producer tail)
+	tail uint64   // producer cursor
+	_    [64]byte // further isolation
 
 	mask uint64 // == len(buf) - 1
 	step uint64 // == len(buf)

@@ -18,7 +18,7 @@ type Hash struct {
 	keys []uint32 // key slots; key=0 denotes empty
 	vals []uint32 // corresponding values
 	mask uint32   // bitmask for modulo (len(keys)-1)
-	_pad [56]byte // cacheline isolation for high-throughput (was [4]byte)
+	_    [56]byte // cacheline isolation for high-throughput (was [4]byte)
 }
 
 // nextPow2 rounds an integer up to the next power-of-two.

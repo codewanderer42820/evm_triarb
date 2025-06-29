@@ -35,9 +35,9 @@ const (
 
 // Uint128 is a 128-bit unsigned integer (Hi << 64 | Lo)
 type Uint128 struct {
-	Hi   uint64
-	Lo   uint64
-	_pad [0]uint64 // align to 16 bytes if needed
+	Hi uint64
+	Lo uint64
+	_  [0]uint64 // align to 16 bytes if needed
 }
 
 /*──────────────────── internal helpers ───────────────────*/
