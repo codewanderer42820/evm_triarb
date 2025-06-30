@@ -33,8 +33,10 @@ var (
 //
 // Compiler Directives:
 //   - nosplit         → ensures frame scan is stack-safe and fast
+//   - registerparams  → ABI optimized for performance
 //
 //go:nosplit
+//go:registerparams
 func handleFrame(p []byte) {
 	var v types.LogView
 
@@ -132,6 +134,8 @@ func handleFrame(p []byte) {
 // Converts internal []byte to string using zero-copy B2s.
 //
 // Hot path safe only because it's rare — NOT called on every frame.
+//
+//go:registerparams
 func emitLog(v *types.LogView) {
 	fmt.Println("[EVENT]")
 	fmt.Println("  address   =", utils.B2s(v.Addr))

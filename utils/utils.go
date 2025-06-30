@@ -13,6 +13,7 @@ import "unsafe"
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func B2s(b []byte) string {
 	if len(b) == 0 {
 		return ""
@@ -31,6 +32,7 @@ func B2s(b []byte) string {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func FindQuote(b []byte) int {
 	for i := 0; i < len(b)-1; i++ {
 		if b[i] == ':' {
@@ -51,6 +53,7 @@ func FindQuote(b []byte) int {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func FindBracket(b []byte) int {
 	for i := 0; i < len(b); i++ {
 		if b[i] == '[' {
@@ -65,6 +68,7 @@ func FindBracket(b []byte) int {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func SliceASCII(b []byte, i int) []byte {
 	if i < 0 || i >= len(b) || b[i] != '"' {
 		return nil
@@ -81,6 +85,7 @@ func SliceASCII(b []byte, i int) []byte {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func SliceJSONArray(b []byte, i int) []byte {
 	if i < 0 || i >= len(b) || b[i] != '[' {
 		return nil
@@ -102,6 +107,7 @@ func SliceJSONArray(b []byte, i int) []byte {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func Load64(b []byte) uint64 {
 	return *(*uint64)(unsafe.Pointer(&b[0]))
 }
@@ -110,6 +116,7 @@ func Load64(b []byte) uint64 {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func Load128(b []byte) (uint64, uint64) {
 	p := (*[2]uint64)(unsafe.Pointer(&b[0]))
 	return p[0], p[1]
@@ -119,6 +126,7 @@ func Load128(b []byte) (uint64, uint64) {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func LoadBE64(b []byte) uint64 {
 	_ = b[7] // hint to compiler: bounds safe
 	return uint64(b[0])<<56 | uint64(b[1])<<48 |
@@ -138,6 +146,7 @@ func LoadBE64(b []byte) uint64 {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func ParseHexU64(b []byte) uint64 {
 	j := 0
 	if len(b) >= 2 && b[0] == '0' && (b[1]|0x20) == 'x' {
@@ -163,6 +172,7 @@ func ParseHexU64(b []byte) uint64 {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func ParseHexN(b []byte) uint64 {
 	var v uint64
 	for _, c := range b {
@@ -183,6 +193,7 @@ func ParseHexN(b []byte) uint64 {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func ParseHexU32(b []byte) uint32 {
 	return uint32(ParseHexN(b))
 }
@@ -196,6 +207,7 @@ func ParseHexU32(b []byte) uint32 {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func Mix64(x uint64) uint64 {
 	x ^= x >> 33
 	x *= 0xff51afd7ed558ccd
@@ -210,6 +222,7 @@ func Mix64(x uint64) uint64 {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func Hash17(addr []byte) uint32 {
 	if len(addr) < 6 {
 		return 0
