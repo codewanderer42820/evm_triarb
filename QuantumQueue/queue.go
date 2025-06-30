@@ -53,6 +53,7 @@ type node struct {
 // groupBlock holds a two-level bitmap summary for one group of 64 lanes,
 // each lane covering 64 buckets. Summary bits allow fast traversal.
 
+//go:notinheap
 //go:align 576
 //go:inline
 type groupBlock struct {
@@ -72,6 +73,9 @@ type groupBlock struct {
 //   - `freeHead`: freelist head
 //
 // Padding is used to align hot fields for cache efficiency.
+
+//go:notinheap
+//go:inline
 type QuantumQueue struct {
 	arena   [CapItems]node         // statically allocated pool
 	buckets [BucketCount]Handle    // tick-indexed list heads
