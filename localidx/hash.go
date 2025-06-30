@@ -28,6 +28,10 @@ package localidx
 
 import "unsafe"
 
+// Package localidx implements a fixed-capacity Robin-Hood hashmap
+// optimized for single-threaded, nanosecond-class performance.
+// Zero heap pressure; insertion-only; no deletion logic.
+
 //go:notinheap         // avoids heap metadata, allows static arena use
 //go:align 64          // ensures alignment for cacheline locality
 //go:inline            // hint to inline Hash where embedded in parent
@@ -37,6 +41,9 @@ type Hash struct {
 	mask uint32   // bitmask for modulo (len(keys)-1)
 }
 
+// nextPow2 returns the smallest power of two greater than or equal to n.
+// Used to size the hash table for efficient masking and linear probing.
+//
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -48,11 +55,15 @@ func nextPow2(n int) uint32 {
 	return s
 }
 
+// New creates and returns a Hash with capacity for at least `capacity` entries.
+// Internally, it allocates slices of length equal to nextPow2(capacity*2),
+// providing ~50% load factor headroom for performance.
+//
 //go:nosplit
 //go:inline
 //go:registerparams
 func New(capacity int) Hash {
-	sz := nextPow2(capacity * 2) // doubled → leaves 50% headroom
+	sz := nextPow2(capacity * 2)
 	return Hash{
 		keys: make([]uint32, sz),
 		vals: make([]uint32, sz),
@@ -60,6 +71,12 @@ func New(capacity int) Hash {
 	}
 }
 
+// Put inserts the given key-value pair into the hash.
+// If the key is not present, it is placed into an empty slot and the inserted value is returned.
+// If the key already exists, the existing stored value is returned and no overwrite occurs.
+// Implements Robin-Hood hashing: when probing, entries swap based on probe-distance
+// to minimize variance. Soft-prefetching hides memory latency.
+//
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -70,21 +87,20 @@ func (h Hash) Put(key, val uint32) uint32 {
 	for {
 		k := h.keys[i]
 
-		// Empty slot → insert here
 		if k == 0 {
+			// Empty slot → insert here
 			h.keys[i], h.vals[i] = key, val
 			return val
 		}
-
-		// Existing key → return stored value
 		if k == key {
+			// Existing key → return stored value without overwrite
 			return h.vals[i]
 		}
 
 		// Compute current resident's probe distance
 		kDist := (i + h.mask + 1 - (k & h.mask)) & h.mask
 
-		// Robin-Hood: swap if we're "poorer" (i.e., have higher dist)
+		// Robin-Hood: swap entries if new element has probed farther
 		if kDist < dist {
 			key, h.keys[i] = h.keys[i], key
 			val, h.vals[i] = h.vals[i], val
@@ -95,12 +111,17 @@ func (h Hash) Put(key, val uint32) uint32 {
 		_ = *(*uint32)(unsafe.Pointer(
 			uintptr(unsafe.Pointer(&h.keys[0])) + uintptr(((i+2)&h.mask)<<2)))
 
-		// Linear probe to next slot
+		// Move to next slot and increment probe distance
 		i = (i + 1) & h.mask
 		dist++
 	}
 }
 
+// Get retrieves the value for the given key.
+// Returns (value, true) if found; (0, false) if not present.
+// Lookup terminates on empty slot or when probe-distance bound-check
+// indicates the key is not in this cluster. Soft-prefetching reduces latency.
+//
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -112,21 +133,26 @@ func (h Hash) Get(key uint32) (uint32, bool) {
 		k := h.keys[i]
 
 		if k == 0 {
-			return 0, false // empty slot = not present
+			// Empty slot → key not present
+			return 0, false
 		}
 		if k == key {
-			return h.vals[i], true // match
+			// Match found → return associated value
+			return h.vals[i], true
 		}
 
+		// Compute current resident's probe distance
 		kDist := (i + h.mask + 1 - (k & h.mask)) & h.mask
 		if kDist < dist {
-			return 0, false // bound-check fail → key not in cluster
+			// Bound-check fail → key not in this cluster
+			return 0, false
 		}
 
-		// Soft-prefetch ahead (unsafe if misused)
+		// Soft-prefetch ahead to hide memory latency
 		_ = *(*uint32)(unsafe.Pointer(
 			uintptr(unsafe.Pointer(&h.keys[0])) + uintptr(((i+2)&h.mask)<<2)))
 
+		// Continue probing
 		i = (i + 1) & h.mask
 		dist++
 	}
