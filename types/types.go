@@ -14,6 +14,9 @@ package types
 //   - Hot path fields come first: address, data, topics
 //   - Numeric metadata fields follow (block/tx/log)
 //   - Cold dedup-only fingerprint fields are last
+//
+//go:notinheap
+//go:align 128
 type LogView struct {
 	// ───────────── Hot fields: accessed immediately in fast path ──────────────
 
