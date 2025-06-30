@@ -50,50 +50,54 @@ func (h *stressHeap) Pop() interface{} {
 func TestQueueStressRandomOperations(t *testing.T) {
 	const iterations = 50_000_000
 
-	// Use a fixed seed for deterministic test runs
 	rng := rand.New(rand.NewSource(42))
 	q := NewQuantumQueue()
 	ref := &stressHeap{}
 	heap.Init(ref)
 
-	// Prepare pool of free handles and a set of live handles
 	free := make([]Handle, CapItems)
 	for i := range free {
 		free[i] = Handle(i)
 	}
-	live := make(map[Handle]bool) // tracks handles currently in queue
-	seq := 0                      // monotonically increasing sequence number
+	live := make(map[Handle]bool)
+	seq := 0
+
+	// Helper to make deterministic payload
+	makeVal := func(seed int64) *[48]byte {
+		var b [48]byte
+		for i := range b {
+			b[i] = byte((seed + int64(i)) & 0xFF)
+		}
+		return &b
+	}
 
 	for i := 0; i < iterations; i++ {
-		op := rng.Intn(3)                    // randomly choose operation: 0=push,1=move,2=pop
-		tick := int64(rng.Intn(BucketCount)) // random tick within valid range
+		op := rng.Intn(3)
+		tick := int64(rng.Intn(BucketCount))
 
 		switch op {
 		case 0:
-			// Push a new handle if available
 			if len(free) == 0 {
 				continue
 			}
 			h := free[len(free)-1]
 			free = free[:len(free)-1]
-			q.Push(tick, h, nil)
+			val := makeVal(int64(seq))
+			q.Push(tick, h, val)
 			heap.Push(ref, &stressItem{h: h, tick: tick, seq: seq})
 			live[h] = true
 			seq++
 
 		case 1:
-			// Move tick of an existing live handle
 			if len(live) == 0 {
 				continue
 			}
-			// Select any handle from live set
 			var h Handle
 			for hh := range live {
 				h = hh
 				break
 			}
 			q.MoveTick(h, tick)
-			// Remove all stale versions of h from reference heap (reverse order)
 			for j := len(*ref) - 1; j >= 0; j-- {
 				if (*ref)[j].h == h {
 					heap.Remove(ref, j)
@@ -103,31 +107,26 @@ func TestQueueStressRandomOperations(t *testing.T) {
 			seq++
 
 		case 2:
-			// Pop the minimum if queue isn't empty
 			if q.Empty() {
 				continue
 			}
 			h, poppedTick, _ := q.PeepMin()
 			exp := heap.Pop(ref).(*stressItem)
-
-			// Verify queue behavior matches reference
 			if exp.h != h || exp.tick != poppedTick {
 				t.Fatalf("Mismatch at iter %d: got (h=%v,t=%d); want (h=%v,t=%d)",
 					i, h, poppedTick, exp.h, exp.tick)
 			}
-			// Remove from queue and return handle to free pool
 			q.UnlinkMin(h, poppedTick)
 			delete(live, h)
 			free = append(free, h)
 		}
 	}
 
-	// Drain any remaining elements and verify heap/queue stay consistent
 	for !q.Empty() {
 		h, poppedTick, _ := q.PeepMin()
 		exp := heap.Pop(ref).(*stressItem)
 		if exp.h != h || exp.tick != poppedTick {
-			t.Fatalf("Drain mismatch: got (h=%v,t=%d); want (h=%v,t=%d)",
+			t.Fatalf("Drain mismatch: got (h=%v,t=%d); want (%v,%d)",
 				h, poppedTick, exp.h, exp.tick)
 		}
 		q.UnlinkMin(h, poppedTick)
@@ -135,7 +134,6 @@ func TestQueueStressRandomOperations(t *testing.T) {
 		free = append(free, h)
 	}
 
-	// Ensure reference heap is empty
 	if ref.Len() != 0 {
 		t.Fatalf("Reference heap not empty after drain: %d items left", ref.Len())
 	}

@@ -34,7 +34,7 @@ func BenchmarkPushUnique(b *testing.B) {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
 	}
-	val := make([]byte, 48)
+	val := arr48(make([]byte, 48))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		h := handles[i%benchSize]
@@ -49,9 +49,9 @@ func BenchmarkPushUpdate(b *testing.B) {
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
-		q.Push(int64(i), h, make([]byte, 48))
+		q.Push(int64(i), h, arr48(make([]byte, 48)))
 	}
-	val := make([]byte, 48)
+	val := arr48(make([]byte, 48))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		h := handles[i%benchSize]
@@ -63,7 +63,7 @@ func BenchmarkPushUpdate(b *testing.B) {
 func BenchmarkPushSameTickZero(b *testing.B) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
-	val := make([]byte, 48)
+	val := arr48(make([]byte, 48))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		q.Push(0, h, val)
@@ -74,7 +74,7 @@ func BenchmarkPushSameTickZero(b *testing.B) {
 func BenchmarkPushSameTickMax(b *testing.B) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
-	val := make([]byte, 48)
+	val := arr48(make([]byte, 48))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		q.Push(int64(benchSize-1), h, val)
@@ -88,7 +88,7 @@ func BenchmarkPeepMin(b *testing.B) {
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
-		q.Push(int64(i), h, make([]byte, 48))
+		q.Push(int64(i), h, arr48(make([]byte, 48)))
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -103,14 +103,14 @@ func BenchmarkUnlinkMin(b *testing.B) {
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
-		q.Push(int64(i), h, make([]byte, 48))
+		q.Push(int64(i), h, arr48(make([]byte, 48)))
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		h, tick, _ := q.PeepMin()
 		q.UnlinkMin(h, tick)
-		q.Push((tick+benchSize)%CapItems, h, make([]byte, 48))
+		q.Push((tick+benchSize)%CapItems, h, arr48(make([]byte, 48)))
 	}
 }
 
@@ -121,7 +121,7 @@ func BenchmarkMoveTick(b *testing.B) {
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
-		q.Push(int64(i), h, make([]byte, 48))
+		q.Push(int64(i), h, arr48(make([]byte, 48)))
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -143,7 +143,7 @@ func BenchmarkPushRandom(b *testing.B) {
 	for i := range ticks {
 		ticks[i] = rand.Int63n(benchSize)
 	}
-	val := make([]byte, 48)
+	val := arr48(make([]byte, 48))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		h := handles[i%benchSize]
