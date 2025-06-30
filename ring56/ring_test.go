@@ -1,22 +1,13 @@
-// ring_test.go — Functional verification of the lock-free SPSC ring with 56-byte payloads.
-//
-// This suite tests:
-//   - Basic push/pop correctness
-//   - Full ring capacity behavior
-//   - Wraparound cursor logic
-//   - Blocking PopWait behavior under delay
-//
-// All tests assume:
-//   - Caller is single-threaded SPSC (no races).
-//   - Memory is reused immediately upon pop.
-//   - No GC interference; short-lived allocations only.
-
 package ring56
 
 import (
 	"testing"
 	"time"
 )
+
+// -----------------------------------------------------------------------------
+// ░░ Constructor Tests ░░
+// -----------------------------------------------------------------------------
 
 // TestNewPanicsOnBadSize validates that the constructor panics
 // on non-power-of-two or non-positive sizes.
@@ -33,6 +24,10 @@ func TestNewPanicsOnBadSize(t *testing.T) {
 		}()
 	}
 }
+
+// -----------------------------------------------------------------------------
+// ░░ Core Ring Operation Tests ░░
+// -----------------------------------------------------------------------------
 
 // TestPushPopRoundTrip confirms single element round-trip integrity
 // and checks that the ring is empty afterwards.
@@ -67,6 +62,14 @@ func TestPushFailsWhenFull(t *testing.T) {
 	}
 }
 
+// TestPopNil confirms that Pop returns nil on an empty ring.
+func TestPopNil(t *testing.T) {
+	r := New(4)
+	if r.Pop() != nil {
+		t.Fatal("Pop on empty ring should return nil")
+	}
+}
+
 // TestPopWaitBlocksUntilItem verifies PopWait blocks until data arrives
 // and returns the correct value.
 func TestPopWaitBlocksUntilItem(t *testing.T) {
@@ -78,14 +81,6 @@ func TestPopWaitBlocksUntilItem(t *testing.T) {
 	}()
 	if got := r.PopWait(); got == nil || *got != *want {
 		t.Fatalf("PopWait = %v, want %v", got, want)
-	}
-}
-
-// TestPopNil confirms that Pop returns nil on an empty ring.
-func TestPopNil(t *testing.T) {
-	r := New(4)
-	if r.Pop() != nil {
-		t.Fatal("Pop on empty ring should return nil")
 	}
 }
 
@@ -103,5 +98,55 @@ func TestWrapAround(t *testing.T) {
 		if got == nil || got[0] != byte(i) {
 			t.Fatalf("iteration %d: got %v, want %v", i, got[0], val[0])
 		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// ░░ Interleaved & Idle Edge Case Tests ░░
+// -----------------------------------------------------------------------------
+
+// TestPushPopInterleaved checks cursor safety under interleaved ops.
+func TestPushPopInterleaved(t *testing.T) {
+	r := New(8)
+	for i := 0; i < 64; i++ {
+		val := &[56]byte{byte(i)}
+		if !r.Push(val) {
+			t.Fatalf("push %d failed", i)
+		}
+		got := r.Pop()
+		if got == nil || got[0] != byte(i) {
+			t.Fatalf("mismatch at %d", i)
+		}
+	}
+}
+
+// TestPopAfterLongIdle ensures ring resumes correctly after inactivity.
+func TestPopAfterLongIdle(t *testing.T) {
+	r := New(2)
+	time.Sleep(50 * time.Millisecond)
+	want := &[56]byte{88}
+	if !r.Push(want) {
+		t.Fatal("Push failed after idle")
+	}
+	got := r.Pop()
+	if got == nil || *got != *want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// TestPushDropOnOverflow simulates back-to-back Push beyond capacity.
+func TestPushDropOnOverflow(t *testing.T) {
+	r := New(4)
+	val := &[56]byte{99}
+	drops := 0
+	for i := 0; i < 8; i++ {
+		if !r.Push(val) {
+			drops++
+		} else {
+			_ = r.Pop()
+		}
+	}
+	if drops == 0 {
+		t.Fatal("expected at least one push to fail on overflow")
 	}
 }

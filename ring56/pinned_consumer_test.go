@@ -1,17 +1,3 @@
-// pinned_consumer_test.go — Unit tests for PinnedConsumer lifecycle and correctness.
-//
-// All tests assume:
-//   - Single-threaded access to the ring.
-//   - Pinned goroutine correctly spins, backs off, and exits on demand.
-//   - Payloads are passed via *[56]byte and dereferenced manually.
-//
-// These tests validate:
-//   - Single delivery
-//   - Hot window persistence
-//   - Cold wake-up after timeout
-//   - Proper shutdown signaling
-//   - Ring correctness not compromised by consumer control
-
 package ring56
 
 import (
@@ -20,6 +6,10 @@ import (
 	"testing"
 	"time"
 )
+
+// -----------------------------------------------------------------------------
+// ░░ Pinned Consumer Lifecycle Tests ░░
+// -----------------------------------------------------------------------------
 
 // launch spins up a pinned consumer on its own thread.
 // Returns: stop, hot (control flags), and done (channel closed on exit).
@@ -132,4 +122,27 @@ func TestPinnedConsumerBackoffThenWake(t *testing.T) {
 
 	atomic.StoreUint32(stop, 1)
 	<-done
+}
+
+// -----------------------------------------------------------------------------
+// ░░ Late Consumer Start Test ░░
+// -----------------------------------------------------------------------------
+
+// TestDelayedConsumerStart validates a Push before consumer is active.
+func TestDelayedConsumerStart(t *testing.T) {
+	r := New(4)
+	var seen atomic.Bool
+	r.Push(&[56]byte{11})
+	stop := new(uint32)
+	hot := new(uint32)
+	done := make(chan struct{})
+	go PinnedConsumer(0, r, stop, hot, func(*[56]byte) {
+		seen.Store(true)
+	}, done)
+	time.Sleep(10 * time.Millisecond)
+	atomic.StoreUint32(stop, 1)
+	<-done
+	if !seen.Load() {
+		t.Fatal("consumer did not see pre-pushed value")
+	}
 }

@@ -1,14 +1,3 @@
-// ring_bench_test.go — Micro-benchmarks for 56-byte fixed-capacity SPSC ring.
-//
-// Focus:
-//   - Hot-path performance for Push, Pop, and PushPop
-//   - Cross-core contention simulation
-//   - Elision-resistant test design (via runtime.KeepAlive + global sink)
-//
-// Assumptions:
-//   - Ring is correctly sized (power-of-two).
-//   - Producer and consumer maintain SPSC contract.
-
 package ring56
 
 import (
@@ -17,13 +6,17 @@ import (
 	"testing"
 )
 
-const benchCap = 1024 // small enough to remain hot in L1/L2 cache
+const benchCap = 1024 // Small enough to fit in L1/L2 on modern cores
 
-var dummy56 = &[56]byte{1, 2, 3} // constant payload
-var sink any                     // escape sink to prevent elision
+var dummy56 = &[56]byte{1, 2, 3} // Constant payload for benchmark sanity
+var sink any                     // Global escape sink (prevents compiler elision)
+
+// -----------------------------------------------------------------------------
+// ░░ Benchmark: Push only (write path) ░░
+// -----------------------------------------------------------------------------
 
 // BenchmarkRing_Push measures producer-only throughput under full ring pressure.
-// Caller spins on Pop if full, emulating best-effort batching.
+// Producer spins if full, simulating backpressure + retry.
 func BenchmarkRing_Push(b *testing.B) {
 	r := New(benchCap)
 	b.ReportAllocs()
@@ -31,13 +24,18 @@ func BenchmarkRing_Push(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		if !r.Push(dummy56) {
-			_ = r.Pop()
-			_ = r.Push(dummy56)
+			_ = r.Pop()         // free one
+			_ = r.Push(dummy56) // should now succeed
 		}
 	}
 }
 
-// BenchmarkRing_Pop measures raw consumer throughput assuming ring is preloaded.
+// -----------------------------------------------------------------------------
+// ░░ Benchmark: Pop only (read path) ░░
+// -----------------------------------------------------------------------------
+
+// BenchmarkRing_Pop measures pure consumer latency.
+// The ring is prefilled and partially consumed to keep it hot.
 func BenchmarkRing_Pop(b *testing.B) {
 	r := New(benchCap)
 	for i := 0; i < benchCap-1; i++ {
@@ -58,8 +56,12 @@ func BenchmarkRing_Pop(b *testing.B) {
 	runtime.KeepAlive(sink)
 }
 
-// BenchmarkRing_PushPop measures a tight in-goroutine loop of Pop→Push.
-// This approximates microservice-style relaying.
+// -----------------------------------------------------------------------------
+// ░░ Benchmark: Push + Pop (single goroutine relay) ░░
+// -----------------------------------------------------------------------------
+
+// BenchmarkRing_PushPop measures tightly-coupled sequential push/pop throughput.
+// This simulates relay systems or memory-local stream processing.
 func BenchmarkRing_PushPop(b *testing.B) {
 	r := New(benchCap)
 	for i := 0; i < benchCap/2; i++ {
@@ -76,12 +78,15 @@ func BenchmarkRing_PushPop(b *testing.B) {
 	runtime.KeepAlive(sink)
 }
 
-// BenchmarkRing_CrossCore simulates a full producer-consumer split across OS threads.
-//
-// GOMAXPROCS(2) gives us real core separation on most OSes.
-// This captures true inter-core communication cost through L2 or L3.
+// -----------------------------------------------------------------------------
+// ░░ Benchmark: Cross-Core (full SPSC with pinned consumer) ░░
+// -----------------------------------------------------------------------------
+
+// BenchmarkRing_CrossCore simulates true SPSC behavior with a pinned producer
+// and a consumer running on a separate OS thread.
+// This captures L2/L3 core-to-core handoff performance.
 func BenchmarkRing_CrossCore(b *testing.B) {
-	runtime.GOMAXPROCS(2)
+	runtime.GOMAXPROCS(2) // ensure scheduler isn't bottlenecked
 	r := New(benchCap)
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -99,7 +104,7 @@ func BenchmarkRing_CrossCore(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for !r.Push(dummy56) {
-			// spin until slot frees
+			// spin until consumer frees a slot
 		}
 	}
 	wg.Wait()
