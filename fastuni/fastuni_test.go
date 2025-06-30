@@ -62,29 +62,43 @@ func TestLog2u128(t *testing.T) {
 
 /*─────────────────── ln reserve ratio tests ───────────────────*/
 func TestLnReserveRatio(t *testing.T) {
-	if got, err := LnReserveRatio(0, 1); err == nil || !math.IsInf(got, -1) {
-		t.Errorf("LnReserveRatio(0,1): want -Inf got %g err=%v", got, err)
+	// Zero numerator → error
+	if got, err := LnReserveRatio(0, 1); err != ErrZeroValue {
+		t.Errorf("LnReserveRatio(0,1): want err=ErrZeroValue got %g err=%v", got, err)
 	}
-	if got, err := LnReserveRatio(1, 0); err == nil || !math.IsInf(got, 1) {
-		t.Errorf("LnReserveRatio(1,0): want +Inf got %g err=%v", got, err)
+
+	// Zero denominator → error
+	if got, err := LnReserveRatio(1, 0); err != ErrZeroValue {
+		t.Errorf("LnReserveRatio(1,0): want err=ErrZeroValue got %g err=%v", got, err)
 	}
+
+	// Equal inputs → 0
 	if got, err := LnReserveRatio(42, 42); err != nil || got != 0 {
 		t.Errorf("LnReserveRatio(42,42): want 0 got %g err=%v", got, err)
 	}
+
+	// Small delta case
 	a, b := uint64(10000), uint64(10001)
 	r := float64(a)/float64(b) - 1
 	if got, err := LnReserveRatio(a, b); err != nil || math.Abs(got-math.Log1p(r)) > tol {
 		t.Errorf("LnReserveRatio small delta: want %g got %g err=%v", math.Log1p(r), got, err)
 	}
+
+	// Fallback (log2-based) case
 	a, b = 16, 1
 	got, err := LnReserveRatio(a, b)
 	want := (log2u64(a) - log2u64(b)) * ln2
 	if err != nil || math.Abs(got-want) > tol {
 		t.Errorf("LnReserveRatio fallback: want %g got %g err=%v", want, got, err)
 	}
+
+	// Symmetry test
 	x, y := uint64(12345), uint64(67890)
-	a1, _ := LnReserveRatio(x, y)
-	a2, _ := LnReserveRatio(y, x)
+	a1, err1 := LnReserveRatio(x, y)
+	a2, err2 := LnReserveRatio(y, x)
+	if err1 != nil || err2 != nil {
+		t.Errorf("LnReserveRatio symmetry: unexpected errors: %v, %v", err1, err2)
+	}
 	if sum := a1 + a2; math.Abs(sum) > tol {
 		t.Errorf("LnReserveRatio symmetry violated: sum=%g", sum)
 	}
