@@ -28,7 +28,6 @@ import (
 //   - align 64: ensures slot fits cleanly in cachelines for producer/consumer
 //
 //go:notinheap
-//go:align 64
 type slot struct {
 	val [56]byte
 	seq uint64
@@ -41,19 +40,19 @@ type slot struct {
 //   - align 64: maintains cacheline separation between head/tail
 //
 //go:notinheap
-//go:align 64
 type Ring struct {
 	_    [64]byte // consumer head cacheline
 	head uint64
 
-	_    [64]byte // producer tail cacheline
+	_    [56]byte // producer tail cacheline
 	tail uint64
 
-	_ [64]byte // extra padding
+	_ [56]byte // extra padding
 
 	mask uint64
 	step uint64
 	buf  []slot
+	_    [3]uint64
 }
 
 // New constructs a ring with power-of-two size.
