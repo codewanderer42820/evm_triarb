@@ -50,8 +50,10 @@ type wsFrame struct {
 //
 // Compiler Directives:
 //   - nosplit         → ensures early init path has no preemption
+//   - registerparams  → ABI optimized (though `init` has no input)
 //
 //go:nosplit
+//go:registerparams
 func init() {
 	// ───── Step 1: Generate Sec-WebSocket-Key (16 random bytes) ─────
 	key := make([]byte, 16)
