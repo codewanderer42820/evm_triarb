@@ -105,21 +105,92 @@ func BenchmarkPeepMin(b *testing.B) {
 	}
 }
 
-// BenchmarkUnlinkMin benchmarks repeated PeepMin + UnlinkMin + Push.
-// Simulates continuous consumption of the min and recycling.
-func BenchmarkUnlinkMin(b *testing.B) {
+// BenchmarkUnlinkMin_StableBucket benchmarks UnlinkMin when operating on a stable,
+// single-entry bucket. The tick is reused continuously and the bitmap summary
+// never changes. This reflects the common-case hot-path in core-pinned routers.
+func BenchmarkUnlinkMin_StableBucket(b *testing.B) {
 	q := NewQuantumQueue()
-	handles := make([]Handle, benchSize)
-	for i := range handles {
-		h, _ := q.BorrowSafe()
-		handles[i] = h
-		q.Push(int64(i), h, new([48]byte))
+	h, _ := q.BorrowSafe()
+	val := new([48]byte)
+	q.Push(2048, h, val) // chosen mid-range stable tick
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		q.UnlinkMin(h, 2048)
+		q.Push(2048, h, val)
+	}
+}
+
+// BenchmarkUnlinkMin_DenseBucket benchmarks UnlinkMin when operating within
+// a dense bucket (3 handles pushed to same tick). This ensures the list head
+// rotates but the bucket never empties, so bitmap summaries remain untouched.
+func BenchmarkUnlinkMin_DenseBucket(b *testing.B) {
+	q := NewQuantumQueue()
+	var hs [3]Handle
+	val := new([48]byte)
+	for i := 0; i < 3; i++ {
+		hs[i], _ = q.BorrowSafe()
+		q.Push(1234, hs[i], val)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		h, tick, _ := q.PeepMin()
+		h := hs[i%3]
+		q.UnlinkMin(h, 1234)
+		q.Push(1234, h, val)
+	}
+}
+
+// BenchmarkUnlinkMin_BitmapCollapse benchmarks worst-case unlink behavior,
+// where each UnlinkMin empties the bucket and triggers a full bitmap clear
+// across group, lane, and bucket summary levels. This represents the cold-path
+// edge case and exercises all 3 layers of the bitmap hierarchy.
+func BenchmarkUnlinkMin_BitmapCollapse(b *testing.B) {
+	q := NewQuantumQueue()
+	val := new([48]byte)
+	h, _ := q.BorrowSafe()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tick := int64(i % BucketCount) // rotate across all tick buckets
+		q.Push(tick, h, val)
 		q.UnlinkMin(h, tick)
-		q.Push((tick+benchSize)%CapItems, h, new([48]byte))
+	}
+}
+
+// BenchmarkUnlinkMin_ScatterCollapse benchmarks UnlinkMin with randomized ticks.
+// This simulates wide churn where handles are constantly inserted into random
+// tick positions, forcing worst-case cache churn and frequent bitmap collapses.
+// It models dynamic traffic with poor temporal locality.
+func BenchmarkUnlinkMin_ScatterCollapse(b *testing.B) {
+	q := NewQuantumQueue()
+	val := new([48]byte)
+	h, _ := q.BorrowSafe()
+
+	ticks := make([]int64, b.N)
+	for i := range ticks {
+		ticks[i] = int64(rand.Intn(BucketCount))
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tick := ticks[i]
+		q.Push(tick, h, val)
+		q.UnlinkMin(h, tick)
+	}
+}
+
+// BenchmarkUnlinkMin_ReinsertAfterCollapse benchmarks a pattern where the
+// same tick is reused, but the bucket is fully collapsed on every UnlinkMin.
+// This represents a midpoint between the worst-case collapse and steady-state,
+// and simulates real tick reuse without handle batching.
+func BenchmarkUnlinkMin_ReinsertAfterCollapse(b *testing.B) {
+	q := NewQuantumQueue()
+	val := new([48]byte)
+	h, _ := q.BorrowSafe()
+	const tick = 4095 // max tick, stable index
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		q.Push(tick, h, val)
+		q.UnlinkMin(h, tick)
 	}
 }
 
