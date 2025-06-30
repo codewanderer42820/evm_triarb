@@ -6,9 +6,11 @@ import (
 	"time"
 )
 
-const benchSize = CapItems // one handle per tick slot
+// Use the full arena capacity (1 entry per tick) for maximal stress
+const benchSize = CapItems
 
-// BenchmarkEmpty measures the cost of checking emptiness.
+// BenchmarkEmpty measures the overhead of calling Empty().
+// This is a constant-time operation reading a field.
 func BenchmarkEmpty(b *testing.B) {
 	q := NewQuantumQueue()
 	b.ResetTimer()
@@ -17,7 +19,8 @@ func BenchmarkEmpty(b *testing.B) {
 	}
 }
 
-// BenchmarkSize measures the cost of querying size.
+// BenchmarkSize measures the cost of calling Size().
+// This is also a constant-time operation reading an int field.
 func BenchmarkSize(b *testing.B) {
 	q := NewQuantumQueue()
 	b.ResetTimer()
@@ -26,7 +29,8 @@ func BenchmarkSize(b *testing.B) {
 	}
 }
 
-// BenchmarkPushUnique benchmarks Push on unique ticks (cold insert).
+// BenchmarkPushUnique benchmarks Push on unique tick values.
+// Each tick is used exactly once, simulating cold inserts.
 func BenchmarkPushUnique(b *testing.B) {
 	q := NewQuantumQueue()
 	handles := make([]Handle, benchSize)
@@ -43,7 +47,8 @@ func BenchmarkPushUnique(b *testing.B) {
 	}
 }
 
-// BenchmarkPushUpdate benchmarks Push for in-place update (same tick).
+// BenchmarkPushUpdate benchmarks Push on the same tick repeatedly.
+// This hits the fast-path: no unlinking, just payload update.
 func BenchmarkPushUpdate(b *testing.B) {
 	q := NewQuantumQueue()
 	handles := make([]Handle, benchSize)
@@ -60,7 +65,8 @@ func BenchmarkPushUpdate(b *testing.B) {
 	}
 }
 
-// BenchmarkPushSameTickZero benchmarks repeated Push on tick 0.
+// BenchmarkPushSameTickZero benchmarks repeated updates on tick 0.
+// This simulates multiple updates on the same tick (constant key).
 func BenchmarkPushSameTickZero(b *testing.B) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
@@ -71,7 +77,8 @@ func BenchmarkPushSameTickZero(b *testing.B) {
 	}
 }
 
-// BenchmarkPushSameTickMax benchmarks repeated Push on max tick (CapItems-1).
+// BenchmarkPushSameTickMax benchmarks Push on the maximum tick value.
+// This tests the edge of the tick range (CapItems - 1).
 func BenchmarkPushSameTickMax(b *testing.B) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
@@ -82,7 +89,8 @@ func BenchmarkPushSameTickMax(b *testing.B) {
 	}
 }
 
-// BenchmarkPeepMin benchmarks retrieving the minimum element.
+// BenchmarkPeepMin benchmarks the cost of retrieving the minimum item.
+// Assumes queue is fully populated with unique, increasing tick values.
 func BenchmarkPeepMin(b *testing.B) {
 	q := NewQuantumQueue()
 	handles := make([]Handle, benchSize)
@@ -97,7 +105,8 @@ func BenchmarkPeepMin(b *testing.B) {
 	}
 }
 
-// BenchmarkUnlinkMin benchmarks removing the minimum element.
+// BenchmarkUnlinkMin benchmarks repeated PeepMin + UnlinkMin + Push.
+// Simulates continuous consumption of the min and recycling.
 func BenchmarkUnlinkMin(b *testing.B) {
 	q := NewQuantumQueue()
 	handles := make([]Handle, benchSize)
@@ -114,7 +123,8 @@ func BenchmarkUnlinkMin(b *testing.B) {
 	}
 }
 
-// BenchmarkMoveTick benchmarks moving existing handles to new ticks.
+// BenchmarkMoveTick benchmarks relocating existing handles to new ticks.
+// Tests unlinking from one bucket and relinking into another.
 func BenchmarkMoveTick(b *testing.B) {
 	q := NewQuantumQueue()
 	handles := make([]Handle, benchSize)
@@ -130,7 +140,8 @@ func BenchmarkMoveTick(b *testing.B) {
 	}
 }
 
-// BenchmarkPushRandom benchmarks Push on random ticks.
+// BenchmarkPushRandom benchmarks Push on randomly selected tick values.
+// This simulates unordered, bursty traffic with no locality.
 func BenchmarkPushRandom(b *testing.B) {
 	q := NewQuantumQueue()
 	handles := make([]Handle, benchSize)
