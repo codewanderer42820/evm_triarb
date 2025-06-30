@@ -70,7 +70,6 @@ const (
 	BucketCount = GroupCount * LaneCount * LaneCount // = 262,144
 
 	// CapItems = maximum number of queue entries that can be held concurrently.
-	// One node per tick is allowed.
 	CapItems = 52428
 )
 
