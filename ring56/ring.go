@@ -115,6 +115,7 @@ func (r *Ring) Pop() *[56]byte {
 // PopWait blocks (spins) until a value is available.
 //
 //go:nosplit
+//go:inline
 //go:registerparams
 func (r *Ring) PopWait() *[56]byte {
 	for {
