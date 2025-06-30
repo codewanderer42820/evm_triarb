@@ -9,6 +9,7 @@ package quantumqueue
 import (
 	"errors"
 	"math/bits"
+	"unsafe"
 )
 
 // -----------------------------------------------------------------------------
@@ -49,9 +50,9 @@ type idx32 = Handle
 // - 64B aligned for cache performance.
 // - Holds the tick key, inline 48-byte payload, and doubly-linked list pointers.
 
-//go:notinheap     // Prevents heap metadata; ensures arena-pinning
-//go:align 64      // Align each node to 64 bytes (cache-line aligned)
-//go:inline        // Encourage inlining of accessors and helpers
+//go:notinheap
+//go:align 64
+//go:inline
 type node struct {
 	tick int64    // Tick index or -1 if unused (free)
 	data [48]byte // Inline data payload (48 bytes = 3 cache lines)
@@ -66,8 +67,8 @@ type node struct {
 // groupBlock stores 64 lanes of tick metadata and summaries.
 // Used for O(1) traversal and hierarchy tracking of tick population.
 
-//go:notinheap     // Avoids heap overhead
-//go:align 576     // Align to reduce false sharing and optimize cache fetches
+//go:notinheap
+//go:align 576
 //go:inline
 type groupBlock struct {
 	l1Summary uint64            // Summary of active lanes (1 bit per lane)
@@ -83,7 +84,7 @@ type groupBlock struct {
 // It avoids all allocations and performs all updates in O(1), but places
 // full responsibility on the caller for maintaining safety and correctness.
 
-//go:notinheap     // Avoid GC overhead or movement
+//go:notinheap
 //go:inline
 type QuantumQueue struct {
 	arena   [CapItems]node         // Static storage for all possible entries
@@ -97,12 +98,8 @@ type QuantumQueue struct {
 	_        [40]byte // Additional cache-line separation for hot fields
 }
 
-// -----------------------------------------------------------------------------
-// Constructor
-// -----------------------------------------------------------------------------
-
 // NewQuantumQueue returns a new empty queue with all handles linked into the freelist.
-//
+
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -124,13 +121,9 @@ func NewQuantumQueue() *QuantumQueue {
 	return q
 }
 
-// -----------------------------------------------------------------------------
-// Borrowing nodes from the freelist
-// -----------------------------------------------------------------------------
-
 // Borrow returns the next available handle from the freelist.
 // No check for exhaustion. Unsafe in footgun mode.
-//
+
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -145,7 +138,7 @@ func (q *QuantumQueue) Borrow() (Handle, error) {
 }
 
 // BorrowSafe is like Borrow but returns an error if the freelist is exhausted.
-//
+
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -162,12 +155,8 @@ func (q *QuantumQueue) BorrowSafe() (Handle, error) {
 	return h, nil
 }
 
-// -----------------------------------------------------------------------------
-// Queue metadata queries
-// -----------------------------------------------------------------------------
-
 // Size returns the number of live entries in the queue.
-//
+
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -176,7 +165,7 @@ func (q *QuantumQueue) Size() int {
 }
 
 // Empty reports whether the queue is currently empty.
-//
+
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -184,19 +173,21 @@ func (q *QuantumQueue) Empty() bool {
 	return q.size == 0
 }
 
-// -----------------------------------------------------------------------------
-// Core operations: unlink / linkAtHead / Push / PeepMin / MoveTick / UnlinkMin
-// -----------------------------------------------------------------------------
-
 // unlink removes a handle from its bucket and updates the bitmaps.
 // The node is returned to the freelist.
-//
+
 //go:inline
 //go:nosplit
 //go:registerparams
 func (q *QuantumQueue) unlink(h Handle) {
 	n := &q.arena[h]
 	b := idx32(n.tick)
+
+	// Prefetch next node to hide dereference latency
+	if n.next != nilIdx {
+		_ = *(*node)(unsafe.Pointer(
+			uintptr(unsafe.Pointer(&q.arena[0])) + uintptr(n.next)*unsafe.Sizeof(node{})))
+	}
 
 	// Detach node from doubly-linked list
 	if n.prev != nilIdx {
@@ -223,7 +214,7 @@ func (q *QuantumQueue) unlink(h Handle) {
 		}
 	}
 
-	// Recycle the node into the freelist
+	// Recycle node into freelist
 	n.next = q.freeHead
 	n.prev = nilIdx
 	n.tick = -1
@@ -232,13 +223,19 @@ func (q *QuantumQueue) unlink(h Handle) {
 }
 
 // linkAtHead inserts a node into the bucket at its new tick and updates the summary hierarchy.
-//
+
 //go:inline
 //go:nosplit
 //go:registerparams
 func (q *QuantumQueue) linkAtHead(h Handle, tick int64) {
 	n := &q.arena[h]
 	b := idx32(uint64(tick))
+
+	// Prefetch current bucket head before mutation
+	if q.buckets[b] != nilIdx {
+		_ = *(*node)(unsafe.Pointer(
+			uintptr(unsafe.Pointer(&q.arena[0])) + uintptr(q.buckets[b])*unsafe.Sizeof(node{})))
+	}
 
 	n.tick = tick
 	n.prev = nilIdx
@@ -262,7 +259,7 @@ func (q *QuantumQueue) linkAtHead(h Handle, tick int64) {
 // Push inserts or updates the node at the specified tick.
 // If the handle is already assigned and same-tick, only the payload is updated.
 // Otherwise, it is unlinked from its current tick and reinserted at the new tick.
-//
+
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -281,7 +278,7 @@ func (q *QuantumQueue) Push(tick int64, h Handle, val *[48]byte) {
 
 // PeepMin returns the head of the lexicographically minimum tick,
 // without modifying the queue. O(1) via summary bitmaps.
-//
+
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -292,11 +289,16 @@ func (q *QuantumQueue) PeepMin() (Handle, int64, *[48]byte) {
 	t := bits.LeadingZeros64(gb.l2[l])
 	b := idx32((uint64(g) << 12) | (uint64(l) << 6) | uint64(t))
 	h := q.buckets[b]
+
+	// Prefetch arena[h] before use
+	_ = *(*node)(unsafe.Pointer(
+		uintptr(unsafe.Pointer(&q.arena[0])) + uintptr(h)*unsafe.Sizeof(node{})))
+
 	return h, q.arena[h].tick, &q.arena[h].data
 }
 
 // MoveTick relocates a handle to a new tick (if different).
-//
+
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -311,7 +313,7 @@ func (q *QuantumQueue) MoveTick(h Handle, newTick int64) {
 
 // UnlinkMin removes the head of the minimum tick.
 // The `tick` argument is unused (retained for call symmetry).
-//
+
 //go:inline
 //go:nosplit
 //go:registerparams
