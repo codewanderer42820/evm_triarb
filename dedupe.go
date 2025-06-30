@@ -6,57 +6,83 @@ import "main/utils"
 // Deduper — Lock-free L1-resident de-duplication ring
 ///////////////////////////////////////////////////////////////////////////////
 
-// dedupeSlot represents one entry in the deduplication ring buffer.
-// Each slot is exactly 32 bytes — fits two per 64-byte cache line.
-// Fields are tightly packed to avoid wasted space and false sharing.
+// dedupeSlot represents a single entry in the deduplication ring buffer.
+// Size: 32 bytes per slot — exactly two per 64-byte cache line.
+// This ensures optimal spatial locality and full L1 residency.
+//
+// Fields:
+//   - blk, tx, log  → event coordinates
+//   - tagHi/Lo      → fingerprint of content (topic0 or data fallback)
+//   - age           → block height for staleness & reorg detection
 type dedupeSlot struct {
-	blk, tx, log uint32 // 96-bit composite key (block, tx, log index)
-	tagHi, tagLo uint64 // 128-bit fingerprint of content (topic0, data, etc.)
-	age          uint32 // block number of last-seen entry, used for eviction
+	blk, tx, log uint32 // 96-bit composite key (log identity)
+	tagHi, tagLo uint64 // 128-bit fingerprint (topics or data)
+	age          uint32 // last seen block height for reorg-aware eviction
 
-	// padding to enforce 32-byte alignment and cache line pairing
+	// Enforced alignment to 32B by adding padding (4B)
+	// Required to prevent false sharing / straddled slots on L1 cache lines.
 	//lint:ignore U1000 unused but required to avoid misalignment
 	_ uint32
 }
 
-// Deduper maintains a fixed-size ring for high-speed, branch-free deduplication.
-// Used to reject replays or stale logs. Entire structure fits in L1 on modern CPUs.
+// Deduper is a fixed-size ring buffer that stores recent event identities.
+// It rejects duplicate or stale logs and overwrites without branches.
+// Total size: (1 << ringBits) * 32 bytes = 8 MiB if ringBits = 18.
+//
+// Runtime behavior:
+//   - Evicts using `age` vs `latestBlk`
+//   - Fully branchless write path
+//   - Thread-local by design (not synchronized)
 type Deduper struct {
-	buf [1 << ringBits]dedupeSlot // ringBits = 18 ⇒ 256 Ki slots = 8 MiB
+	buf [1 << ringBits]dedupeSlot // power-of-two ring of slots (cache-aligned)
 }
 
-// Check determines whether an incoming event is new under the current tip block.
-// It returns true if the (blk, tx, log, tag) tuple has NOT been seen recently.
+// Check returns true if the (blk, tx, log, tag) tuple is NEW (not seen recently).
 //
-// Implements eviction via `age`, and always writes unconditionally (branch-free).
+// Eviction strategy:
+//   - Each slot is evicted if older than `maxReorg` blocks
+//   - Writes always happen regardless of match (branchless overwrite)
+//
+// Hash strategy:
+//   - Key is a 64-bit fused triplet: blk (24b), tx (20b), log (20b)
+//   - Mixed with Murmur-style hash for uniform distribution
+//
+// Compiler Directives:
+//   - nosplit         → avoids stack checks, safe for flat logic
+//   - inline          → embeds into caller to remove call overhead
+//   - registerparams  → ABI-optimal on modern Go compilers
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func (d *Deduper) Check(
-	blk, tx, log uint32,
-	tagHi, tagLo uint64,
-	latestBlk uint32,
+	blk, tx, log uint32, // EVM identity (composite key)
+	tagHi, tagLo uint64, // fingerprint of content
+	latestBlk uint32, // latest known block (for reorg eviction)
 ) bool {
-	// Combine blk, tx, log into a compact 64-bit key:
-	// blk: top 24 bits, tx: mid 20 bits, log: low 20 bits.
+	// ───── Step 1: Fuse key into a 64-bit pseudo-unique hash ─────
+	//   blk → top 24 bits
+	//   tx  → mid 20 bits
+	//   log → low 20 bits
 	key := (uint64(blk) << 40) ^ (uint64(tx) << 20) ^ uint64(log)
 
-	// Use high-quality mixer and mask to locate ring index.
+	// ───── Step 2: Compute slot index using high-entropy hash ─────
 	i := utils.Mix64(key) & (uint64(len(d.buf)) - 1)
 	slot := &d.buf[i]
 
-	// Check staleness (re-org too deep or age regression).
+	// ───── Step 3: Check if slot is stale — evict on deep reorgs ─────
 	stale := latestBlk < slot.age || (latestBlk-slot.age) > maxReorg
 
-	// Match if not stale and key+tag fields match exactly.
+	// ───── Step 4: Determine match — event is duplicate if all fields match ─────
 	match := !stale &&
 		slot.blk == blk && slot.tx == tx && slot.log == log &&
 		slot.tagHi == tagHi && slot.tagLo == tagLo
 
-	// Overwrite slot unconditionally — removes need for branches.
+	// ───── Step 5: Write path — unconditional overwrite, branch-free ─────
 	slot.blk, slot.tx, slot.log = blk, tx, log
 	slot.tagHi, slot.tagLo = tagHi, tagLo
 	slot.age = latestBlk
 
-	return !match // true if this event is NEW
+	// Return true if this is a brand new event
+	return !match
 }

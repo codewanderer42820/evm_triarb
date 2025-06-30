@@ -11,34 +11,45 @@ import (
 	"unsafe"
 )
 
-var (
-	// literal match for full "transactionIndex" string (18 bytes)
-	litTxIdx = []byte(`"transactionIndex"`)
+// literal match for full "transactionIndex" string (18 bytes).
+// Needed since tag prefix is non-unique and must be disambiguated by full match.
+var litTxIdx = []byte(`"transactionIndex"`)
 
-	deduper   Deduper // global deduplication engine
-	latestBlk uint32  // tracks latest seen block for eviction logic
+// deduper is the global instance of Deduper used for replay prevention.
+// latestBlk tracks the latest seen block height for eviction control.
+var (
+	deduper   Deduper
+	latestBlk uint32
 )
 
 // handleFrame scans a raw WebSocket payload for a single log entry.
-// It extracts exactly six fields via aligned 8-byte tags and zero-copy slicing.
-// Early exit occurs on missing fields, malformed data, or unmatched Sync events.
+// It extracts exactly six fields via aligned 8-byte probes and zero-copy slicing.
+// Early exit on missing fields, malformed tags, or non-Sync events.
+//
+// Performance:
+//   - Branch-free 8-byte window scan using constants from constants.go
+//   - Uses zero-allocation slice windows into wsBuf
+//   - Topics[0] hash is fingerprinted for dedupe
+//
+// Compiler Directives:
+//   - nosplit         → ensures frame scan is stack-safe and fast
 //
 //go:nosplit
 func handleFrame(p []byte) {
 	var v types.LogView
 
-	// Define fields we want to extract (bitmap).
+	// Bitmask to track missing fields
 	const (
-		wantAddr = 1 << iota
-		wantData
-		wantTopics
-		wantBlk
-		wantTx
-		wantLog
+		wantAddr   = 1 << iota // "address"
+		wantData               // "data"
+		wantTopics             // "topics"
+		wantBlk                // "blockNumber"
+		wantTx                 // "transactionIndex"
+		wantLog                // "logIndex"
 	)
 	missing := wantAddr | wantData | wantTopics | wantBlk | wantTx | wantLog
 
-	// Slide window with 8-byte aligned loads into fixed tag matcher.
+	// Slide across the payload using 8-byte window scans
 	for i := 0; i <= len(p)-8 && missing != 0; i++ {
 		tag := *(*[8]byte)(unsafe.Pointer(&p[i]))
 
@@ -57,10 +68,9 @@ func handleFrame(p []byte) {
 			if missing&wantTopics != 0 {
 				v.Topics = utils.SliceJSONArray(p, i+8+utils.FindBracket(p[i+8:]))
 
-				// Apply fast path Sync-event filter (UniswapV2)
-				if len(v.Topics) < 11 ||
-					*(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
-					return // Not a Sync event ⇒ drop
+				// Fast path filter: early drop if not UniswapV2 Sync()
+				if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
+					return
 				}
 				missing &^= wantTopics
 			}
@@ -70,6 +80,7 @@ func handleFrame(p []byte) {
 				missing &^= wantBlk
 			}
 		case keyTransactionIndex:
+			// Match full 18-byte literal, not just prefix
 			if missing&wantTx != 0 && bytes.Equal(p[i:i+18], litTxIdx) {
 				v.TxIndex = utils.SliceASCII(p, i+18+utils.FindQuote(p[i+18:]))
 				missing &^= wantTx
@@ -82,13 +93,14 @@ func handleFrame(p []byte) {
 		}
 	}
 
-	// Bail if any numeric metadata field is still missing
+	// Drop if any numeric metadata field is missing
 	if len(v.BlkNum) == 0 || len(v.TxIndex) == 0 || len(v.LogIdx) == 0 {
 		return
 	}
 
-	// ───── Fingerprint construction for deduplication ─────
+	// ───── Fingerprint logic for deduplication ─────
 
+	// Entropy source: topics preferred > data fallback
 	switch {
 	case len(v.Topics) >= 16:
 		v.TagHi, v.TagLo = utils.Load128(v.Topics)
@@ -97,27 +109,29 @@ func handleFrame(p []byte) {
 	case len(v.Data) >= 8:
 		v.TagLo = utils.Load64(v.Data)
 	default:
-		return // Not enough entropy to safely fingerprint
+		return // No stable fingerprint available
 	}
 
-	// Convert numeric fields (0x hex → uint32)
+	// Parse block/tx/log into numeric uint32s for dedupe key
 	blk32 := uint32(utils.ParseHexU64(v.BlkNum))
 	tx32 := utils.ParseHexU32(v.TxIndex)
 	log32 := utils.ParseHexU32(v.LogIdx)
 
-	// Track latest block for staleness detection
+	// Update latest block for age tracking and reorg defense
 	if blk32 > latestBlk {
 		latestBlk = blk32
 	}
 
-	// Deduplication: only emit if event is new
+	// Deduplication: emit only if unseen under current tip
 	if deduper.Check(blk32, tx32, log32, v.TagHi, v.TagLo, latestBlk) {
 		emitLog(&v)
 	}
 }
 
-// emitLog prints a fully deduplicated event in human-readable form.
-// Uses zero-allocation byte → string conversion for display only.
+// emitLog prints a fully deduplicated event to stdout.
+// Converts internal []byte to string using zero-copy B2s.
+//
+// Hot path safe only because it's rare — NOT called on every frame.
 func emitLog(v *types.LogView) {
 	fmt.Println("[EVENT]")
 	fmt.Println("  address   =", utils.B2s(v.Addr))

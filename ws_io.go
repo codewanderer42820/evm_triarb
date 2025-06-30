@@ -1,79 +1,11 @@
-// ws_io.go — raw I/O helpers for the WebSocket transport.
-// Handles buffer management, handshake parsing, and zero-copy frame decoding.
-
-package main
-
-import (
-	"bytes"
-	"encoding/binary"
-	"fmt"
-	"io"
-	"net"
-	"unsafe"
-)
-
-// ────────────────────────── Handshake Parsing ─────────────────────────────
-
-// hsBuf is a temporary 4 KiB buffer used to read the WebSocket upgrade response.
-// hsTerm is the CRLF–CRLF delimiter that terminates the HTTP header.
-var (
-	hsBuf  [4096]byte                       // 4 KiB scratch space
-	hsTerm = []byte{'\r', '\n', '\r', '\n'} // "\r\n\r\n"
-)
-
-// readHandshake reads from the socket until the HTTP upgrade response is complete.
-// It returns the raw header bytes or an error if the header overflows or fails.
-//
-//go:nosplit
-func readHandshake(c net.Conn) ([]byte, error) {
-	n := 0
-	for {
-		if n == len(hsBuf) {
-			err := fmt.Errorf("handshake overflow: header exceeds %d bytes", len(hsBuf))
-			dropError("handshake overflow", err)
-			return nil, err
-		}
-		m, err := c.Read(hsBuf[n:])
-		if err != nil {
-			dropError("readHandshake", err)
-			return nil, err
-		}
-		n += m
-		if bytes.Index(hsBuf[:n], hsTerm) >= 0 {
-			return hsBuf[:n], nil
-		}
-	}
-}
-
-// ───────────────────────────── Frame Decoder ──────────────────────────────
-
-// ensureRoom guarantees at least `need` bytes are readable in `wsBuf`.
-// It compacts the buffer in-place if needed and refills via conn.Read().
-func ensureRoom(conn net.Conn, need int) error {
-	// Reject frames larger than the buffer
-	if need > len(wsBuf) {
-		return fmt.Errorf("frame %d exceeds wsBuf capacity %d", need, len(wsBuf))
-	}
-
-	// Refill until buffer holds `need` bytes
-	for wsLen < need {
-		// Compact buffer to start if we hit the end
-		if wsStart+wsLen == len(wsBuf) {
-			copy(wsBuf[0:wsLen], wsBuf[wsStart:wsStart+wsLen])
-			wsStart = 0
-		}
-		n, err := conn.Read(wsBuf[wsStart+wsLen:])
-		if err != nil {
-			return err
-		}
-		wsLen += n
-	}
-	return nil
-}
-
 // readFrame parses the next WebSocket frame from the TCP stream.
-// It supports only non-fragmented, masked, data frames (as per Infura).
-// Control frames (PING, PONG, CLOSE) are skipped.
+// Assumptions:
+//   - Infura sends non-fragmented, masked data frames (opcode 0x1/0x2)
+//   - Frame is ≤ maxFrameSize
+//   - Control frames are skipped
+//
+// Compiler Directives:
+//   - nosplit → ensures zero stack churn during loop
 //
 //go:nosplit
 func readFrame(conn net.Conn) (*wsFrame, error) {
@@ -85,12 +17,12 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 		hdr0 := wsBuf[wsStart]
 		hdr1 := wsBuf[wsStart+1]
 
-		fin := hdr0 & 0x80    // final frame flag
-		opcode := hdr0 & 0x0F // 0x1 = text, 0x2 = binary, 0x9 = ping, etc.
-		masked := hdr1 & 0x80 // must be set for client → server
+		fin := hdr0 & 0x80    // FIN bit (must be 1)
+		opcode := hdr0 & 0x0F // 0x1 = text, 0x2 = binary
+		masked := hdr1 & 0x80 // must be set (client-to-server)
 		plen7 := int(hdr1 & 0x7F)
 
-		// ───── Step 2: Skip control frames ─────
+		// ───── Step 2: Control Frame Handling ─────
 		switch opcode {
 		case 0x8: // CLOSE
 			return nil, io.EOF
@@ -100,7 +32,7 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 			continue
 		}
 
-		// ───── Step 3: Decode payload length ─────
+		// ───── Step 3: Decode Payload Length ─────
 		offset := 2
 		var plen int
 
@@ -125,7 +57,7 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 			plen = plen7
 		}
 
-		// ───── Step 4: Extract masking key ─────
+		// ───── Step 4: Extract Masking Key ─────
 		var mkey uint32
 		if masked != 0 {
 			if err := ensureRoom(conn, offset+4); err != nil {
@@ -135,14 +67,14 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 			offset += 4
 		}
 
-		// ───── Step 5: Read payload ─────
+		// ───── Step 5: Read Payload ─────
 		if err := ensureRoom(conn, offset+plen); err != nil {
 			return nil, err
 		}
 		payloadStart := wsStart + offset
 		payloadEnd := payloadStart + plen
 
-		// ───── Step 6: Unmask payload (RFC 6455) ─────
+		// ───── Step 6: Apply Mask (RFC 6455) ─────
 		if masked != 0 {
 			key := [4]byte{}
 			*(*uint32)(unsafe.Pointer(&key[0])) = mkey
@@ -151,12 +83,12 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 			}
 		}
 
-		// Fragmentation not supported
+		// ───── Step 7: Reject Fragmented Frames ─────
 		if fin == 0 {
 			return nil, fmt.Errorf("fragmented frames not supported")
 		}
 
-		// ───── Step 7: Register frame in ring ─────
+		// ───── Step 8: Register Frame in Ring ─────
 		idx := wsHead & (frameCap - 1)
 		f := &wsFrames[idx]
 		f.Payload = wsBuf[payloadStart:payloadEnd]

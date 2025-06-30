@@ -1,30 +1,39 @@
 package types
 
-// LogView provides a zero-allocation, windowed view into an Ethereum event log
-// directly over the WebSocket frame buffer. It avoids any heap allocations by
-// keeping all slices pointing inside the global `wsBuf`. Never allow these
-// slices to escape or be retained outside the immediate processing path.
+// LogView provides a zero-allocation, pointer-stable view into a single Ethereum event log.
+// All slices point directly into the global `wsBuf`, avoiding heap allocations entirely.
 //
-// This struct is hot in the parsing + deduplication path, so memory layout is
-// tuned for read locality on hot fields (addr, data, topics). Fields used only
-// in dedup logic are kept cold.
+// This struct is the sole intermediate between frame decoding and deduplication:
+//   - Written by `handleFrame()`
+//   - Read by `deduper.Check()` and `emitLog()`
+//
+// ⚠️ Never allow LogView or its fields to escape beyond current frame lifecycle.
+// Doing so would risk use-after-free if `wsBuf` is rotated.
+//
+// Memory layout is cache-optimized:
+//   - Hot path fields come first: address, data, topics
+//   - Numeric metadata fields follow (block/tx/log)
+//   - Cold dedup-only fingerprint fields are last
 type LogView struct {
-	// ───────────── Hot fields: accessed immediately by fastpath ──────────────
+	// ───────────── Hot fields: accessed immediately in fast path ──────────────
 
-	Addr   []byte // View of the "address" field — 20-byte ASCII hex (no "0x")
-	Data   []byte // View of the "data" field — full calldata, 0x-prefixed
-	Topics []byte // View of the "topics" field — JSON array of 0x-prefixed strings
+	Addr   []byte // `"address"` field — 20-byte hex, 0x-prefixed (e.g. "0xabc...")
+	Data   []byte // `"data"` field — calldata, 0x-prefixed hex string
+	Topics []byte // `"topics"` field — JSON array of strings (slice of bytes inside [ ])
 
-	BlkNum  []byte // View of "blockNumber" field — 0x-prefixed, parsed as uint32
-	TxIndex []byte // View of "transactionIndex" — 0x-prefixed, parsed as uint32
-	LogIdx  []byte // View of "logIndex" — 0x-prefixed, parsed as uint32
+	// ───────────── Metadata fields: parsed and passed to deduper ──────────────
 
-	// ───────────── Cold fields: used only during dedup checks ───────────────
+	BlkNum  []byte // `"blockNumber"` field — 0x-prefixed hex (parsed to uint32)
+	TxIndex []byte // `"transactionIndex"` — 0x-prefixed hex
+	LogIdx  []byte // `"logIndex"` — 0x-prefixed hex
 
-	TagHi uint64 // High 64 bits of the dedup fingerprint (topic0 or hash(data))
-	TagLo uint64 // Low 64 bits of fingerprint (fallbacks to partial topic/data)
+	// ───────────── Cold fields: used only by deduper fingerprinting ───────────
 
-	// NOTE: No additional padding added as alignment is already optimal.
-	// This layout keeps all []byte slices together (64-bit ptr + len each),
-	// followed by 2 × uint64 fingerprint. Cache footprint: 6×16 + 16 = 112 bytes.
+	TagHi uint64 // upper 64 bits of hash fingerprint (topics[0] or data hash)
+	TagLo uint64 // lower 64 bits of fingerprint (fallback to topic[0] or data)
+
+	// NOTE: No padding required — memory alignment is already optimal.
+	// The layout packs all []byte (2 words each) followed by 2× uint64.
+	//
+	// Final size: 6×(2×8) + 2×8 = 112 bytes total (fits in 2 L1 cache lines)
 }
