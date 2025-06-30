@@ -92,7 +92,7 @@ type idx32 = Handle
 // - Stored in a statically-allocated arena (no heap).
 // - 64B aligned for cache performance.
 // - Holds the tick key, inline 48-byte payload, and doubly-linked list pointers.
-
+//
 //go:notinheap
 //go:align 64
 //go:inline
@@ -109,7 +109,7 @@ type node struct {
 
 // groupBlock stores 64 lanes of tick metadata and summaries.
 // Used for O(1) traversal and hierarchy tracking of tick population.
-
+//
 //go:notinheap
 //go:align 576
 //go:inline
@@ -126,7 +126,7 @@ type groupBlock struct {
 // QuantumQueue is the central footgun-mode queue.
 // It avoids all allocations and performs all updates in O(1), but places
 // full responsibility on the caller for maintaining safety and correctness.
-
+//
 //go:notinheap
 //go:inline
 type QuantumQueue struct {
@@ -142,9 +142,9 @@ type QuantumQueue struct {
 }
 
 // NewQuantumQueue returns a new empty queue with all handles linked into the freelist.
-
-//go:inline
+//
 //go:nosplit
+//go:inline
 //go:registerparams
 func NewQuantumQueue() *QuantumQueue {
 	q := &QuantumQueue{freeHead: 0}
@@ -166,9 +166,9 @@ func NewQuantumQueue() *QuantumQueue {
 
 // Borrow returns the next available handle from the freelist.
 // No check for exhaustion. Unsafe in footgun mode.
-
-//go:inline
+//
 //go:nosplit
+//go:inline
 //go:registerparams
 func (q *QuantumQueue) Borrow() (Handle, error) {
 	h := q.freeHead
@@ -181,9 +181,9 @@ func (q *QuantumQueue) Borrow() (Handle, error) {
 }
 
 // BorrowSafe is like Borrow but returns an error if the freelist is exhausted.
-
-//go:inline
+//
 //go:nosplit
+//go:inline
 //go:registerparams
 func (q *QuantumQueue) BorrowSafe() (Handle, error) {
 	h := q.freeHead
@@ -199,18 +199,18 @@ func (q *QuantumQueue) BorrowSafe() (Handle, error) {
 }
 
 // Size returns the number of live entries in the queue.
-
-//go:inline
+//
 //go:nosplit
+//go:inline
 //go:registerparams
 func (q *QuantumQueue) Size() int {
 	return q.size
 }
 
 // Empty reports whether the queue is currently empty.
-
-//go:inline
+//
 //go:nosplit
+//go:inline
 //go:registerparams
 func (q *QuantumQueue) Empty() bool {
 	return q.size == 0
@@ -218,9 +218,9 @@ func (q *QuantumQueue) Empty() bool {
 
 // unlink removes a handle from its bucket and updates the bitmaps.
 // The node is returned to the freelist.
-
-//go:inline
+//
 //go:nosplit
+//go:inline
 //go:registerparams
 func (q *QuantumQueue) unlink(h Handle) {
 	n := &q.arena[h]
@@ -266,9 +266,9 @@ func (q *QuantumQueue) unlink(h Handle) {
 }
 
 // linkAtHead inserts a node into the bucket at its new tick and updates the summary hierarchy.
-
-//go:inline
+//
 //go:nosplit
+//go:inline
 //go:registerparams
 func (q *QuantumQueue) linkAtHead(h Handle, tick int64) {
 	n := &q.arena[h]
@@ -302,9 +302,9 @@ func (q *QuantumQueue) linkAtHead(h Handle, tick int64) {
 // Push inserts or updates the node at the specified tick.
 // If the handle is already assigned and same-tick, only the payload is updated.
 // Otherwise, it is unlinked from its current tick and reinserted at the new tick.
-
-//go:inline
+//
 //go:nosplit
+//go:inline
 //go:registerparams
 func (q *QuantumQueue) Push(tick int64, h Handle, val *[48]byte) {
 	n := &q.arena[h]
@@ -321,9 +321,9 @@ func (q *QuantumQueue) Push(tick int64, h Handle, val *[48]byte) {
 
 // PeepMin returns the head of the lexicographically minimum tick,
 // without modifying the queue. O(1) via summary bitmaps.
-
-//go:inline
+//
 //go:nosplit
+//go:inline
 //go:registerparams
 func (q *QuantumQueue) PeepMin() (Handle, int64, *[48]byte) {
 	g := bits.LeadingZeros64(q.summary)
@@ -341,9 +341,9 @@ func (q *QuantumQueue) PeepMin() (Handle, int64, *[48]byte) {
 }
 
 // MoveTick relocates a handle to a new tick (if different).
-
-//go:inline
+//
 //go:nosplit
+//go:inline
 //go:registerparams
 func (q *QuantumQueue) MoveTick(h Handle, newTick int64) {
 	n := &q.arena[h]
@@ -356,9 +356,9 @@ func (q *QuantumQueue) MoveTick(h Handle, newTick int64) {
 
 // UnlinkMin removes the head of the minimum tick.
 // The `tick` argument is unused (retained for call symmetry).
-
-//go:inline
+//
 //go:nosplit
+//go:inline
 //go:registerparams
 func (q *QuantumQueue) UnlinkMin(h Handle, _ int64) {
 	q.unlink(h)
