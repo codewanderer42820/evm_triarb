@@ -110,8 +110,7 @@ type PairTriplet [3]PairID
 type CycleState struct {
 	Ticks [3]float64
 	Pairs PairTriplet
-	_     [4]byte  // align to 40
-	_     [16]byte // pad to 56
+	_     [4]byte // align to 40
 }
 
 type EdgeBinding struct {
@@ -143,10 +142,8 @@ type CoreExecutor struct {
 
 // TickUpdate — 56-byte ring message (PairID + two ticks + padding)
 type TickUpdate struct {
-	Pair             PairID
-	_                uint32
 	FwdTick, RevTick float64
-	_                [32]byte
+	Pair             PairID
 }
 
 var _ [56 - unsafe.Sizeof(TickUpdate{})]byte
