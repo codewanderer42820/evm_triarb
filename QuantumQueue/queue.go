@@ -95,7 +95,6 @@ type idx32 = Handle
 //
 //go:notinheap
 //go:align 64
-//go:inline
 type node struct {
 	tick int64    // Tick index or -1 if unused (free)
 	data [48]byte // Inline data payload (48 bytes = 3 cache lines)
@@ -112,11 +111,9 @@ type node struct {
 //
 //go:notinheap
 //go:align 576
-//go:inline
 type groupBlock struct {
 	l1Summary uint64            // Summary of active lanes (1 bit per lane)
 	l2        [LaneCount]uint64 // Each lane has a 64-bit bitmap (1 bit per bucket)
-	_         [56]byte          // Explicit padding to avoid cross-line overlap
 }
 
 // -----------------------------------------------------------------------------
@@ -128,7 +125,6 @@ type groupBlock struct {
 // full responsibility on the caller for maintaining safety and correctness.
 //
 //go:notinheap
-//go:inline
 type QuantumQueue struct {
 	arena   [CapItems]node         // Static storage for all possible entries
 	buckets [BucketCount]Handle    // Bucket array indexed by tick
