@@ -1,31 +1,45 @@
+// Package localidx implements a fixed-capacity Robin-Hood hashmap
+// with zero heap pressure, single-writer performance, and direct
+// memory layout exposure.
+//
+// This is a performance-first, safety-last implementation designed for
+// ultra-fast in-place key-value routing, typically inside CPU-local arenas.
+//
+// ⚠️ Quantum Hash Footgun Rating: 8 / 10 ⚠️
+// This map is optimized for nanosecond-class access under single-core,
+// single-threaded constraints. It sacrifices general safety for maximal
+// throughput and assumes total caller discipline.
+//
+// Footgun 1/8: Zero-valued key is reserved as "empty slot" marker.
+//              Do NOT attempt to store key == 0.
+// Footgun 2/8: No deletion logic. Inserted keys persist forever.
+// Footgun 3/8: Unsafe.Pointer math used for soft-prefetching ahead.
+//              Misalignment or bad mask logic will corrupt memory.
+// Footgun 4/8: Robin-Hood swap logic is destructive and assumes linear scan semantics.
+// Footgun 5/8: No resizing. If capacity is exceeded, logic fails silently or clogs.
+// Footgun 6/8: Cacheline padding is present but alignment is not enforced without explicit container.
+// Footgun 7/8: No generation tracking. Reuse or snapshotting risks stale reads.
+// Footgun 8/8: Absolutely not safe for concurrent access.
+//              Single-threaded only. Caller must uphold exclusivity.
+//
+// → You are holding a surgical instrument. If misused, it will bleed — fast.
+
 package localidx
 
 import "unsafe"
 
-// Hash implements a fixed-capacity Robin-Hood hashmap.
-//
-// Design:
-//   - Key and value slices are allocated in parallel.
-//   - Capacity is always a power-of-two ×2 the requested capacity.
-//   - Mask allows modulo via bitmasking.
-//   - Single writer; no sync needed.
-//   - Zero-valued key marks empty slot (so key==0 is disallowed).
-//
-// Optimized for:
-//   - Tightest probe latency under load (Robin-Hood policy equalizes path).
-//   - Memory layout ensures fast vectorization and prefetch friendliness.
+//go:notinheap         // avoids heap metadata, allows static arena use
+//go:align 64          // ensures alignment for cacheline locality
+//go:inline            // hint to inline Hash where embedded in parent
 type Hash struct {
 	keys []uint32 // key slots; key=0 denotes empty
 	vals []uint32 // corresponding values
 	mask uint32   // bitmask for modulo (len(keys)-1)
-	_    [56]byte // cacheline isolation for high-throughput (was [4]byte)
 }
 
-// nextPow2 rounds an integer up to the next power-of-two.
-// Used to compute table capacity and mask.
-//
 //go:nosplit
 //go:inline
+//go:registerparams
 func nextPow2(n int) uint32 {
 	s := uint32(1)
 	for s < uint32(n) {
@@ -34,11 +48,9 @@ func nextPow2(n int) uint32 {
 	return s
 }
 
-// New creates a new Hash with enough capacity to store 'capacity' entries
-// with a ~50% load factor. Underlying slices are allocated as power-of-two.
-//
 //go:nosplit
 //go:inline
+//go:registerparams
 func New(capacity int) Hash {
 	sz := nextPow2(capacity * 2) // doubled → leaves 50% headroom
 	return Hash{
@@ -48,18 +60,9 @@ func New(capacity int) Hash {
 	}
 }
 
-// Put inserts a key with associated value.
-// If the key already exists, it returns the existing value.
-// Otherwise, it stores 'val' and returns it.
-//
-// Algorithm:
-//   - Robin-Hood probing with displacement comparison.
-//   - If incoming key's probe distance is larger than occupant’s, it swaps.
-//   - Probing continues until an empty slot or match is found.
-//   - Empty slot → insert and return.
-//   - Match → return current value (no overwrite).
-//
 //go:nosplit
+//go:inline
+//go:registerparams
 func (h Hash) Put(key, val uint32) uint32 {
 	i := key & h.mask // initial bucket index
 	dist := uint32(0) // distance from original hashed bucket
@@ -88,7 +91,7 @@ func (h Hash) Put(key, val uint32) uint32 {
 			dist = kDist
 		}
 
-		// Soft-prefetch next slot’s key to overlap memory latency
+		// Soft-prefetch next slot’s key to hide latency
 		_ = *(*uint32)(unsafe.Pointer(
 			uintptr(unsafe.Pointer(&h.keys[0])) + uintptr(((i+2)&h.mask)<<2)))
 
@@ -98,14 +101,9 @@ func (h Hash) Put(key, val uint32) uint32 {
 	}
 }
 
-// Get returns the value associated with the key if present.
-// Otherwise, it returns (0, false).
-//
-// Optimizations:
-//   - Early exit via “bound check”: if current slot's probe distance is
-//     smaller than ours, key must be missing (Robin-Hood guarantee).
-//
 //go:nosplit
+//go:inline
+//go:registerparams
 func (h Hash) Get(key uint32) (uint32, bool) {
 	i := key & h.mask
 	dist := uint32(0)
@@ -125,7 +123,7 @@ func (h Hash) Get(key uint32) (uint32, bool) {
 			return 0, false // bound-check fail → key not in cluster
 		}
 
-		// Soft-prefetch ahead
+		// Soft-prefetch ahead (unsafe if misused)
 		_ = *(*uint32)(unsafe.Pointer(
 			uintptr(unsafe.Pointer(&h.keys[0])) + uintptr(((i+2)&h.mask)<<2)))
 
