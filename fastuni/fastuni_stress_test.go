@@ -1,11 +1,4 @@
 // fastuni_stress_test.go — parallel randomized correctness sweeps for reserve-ratio routines.
-// -----------------------------------------------------------
-// Runs deterministic random tests across three regimes:
-//   SMALL  — 1e6  samples
-//   MEDIUM — 1e9  samples (skip with -short)
-//   LARGE  — 1e12 samples (skip with -short)
-// Tolerance: |Δ| ≤ 5e-5 nat.
-
 package fastuni
 
 import (
@@ -22,13 +15,12 @@ const (
 	million  = 1_000_000
 	billion  = 1_000_000_000
 	trillion = 1_000_000_000_000
-	seedBase = 0x5eed // base for deterministic RNG seed
+	seedBase = 0x5eed
+	tol      = 5e-5
 )
 
 /*─────────────────── test input generators ───────────────────*/
 
-// drawSmall produces (a,b) with small delta variations.
-// Range: base up to 1e12, delta up to 1e6.
 func drawSmall(r *rand.Rand) (a, b uint64) {
 	base := r.Uint64()%1_000_000_000_000 + 1
 	delta := r.Uint64()%1_000_000 + 1
@@ -38,7 +30,6 @@ func drawSmall(r *rand.Rand) (a, b uint64) {
 	return base, base + delta
 }
 
-// drawMedium produces (a,b) by scaling a base up to 1e9 by factor 8..32.
 func drawMedium(r *rand.Rand) (a, b uint64) {
 	base := r.Uint64()%1_000_000_000 + 1
 	factor := uint64(r.Intn(25) + 8)
@@ -48,7 +39,6 @@ func drawMedium(r *rand.Rand) (a, b uint64) {
 	return base, base * factor
 }
 
-// drawLarge produces bit-shifted values for large-range tests.
 func drawLarge(r *rand.Rand) (a, b uint64) {
 	base := r.Uint64()%1_000_000 + 1
 	shift := uint(r.Intn(40) + 24)
@@ -62,15 +52,12 @@ func drawLarge(r *rand.Rand) (a, b uint64) {
 	return base, high
 }
 
-/*─────────────────── parallel sweep engine ───────────────────*/
+/*─────────────────── sweep engine ───────────────────*/
 
-// sweepN runs n samples of regime in parallel across GOMAXPROCS workers.
-// gen generates (a,b), gold computes reference, impl is the tested function.
-// Fails on first sample where |got-want| > tol.
 func sweepN(t *testing.T, regime string, n int,
 	gen func(*rand.Rand) (uint64, uint64),
 	gold func(float64) float64,
-	impl func(uint64, uint64) float64,
+	impl func(uint64, uint64) (float64, error),
 ) {
 	workers := runtime.GOMAXPROCS(0)
 	if workers < 2 || n < workers {
@@ -98,12 +85,12 @@ func sweepN(t *testing.T, regime string, n int,
 			for i := from; i < to; i++ {
 				a, b := gen(rng)
 				want := gold(float64(a) / float64(b))
-				got := impl(a, b)
-				if math.Abs(got-want) > tol {
+				got, err := impl(a, b)
+				if err != nil || math.Abs(got-want) > tol {
 					once.Do(func() {
 						failMsg = fmt.Sprintf(
-							"%s sample %d/%d (worker %d): (%d,%d) want %.12g got %.12g Δ=%.3g",
-							regime, i, n, worker, a, b, want, got, got-want,
+							"%s sample %d/%d (worker %d): (%d,%d) want %.12g got %.12g Δ=%.3g err=%v",
+							regime, i, n, worker, a, b, want, got, got-want, err,
 						)
 					})
 					return
@@ -118,21 +105,20 @@ func sweepN(t *testing.T, regime string, n int,
 	}
 }
 
-// singleThreadSweep runs n samples serially for small workloads.
 func singleThreadSweep(t *testing.T, regime string, n int,
 	gen func(*rand.Rand) (uint64, uint64),
 	gold func(float64) float64,
-	impl func(uint64, uint64) float64,
+	impl func(uint64, uint64) (float64, error),
 ) {
 	r := rand.New(rand.NewSource(seedBase + int64(regime[0]) + int64(n)))
 	for i := 0; i < n; i++ {
 		a, b := gen(r)
 		want := gold(float64(a) / float64(b))
-		got := impl(a, b)
-		if math.Abs(got-want) > tol {
+		got, err := impl(a, b)
+		if err != nil || math.Abs(got-want) > tol {
 			t.Fatalf(
-				"%s sample %d/%d: (%d,%d) want %.12g got %.12g Δ=%.3g",
-				regime, i, n, a, b, want, got, got-want,
+				"%s sample %d/%d: (%d,%d) want %.12g got %.12g Δ=%.3g err=%v",
+				regime, i, n, a, b, want, got, got-want, err,
 			)
 		}
 	}
@@ -140,32 +126,21 @@ func singleThreadSweep(t *testing.T, regime string, n int,
 
 /*─────────────────── 1M sample tests ───────────────────*/
 
-// TestLnReserveRatioSmall1M verifies LnReserveRatio over 1e6 samples in SMALL regime.
 func TestLnReserveRatioSmall1M(t *testing.T) {
 	sweepN(t, "SMALL", million, drawSmall, math.Log, LnReserveRatio)
 }
-
-// TestLnReserveRatioMedium1M verifies LnReserveRatio over 1e6 samples in MEDIUM regime.
 func TestLnReserveRatioMedium1M(t *testing.T) {
 	sweepN(t, "MEDIUM", million, drawMedium, math.Log, LnReserveRatio)
 }
-
-// TestLnReserveRatioLarge1M verifies LnReserveRatio over 1e6 samples in LARGE regime.
 func TestLnReserveRatioLarge1M(t *testing.T) {
 	sweepN(t, "LARGE", million, drawLarge, math.Log, LnReserveRatio)
 }
-
-// TestLog2ReserveRatioSmall1M verifies Log2ReserveRatio over 1e6 samples in SMALL regime.
 func TestLog2ReserveRatioSmall1M(t *testing.T) {
 	sweepN(t, "SMALL", million, drawSmall, math.Log2, Log2ReserveRatio)
 }
-
-// TestLog2ReserveRatioMedium1M verifies Log2ReserveRatio over 1e6 samples in MEDIUM regime.
 func TestLog2ReserveRatioMedium1M(t *testing.T) {
 	sweepN(t, "MEDIUM", million, drawMedium, math.Log2, Log2ReserveRatio)
 }
-
-// TestLog2ReserveRatioLarge1M verifies Log2ReserveRatio over 1e6 samples in LARGE regime.
 func TestLog2ReserveRatioLarge1M(t *testing.T) {
 	sweepN(t, "LARGE", million, drawLarge, math.Log2, Log2ReserveRatio)
 }
