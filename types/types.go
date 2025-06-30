@@ -35,8 +35,5 @@ type LogView struct {
 	TagHi uint64 // upper 64 bits of hash fingerprint (topics[0] or data hash)
 	TagLo uint64 // lower 64 bits of fingerprint (fallback to topic[0] or data)
 
-	// NOTE: No padding required — memory alignment is already optimal.
-	// The layout packs all []byte (2 words each) followed by 2× uint64.
-	//
-	// Final size: 6×(2×8) + 2×8 = 112 bytes total (fits in 2 L1 cache lines)
+	_ [4]uint64
 }
