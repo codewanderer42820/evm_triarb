@@ -25,6 +25,7 @@ var (
 // It returns the raw header bytes or an error if the header overflows or fails.
 //
 //go:nosplit
+//go:registerparams
 func readHandshake(c net.Conn) ([]byte, error) {
 	n := 0
 	for {
@@ -49,6 +50,8 @@ func readHandshake(c net.Conn) ([]byte, error) {
 
 // ensureRoom guarantees at least `need` bytes are readable in `wsBuf`.
 // It compacts the buffer in-place if needed and refills via conn.Read().
+//
+//go:registerparams
 func ensureRoom(conn net.Conn, need int) error {
 	// Reject frames larger than buffer size
 	if need > len(wsBuf) {
@@ -79,6 +82,7 @@ func ensureRoom(conn net.Conn, need int) error {
 //   - PING/PONG/CLOSE frames are skipped
 //
 //go:nosplit
+//go:registerparams
 func readFrame(conn net.Conn) (*wsFrame, error) {
 	for {
 		// Step 1: Minimal 2-byte header
