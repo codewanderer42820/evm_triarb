@@ -270,6 +270,7 @@ func (q *QuantumQueue) UnlinkMin(h Handle, _ int64) {
 //
 //go:inline
 //go:nosplit
+//go:registerparams
 func (q *QuantumQueue) PeepMin32() [32]Handle {
 	// --- Fast nilIdx initialization via doubling copy ---
 	var res [32]Handle
