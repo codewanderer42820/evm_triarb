@@ -33,6 +33,7 @@ var cpuMasks = [...][1]uintptr{
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func setAffinity(cpu int) {
 	// Bounds check to ensure we don't access invalid mask
 	if cpu < 0 || cpu >= len(cpuMasks) {
