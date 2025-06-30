@@ -12,9 +12,9 @@ import (
 	"runtime"
 	"unsafe"
 
-	"main/bucketqueue"
 	"main/fastuni"
 	"main/localidx"
+	"main/quantumqueue"
 	"main/ring56"
 	"main/types"
 	"main/utils"
@@ -143,15 +143,15 @@ type PairShard struct {
 // Layout: ptr, ptr, handle, uint16 slot, 2-byte pad.
 type FanoutEntry struct {
 	State   *CycleState
-	Queue   *bucketqueue.Queue
-	Handle  bucketqueue.Handle
+	Queue   *quantumqueue.QuantumQueue
+	Handle  quantumqueue.Handle
 	EdgeIdx uint16
 	_       [2]byte
 }
 
 // CoreExecutor holds all per-core data and tick queues.
 type CoreExecutor struct {
-	Heaps     []bucketqueue.Queue
+	Heaps     []quantumqueue.QuantumQueue
 	Fanouts   [][]FanoutEntry
 	LocalIdx  localidx.Hash
 	IsReverse bool
@@ -231,7 +231,7 @@ func InitExecutors(cycles []PairTriplet) {
 func shardWorker(coreID, half int, in <-chan PairShard) {
 	runtime.LockOSThread()
 	ex := &CoreExecutor{
-		Heaps:     make([]bucketqueue.Queue, 0, 1024),
+		Heaps:     make([]quantumqueue.QuantumQueue, 0, 1024),
 		Fanouts:   make([][]FanoutEntry, 0, 1024),
 		LocalIdx:  localidx.New(1 << 16),
 		IsReverse: coreID >= half,
@@ -258,7 +258,7 @@ func shardWorker(coreID, half int, in <-chan PairShard) {
 func attachShard(ex *CoreExecutor, shard *PairShard, buf *[]CycleState) {
 	lid32 := ex.LocalIdx.Put(uint32(shard.Pair), uint32(len(ex.Heaps)))
 	if int(lid32) == len(ex.Heaps) {
-		ex.Heaps = append(ex.Heaps, *bucketqueue.New())
+		ex.Heaps = append(ex.Heaps, *quantumqueue.New())
 		ex.Fanouts = append(ex.Fanouts, nil)
 	}
 	hq := &ex.Heaps[lid32]
@@ -285,7 +285,7 @@ func handleTick(ex *CoreExecutor, upd *TickUpdate) {
 
 	const maxDrain = 128
 	type stashRec struct {
-		h         bucketqueue.Handle
+		h         quantumqueue.Handle
 		cs        *CycleState
 		wasProfit bool
 	}
