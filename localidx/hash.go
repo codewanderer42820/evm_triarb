@@ -34,7 +34,6 @@ import "unsafe"
 
 //go:notinheap         // avoids heap metadata, allows static arena use
 //go:align 64          // ensures alignment for cacheline locality
-//go:inline            // hint to inline Hash where embedded in parent
 type Hash struct {
 	keys []uint32 // key slots; key=0 denotes empty
 	vals []uint32 // corresponding values
