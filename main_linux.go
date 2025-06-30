@@ -56,8 +56,10 @@ func main() {
 //
 // Compiler Directives:
 //   - nosplit         → avoids call stack metadata overhead
+//   - registerparams  → ABI-optimal for performance
 //
 //go:nosplit
+//go:registerparams
 func runPublisher() error {
 	// ───── Step 1: TCP Connect and TLS Wrap ─────
 	raw, err := net.Dial("tcp", wsDialAddr)
