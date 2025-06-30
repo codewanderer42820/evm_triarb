@@ -214,17 +214,17 @@ func (q *QuantumQueue) linkAtHead(h Handle, tick int64) {
 //go:inline
 //go:nosplit
 //go:registerparams
-func (q *QuantumQueue) Push(tick int64, h Handle, val []byte) {
+func (q *QuantumQueue) Push(tick int64, h Handle, val *[48]byte) {
 	n := &q.arena[h]
 	if n.tick == tick {
-		copy(n.data[:], val)
+		copy(n.data[:], val[:])
 		return
 	}
 	if n.tick >= 0 {
 		q.unlink(h)
 	}
 	q.linkAtHead(h, tick)
-	copy(q.arena[h].data[:], val)
+	copy(q.arena[h].data[:], val[:])
 }
 
 // PeepMin returns the handle, tick, and payload ptr of the smallest tick.
