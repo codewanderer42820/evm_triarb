@@ -14,7 +14,7 @@ import (
 
 	"main/bucketqueue"
 	"main/localidx"
-	"main/ring32"
+	"main/ring56"
 	"main/types"
 )
 
@@ -140,7 +140,7 @@ func TestDispatchUpdate(t *testing.T) {
 	RegisterPair(addr, PairID(9))
 	copy(v.Addr[addrHexStart:addrHexEnd], addr)
 	pair2cores[9] = 1 << 0
-	rings[0] = ring32.New(1 << 4)
+	rings[0] = ring56.New(1 << 4)
 	binary.BigEndian.PutUint64(v.Data[24:32], 100)
 	binary.BigEndian.PutUint64(v.Data[56:64], 200)
 	// should push into ring without panic
@@ -246,7 +246,7 @@ func TestHandleTickReverse(t *testing.T) {
 	}
 }
 
-// TestPinnedConsumerDispatch ensures PinnedConsumer routes messages to handleTick via ring32.
+// TestPinnedConsumerDispatch ensures PinnedConsumer routes messages to handleTick via ring56.
 func TestPinnedConsumerDispatch(t *testing.T) {
 	ex := &CoreExecutor{Heaps: make([]bucketqueue.Queue, 1), Fanouts: make([][]FanoutEntry, 1), LocalIdx: localidx.New(1 << 16)}
 	cs := &CycleState{}
@@ -256,12 +256,12 @@ func TestPinnedConsumerDispatch(t *testing.T) {
 	ex.Fanouts[0] = []FanoutEntry{{State: cs, Queue: hq, Handle: h, EdgeIdx: 0}}
 	ex.LocalIdx.Put(123, 0)
 	executors[3] = ex
-	r := ring32.New(4)
+	r := ring56.New(4)
 	rings[3] = r
 	msg := &TickUpdate{Pair: 123, FwdTick: 99}
 	r.Push((*[32]byte)(unsafe.Pointer(msg)))
 	done := make(chan struct{})
-	go ring32.PinnedConsumer(3, r, new(uint32), new(uint32), func(p *[32]byte) {
+	go ring56.PinnedConsumer(3, r, new(uint32), new(uint32), func(p *[32]byte) {
 		handleTick(ex, (*TickUpdate)(unsafe.Pointer(p)))
 		close(done)
 	}, done)

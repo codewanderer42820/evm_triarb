@@ -1,7 +1,7 @@
 // ring_atomic_amd64.go — Acquire/Release atomic helpers for x86-64
 //go:build amd64 && !noasm
 
-package ring32
+package ring56
 
 // loadAcquireUint64 performs a load with acquire semantics from *p.
 // This guarantees that any subsequent loads/stores will observe memory

@@ -15,7 +15,7 @@ import (
 	"main/bucketqueue"
 	"main/fastuni"
 	"main/localidx"
-	"main/ring32"
+	"main/ring56"
 	"main/types"
 	"main/utils"
 )
@@ -172,7 +172,7 @@ var _ [32 - unsafe.Sizeof(TickUpdate{})]byte
 // Per-core executors and ring buffers.
 var (
 	executors   [64]*CoreExecutor
-	rings       [64]*ring32.Ring
+	rings       [64]*ring56.Ring
 	pair2cores  [1 << 17]CoreMask
 	shardBucket map[PairID][]PairShard
 
@@ -239,7 +239,7 @@ func shardWorker(coreID, half int, in <-chan PairShard) {
 	executors[coreID] = ex
 
 	// Larger ring to buffer ~50 ms @1 M/sec bursts
-	rb := ring32.New(1 << 16)
+	rb := ring56.New(1 << 16)
 	rings[coreID] = rb
 
 	// Pre-allocate per-shard cycle slice
@@ -247,7 +247,7 @@ func shardWorker(coreID, half int, in <-chan PairShard) {
 	for shard := range in {
 		attachShard(ex, &shard, &cycleBuf)
 	}
-	ring32.PinnedConsumer(coreID, rb, new(uint32), new(uint32),
+	ring56.PinnedConsumer(coreID, rb, new(uint32), new(uint32),
 		func(p *[32]byte) { handleTick(ex, (*TickUpdate)(unsafe.Pointer(p))) },
 		make(chan struct{}))
 }

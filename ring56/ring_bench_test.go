@@ -1,5 +1,15 @@
-// ring_bench_test.go — Micro-benchmarks for 32-byte fixed-capacity ring
-package ring32
+// ring_bench_test.go — Micro-benchmarks for 56-byte fixed-capacity SPSC ring.
+//
+// Focus:
+//   - Hot-path performance for Push, Pop, and PushPop
+//   - Cross-core contention simulation
+//   - Elision-resistant test design (via runtime.KeepAlive + global sink)
+//
+// All tests assume:
+//   - Ring is correctly sized (power-of-two)
+//   - Producer and consumer maintain SPSC contract
+
+package ring56
 
 import (
 	"runtime"
@@ -9,28 +19,28 @@ import (
 
 const benchCap = 1024 // small enough to remain hot in L1/L2 cache
 
-var dummy32 = &[32]byte{1, 2, 3} // constant payload
-var sink any                     // prevent compiler elision
+var dummy56 = &[56]byte{1, 2, 3} // constant payload
+var sink any                     // escape sink to prevent elision
 
-// BenchmarkRing_Push measures producer-only throughput with backpressure handling.
+// BenchmarkRing_Push measures producer-only throughput under full ring pressure.
 func BenchmarkRing_Push(b *testing.B) {
 	r := New(benchCap)
 	b.ReportAllocs()
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if !r.Push(dummy32) {
-			_ = r.Pop()         // clear one slot
-			_ = r.Push(dummy32) // must succeed now
+		if !r.Push(dummy56) {
+			_ = r.Pop()
+			_ = r.Push(dummy56)
 		}
 	}
 }
 
-// BenchmarkRing_Pop measures standalone pop cost assuming ring is mostly full.
+// BenchmarkRing_Pop measures raw consumer throughput assuming mostly full ring.
 func BenchmarkRing_Pop(b *testing.B) {
 	r := New(benchCap)
 	for i := 0; i < benchCap-1; i++ {
-		r.Push(dummy32)
+		r.Push(dummy56)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -38,20 +48,20 @@ func BenchmarkRing_Pop(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		p := r.Pop()
 		if p == nil {
-			r.Push(dummy32)
+			r.Push(dummy56)
 			p = r.Pop()
 		}
 		sink = p
-		_ = r.Push(dummy32)
+		_ = r.Push(dummy56)
 	}
 	runtime.KeepAlive(sink)
 }
 
-// BenchmarkRing_PushPop runs producer+consumer in the same goroutine.
+// BenchmarkRing_PushPop measures tight producer-consumer loop in same goroutine.
 func BenchmarkRing_PushPop(b *testing.B) {
 	r := New(benchCap)
 	for i := 0; i < benchCap/2; i++ {
-		r.Push(dummy32)
+		r.Push(dummy56)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -59,13 +69,12 @@ func BenchmarkRing_PushPop(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		p := r.Pop()
 		sink = p
-		_ = r.Push(dummy32)
+		_ = r.Push(dummy56)
 	}
 	runtime.KeepAlive(sink)
 }
 
-// BenchmarkRing_CrossCore runs producer and consumer on separate goroutines.
-// Ensures high-throughput across cores using dedicated threads.
+// BenchmarkRing_CrossCore simulates full-duplex behavior with true core separation.
 func BenchmarkRing_CrossCore(b *testing.B) {
 	runtime.GOMAXPROCS(2)
 	r := New(benchCap)
@@ -83,9 +92,8 @@ func BenchmarkRing_CrossCore(b *testing.B) {
 
 	b.ReportAllocs()
 	b.ResetTimer()
-
 	for i := 0; i < b.N; i++ {
-		for !r.Push(dummy32) {
+		for !r.Push(dummy56) {
 			// spin until slot frees
 		}
 	}

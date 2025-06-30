@@ -1,7 +1,7 @@
 // ring_atomic_fallback.go — Portable atomic acquire/release for non-x86 or noasm builds
 //go:build !amd64 || noasm
 
-package ring32
+package ring56
 
 import "sync/atomic"
 

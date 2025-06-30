@@ -1,7 +1,7 @@
 // setaffinity_linux.go — Linux-only binding for sched_setaffinity(2)
 //go:build linux && !tinygo
 
-package ring32
+package ring56
 
 import (
 	"syscall"

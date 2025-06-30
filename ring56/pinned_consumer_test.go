@@ -1,5 +1,18 @@
-// pinned_consumer_test.go — Unit tests for PinnedConsumer behavior and lifecycle
-package ring32
+// pinned_consumer_test.go — Unit tests for PinnedConsumer lifecycle and correctness.
+//
+// All tests assume:
+//   - Single-threaded access to the ring.
+//   - Pinned goroutine correctly spins, backs off, and exits on demand.
+//   - Payloads are passed via *[56]byte and dereferenced manually.
+//
+// These tests validate:
+//   - Single delivery
+//   - Hot window persistence
+//   - Cold wake-up after timeout
+//   - Proper shutdown signaling
+//   - Ring correctness not compromised by consumer control
+
+package ring56
 
 import (
 	"runtime"
@@ -8,10 +21,9 @@ import (
 	"time"
 )
 
-// launch spins up a pinned consumer on a fresh thread.
-// Returns: stop and hot flags (to control lifecycle), and done (signal channel).
-// Used by all tests to avoid duplicated setup code.
-func launch(r *Ring, fn func(*[32]byte)) (stop, hot *uint32, done chan struct{}) {
+// launch spins up a pinned consumer on its own thread.
+// Returns: stop, hot (control flags), and done (channel closed on exit).
+func launch(r *Ring, fn func(*[56]byte)) (stop, hot *uint32, done chan struct{}) {
 	stop = new(uint32)
 	hot = new(uint32)
 	done = make(chan struct{})
@@ -19,16 +31,17 @@ func launch(r *Ring, fn func(*[32]byte)) (stop, hot *uint32, done chan struct{})
 	return
 }
 
-// TestPinnedConsumerDeliversItem validates that a pushed element triggers
-// the handler exactly once, and that the goroutine exits cleanly when asked.
+// TestPinnedConsumerDeliversItem verifies handler fires once on push
+// and consumer shuts down cleanly on signal.
 func TestPinnedConsumerDeliversItem(t *testing.T) {
-	runtime.GOMAXPROCS(2) // Ensure scheduler has enough threads
+	runtime.GOMAXPROCS(2)
 	r := New(8)
-	want := [32]byte{1, 2, 3, 4}
-	var got [32]byte
-	var zero [32]byte
 
-	stop, hot, done := launch(r, func(p *[32]byte) { got = *p })
+	want := [56]byte{1, 2, 3, 4}
+	var got [56]byte
+	var zero [56]byte
+
+	stop, hot, done := launch(r, func(p *[56]byte) { got = *p })
 
 	atomic.StoreUint32(hot, 1)
 	if !r.Push(&want) {
@@ -58,10 +71,10 @@ func TestPinnedConsumerDeliversItem(t *testing.T) {
 	}
 }
 
-// TestPinnedConsumerStopsNoWork ensures a consumer exits even when idle.
+// TestPinnedConsumerStopsNoWork confirms idle consumers exit cleanly.
 func TestPinnedConsumerStopsNoWork(t *testing.T) {
 	r := New(4)
-	stop, _, done := launch(r, func(_ *[32]byte) {})
+	stop, _, done := launch(r, func(_ *[56]byte) {})
 	atomic.StoreUint32(stop, 1)
 
 	select {
@@ -71,15 +84,15 @@ func TestPinnedConsumerStopsNoWork(t *testing.T) {
 	}
 }
 
-// TestPinnedConsumerHotWindow checks that the consumer stays alive within
-// hotWindow duration even if producer becomes idle immediately.
+// TestPinnedConsumerHotWindow ensures consumer persists within hotWindow
+// even after producer stops.
 func TestPinnedConsumerHotWindow(t *testing.T) {
 	r := New(4)
 	var hits atomic.Uint32
-	stop, hot, done := launch(r, func(_ *[32]byte) { hits.Add(1) })
+	stop, hot, done := launch(r, func(_ *[56]byte) { hits.Add(1) })
 
 	atomic.StoreUint32(hot, 1)
-	_ = r.Push(&[32]byte{9})
+	_ = r.Push(&[56]byte{9})
 	atomic.StoreUint32(hot, 0)
 
 	time.Sleep(1 * time.Second)
@@ -97,20 +110,20 @@ func TestPinnedConsumerHotWindow(t *testing.T) {
 	<-done
 }
 
-// TestPinnedConsumerBackoffThenWake simulates a cold wake-up after spin budget + hot window.
+// TestPinnedConsumerBackoffThenWake tests cold-resume behavior after timeout.
 func TestPinnedConsumerBackoffThenWake(t *testing.T) {
 	r := New(4)
 	var hits atomic.Uint32
-	stop, hot, done := launch(r, func(_ *[32]byte) { hits.Add(1) })
+	stop, hot, done := launch(r, func(_ *[56]byte) { hits.Add(1) })
 
 	atomic.StoreUint32(hot, 1)
-	r.Push(&[32]byte{7})
+	r.Push(&[56]byte{7})
 	atomic.StoreUint32(hot, 0)
 
 	time.Sleep(15*time.Second + 100*time.Millisecond)
 
 	atomic.StoreUint32(hot, 1)
-	r.Push(&[32]byte{8})
+	r.Push(&[56]byte{8})
 	time.Sleep(10 * time.Millisecond)
 
 	if v := hits.Load(); v != 2 {

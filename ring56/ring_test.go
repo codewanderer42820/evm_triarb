@@ -1,5 +1,17 @@
-// ring_test.go — Functional verification of the lock-free SPSC ring
-package ring32
+// ring_test.go — Functional verification of the lock-free SPSC ring with 56-byte payloads.
+//
+// This suite tests:
+//   - Basic push/pop correctness
+//   - Full ring capacity behavior
+//   - Wraparound cursor logic
+//   - Blocking PopWait behavior under delay
+//
+// All tests assume:
+//   - Caller is single-threaded SPSC (no races).
+//   - Memory is reused immediately upon pop.
+//   - No GC interference; short-lived allocations only.
+
+package ring56
 
 import (
 	"testing"
@@ -23,10 +35,10 @@ func TestNewPanicsOnBadSize(t *testing.T) {
 }
 
 // TestPushPopRoundTrip confirms single element round-trip integrity
-// and checks that the queue is empty afterwards.
+// and checks that the ring is empty afterwards.
 func TestPushPopRoundTrip(t *testing.T) {
 	r := New(8)
-	val := &[32]byte{1, 2, 3}
+	val := &[56]byte{1, 2, 3}
 
 	if !r.Push(val) {
 		t.Fatal("Push should succeed")
@@ -36,15 +48,15 @@ func TestPushPopRoundTrip(t *testing.T) {
 		t.Fatalf("expected %v, got %v", val, got)
 	}
 	if r.Pop() != nil {
-		t.Fatal("Ring should be empty")
+		t.Fatal("Ring should be empty after Pop")
 	}
 }
 
-// TestPushFailsWhenFull fills the ring and verifies that further
-// pushes are rejected.
+// TestPushFailsWhenFull fills the ring and verifies
+// that a full queue blocks further pushes.
 func TestPushFailsWhenFull(t *testing.T) {
 	r := New(4)
-	val := &[32]byte{7}
+	val := &[56]byte{7}
 	for i := 0; i < 4; i++ {
 		if !r.Push(val) {
 			t.Fatalf("push %d unexpectedly failed", i)
@@ -59,7 +71,7 @@ func TestPushFailsWhenFull(t *testing.T) {
 // and returns the correct value.
 func TestPopWaitBlocksUntilItem(t *testing.T) {
 	r := New(2)
-	want := &[32]byte{42}
+	want := &[56]byte{42}
 	go func() {
 		time.Sleep(5 * time.Millisecond)
 		r.Push(want)
@@ -77,13 +89,13 @@ func TestPopNil(t *testing.T) {
 	}
 }
 
-// TestWrapAround ensures wrap-around of head and tail math works
-// after more than one full ring cycle.
+// TestWrapAround ensures that cursor arithmetic works correctly
+// when wrapping around the ring buffer multiple times.
 func TestWrapAround(t *testing.T) {
 	const size = 4
 	r := New(size)
 	for i := 0; i < 10; i++ {
-		val := &[32]byte{byte(i)}
+		val := &[56]byte{byte(i)}
 		if !r.Push(val) {
 			t.Fatalf("push %d failed unexpectedly", i)
 		}

@@ -1,4 +1,4 @@
-// ring_56byte.go — Lock‑free single‑producer/single‑consumer (SPSC) ring queue (56-byte payload)
+// ring.go — Lock‑free single‑producer/single‑consumer (SPSC) ring queue (56-byte payload)
 //
 // ⚠️ Footgun-Grade Ring: Engineered for absolute performance under full trust model.
 //
@@ -15,33 +15,29 @@
 //
 // Use only with full memory and CPU core discipline.
 
-package ring32
+package ring56
 
 import (
 	"sync/atomic"
 )
 
-// slot is the payload container for one entry in the ring.
-// Payload is 56 bytes, followed by a uint64 ticket for strict position control.
 type slot struct {
-	val [56]byte // fixed-size payload (matches fastuni, quantumqueue, etc.)
-	seq uint64   // slot ticket number
+	val [56]byte // fixed-size payload (cache-aligned)
+	seq uint64   // slot ticket number for cursor sync
 }
 
-// Ring is a lock-free single-producer/single-consumer queue.
-// Designed for pinned-thread hot-loop dispatch.
 type Ring struct {
 	_    [64]byte // cache-line isolation (consumer head)
-	head uint64   // consumer cursor
+	head uint64
 
 	_    [64]byte // cache-line isolation (producer tail)
-	tail uint64   // producer cursor
+	tail uint64
 
-	_ [64]byte // further isolation from neighbors
+	_ [64]byte // full page-line isolation
 
-	mask uint64 // == len(buf) - 1 (bitmask for modulo)
-	step uint64 // == len(buf)     (precomputed stride for wraparound)
-	buf  []slot // backing ring buffer
+	mask uint64
+	step uint64
+	buf  []slot
 }
 
 // New constructs a ring with power-of-two size.

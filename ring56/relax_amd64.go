@@ -1,5 +1,5 @@
 // relax_amd64.go — Go-side declaration for cpuRelax used in spin loops
-package ring32
+package ring56
 
 // cpuRelax emits the x86-64 PAUSE instruction, acting as a polite hint to the CPU
 // that this thread is busy-spinning and should back off slightly.
