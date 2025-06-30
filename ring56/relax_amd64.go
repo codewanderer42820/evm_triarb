@@ -7,6 +7,11 @@ package ring56
 // Used in spin loops to avoid excess power draw or wasting hyperthreaded sibling resources.
 // The actual implementation is provided in relax_amd64.s.
 //
+// Compiler directives:
+//   - noescape: tells compiler this pointer-returning fn leaks no memory to heap
+//   - nosplit: suppresses stack split logic (safe for tight spin loops)
+//   - inline: strongly encourages inlining at call sites
+//
 //go:noescape
 //go:nosplit
 //go:inline

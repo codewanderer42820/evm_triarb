@@ -10,6 +10,7 @@ import (
 
 // cpuMasks holds precomputed one-word masks (bit = 1 << cpu) for CPUs 0–63.
 // Each is statically initialized so it can be passed directly to the syscall.
+// This avoids runtime heap allocations and stays entirely nosplit-friendly.
 var cpuMasks = [...][1]uintptr{
 	{1 << 0}, {1 << 1}, {1 << 2}, {1 << 3}, {1 << 4}, {1 << 5}, {1 << 6}, {1 << 7},
 	{1 << 8}, {1 << 9}, {1 << 10}, {1 << 11}, {1 << 12}, {1 << 13}, {1 << 14}, {1 << 15},
@@ -21,6 +22,15 @@ var cpuMasks = [...][1]uintptr{
 	{1 << 56}, {1 << 57}, {1 << 58}, {1 << 59}, {1 << 60}, {1 << 61}, {1 << 62}, {1 << 63},
 }
 
+// setAffinity binds the current OS thread to the specified logical CPU.
+//
+// On valid Linux platforms, this is implemented via syscall.SYS_SCHED_SETAFFINITY.
+// It uses a precomputed static mask (1<<cpu) to avoid heap allocations.
+//
+// Compiler directives:
+//   - nosplit: safe because we use static memory and make no heap calls
+//   - inline: encourages inlining into goroutine prologues like PinnedConsumer
+//
 //go:nosplit
 //go:inline
 func setAffinity(cpu int) {

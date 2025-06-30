@@ -34,8 +34,14 @@ const (
 //
 // When the consumer exits, the `done` channel is closed for cleanup.
 //
+// Compiler directives:
+//   - nosplit: avoid stack checks, safe due to fixed size and no runtime calls inside loop
+//   - inline: encourage aggressive inlining of caller
+//   - registerparams: pass arguments in registers (Go 1.21+ ABI)
+//
 //go:nosplit
 //go:inline
+//go:registerparams
 func PinnedConsumer(
 	core int, // Logical CPU core to bind this thread to
 	ring *Ring, // Ring to consume from (SPSC)

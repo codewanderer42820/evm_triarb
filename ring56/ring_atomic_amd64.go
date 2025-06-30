@@ -4,6 +4,7 @@
 package ring56
 
 // loadAcquireUint64 performs a load with acquire semantics from *p.
+//
 // This guarantees that any subsequent loads/stores will observe memory
 // operations that happened-before the release-store to *p by another core.
 //
@@ -11,16 +12,25 @@ package ring56
 // On TSO architectures like x86-64, this satisfies acquire ordering and
 // acts as a compiler barrier without requiring mfence.
 //
+// Compiler directives:
+//   - nosplit: usable inside tight rings
+//   - inline: emits direct MOVQ
+//
 //go:nosplit
 //go:inline
 func loadAcquireUint64(p *uint64) (v uint64)
 
 // storeReleaseUint64 stores the value v into *p with release semantics.
+//
 // This ensures that all memory writes before the store are visible to
 // another core before it observes the new value at *p.
 //
 // It is implemented using MOVQ without LOCK or MFENCE on x86-64, as
 // TSO memory ordering already preserves the required visibility guarantees.
+//
+// Compiler directives:
+//   - nosplit: no stack growth
+//   - inline: emits MOVQ directly
 //
 //go:nosplit
 //go:inline

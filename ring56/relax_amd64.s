@@ -11,7 +11,6 @@
 //
 // Marked NOSPLIT to allow safe usage in nosplit Go paths.
 
-// func cpuRelax()
 TEXT ·cpuRelax(SB), NOSPLIT, $0
 	PAUSE
 	RET

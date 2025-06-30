@@ -5,9 +5,9 @@
 //   - Cross-core contention simulation
 //   - Elision-resistant test design (via runtime.KeepAlive + global sink)
 //
-// All tests assume:
-//   - Ring is correctly sized (power-of-two)
-//   - Producer and consumer maintain SPSC contract
+// Assumptions:
+//   - Ring is correctly sized (power-of-two).
+//   - Producer and consumer maintain SPSC contract.
 
 package ring56
 
@@ -23,6 +23,7 @@ var dummy56 = &[56]byte{1, 2, 3} // constant payload
 var sink any                     // escape sink to prevent elision
 
 // BenchmarkRing_Push measures producer-only throughput under full ring pressure.
+// Caller spins on Pop if full, emulating best-effort batching.
 func BenchmarkRing_Push(b *testing.B) {
 	r := New(benchCap)
 	b.ReportAllocs()
@@ -36,7 +37,7 @@ func BenchmarkRing_Push(b *testing.B) {
 	}
 }
 
-// BenchmarkRing_Pop measures raw consumer throughput assuming mostly full ring.
+// BenchmarkRing_Pop measures raw consumer throughput assuming ring is preloaded.
 func BenchmarkRing_Pop(b *testing.B) {
 	r := New(benchCap)
 	for i := 0; i < benchCap-1; i++ {
@@ -57,7 +58,8 @@ func BenchmarkRing_Pop(b *testing.B) {
 	runtime.KeepAlive(sink)
 }
 
-// BenchmarkRing_PushPop measures tight producer-consumer loop in same goroutine.
+// BenchmarkRing_PushPop measures a tight in-goroutine loop of Pop→Push.
+// This approximates microservice-style relaying.
 func BenchmarkRing_PushPop(b *testing.B) {
 	r := New(benchCap)
 	for i := 0; i < benchCap/2; i++ {
@@ -74,7 +76,10 @@ func BenchmarkRing_PushPop(b *testing.B) {
 	runtime.KeepAlive(sink)
 }
 
-// BenchmarkRing_CrossCore simulates full-duplex behavior with true core separation.
+// BenchmarkRing_CrossCore simulates a full producer-consumer split across OS threads.
+//
+// GOMAXPROCS(2) gives us real core separation on most OSes.
+// This captures true inter-core communication cost through L2 or L3.
 func BenchmarkRing_CrossCore(b *testing.B) {
 	runtime.GOMAXPROCS(2)
 	r := New(benchCap)

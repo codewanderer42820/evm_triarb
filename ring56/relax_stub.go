@@ -12,6 +12,10 @@ package ring56
 // The function is safe to call unconditionally in spin loops — on unsupported
 // targets it simply does nothing.
 //
+// Compiler directives:
+//   - nosplit: safe to embed in spin loops
+//   - inline: encourages compiler to drop into instruction stream
+//
 //go:nosplit
 //go:inline
 func cpuRelax() {}

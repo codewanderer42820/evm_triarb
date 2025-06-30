@@ -21,11 +21,19 @@ import (
 	"sync/atomic"
 )
 
+// slot is the internal ring buffer slot. Each is 64B aligned.
+//
+//go:notinheap
+//go:align 64
 type slot struct {
-	val [56]byte // fixed-size payload (cache-aligned)
+	val [56]byte // fixed-size payload (cacheline-fit)
 	seq uint64   // slot ticket number for cursor sync
 }
 
+// Ring is a cacheline-isolated SPSC ring with fixed-size slots.
+//
+//go:notinheap
+//go:align 64
 type Ring struct {
 	_    [64]byte // cache-line isolation (consumer head)
 	head uint64
@@ -42,9 +50,10 @@ type Ring struct {
 
 // New constructs a ring with power-of-two size.
 // Panics if size is not valid. Caller must ensure sizing discipline.
-//
+
 //go:nosplit
 //go:inline
+//go:registerparams
 func New(size int) *Ring {
 	if size <= 0 || size&(size-1) != 0 {
 		panic("ring: size must be >0 and power of two")
@@ -62,9 +71,10 @@ func New(size int) *Ring {
 
 // Push attempts to enqueue a [56]byte payload.
 // Returns false if slot is not yet ready (queue full). No backoff logic.
-//
+
 //go:nosplit
 //go:inline
+//go:registerparams
 func (r *Ring) Push(val *[56]byte) bool {
 	t := r.tail
 	s := &r.buf[t&r.mask]
@@ -79,9 +89,10 @@ func (r *Ring) Push(val *[56]byte) bool {
 
 // Pop returns the next available payload pointer.
 // If empty, returns nil. Payload is valid until overwritten.
-//
+
 //go:nosplit
 //go:inline
+//go:registerparams
 func (r *Ring) Pop() *[56]byte {
 	h := r.head
 	s := &r.buf[h&r.mask]
@@ -96,8 +107,9 @@ func (r *Ring) Pop() *[56]byte {
 
 // PopWait spins until a value is available and returns it.
 // Uses cpuRelax() for polite spin-loop yielding.
-//
+
 //go:nosplit
+//go:registerparams
 func (r *Ring) PopWait() *[56]byte {
 	for {
 		if p := r.Pop(); p != nil {
