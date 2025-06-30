@@ -8,6 +8,9 @@ import (
 	"testing"
 )
 
+// rnd is a deterministic PRNG for reproducible stress patterns
+var rnd = rand.New(rand.NewSource(0xC0FFEE))
+
 // -----------------------------------------------------------------------------
 // ░░ Constructor and Allocation Semantics ░░
 // -----------------------------------------------------------------------------

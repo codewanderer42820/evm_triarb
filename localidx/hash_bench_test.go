@@ -5,7 +5,6 @@
 package localidx
 
 import (
-	"math/rand"
 	"testing"
 )
 
@@ -13,8 +12,6 @@ const (
 	insertSize = 1 << 17        // 131072 → ~512 KiB table, fits in L2/L3
 	lookupSize = insertSize / 2 // 65536 → 50% hit/miss balance
 )
-
-var rnd = rand.New(rand.NewSource(1337)) // deterministic RNG for reproducibility
 
 // Pre-allocated keys to avoid slice alloc noise during benchmarking
 var (
