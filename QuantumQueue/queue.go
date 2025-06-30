@@ -94,7 +94,6 @@ type idx32 = Handle
 // - Holds the tick key, inline 48-byte payload, and doubly-linked list pointers.
 //
 //go:notinheap
-//go:align 64
 type node struct {
 	tick int64    // Tick index or -1 if unused (free)
 	data [48]byte // Inline data payload (48 bytes = 3 cache lines)
@@ -110,7 +109,6 @@ type node struct {
 // Used for O(1) traversal and hierarchy tracking of tick population.
 //
 //go:notinheap
-//go:align 576
 type groupBlock struct {
 	l1Summary uint64            // Summary of active lanes (1 bit per lane)
 	l2        [LaneCount]uint64 // Each lane has a 64-bit bitmap (1 bit per bucket)
