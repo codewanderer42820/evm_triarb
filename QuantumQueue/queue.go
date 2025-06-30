@@ -263,3 +263,76 @@ func (q *QuantumQueue) MoveTick(h Handle, newTick int64) {
 func (q *QuantumQueue) UnlinkMin(h Handle, _ int64) {
 	q.unlink(h)
 }
+
+// PeepMin32 returns exactly 32 handles in ascending‐tick order.
+// If there are fewer than 32 items, the remaining slots stay as nilIdx.
+// Zero‐alloc, zero‐copy, zero mutation of the real queue.
+//
+//go:inline
+//go:nosplit
+func (q *QuantumQueue) PeepMin32() [32]Handle {
+	// --- Fast nilIdx initialization via doubling copy ---
+	var res [32]Handle
+	res[0] = nilIdx
+	for width := 1; width < len(res); width <<= 1 {
+		copy(res[width:], res[:width])
+	}
+
+	// --- Stack‐only tombstone masks ---
+	var (
+		groupMask  uint64
+		laneMask   [GroupCount]uint64
+		bucketMask [GroupCount][LaneCount]uint64
+	)
+
+	count := 0
+	var nextDup Handle = nilIdx
+
+	for count < 32 {
+		// 1) Drain duplicates in current bucket chain
+		if nextDup != nilIdx {
+			h := nextDup
+			nextDup = q.arena[h].next
+
+			res[count] = h
+			count++
+			continue
+		}
+
+		// 2) Find next non-empty group
+		liveGroups := q.summary &^ groupMask
+		if liveGroups == 0 {
+			break
+		}
+		g := bits.LeadingZeros64(liveGroups)
+
+		// 3) Within that group, find next non-empty lane
+		liveL1 := q.groups[g].l1Summary &^ laneMask[g]
+		l := bits.LeadingZeros64(liveL1)
+
+		// 4) Within that lane, find next non-empty bucket
+		liveL2 := q.groups[g].l2[l] &^ bucketMask[g][l]
+		t := bits.LeadingZeros64(liveL2)
+
+		// 5) Compute bucket index and fetch head handle
+		b := idx32((uint64(g) << 12) | (uint64(l) << 6) | uint64(t))
+		h := q.buckets[b]
+		nextDup = q.arena[h].next
+
+		res[count] = h
+		count++
+
+		// 6) Mark that bucket consumed
+		bucketMask[g][l] |= 1 << (63 - t)
+		// 7) If lane is now empty, mark it
+		if q.groups[g].l2[l]&^bucketMask[g][l] == 0 {
+			laneMask[g] |= 1 << (63 - l)
+			// 8) If group is now empty, mark it
+			if q.groups[g].l1Summary&^laneMask[g] == 0 {
+				groupMask |= 1 << (63 - g)
+			}
+		}
+	}
+
+	return res
+}
