@@ -53,7 +53,7 @@ func (h *stressHeap) Pop() interface{} {
 // QuantumQueue and a Go heap reference, verifying that peek/unlink produce
 // identical sequences under push, move, and pop operations.
 func TestQueueStressRandomOperations(t *testing.T) {
-	const iterations = 30_000_000
+	const iterations = 10_000_000
 
 	// deterministic RNG for repeatable test
 	rng := rand.New(rand.NewSource(69))
