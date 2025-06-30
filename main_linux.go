@@ -20,10 +20,6 @@ var (
 	memstats runtime.MemStats          // GC metrics for runtime guardrails
 )
 
-// Compiler Directives:
-//   - nosplit         → eliminates runtime stack checks on critical path
-//
-//go:nosplit
 func main() {
 	// Disable background GC — full manual control to limit jitter
 	debug.SetGCPercent(-1)

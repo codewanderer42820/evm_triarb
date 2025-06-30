@@ -21,10 +21,6 @@ var (
 	memstats runtime.MemStats        // reused struct for GC guardrail metrics
 )
 
-// Compiler Directives:
-//   - nosplit         → required to avoid stack checks in real-time loop
-//
-//go:nosplit
 func main() {
 	// Disable automatic GC to prevent pause noise
 	debug.SetGCPercent(-1)
