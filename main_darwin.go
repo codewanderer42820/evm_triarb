@@ -57,8 +57,10 @@ func main() {
 //
 // Compiler Directives:
 //   - nosplit         → removes stack frame check overhead
+//   - registerparams  → avoids stack spill from arg-passing
 //
 //go:nosplit
+//go:registerparams
 func runPublisher() error {
 	// ───── Step 1: Dial TCP + wrap with TLS ─────
 	raw, err := net.Dial("tcp", wsDialAddr)
