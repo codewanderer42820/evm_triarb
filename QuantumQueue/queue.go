@@ -128,12 +128,14 @@ func (q *QuantumQueue) BorrowSafe() (Handle, error) {
 // Size returns the number of active entries.
 //
 //go:inline
+//go:nosplit
 //go:registerparams
 func (q *QuantumQueue) Size() int { return q.size }
 
 // Empty reports whether the queue is empty.
 //
 //go:inline
+//go:nosplit
 //go:registerparams
 func (q *QuantumQueue) Empty() bool { return q.size == 0 }
 
@@ -230,6 +232,7 @@ func (q *QuantumQueue) Push(tick int64, h Handle, val *[48]byte) {
 // PeepMin returns the handle, tick, and payload ptr of the smallest tick.
 //
 //go:inline
+//go:nosplit
 //go:registerparams
 func (q *QuantumQueue) PeepMin() (Handle, int64, *[48]byte) {
 	g := bits.LeadingZeros64(q.summary)
