@@ -33,11 +33,11 @@ import "unsafe"
 // Zero heap pressure; insertion-only; no deletion logic.
 
 //go:notinheap         // avoids heap metadata, allows static arena use
-//go:align 64          // ensures alignment for cacheline locality
 type Hash struct {
-	keys []uint32 // key slots; key=0 denotes empty
-	vals []uint32 // corresponding values
-	mask uint32   // bitmask for modulo (len(keys)-1)
+	keys    []uint32 // key slots; key=0 denotes empty
+	vals    []uint32 // corresponding values
+	mask, _ uint32   // bitmask for modulo (len(keys)-1)
+	_       uint64
 }
 
 // nextPow2 returns the smallest power of two greater than or equal to n.
