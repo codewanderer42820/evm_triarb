@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// ░░ Pinned Consumer Lifecycle Tests ░░
+// -----------------------------------------------------------------------------
+//
+// These tests verify the correct lifecycle behavior of pinned consumers:
+//   - Push/poll semantics
+//   - Shutdown signaling
+//   - Hot window retention and cold resume
+
 package ring56
 
 import (

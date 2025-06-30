@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// ░░ Ring Buffer Performance Benchmarks ░░
+// -----------------------------------------------------------------------------
+//
+// These microbenchmarks target critical paths for latency and throughput:
+//   - Producer-only (Push)
+//   - Consumer-only (Pop)
+//   - Relay (Push+Pop)
+//   - Cross-core SPSC behavior
+
 package ring56
 
 import (

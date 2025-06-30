@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// ░░ Constructor & Edge Case Validation ░░
+// -----------------------------------------------------------------------------
+//
+// Tests under this group verify ring buffer invariants:
+//   - Constructor rejects invalid sizes
+//   - Edge conditions (empty, full, wraparound)
+//   - Data integrity under interleaved push/pop patterns
+
 package ring56
 
 import (
