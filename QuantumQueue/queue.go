@@ -112,6 +112,7 @@ type node struct {
 type groupBlock struct {
 	l1Summary uint64            // Summary of active lanes (1 bit per lane)
 	l2        [LaneCount]uint64 // Each lane has a 64-bit bitmap (1 bit per bucket)
+	_         [7]uint64
 }
 
 // -----------------------------------------------------------------------------
