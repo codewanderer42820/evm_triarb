@@ -21,39 +21,44 @@ import (
 	"sync/atomic"
 )
 
-// slot holds one **24-byte** payload plus an 8-byte sequence counter.
-// Total struct size: 32 B (half of a 64-byte cache line).
+// slot carries a 24-byte payload plus an 8-byte sequence counter.
+// Total: 32 B  (= one-half of a 64-byte cache-line).
 //
 //go:notinheap
 //go:align 64
 type slot struct {
-	val [24]byte // user payload
-	seq uint64   // sequence number for ownership tracking
+	val [24]byte // user payload (bytes 0–23)
+	seq uint64   // sequence number (bytes 24–31)
 }
 
-// Ring is an ultra-fast, cache-friendly, single-producer single-consumer ring buffer.
+// Ring is a single-producer / single-consumer ring buffer.
 //
-// Layout ensures:
-// - `head` and `tail` each sit on separate 64-byte cachelines
-// - No false sharing across producer/consumer lanes
-// - struct size = 272 bytes (multiple of 64)
+// Layout guarantees
+//   - `head` and `tail` live on distinct 64-byte lines → no false sharing
+//   - read-only fields (`mask`, `step`, slice header) share one cold line
+//   - Total struct size = **256 B** (exactly 4 cache-lines, multiple of 64)
 //
 //go:notinheap
 //go:align 64
 type Ring struct {
-	_    [64]byte // bytes 0–63: pad to isolate head
-	head uint64   // bytes 64–71: read cursor (consumer)
+	// cache-line 0 — pad so `head` starts on its own line
+	_    [64]byte // bytes   0–63
+	head uint64   // bytes  64–71 : consumer read cursor
 
-	_    [56]byte // bytes 72–135: pad to isolate tail
-	tail uint64   // bytes 136–143: write cursor (producer)
+	// cache-line 1 — isolate `tail`
+	_    [56]byte // bytes  72–127
+	tail uint64   // bytes 128–135 : producer write cursor
 
-	_ [56]byte // bytes 144–207: additional separation or future metadata
+	// cache-line 2 — spare / future metadata
+	_ [56]byte // bytes 136–191
 
-	mask uint64 // bytes 208–215
-	step uint64 // bytes 216–223
-	buf  []slot // bytes 224–247 (slice header: ptr, len, cap)
+	// cache-line 3 — read-only config
+	mask uint64 // bytes 192–199
+	step uint64 // bytes 200–207
+	buf  []slot // bytes 208–231 : slice header (ptr,len,cap)
 
-	_ [3]uint64
+	// still cache-line 3 — trailing pad keeps total divisible by 64
+	_ [3]uint64 // bytes 232–255
 }
 
 // New constructs a ring with power-of-two size.
