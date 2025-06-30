@@ -44,16 +44,16 @@ type Ring struct {
 	_    [64]byte // bytes 0–63: pad to isolate head
 	head uint64   // bytes 64–71: read cursor (consumer)
 
-	_    [64]byte // bytes 72–135: pad to isolate tail
+	_    [56]byte // bytes 72–135: pad to isolate tail
 	tail uint64   // bytes 136–143: write cursor (producer)
 
-	_ [64]byte // bytes 144–207: additional separation or future metadata
+	_ [56]byte // bytes 144–207: additional separation or future metadata
 
 	mask uint64 // bytes 208–215
 	step uint64 // bytes 216–223
 	buf  []slot // bytes 224–247 (slice header: ptr, len, cap)
 
-	_ [3]uint64 // bytes 248–271: align to 272 total
+	_ [3]uint64
 }
 
 // New constructs a ring with power-of-two size.
