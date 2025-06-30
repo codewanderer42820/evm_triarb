@@ -1,4 +1,9 @@
 // fastuni_stress_test.go — parallel randomized correctness sweeps for reserve-ratio routines.
+//
+// This file performs large-scale randomized validation for logarithmic ratio
+// functions (LnReserveRatio and Log2ReserveRatio) across various input regimes.
+// All checks compare implementation outputs to math.{Log,Log2} ground truth.
+
 package fastuni
 
 import (
@@ -11,24 +16,27 @@ import (
 )
 
 /*─────────────────── constants ───────────────────*/
+
 const (
 	million  = 1_000_000
 	billion  = 1_000_000_000
 	trillion = 1_000_000_000_000
-	seedBase = 0x5eed
+	seedBase = 0x5eed // base for per-thread deterministic seeds
 )
 
-/*─────────────────── test input generators ───────────────────*/
+/*─────────────────── input generators ───────────────────*/
 
+// drawSmall returns (a, b) pairs with small differences (a ≈ b)
 func drawSmall(r *rand.Rand) (a, b uint64) {
-	base := r.Uint64()%1_000_000_000_000 + 1
-	delta := r.Uint64()%1_000_000 + 1
+	base := r.Uint64()%1_000_000_000_000 + 1 // avoid 0
+	delta := r.Uint64()%1_000_000 + 1        // small delta
 	if r.Intn(2) == 0 {
 		return base + delta, base
 	}
 	return base, base + delta
 }
 
+// drawMedium returns (a, b) pairs with moderate multiplicative gaps
 func drawMedium(r *rand.Rand) (a, b uint64) {
 	base := r.Uint64()%1_000_000_000 + 1
 	factor := uint64(r.Intn(25) + 8)
@@ -38,12 +46,13 @@ func drawMedium(r *rand.Rand) (a, b uint64) {
 	return base, base * factor
 }
 
+// drawLarge returns (a, b) pairs with large magnitude differences
 func drawLarge(r *rand.Rand) (a, b uint64) {
 	base := r.Uint64()%1_000_000 + 1
 	shift := uint(r.Intn(40) + 24)
 	high := base << shift
 	if high == 0 {
-		high = (1<<63 - 1)
+		high = 1<<63 - 1
 	}
 	if r.Intn(2) == 0 {
 		return high, base
@@ -51,8 +60,9 @@ func drawLarge(r *rand.Rand) (a, b uint64) {
 	return base, high
 }
 
-/*─────────────────── sweep engine ───────────────────*/
+/*─────────────────── generic sweeping engine ───────────────────*/
 
+// sweepN tests 'impl(a,b)' against 'gold(a/b)' for N samples, possibly in parallel.
 func sweepN(t *testing.T, regime string, n int,
 	gen func(*rand.Rand) (uint64, uint64),
 	gold func(float64) float64,
@@ -104,6 +114,7 @@ func sweepN(t *testing.T, regime string, n int,
 	}
 }
 
+// singleThreadSweep is a fallback sweep implementation without parallelism
 func singleThreadSweep(t *testing.T, regime string, n int,
 	gen func(*rand.Rand) (uint64, uint64),
 	gold func(float64) float64,
@@ -123,7 +134,7 @@ func singleThreadSweep(t *testing.T, regime string, n int,
 	}
 }
 
-/*─────────────────── 1M sample tests ───────────────────*/
+/*─────────────────── 1M-scale tests ───────────────────*/
 
 func TestLnReserveRatioSmall1M(t *testing.T) {
 	sweepN(t, "SMALL", million, drawSmall, math.Log, LnReserveRatio)
@@ -144,7 +155,9 @@ func TestLog2ReserveRatioLarge1M(t *testing.T) {
 	sweepN(t, "LARGE", million, drawLarge, math.Log2, Log2ReserveRatio)
 }
 
-/*─────────────────── 1B sample tests (skip in -short) ───────────────────*/
+/*─────────────────── 1B-scale tests ───────────────────*/
+
+// These are skipped by default when `go test -short` is used.
 
 func TestLnReserveRatioSmall1B(t *testing.T) {
 	if testing.Short() {
@@ -183,7 +196,9 @@ func TestLog2ReserveRatioLarge1B(t *testing.T) {
 	sweepN(t, "LARGE", billion, drawLarge, math.Log2, Log2ReserveRatio)
 }
 
-/*─────────────────── 1T sample tests (opt-in only) ───────────────────*/
+/*─────────────────── 1T-scale tests ───────────────────*/
+
+// These are opt-in only. Not recommended for routine testing.
 
 func TestLnReserveRatioSmallTrillion(t *testing.T) {
 	if testing.Short() {
