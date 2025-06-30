@@ -71,7 +71,7 @@ const (
 
 	// CapItems = maximum number of queue entries that can be held concurrently.
 	// One node per tick is allowed.
-	CapItems = BucketCount
+	CapItems = 52428
 )
 
 // Handle is an opaque index into the node arena. Must remain within bounds [0, CapItems).
