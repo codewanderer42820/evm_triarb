@@ -18,7 +18,7 @@
 package ring56
 
 import (
-	_ "sync/atomic" // only used in fallback paths
+	"sync/atomic"
 )
 
 // slot holds one 56-byte payload and its sequence number for tracking ownership.
@@ -59,11 +59,6 @@ type Ring struct {
 // New constructs a ring with power-of-two size.
 // Panics if size is invalid.
 //
-// Compiler directives:
-//   - nosplit: avoids stack checks in hot code
-//   - inline: inlines construction
-//   - registerparams: pass args via registers (Go 1.21+ ABI)
-//
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -85,32 +80,22 @@ func New(size int) *Ring {
 // Push attempts to enqueue a [56]byte payload.
 // Returns false if full (slot not ready).
 //
-// Compiler directives:
-//   - nosplit: tight loop safe
-//   - inline: for zero-call hot path
-//   - registerparams: for fast param passing
-//
 //go:nosplit
 //go:inline
 //go:registerparams
 func (r *Ring) Push(val *[56]byte) bool {
 	t := r.tail
 	s := &r.buf[t&r.mask]
-	if loadAcquireUint64(&s.seq) != t {
+	if atomic.LoadUint64(&s.seq) != t {
 		return false
 	}
 	s.val = *val
-	storeReleaseUint64(&s.seq, t+1)
+	atomic.StoreUint64(&s.seq, t+1)
 	r.tail = t + 1
 	return true
 }
 
 // Pop returns the next available payload, or nil if empty.
-//
-// Compiler directives:
-//   - nosplit: safe in spin loops
-//   - inline: inlines into waiters or fast-path
-//   - registerparams: minimal arg overhead
 //
 //go:nosplit
 //go:inline
@@ -118,20 +103,16 @@ func (r *Ring) Push(val *[56]byte) bool {
 func (r *Ring) Pop() *[56]byte {
 	h := r.head
 	s := &r.buf[h&r.mask]
-	if loadAcquireUint64(&s.seq) != h+1 {
+	if atomic.LoadUint64(&s.seq) != h+1 {
 		return nil
 	}
 	val := &s.val
-	storeReleaseUint64(&s.seq, h+r.step)
+	atomic.StoreUint64(&s.seq, h+r.step)
 	r.head = h + 1
 	return val
 }
 
 // PopWait blocks (spins) until a value is available.
-//
-// Compiler directives:
-//   - nosplit: safe because cpuRelax is nosplit too
-//   - registerparams: minimal call overhead
 //
 //go:nosplit
 //go:registerparams
