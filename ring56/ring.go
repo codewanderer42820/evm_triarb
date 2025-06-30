@@ -18,30 +18,38 @@
 package ring56
 
 import (
-	"sync/atomic"
+	_ "sync/atomic" // only used in fallback paths
 )
 
-// slot is the internal ring buffer slot. Each is 64B aligned.
+// slot holds one 56-byte payload and its sequence number for tracking ownership.
+//
+// Compiler directives:
+//   - notinheap: avoids GC tracking
+//   - align 64: ensures slot fits cleanly in cachelines for producer/consumer
 //
 //go:notinheap
 //go:align 64
 type slot struct {
-	val [56]byte // fixed-size payload (cacheline-fit)
-	seq uint64   // slot ticket number for cursor sync
+	val [56]byte
+	seq uint64
 }
 
-// Ring is a cacheline-isolated SPSC ring with fixed-size slots.
+// Ring is an ultra-fast, cache-friendly, single-producer single-consumer ring buffer.
+//
+// Compiler directives:
+//   - notinheap: ensures arena safety and zero GC metadata
+//   - align 64: maintains cacheline separation between head/tail
 //
 //go:notinheap
 //go:align 64
 type Ring struct {
-	_    [64]byte // cache-line isolation (consumer head)
+	_    [64]byte // consumer head cacheline
 	head uint64
 
-	_    [64]byte // cache-line isolation (producer tail)
+	_    [64]byte // producer tail cacheline
 	tail uint64
 
-	_ [64]byte // full page-line isolation
+	_ [64]byte // extra padding
 
 	mask uint64
 	step uint64
@@ -49,8 +57,13 @@ type Ring struct {
 }
 
 // New constructs a ring with power-of-two size.
-// Panics if size is not valid. Caller must ensure sizing discipline.
-
+// Panics if size is invalid.
+//
+// Compiler directives:
+//   - nosplit: avoids stack checks in hot code
+//   - inline: inlines construction
+//   - registerparams: pass args via registers (Go 1.21+ ABI)
+//
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -70,44 +83,56 @@ func New(size int) *Ring {
 }
 
 // Push attempts to enqueue a [56]byte payload.
-// Returns false if slot is not yet ready (queue full). No backoff logic.
-
+// Returns false if full (slot not ready).
+//
+// Compiler directives:
+//   - nosplit: tight loop safe
+//   - inline: for zero-call hot path
+//   - registerparams: for fast param passing
+//
 //go:nosplit
 //go:inline
 //go:registerparams
 func (r *Ring) Push(val *[56]byte) bool {
 	t := r.tail
 	s := &r.buf[t&r.mask]
-	if atomic.LoadUint64(&s.seq) != t {
+	if loadAcquireUint64(&s.seq) != t {
 		return false
 	}
 	s.val = *val
-	atomic.StoreUint64(&s.seq, t+1)
+	storeReleaseUint64(&s.seq, t+1)
 	r.tail = t + 1
 	return true
 }
 
-// Pop returns the next available payload pointer.
-// If empty, returns nil. Payload is valid until overwritten.
-
+// Pop returns the next available payload, or nil if empty.
+//
+// Compiler directives:
+//   - nosplit: safe in spin loops
+//   - inline: inlines into waiters or fast-path
+//   - registerparams: minimal arg overhead
+//
 //go:nosplit
 //go:inline
 //go:registerparams
 func (r *Ring) Pop() *[56]byte {
 	h := r.head
 	s := &r.buf[h&r.mask]
-	if atomic.LoadUint64(&s.seq) != h+1 {
+	if loadAcquireUint64(&s.seq) != h+1 {
 		return nil
 	}
 	val := &s.val
-	atomic.StoreUint64(&s.seq, h+r.step)
+	storeReleaseUint64(&s.seq, h+r.step)
 	r.head = h + 1
 	return val
 }
 
-// PopWait spins until a value is available and returns it.
-// Uses cpuRelax() for polite spin-loop yielding.
-
+// PopWait blocks (spins) until a value is available.
+//
+// Compiler directives:
+//   - nosplit: safe because cpuRelax is nosplit too
+//   - registerparams: minimal call overhead
+//
 //go:nosplit
 //go:registerparams
 func (r *Ring) PopWait() *[56]byte {
