@@ -121,10 +121,10 @@ type PairTriplet [3]PairID
 // CycleState stores mutable tick values and cycle membership.
 // Layout: 3×float64 ticks (hot-path), PairTriplet, 4-byte pad for 40 B total.
 type CycleState struct {
-	Ticks [3]float64  // 24 bytes
-	Pairs PairTriplet // 12 bytes
-	_     [4]byte     // 4 bytes (alignment or flag)
-	_     [16]byte    // padding to reach 56 bytes
+	Ticks [3]float64  // 3 * 8 = 24 bytes
+	Pairs PairTriplet // 3 * uint32 = 12 bytes
+	_     [4]byte     // 4 bytes (alignment, reserved flags, or filler)
+	_     [16]byte    // 16 bytes padding to reach 56B total
 }
 
 // EdgeBinding associates a cycle and which tick slot to update.
