@@ -4,6 +4,49 @@
 // MoveTick, and UnlinkMin. This "footgun" version omits safety checks for
 // maximum performance, so the caller must uphold invariants (e.g., valid handles,
 // correct ticks).
+
+// -----------------------------------------------------------------------------
+// ⚠️ Quantum Footgun Grade: 10 / 10 ⚠️
+// This module is intentionally unsafe, low-level, and completely free of checks.
+// Every design decision was made to favor performance over safety. The result
+// is a nanosecond-scale tick scheduler with O(1) ops and no GC — but also
+// *maximum user liability*. Below are the 10 footguns you must honor.
+// -----------------------------------------------------------------------------
+
+// Footgun 1/10: Handle reuse is manual. If you forget to unlink before reuse,
+// you create arena corruption and ghost state.
+//
+// Footgun 2/10: Arena has no generation counter. A stale handle will silently
+// dereference memory that may have been reassigned or recycled.
+//
+// Footgun 3/10: No bounds check on tick range. You must guarantee tick ∈ [0, 262143].
+// Anything else writes undefined arena and bitmap state.
+//
+// Footgun 4/10: The freelist is manually maintained. Over-borrowing leads to
+// accessing garbage and inserting it into the queue as if valid.
+//
+// Footgun 5/10: Prefetch logic can dereference invalid memory if you corrupt
+// arena linkage or forget to initialize handles properly.
+//
+// Footgun 6/10: No atomics or locks. Cross-core access without fencing will
+// corrupt state instantly.
+//
+// Footgun 7/10: No memory scrubbing. Freed nodes retain previous payloads and
+// are not zeroed. Privacy and correctness are both caller's responsibility.
+//
+// Footgun 8/10: No panic, no recover, no error logs. Misuse fails silently and
+// dangerously.
+//
+// Footgun 9/10: Summary bitmaps are manually cleared. If your unlink logic is
+// incorrect, PeepMin may return ghost state forever.
+//
+// Footgun 10/10: If summary == 0 but PeepMin is still called, it accesses
+// undefined arena state. You must not call it when Empty() == true.
+//
+// → This system assumes caller omniscience.
+// → Violating the contract results in undefined behavior — fast.
+// -----------------------------------------------------------------------------
+
 package quantumqueue
 
 import (
