@@ -23,7 +23,6 @@ const (
 	million  = 1_000_000
 	billion  = 1_000_000_000
 	trillion = 1_000_000_000_000 // 1e12; Go doesn't support float literal for this
-	tol      = 5e-5              // universal error tolerance in nat
 	seedBase = 0x5eed            // base seed, regime-adjusted
 )
 
