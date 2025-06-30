@@ -14,15 +14,13 @@ import "main/utils"
 //   - blk, tx, log  → event coordinates
 //   - tagHi/Lo      → fingerprint of content (topic0 or data fallback)
 //   - age           → block height for staleness & reorg detection
+//
+//go:notinheap
 type dedupeSlot struct {
-	blk, tx, log uint32 // 96-bit composite key (log identity)
-	tagHi, tagLo uint64 // 128-bit fingerprint (topics or data)
-	age          uint32 // last seen block height for reorg-aware eviction
-
-	// Enforced alignment to 32B by adding padding (4B)
-	// Required to prevent false sharing / straddled slots on L1 cache lines.
-	//lint:ignore U1000 unused but required to avoid misalignment
-	_ uint32
+	blk, _, tx, _, log, _ uint32 // 96-bit composite key
+	tagHi, tagLo          uint64 // 128-bit fingerprint
+	age, _                uint32
+	_                     [2]uint64
 }
 
 // Deduper is a fixed-size ring buffer that stores recent event identities.
