@@ -2,14 +2,15 @@ package quantumqueue
 
 import "testing"
 
-// arr48 converts a byte slice into a fixed-size 48-byte array pointer for Push payloads.
+// arr48 is a helper to convert a byte slice into a fixed-size [48]byte pointer.
+// This is used for constructing payloads for Push without heap allocation.
 func arr48(b []byte) *[48]byte {
 	var a [48]byte
 	copy(a[:], b)
 	return &a
 }
 
-// TestNewQueueEmptyAndSize verifies that a new queue reports empty and size zero.
+// TestNewQueueEmptyAndSize ensures that a freshly constructed queue is empty.
 func TestNewQueueEmptyAndSize(t *testing.T) {
 	q := NewQuantumQueue()
 	if !q.Empty() {
@@ -20,7 +21,7 @@ func TestNewQueueEmptyAndSize(t *testing.T) {
 	}
 }
 
-// TestBorrowSafeExhaustion verifies that BorrowSafe returns an error once the arena is exhausted.
+// TestBorrowSafeExhaustion verifies that BorrowSafe returns an error once the arena is fully allocated.
 func TestBorrowSafeExhaustion(t *testing.T) {
 	q := NewQuantumQueue()
 	for i := 0; i < CapItems; i++ {
@@ -33,7 +34,7 @@ func TestBorrowSafeExhaustion(t *testing.T) {
 	}
 }
 
-// TestBorrowResetsNode verifies that Borrow resets node fields.
+// TestBorrowResetsNode verifies that Borrow resets tick and pointer state.
 func TestBorrowResetsNode(t *testing.T) {
 	q := NewQuantumQueue()
 	h1, err := q.Borrow()
@@ -53,12 +54,13 @@ func TestBorrowResetsNode(t *testing.T) {
 	}
 }
 
-// TestBasicPushPeepMinMoveTickUnlink exercises Push, PeepMin, MoveTick, and UnlinkMin in sequence.
+// TestBasicPushPeepMinMoveTickUnlink exercises the full lifecycle of a few entries.
 func TestBasicPushPeepMinMoveTickUnlink(t *testing.T) {
 	q := NewQuantumQueue()
 	h1, _ := q.BorrowSafe()
 	h2, _ := q.BorrowSafe()
 
+	// Push h1 to tick 10
 	q.Push(10, h1, arr48([]byte("foo")))
 	if q.Empty() {
 		t.Error("queue should not be empty after first push")
@@ -74,6 +76,7 @@ func TestBasicPushPeepMinMoveTickUnlink(t *testing.T) {
 		t.Errorf("PeepMin data = %q; want 'foo'", data[:3])
 	}
 
+	// Push h2 to tick 5 (should become new min)
 	q.Push(5, h2, arr48([]byte("bar")))
 	if got := q.Size(); got != 2 {
 		t.Errorf("Size after two pushes = %d; want 2", got)
@@ -86,6 +89,7 @@ func TestBasicPushPeepMinMoveTickUnlink(t *testing.T) {
 		t.Errorf("PeepMin data = %q; want 'bar'", data[:3])
 	}
 
+	// Move h2 to tick 20
 	q.MoveTick(h2, 20)
 	if got := q.Size(); got != 2 {
 		t.Errorf("Size after MoveTick = %d; want 2", got)
@@ -95,6 +99,7 @@ func TestBasicPushPeepMinMoveTickUnlink(t *testing.T) {
 		t.Errorf("PeepMin after MoveTick = (%v, %d); want (%v, 10)", h, tick, h1)
 	}
 
+	// UnlinkMin h1, verify h2 is now head
 	q.UnlinkMin(h1, 10)
 	if got := q.Size(); got != 1 {
 		t.Errorf("Size after UnlinkMin = %d; want 1", got)
@@ -104,19 +109,20 @@ func TestBasicPushPeepMinMoveTickUnlink(t *testing.T) {
 		t.Errorf("PeepMin after UnlinkMin = (%v, %d); want (%v, 20)", h, tick, h2)
 	}
 
+	// Final removal
 	q.UnlinkMin(h2, 20)
 	if !q.Empty() || q.Size() != 0 {
 		t.Errorf("Queue not empty after removing all entries: Empty=%v, Size=%d", q.Empty(), q.Size())
 	}
 }
 
-// TestUpdateSameTick ensures that updating an existing handle's payload works in-place.
+// TestUpdateSameTick ensures that updating the same tick in-place preserves structure but changes value.
 func TestUpdateSameTick(t *testing.T) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
 	q.Push(3, h, arr48([]byte("abc")))
 	sz := q.Size()
-	q.Push(3, h, arr48([]byte("xyz")))
+	q.Push(3, h, arr48([]byte("xyz"))) // update value at same tick
 	if got := q.Size(); got != sz {
 		t.Errorf("Size after update Push = %d; want %d", got, sz)
 	}
@@ -129,13 +135,13 @@ func TestUpdateSameTick(t *testing.T) {
 	}
 }
 
-// TestPushSameTickUpdatesData ensures that a Push on the same tick updates payload without moving bucket.
+// TestPushSameTickUpdatesData ensures that same-tick pushes don’t move list heads.
 func TestPushSameTickUpdatesData(t *testing.T) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
 	q.Push(42, h, arr48([]byte("orig")))
 	sz := q.Size()
-	q.Push(42, h, arr48([]byte("edit")))
+	q.Push(42, h, arr48([]byte("edit"))) // same tick
 	if got := q.Size(); got != sz {
 		t.Errorf("Size after same-tick Push = %d; want %d", got, sz)
 	}
@@ -152,13 +158,13 @@ func TestPushSameTickUpdatesData(t *testing.T) {
 	}
 }
 
-// TestPushExistingHandleUnlink ensures reassigning a handle unlinks old bucket.
+// TestPushExistingHandleUnlink confirms that moving an existing handle between ticks unlinks correctly.
 func TestPushExistingHandleUnlink(t *testing.T) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
 	q.Push(10, h, arr48([]byte("first")))
 	sz := q.Size()
-	q.Push(20, h, arr48([]byte("second")))
+	q.Push(20, h, arr48([]byte("second"))) // relocate
 	if got := q.Size(); got != sz {
 		t.Errorf("Size after reassign Push = %d; want %d", got, sz)
 	}
@@ -176,7 +182,7 @@ func TestPushExistingHandleUnlink(t *testing.T) {
 	}
 }
 
-// TestUnlinkDoublyLinkedPrevAfterRemove ensures correct stitching when removing a middle node.
+// TestUnlinkDoublyLinkedPrevAfterRemove checks list stitching when removing the middle node.
 func TestUnlinkDoublyLinkedPrevAfterRemove(t *testing.T) {
 	q := NewQuantumQueue()
 	h1, _ := q.BorrowSafe()
@@ -184,10 +190,14 @@ func TestUnlinkDoublyLinkedPrevAfterRemove(t *testing.T) {
 	h3, _ := q.BorrowSafe()
 	q.Push(100, h1, arr48([]byte{1}))
 	q.Push(100, h2, arr48([]byte{2}))
-	q.Push(100, h3, arr48([]byte{3}))
+	q.Push(100, h3, arr48([]byte{3})) // now: h3 <-> h2 <-> h1
+
+	// Validate link chain
 	if q.arena[h2].prev != h3 || q.arena[h2].next != h1 {
 		t.Fatalf("Initial chain incorrect: prev=%v next=%v; want prev=%v next=%v", q.arena[h2].prev, q.arena[h2].next, h3, h1)
 	}
+
+	// Remove h2 from middle
 	q.UnlinkMin(h2, 100)
 	b := idx32(100)
 	if q.buckets[b] != h3 {
@@ -199,13 +209,15 @@ func TestUnlinkDoublyLinkedPrevAfterRemove(t *testing.T) {
 	if q.arena[h1].prev != h3 {
 		t.Errorf("After unlink, h1.prev = %v; want %v", q.arena[h1].prev, h3)
 	}
+
+	// Freed handle should be reusable
 	h4, _ := q.BorrowSafe()
 	if h4 != h2 {
 		t.Errorf("Expected freed handle %v reused; got %v", h2, h4)
 	}
 }
 
-// TestMoveTickNoOp ensures that MoveTick to the same tick does nothing.
+// TestMoveTickNoOp ensures that calling MoveTick to same value does nothing.
 func TestMoveTickNoOp(t *testing.T) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
@@ -221,13 +233,13 @@ func TestMoveTickNoOp(t *testing.T) {
 	}
 }
 
-// TestPushReassignExistingHandle verifies reassigning a handle moves it correctly.
+// TestPushReassignExistingHandle checks reassigning ticks updates link state and values.
 func TestPushReassignExistingHandle(t *testing.T) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
 	q.Push(30, h, arr48([]byte("old")))
 	sz := q.Size()
-	q.Push(40, h, arr48([]byte("new")))
+	q.Push(40, h, arr48([]byte("new"))) // move tick + update value
 	if q.Size() != sz {
 		t.Errorf("Size after reassign Push = %d; want %d", q.Size(), sz)
 	}
@@ -252,13 +264,14 @@ func TestPushReassignExistingHandle(t *testing.T) {
 	}
 }
 
-// TestDuplicateTicks_UnlinkAndMoveTick ensures correct behavior with duplicate ticks.
+// TestDuplicateTicks_UnlinkAndMoveTick tests correct priority/head management under tick duplication.
 func TestDuplicateTicks_UnlinkAndMoveTick(t *testing.T) {
 	q := NewQuantumQueue()
 	h1, _ := q.BorrowSafe()
 	h2, _ := q.BorrowSafe()
 	q.Push(7, h1, arr48([]byte("A")))
-	q.Push(7, h2, arr48([]byte("B")))
+	q.Push(7, h2, arr48([]byte("B"))) // h2 becomes head
+
 	if got := q.Size(); got != 2 {
 		t.Fatalf("Size with duplicates = %d; want 2", got)
 	}
@@ -267,7 +280,7 @@ func TestDuplicateTicks_UnlinkAndMoveTick(t *testing.T) {
 		t.Errorf("PeepMin duplicate head = (%v, %d, %q); want (%v, 7, 'B')", h, tick, data[:1], h2)
 	}
 
-	q.UnlinkMin(h1, 7)
+	q.UnlinkMin(h1, 7) // remove tail
 	if got := q.Size(); got != 1 {
 		t.Errorf("Size after UnlinkMin non-head = %d; want 1", got)
 	}
