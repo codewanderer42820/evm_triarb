@@ -1,3 +1,9 @@
+// fastuni_test.go — unit tests for fastuni footgun routines.
+// -----------------------------------------------------------
+// Validates log₂ implementations, reserve-ratio helpers, price conversions,
+// and randomized correctness across core operations.
+// Tolerance: |Δ| ≤ 5e-5 nat.
+
 package fastuni
 
 import (
@@ -6,10 +12,14 @@ import (
 	"testing"
 )
 
-const tol = 5e-5
-const rndSeed = 69
-const rndLoop = 1_000_000
+/*─────────────────── constants ───────────────────*/
+const (
+	tol     = 5e-5
+	rndSeed = 69
+	rndLoop = 1_000_000
+)
 
+/*─────────────────── log₂ (u64) tests ───────────────────*/
 // TestLog2u64 checks log2u64 behavior:
 // - returns -Inf for zero input,
 // - exact results for powers of two,
@@ -39,6 +49,7 @@ func TestLog2u64(t *testing.T) {
 	}
 }
 
+/*─────────────────── log₂ (u128) tests ───────────────────*/
 // TestLog2u128 verifies log2u128 for:
 // - zero input returns -Inf,
 // - 64-bit branch accuracy,
@@ -69,6 +80,7 @@ func TestLog2u128(t *testing.T) {
 	}
 }
 
+/*─────────────────── ln reserve ratio tests ───────────────────*/
 // TestLnReserveRatio examines LnReserveRatio, including:
 // - infinite results for zero inputs,
 // - zero result for equal inputs,
@@ -113,6 +125,7 @@ func TestLnReserveRatio(t *testing.T) {
 	}
 }
 
+/*─────────────────── log₂ reserve ratio tests ───────────────────*/
 // TestLog2ReserveRatio checks basic log2 ratio and inversion.
 func TestLog2ReserveRatio(t *testing.T) {
 	if got := Log2ReserveRatio(7, 7); got != 0 {
@@ -127,6 +140,7 @@ func TestLog2ReserveRatio(t *testing.T) {
 	}
 }
 
+/*─────────────────── ln reserve ratio const tests ───────────────────*/
 // TestLogReserveRatioConst confirms scaling by conv without any validation.
 func TestLogReserveRatioConst(t *testing.T) {
 	a, b := uint64(12345), uint64(67890)
@@ -143,6 +157,7 @@ func TestLogReserveRatioConst(t *testing.T) {
 	}
 }
 
+/*─────────────────── log₂ price X96 tests ───────────────────*/
 // TestLog2PriceX96 validates Log2PriceX96 for key sqrtPrice values:
 // - 2^96 yields 0, 2^97 yields 2.
 func TestLog2PriceX96(t *testing.T) {
@@ -159,6 +174,7 @@ func TestLog2PriceX96(t *testing.T) {
 	}
 }
 
+/*─────────────────── ln price X96 tests ───────────────────*/
 // TestLnPriceX96 ensures LnPriceX96 matches Log2PriceX96 * ln2.
 func TestLnPriceX96(t *testing.T) {
 	s := Uint128{Hi: 1 << 32, Lo: 0}
@@ -167,6 +183,7 @@ func TestLnPriceX96(t *testing.T) {
 	}
 }
 
+/*─────────────────── ln price X96 const tests ───────────────────*/
 // TestLogPriceX96Const checks scaling of ln(price) without validation.
 func TestLogPriceX96Const(t *testing.T) {
 	s := Uint128{Hi: 1 << 32, Lo: 0}
@@ -179,6 +196,7 @@ func TestLogPriceX96Const(t *testing.T) {
 	}
 }
 
+/*─────────────────── randomized tests ───────────────────*/
 // TestRandomizedFunctions performs deterministic random checks for core operations.
 func TestRandomizedFunctions(t *testing.T) {
 	// Random log2u64
