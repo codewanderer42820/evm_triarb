@@ -6,9 +6,8 @@ import (
 )
 
 type slot struct {
-	val [32]byte // fixed-size payload
+	val [56]byte // fixed-size payload
 	seq uint64   // slot ticket number
-	_   [24]byte // pad to 64 bytes total, prevents false sharing
 }
 
 type Ring struct {
@@ -42,7 +41,7 @@ func New(size int) *Ring {
 
 //go:nosplit
 //go:inline
-func (r *Ring) Push(val *[32]byte) bool {
+func (r *Ring) Push(val *[56]byte) bool {
 	t := r.tail
 	s := &r.buf[t&r.mask]
 	if atomic.LoadUint64(&s.seq) != t {
@@ -56,7 +55,7 @@ func (r *Ring) Push(val *[32]byte) bool {
 
 //go:nosplit
 //go:inline
-func (r *Ring) Pop() *[32]byte {
+func (r *Ring) Pop() *[56]byte {
 	h := r.head
 	s := &r.buf[h&r.mask]
 	if atomic.LoadUint64(&s.seq) != h+1 {
@@ -69,7 +68,7 @@ func (r *Ring) Pop() *[32]byte {
 }
 
 //go:nosplit
-func (r *Ring) PopWait() *[32]byte {
+func (r *Ring) PopWait() *[56]byte {
 	for {
 		if p := r.Pop(); p != nil {
 			return p
