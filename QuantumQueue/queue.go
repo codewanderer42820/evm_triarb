@@ -14,82 +14,95 @@ import (
 // -----------------------------------------------------------------------------
 // Constants defining the queue dimensions and capacity.
 // -----------------------------------------------------------------------------
+
 const (
-	// GroupCount is the number of top-level groups; each covers 4096 ticks.
+	// GroupCount = number of top-level summary groups. Each group spans 4096 ticks.
 	GroupCount = 64
-	// LaneCount is the number of lanes within each group; each lane covers 64 ticks.
+
+	// LaneCount = number of lanes per group. Each lane spans 64 ticks.
 	LaneCount = 64
-	// BucketCount = total tick slots = GroupCount * LaneCount * LaneCount.
-	// Here: 64 groups × 64 lanes × 64 ticks = 262,144 buckets.
-	BucketCount = GroupCount * LaneCount * LaneCount
-	// CapItems matches the number of buckets; each slot holds exactly one node.
+
+	// BucketCount = total number of unique tick slots (Group × Lane × Bucket)
+	BucketCount = GroupCount * LaneCount * LaneCount // = 262,144
+
+	// CapItems = maximum number of queue entries that can be held concurrently.
+	// One node per tick is allowed.
 	CapItems = BucketCount
 )
 
-// Handle is an index into the arena array. It must be in [0, CapItems).
+// Handle is an opaque index into the node arena. Must remain within bounds [0, CapItems).
 type Handle uint32
 
-// nilIdx represents the absence of a valid handle (e.g., list terminator).
+// nilIdx is a sentinel value used to indicate the absence of a handle.
+// Used for freelist termination and doubly-linked list boundaries.
 const nilIdx Handle = ^Handle(0)
 
-// idx32 is an alias for Handle, used when treating it as a bucket index.
+// idx32 is a local alias used where semantic clarity is needed for bucket indices.
 type idx32 = Handle
 
-// node represents one entry in the priority queue. It is cache-aligned
-// and contains the tick key, inline payload, and doubly-linked pointers
-// for efficient removal and insertion at the head.
-// Compiler directives ensure inlining, alignment, and no heap allocation.
+// -----------------------------------------------------------------------------
+// Node: Individual queue element (tick key, payload, pointers)
+// -----------------------------------------------------------------------------
 
-//go:notinheap
-//go:align 64
-//go:inline
+// node represents a single entry in the queue.
+// - Stored in a statically-allocated arena (no heap).
+// - 64B aligned for cache performance.
+// - Holds the tick key, inline 48-byte payload, and doubly-linked list pointers.
+
+//go:notinheap     // Prevents heap metadata; ensures arena-pinning
+//go:align 64      // Align each node to 64 bytes (cache-line aligned)
+//go:inline        // Encourage inlining of accessors and helpers
 type node struct {
-	tick int64    // queue key or -1 if unused
-	data [48]byte // inline payload
-	prev Handle   // doubly-linked list: previous
-	next Handle   // doubly-linked list: next or freelist next
+	tick int64    // Tick index or -1 if unused (free)
+	data [48]byte // Inline data payload (48 bytes = 3 cache lines)
+	prev Handle   // Previous node in bucket (or nilIdx if head)
+	next Handle   // Next node in bucket or freelist
 }
 
-// groupBlock holds a two-level bitmap summary for one group of 64 lanes,
-// each lane covering 64 buckets. Summary bits allow fast traversal.
+// -----------------------------------------------------------------------------
+// groupBlock: Bitmap summaries for one group of lanes
+// -----------------------------------------------------------------------------
 
-//go:notinheap
-//go:align 576
+// groupBlock stores 64 lanes of tick metadata and summaries.
+// Used for O(1) traversal and hierarchy tracking of tick population.
+
+//go:notinheap     // Avoids heap overhead
+//go:align 576     // Align to reduce false sharing and optimize cache fetches
 //go:inline
 type groupBlock struct {
-	l1Summary uint64            // one bit per lane
-	l2        [LaneCount]uint64 // one bit per bucket in lane
-	_         [56]byte          // padding for cache line alignment
+	l1Summary uint64            // Summary of active lanes (1 bit per lane)
+	l2        [LaneCount]uint64 // Each lane has a 64-bit bitmap (1 bit per bucket)
+	_         [56]byte          // Explicit padding to avoid cross-line overlap
 }
 
-// QuantumQueue is the main priority queue structure.
-//
-// It includes:
-//   - `arena`: node storage (fixed)
-//   - `buckets`: one head per tick
-//   - `groups`: bitmap summaries
-//   - `summary`: top-level group bitmap
-//   - `size`: active entry count
-//   - `freeHead`: freelist head
-//
-// Padding is used to align hot fields for cache efficiency.
+// -----------------------------------------------------------------------------
+// QuantumQueue: Main queue structure
+// -----------------------------------------------------------------------------
 
-//go:notinheap
+// QuantumQueue is the central footgun-mode queue.
+// It avoids all allocations and performs all updates in O(1), but places
+// full responsibility on the caller for maintaining safety and correctness.
+
+//go:notinheap     // Avoid GC overhead or movement
 //go:inline
 type QuantumQueue struct {
-	arena   [CapItems]node         // statically allocated pool
-	buckets [BucketCount]Handle    // tick-indexed list heads
-	groups  [GroupCount]groupBlock // two-level bitmap summary
+	arena   [CapItems]node         // Static storage for all possible entries
+	buckets [BucketCount]Handle    // Bucket array indexed by tick
+	groups  [GroupCount]groupBlock // Per-group lane summaries
 
-	summary  uint64   // top-level summary across groups
-	size     int      // count of active items
-	freeHead Handle   // free list head
-	_        [4]byte  // alignment
-	_        [40]byte // further cache alignment
+	summary  uint64   // Top-level summary across groups (1 bit per group)
+	size     int      // Number of active (in-use) handles
+	freeHead Handle   // Head of freelist for available handles
+	_        [4]byte  // Padding for alignment (maintain 8-byte field spacing)
+	_        [40]byte // Additional cache-line separation for hot fields
 }
 
-// NewQuantumQueue constructs a zero-initialized queue with freelist populated.
+// -----------------------------------------------------------------------------
+// Constructor
+// -----------------------------------------------------------------------------
 
+// NewQuantumQueue returns a new empty queue with all handles linked into the freelist.
+//
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -111,8 +124,13 @@ func NewQuantumQueue() *QuantumQueue {
 	return q
 }
 
-// Borrow retrieves a node from the freelist. No safety check.
+// -----------------------------------------------------------------------------
+// Borrowing nodes from the freelist
+// -----------------------------------------------------------------------------
 
+// Borrow returns the next available handle from the freelist.
+// No check for exhaustion. Unsafe in footgun mode.
+//
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -126,8 +144,8 @@ func (q *QuantumQueue) Borrow() (Handle, error) {
 	return h, nil
 }
 
-// BorrowSafe does the same as Borrow, but fails gracefully if out of nodes.
-
+// BorrowSafe is like Borrow but returns an error if the freelist is exhausted.
+//
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -144,8 +162,12 @@ func (q *QuantumQueue) BorrowSafe() (Handle, error) {
 	return h, nil
 }
 
-// Size returns the current number of live entries.
+// -----------------------------------------------------------------------------
+// Queue metadata queries
+// -----------------------------------------------------------------------------
 
+// Size returns the number of live entries in the queue.
+//
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -153,8 +175,8 @@ func (q *QuantumQueue) Size() int {
 	return q.size
 }
 
-// Empty reports if the queue is currently empty.
-
+// Empty reports whether the queue is currently empty.
+//
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -162,8 +184,13 @@ func (q *QuantumQueue) Empty() bool {
 	return q.size == 0
 }
 
-// unlink removes a handle from its current bucket and updates bitmap summaries.
+// -----------------------------------------------------------------------------
+// Core operations: unlink / linkAtHead / Push / PeepMin / MoveTick / UnlinkMin
+// -----------------------------------------------------------------------------
 
+// unlink removes a handle from its bucket and updates the bitmaps.
+// The node is returned to the freelist.
+//
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -171,6 +198,7 @@ func (q *QuantumQueue) unlink(h Handle) {
 	n := &q.arena[h]
 	b := idx32(n.tick)
 
+	// Detach node from doubly-linked list
 	if n.prev != nilIdx {
 		q.arena[n.prev].next = n.next
 	} else {
@@ -179,6 +207,8 @@ func (q *QuantumQueue) unlink(h Handle) {
 	if n.next != nilIdx {
 		q.arena[n.next].prev = n.prev
 	}
+
+	// If bucket became empty, clear bitmap hierarchy
 	if q.buckets[b] == nilIdx {
 		g := uint64(n.tick) >> 12
 		l := (uint64(n.tick) >> 6) & 63
@@ -193,6 +223,7 @@ func (q *QuantumQueue) unlink(h Handle) {
 		}
 	}
 
+	// Recycle the node into the freelist
 	n.next = q.freeHead
 	n.prev = nilIdx
 	n.tick = -1
@@ -200,8 +231,8 @@ func (q *QuantumQueue) unlink(h Handle) {
 	q.size--
 }
 
-// linkAtHead inserts handle at the head of the tick bucket and updates summaries.
-
+// linkAtHead inserts a node into the bucket at its new tick and updates the summary hierarchy.
+//
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -228,8 +259,10 @@ func (q *QuantumQueue) linkAtHead(h Handle, tick int64) {
 	q.size++
 }
 
-// Push inserts or updates a handle into the queue at the given tick. O(1).
-
+// Push inserts or updates the node at the specified tick.
+// If the handle is already assigned and same-tick, only the payload is updated.
+// Otherwise, it is unlinked from its current tick and reinserted at the new tick.
+//
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -246,8 +279,9 @@ func (q *QuantumQueue) Push(tick int64, h Handle, val *[48]byte) {
 	n.data = *val
 }
 
-// PeepMin returns the minimum tick entry in the queue, without removing it. O(1).
-
+// PeepMin returns the head of the lexicographically minimum tick,
+// without modifying the queue. O(1) via summary bitmaps.
+//
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -261,8 +295,8 @@ func (q *QuantumQueue) PeepMin() (Handle, int64, *[48]byte) {
 	return h, q.arena[h].tick, &q.arena[h].data
 }
 
-// MoveTick relocates a handle to a new tick. No-op if unchanged. O(1).
-
+// MoveTick relocates a handle to a new tick (if different).
+//
 //go:inline
 //go:nosplit
 //go:registerparams
@@ -275,8 +309,9 @@ func (q *QuantumQueue) MoveTick(h Handle, newTick int64) {
 	q.linkAtHead(h, newTick)
 }
 
-// UnlinkMin removes a handle that was retrieved via PeepMin. Tick is unused.
-
+// UnlinkMin removes the head of the minimum tick.
+// The `tick` argument is unused (retained for call symmetry).
+//
 //go:inline
 //go:nosplit
 //go:registerparams
