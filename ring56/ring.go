@@ -23,10 +23,6 @@ import (
 
 // slot holds one 56-byte payload and its sequence number for tracking ownership.
 //
-// Compiler directives:
-//   - notinheap: avoids GC tracking
-//   - align 64: ensures slot fits cleanly in cachelines for producer/consumer
-//
 //go:notinheap
 type slot struct {
 	val [56]byte
@@ -34,10 +30,6 @@ type slot struct {
 }
 
 // Ring is an ultra-fast, cache-friendly, single-producer single-consumer ring buffer.
-//
-// Compiler directives:
-//   - notinheap: ensures arena safety and zero GC metadata
-//   - align 64: maintains cacheline separation between head/tail
 //
 //go:notinheap
 type Ring struct {
