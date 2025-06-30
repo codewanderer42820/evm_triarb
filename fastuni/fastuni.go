@@ -39,13 +39,20 @@ type Uint128 struct {
 // -----------------------------------------------------------------------------
 // Internal helpers (no runtime checks).
 // -----------------------------------------------------------------------------
-
 // validateConv is a no-op placeholder for validating conversion factors.
+//
+//go:registerparams
+//go:inline
+//go:nosplit
 func validateConv(conv float64) {
 	// fast path skips validation
 }
 
 // ln1pf approximates ln(1+f) for -1<f<1 using Horner's method.
+//
+//go:registerparams
+//go:inline
+//go:nosplit
 func ln1pf(f float64) float64 {
 	t := f*c5 + c4
 	t = f*t + c3
@@ -57,8 +64,11 @@ func ln1pf(f float64) float64 {
 // -----------------------------------------------------------------------------
 // log₂ implementations.
 // -----------------------------------------------------------------------------
-
 // log2u64 returns log₂(x) for x>0. If x==0, returns -Inf.
+//
+//go:registerparams
+//go:inline
+//go:nosplit
 func log2u64(x uint64) float64 {
 	if x == 0 {
 		return math.Inf(-1)
@@ -86,6 +96,10 @@ func log2u64(x uint64) float64 {
 
 // log2u128 computes log₂ of a 128-bit unsigned integer.
 // Delegates to log2u64 when the high half is zero.
+//
+//go:registerparams
+//go:inline
+//go:nosplit
 func log2u128(u Uint128) float64 {
 	if u.Hi == 0 {
 		return log2u64(u.Lo)
@@ -105,13 +119,20 @@ func log2u128(u Uint128) float64 {
 // -----------------------------------------------------------------------------
 // Reserve-ratio helpers (Uniswap V2).
 // -----------------------------------------------------------------------------
-
 // Log2ReserveRatio returns log₂(a/b) without checks.
+//
+//go:registerparams
+//go:inline
+//go:nosplit
 func Log2ReserveRatio(a, b uint64) float64 {
 	return log2u64(a) - log2u64(b)
 }
 
 // LnReserveRatio returns ln(a/b), using log1p for ratios near 1.
+//
+//go:registerparams
+//go:inline
+//go:nosplit
 func LnReserveRatio(a, b uint64) float64 {
 	if a>>4 == b>>4 {
 		r := float64(a)/float64(b) - 1
@@ -124,6 +145,10 @@ func LnReserveRatio(a, b uint64) float64 {
 }
 
 // LogReserveRatioConst returns ln(a/b)*conv without validating conv.
+//
+//go:registerparams
+//go:inline
+//go:nosplit
 func LogReserveRatioConst(a, b uint64, conv float64) float64 {
 	validateConv(conv)
 	return (log2u64(a) - log2u64(b)) * conv
@@ -132,18 +157,29 @@ func LogReserveRatioConst(a, b uint64, conv float64) float64 {
 // -----------------------------------------------------------------------------
 // Price helpers (Uniswap V3, Q64.96 fixed-point).
 // -----------------------------------------------------------------------------
-
 // Log2PriceX96 computes 2*log₂(sqrtPrice)-192 for full price ratio.
+//
+//go:registerparams
+//go:inline
+//go:nosplit
 func Log2PriceX96(sqrt Uint128) float64 {
 	return (log2u128(sqrt) - 96) * 2
 }
 
 // LnPriceX96 returns ln(price) = 2*ln(sqrtPrice).
+//
+//go:registerparams
+//go:inline
+//go:nosplit
 func LnPriceX96(sqrt Uint128) float64 {
 	return Log2PriceX96(sqrt) * ln2
 }
 
 // LogPriceX96Const returns ln(price)*conv without safety checks.
+//
+//go:registerparams
+//go:inline
+//go:nosplit
 func LogPriceX96Const(sqrt Uint128, conv float64) float64 {
 	validateConv(conv)
 	return Log2PriceX96(sqrt) * conv
