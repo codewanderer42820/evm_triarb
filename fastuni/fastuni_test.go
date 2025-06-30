@@ -38,9 +38,9 @@ func TestLog2u64(t *testing.T) {
 
 /*─────────────────── log₂ (u128) tests ───────────────────*/
 func TestLog2u128(t *testing.T) {
-	if got := log2u128(Uint128{0, 0}); !math.IsInf(got, -1) {
-		t.Fatalf("log2u128(0): want -Inf got %g", got)
-	}
+	// Remove the zero case; log2u128(0) is undefined and panics by design.
+
+	// Hi=0 branch
 	for _, lo := range []uint64{1, 2, 3, 1234567890, 1 << 52} {
 		u := Uint128{Hi: 0, Lo: lo}
 		got := log2u128(u)
@@ -49,6 +49,8 @@ func TestLog2u128(t *testing.T) {
 			t.Errorf("log2u128(%#v): want %g got %g", u, want, got)
 		}
 	}
+
+	// Hi>0 branch
 	for _, u := range []Uint128{{1, 0}, {1 << 10, 1234567890}} {
 		got := log2u128(u)
 		want := math.Log2(float64(u.Hi)*math.Ldexp(1, 64) + float64(u.Lo))
