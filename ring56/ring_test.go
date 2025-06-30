@@ -7,7 +7,7 @@
 //   - Edge conditions (empty, full, wraparound)
 //   - Data integrity under interleaved push/pop patterns
 
-package ring56
+package ring24
 
 import (
 	"testing"
@@ -42,7 +42,7 @@ func TestNewPanicsOnBadSize(t *testing.T) {
 // and checks that the ring is empty afterwards.
 func TestPushPopRoundTrip(t *testing.T) {
 	r := New(8)
-	val := &[56]byte{1, 2, 3}
+	val := &[24]byte{1, 2, 3}
 
 	if !r.Push(val) {
 		t.Fatal("Push should succeed")
@@ -60,7 +60,7 @@ func TestPushPopRoundTrip(t *testing.T) {
 // that a full queue blocks further pushes.
 func TestPushFailsWhenFull(t *testing.T) {
 	r := New(4)
-	val := &[56]byte{7}
+	val := &[24]byte{7}
 	for i := 0; i < 4; i++ {
 		if !r.Push(val) {
 			t.Fatalf("push %d unexpectedly failed", i)
@@ -83,7 +83,7 @@ func TestPopNil(t *testing.T) {
 // and returns the correct value.
 func TestPopWaitBlocksUntilItem(t *testing.T) {
 	r := New(2)
-	want := &[56]byte{42}
+	want := &[24]byte{42}
 	go func() {
 		time.Sleep(5 * time.Millisecond)
 		r.Push(want)
@@ -99,7 +99,7 @@ func TestWrapAround(t *testing.T) {
 	const size = 4
 	r := New(size)
 	for i := 0; i < 10; i++ {
-		val := &[56]byte{byte(i)}
+		val := &[24]byte{byte(i)}
 		if !r.Push(val) {
 			t.Fatalf("push %d failed unexpectedly", i)
 		}
@@ -118,7 +118,7 @@ func TestWrapAround(t *testing.T) {
 func TestPushPopInterleaved(t *testing.T) {
 	r := New(8)
 	for i := 0; i < 64; i++ {
-		val := &[56]byte{byte(i)}
+		val := &[24]byte{byte(i)}
 		if !r.Push(val) {
 			t.Fatalf("push %d failed", i)
 		}
@@ -133,7 +133,7 @@ func TestPushPopInterleaved(t *testing.T) {
 func TestPopAfterLongIdle(t *testing.T) {
 	r := New(2)
 	time.Sleep(50 * time.Millisecond)
-	want := &[56]byte{88}
+	want := &[24]byte{88}
 	if !r.Push(want) {
 		t.Fatal("Push failed after idle")
 	}
@@ -146,7 +146,7 @@ func TestPopAfterLongIdle(t *testing.T) {
 // TestPushDropOnOverflow simulates back-to-back Push beyond capacity.
 func TestPushDropOnOverflow(t *testing.T) {
 	r := New(4)
-	val := &[56]byte{99}
+	val := &[24]byte{99}
 	drops := 0
 	for i := 0; i < 8; i++ {
 		if !r.Push(val) {

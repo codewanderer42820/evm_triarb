@@ -2,13 +2,13 @@
 // -----------------------------------------------------------------------------
 // • Zero-copy address→PairID hashing (stride-64, 5-word keys)
 // • Per-core executors, each with lock-free *QuantumQueue* buckets
-// • ring56 (56-byte) SPSC rings for cross-core TickUpdate dispatch
+// • ring24 (56-byte) SPSC rings for cross-core TickUpdate dispatch
 // • Zero heap allocations in every hot path
 // -----------------------------------------------------------------------------
 //
 //	Layout legend
 //	┌──────────────────────────────────────────────────────────────────────────┐
-//	│ tx-ingress (ws_conn) ─▶ parser ─▶ DispatchUpdate ─▶ ring56 ─▶ executor │
+//	│ tx-ingress (ws_conn) ─▶ parser ─▶ DispatchUpdate ─▶ ring24 ─▶ executor │
 //	│                                                        ▲               │
 //	│                          cycle profit evaluation ◀─────┘               │
 //	└──────────────────────────────────────────────────────────────────────────┘
@@ -24,7 +24,7 @@ import (
 	"main/fastuni"
 	"main/localidx"
 	"main/quantumqueue"
-	"main/ring56"
+	"main/ring24"
 	"main/types"
 	"main/utils"
 )
@@ -106,7 +106,7 @@ func lookupPairID(addr40 []byte) PairID {
 type PairID uint32
 type PairTriplet [3]PairID
 
-// CycleState = 56 B = two cache-lines, fits ring56 slot.
+// CycleState = 56 B = two cache-lines, fits ring24 slot.
 type CycleState struct {
 	Ticks [3]float64
 	Pairs PairTriplet
@@ -152,7 +152,7 @@ var _ [56 - unsafe.Sizeof(TickUpdate{})]byte
 
 var (
 	executors      [64]*CoreExecutor
-	rings          [64]*ring56.Ring
+	rings          [64]*ring24.Ring
 	pair2cores     [1 << 17]uint64
 	shardBucket    map[PairID][]PairShard
 	splitThreshold = 32_768
@@ -232,14 +232,14 @@ func shardWorker(coreID, half int, in <-chan PairShard) {
 		IsReverse: coreID >= half,
 	}
 	executors[coreID] = ex
-	rings[coreID] = ring56.New(1 << 16)
+	rings[coreID] = ring24.New(1 << 16)
 
 	cycleBuf := make([]CycleState, 0, 8192)
 	for sh := range in {
 		attachShard(ex, &sh, &cycleBuf)
 	}
 
-	ring56.PinnedConsumer(coreID, rings[coreID], new(uint32), new(uint32),
+	ring24.PinnedConsumer(coreID, rings[coreID], new(uint32), new(uint32),
 		func(p *[56]byte) { handleTick(ex, (*TickUpdate)(unsafe.Pointer(p))) },
 		make(chan struct{}))
 }

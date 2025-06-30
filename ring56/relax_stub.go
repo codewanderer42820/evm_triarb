@@ -1,7 +1,7 @@
 // relax_stub.go — portable fallback for cpuRelax on non-x86 systems
 //go:build !amd64 || noasm
 
-package ring56
+package ring24
 
 // cpuRelax is a no-op on platforms without PAUSE instruction support.
 // This stub is used for:

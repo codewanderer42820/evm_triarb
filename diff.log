@@ -97,10 +97,10 @@ index bdf4e45..68e9444 100644
  }
  
  // nextPow2 returns the smallest power of two greater than or equal to n.
-diff --git a/ring56/ring.go b/ring56/ring.go
+diff --git a/ring24/ring.go b/ring24/ring.go
 index 3d99600..1ff3305 100644
---- a/ring56/ring.go
-+++ b/ring56/ring.go
+--- a/ring24/ring.go
++++ b/ring24/ring.go
 @@ -23,37 +23,36 @@ import (
  
  // slot holds one 56-byte payload and its sequence number for tracking ownership.
@@ -154,10 +154,10 @@ index 3d99600..1ff3305 100644
  }
  
  // New constructs a ring with power-of-two size.
-diff --git a/ring56/ring_test.go b/ring56/ring_test.go
+diff --git a/ring24/ring_test.go b/ring24/ring_test.go
 index 084cb02..42a1b78 100644
---- a/ring56/ring_test.go
-+++ b/ring56/ring_test.go
+--- a/ring24/ring_test.go
++++ b/ring24/ring_test.go
 @@ -151,8 +151,6 @@ func TestPushDropOnOverflow(t *testing.T) {
  	for i := 0; i < 8; i++ {
  		if !r.Push(val) {

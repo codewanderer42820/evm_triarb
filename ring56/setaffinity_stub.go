@@ -1,7 +1,7 @@
 // setaffinity_stub.go — No-op fallback for non-Linux or TinyGo builds
 //go:build !linux || tinygo
 
-package ring56
+package ring24
 
 // setAffinity is a no-op stub used when the Linux syscall version
 // is unavailable (non-Linux OS or restricted build toolchains).

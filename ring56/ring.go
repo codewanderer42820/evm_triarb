@@ -1,10 +1,10 @@
-// ring.go — Lock‑free single‑producer/single‑consumer (SPSC) ring queue (56-byte payload)
+// ring.go — Lock‑free single‑producer/single‑consumer (SPSC) ring queue (24-byte payload)
 //
 // ⚠️ Footgun-Grade Ring: Engineered for absolute performance under full trust model.
 //
 // Assumptions:
 //   - Single writer, single reader (SPSC).
-//   - All payloads are fixed-size [56]byte aligned.
+//   - All payloads are fixed-size [24]byte aligned.
 //   - Capacity is power-of-two. Overflows must be handled externally.
 //   - Atomic counters are used for head/tail synchronization.
 //
@@ -15,19 +15,20 @@
 //
 // Use only with full memory and CPU core discipline.
 
-package ring56
+package ring24
 
 import (
 	"sync/atomic"
 )
 
-// slot holds one 56-byte payload and its sequence number for tracking ownership.
+// slot holds one **24-byte** payload plus an 8-byte sequence counter.
+// Total struct size: 32 B (half of a 64-byte cache line).
 //
 //go:notinheap
 //go:align 64
 type slot struct {
-	val [56]byte
-	seq uint64 // total size: 64 bytes
+	val [24]byte // user payload
+	seq uint64   // sequence number for ownership tracking
 }
 
 // Ring is an ultra-fast, cache-friendly, single-producer single-consumer ring buffer.
@@ -76,13 +77,13 @@ func New(size int) *Ring {
 	return r
 }
 
-// Push attempts to enqueue a [56]byte payload.
+// Push attempts to enqueue a [24]byte payload.
 // Returns false if full (slot not ready).
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func (r *Ring) Push(val *[56]byte) bool {
+func (r *Ring) Push(val *[24]byte) bool {
 	t := r.tail
 	s := &r.buf[t&r.mask]
 	if atomic.LoadUint64(&s.seq) != t {
@@ -99,7 +100,7 @@ func (r *Ring) Push(val *[56]byte) bool {
 //go:nosplit
 //go:inline
 //go:registerparams
-func (r *Ring) Pop() *[56]byte {
+func (r *Ring) Pop() *[24]byte {
 	h := r.head
 	s := &r.buf[h&r.mask]
 	if atomic.LoadUint64(&s.seq) != h+1 {
@@ -116,7 +117,7 @@ func (r *Ring) Pop() *[56]byte {
 //go:nosplit
 //go:inline
 //go:registerparams
-func (r *Ring) PopWait() *[56]byte {
+func (r *Ring) PopWait() *[24]byte {
 	for {
 		if p := r.Pop(); p != nil {
 			return p

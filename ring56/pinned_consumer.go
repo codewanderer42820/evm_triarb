@@ -8,13 +8,13 @@
 //
 // Assumptions:
 //   - Ring buffer must be SPSC and size-valid.
-//   - Payloads are [56]byte (cacheline-fit).
+//   - Payloads are [24]byte (cacheline-fit).
 //   - Caller controls lifecycle via atomic stop/hot flags.
 //   - Only call once per CPU — this is pinned.
 //
 // No panics. No retries. No forgiveness.
 
-package ring56
+package ring24
 
 import (
 	"runtime"
@@ -23,12 +23,12 @@ import (
 
 const (
 	hotWindow  = 5 * time.Second // how long to stay warm after traffic stops
-	spinBudget = 256             // # empty polls before we relax()
+	spinBudget = 224             // # empty polls before we relax()
 )
 
 // PinnedConsumer runs a dedicated, CPU-bound goroutine locked to one core.
 //
-// It repeatedly polls the ring for entries, invoking `handler(*[56]byte)`
+// It repeatedly polls the ring for entries, invoking `handler(*[24]byte)`
 // when data is present. Exit is signaled by setting *stop = 1. External
 // activity hints can set *hot = 1 to keep it spinning longer.
 //
@@ -47,7 +47,7 @@ func PinnedConsumer(
 	ring *Ring, // Ring to consume from (SPSC)
 	stop *uint32, // Pointer to atomic flag (set to 1 to stop)
 	hot *uint32, // Pointer to atomic flag (1 = producer active)
-	handler func(*[56]byte), // Callback invoked on each Pop
+	handler func(*[24]byte), // Callback invoked on each Pop
 	done chan<- struct{}, // Closed on graceful exit
 ) {
 	go func() {

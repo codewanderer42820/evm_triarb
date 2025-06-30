@@ -8,7 +8,7 @@
 //   - Relay (Push+Pop)
 //   - Cross-core SPSC behavior
 
-package ring56
+package ring24
 
 import (
 	"runtime"
@@ -18,7 +18,7 @@ import (
 
 const benchCap = 1024 // Small enough to fit in L1/L2 on modern cores
 
-var dummy56 = &[56]byte{1, 2, 3} // Constant payload for benchmark sanity
+var dummy24 = &[24]byte{1, 2, 3} // Constant payload for benchmark sanity
 var sink any                     // Global escape sink (prevents compiler elision)
 
 // -----------------------------------------------------------------------------
@@ -33,9 +33,9 @@ func BenchmarkRing_Push(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if !r.Push(dummy56) {
+		if !r.Push(dummy24) {
 			_ = r.Pop()         // free one
-			_ = r.Push(dummy56) // should now succeed
+			_ = r.Push(dummy24) // should now succeed
 		}
 	}
 }
@@ -49,7 +49,7 @@ func BenchmarkRing_Push(b *testing.B) {
 func BenchmarkRing_Pop(b *testing.B) {
 	r := New(benchCap)
 	for i := 0; i < benchCap-1; i++ {
-		r.Push(dummy56)
+		r.Push(dummy24)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -57,11 +57,11 @@ func BenchmarkRing_Pop(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		p := r.Pop()
 		if p == nil {
-			r.Push(dummy56)
+			r.Push(dummy24)
 			p = r.Pop()
 		}
 		sink = p
-		_ = r.Push(dummy56)
+		_ = r.Push(dummy24)
 	}
 	runtime.KeepAlive(sink)
 }
@@ -75,7 +75,7 @@ func BenchmarkRing_Pop(b *testing.B) {
 func BenchmarkRing_PushPop(b *testing.B) {
 	r := New(benchCap)
 	for i := 0; i < benchCap/2; i++ {
-		r.Push(dummy56)
+		r.Push(dummy24)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -83,7 +83,7 @@ func BenchmarkRing_PushPop(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		p := r.Pop()
 		sink = p
-		_ = r.Push(dummy56)
+		_ = r.Push(dummy24)
 	}
 	runtime.KeepAlive(sink)
 }
@@ -113,7 +113,7 @@ func BenchmarkRing_CrossCore(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		for !r.Push(dummy56) {
+		for !r.Push(dummy24) {
 			// spin until consumer frees a slot
 		}
 	}
