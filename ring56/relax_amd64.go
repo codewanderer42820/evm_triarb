@@ -1,4 +1,6 @@
 // relax_amd64.go — Go-side declaration for cpuRelax used in spin loops
+//go:build amd64 && !noasm
+
 package ring56
 
 // cpuRelax emits the x86-64 PAUSE instruction, acting as a polite hint to the CPU
