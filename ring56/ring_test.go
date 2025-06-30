@@ -151,8 +151,6 @@ func TestPushDropOnOverflow(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		if !r.Push(val) {
 			drops++
-		} else {
-			_ = r.Pop()
 		}
 	}
 	if drops == 0 {
