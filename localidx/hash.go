@@ -31,8 +31,8 @@ import "unsafe"
 // Package localidx implements a fixed-capacity Robin-Hood hashmap
 // optimized for single-threaded, nanosecond-class performance.
 // Zero heap pressure; insertion-only; no deletion logic.
-
-//go:notinheap         // avoids heap metadata, allows static arena use
+//
+//go:notinheap
 type Hash struct {
 	keys    []uint32 // key slots; key=0 denotes empty
 	vals    []uint32 // corresponding values
