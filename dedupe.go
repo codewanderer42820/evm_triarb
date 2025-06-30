@@ -16,6 +16,7 @@ import "main/utils"
 //   - age           → block height for staleness & reorg detection
 //
 //go:notinheap
+//go:align 64
 type dedupeSlot struct {
 	blk, _, tx, _, log, _ uint32 // 96-bit composite key
 	tagHi, tagLo          uint64 // 128-bit fingerprint

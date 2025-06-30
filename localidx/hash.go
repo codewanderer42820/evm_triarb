@@ -33,6 +33,7 @@ import "unsafe"
 // Zero heap pressure; insertion-only; no deletion logic.
 //
 //go:notinheap
+//go:align 64
 type Hash struct {
 	keys    []uint32 // key slots; key=0 denotes empty
 	vals    []uint32 // corresponding values

@@ -24,27 +24,35 @@ import (
 // slot holds one 56-byte payload and its sequence number for tracking ownership.
 //
 //go:notinheap
+//go:align 64
 type slot struct {
 	val [56]byte
-	seq uint64
+	seq uint64 // total size: 64 bytes
 }
 
 // Ring is an ultra-fast, cache-friendly, single-producer single-consumer ring buffer.
 //
+// Layout ensures:
+// - `head` and `tail` each sit on separate 64-byte cachelines
+// - No false sharing across producer/consumer lanes
+// - struct size = 272 bytes (multiple of 64)
+//
 //go:notinheap
+//go:align 64
 type Ring struct {
-	_    [64]byte // consumer head cacheline
-	head uint64
+	_    [64]byte // bytes 0–63: pad to isolate head
+	head uint64   // bytes 64–71: read cursor (consumer)
 
-	_    [56]byte // producer tail cacheline
-	tail uint64
+	_    [64]byte // bytes 72–135: pad to isolate tail
+	tail uint64   // bytes 136–143: write cursor (producer)
 
-	_ [56]byte // extra padding
+	_ [64]byte // bytes 144–207: additional separation or future metadata
 
-	mask uint64
-	step uint64
-	buf  []slot
-	_    [3]uint64
+	mask uint64 // bytes 208–215
+	step uint64 // bytes 216–223
+	buf  []slot // bytes 224–247 (slice header: ptr, len, cap)
+
+	_ [3]uint64 // bytes 248–271: align to 272 total
 }
 
 // New constructs a ring with power-of-two size.

@@ -93,6 +93,7 @@ type idx32 = Handle
 // - Holds the tick key, inline 48-byte payload, and doubly-linked list pointers.
 //
 //go:notinheap
+//go:align 64
 type node struct {
 	tick int64    // Tick index or -1 if unused (free)
 	data [48]byte // Inline data payload (48 bytes = 3 cache lines)
@@ -108,6 +109,7 @@ type node struct {
 // Used for O(1) traversal and hierarchy tracking of tick population.
 //
 //go:notinheap
+//go:align 64
 type groupBlock struct {
 	l1Summary uint64            // Summary of active lanes (1 bit per lane)
 	l2        [LaneCount]uint64 // Each lane has a 64-bit bitmap (1 bit per bucket)
@@ -123,6 +125,7 @@ type groupBlock struct {
 // full responsibility on the caller for maintaining safety and correctness.
 //
 //go:notinheap
+//go:align 64
 type QuantumQueue struct {
 	arena   [CapItems]node         // Static storage for all possible entries
 	buckets [BucketCount]Handle    // Bucket array indexed by tick

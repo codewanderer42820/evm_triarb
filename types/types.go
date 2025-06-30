@@ -16,6 +16,7 @@ package types
 //   - Cold dedup-only fingerprint fields are last
 //
 //go:notinheap
+//go:align 64
 //go:align 128
 type LogView struct {
 	// ───────────── Hot fields: accessed immediately in fast path ──────────────
