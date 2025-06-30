@@ -16,7 +16,6 @@ const (
 	billion  = 1_000_000_000
 	trillion = 1_000_000_000_000
 	seedBase = 0x5eed
-	tol      = 5e-5
 )
 
 /*─────────────────── test input generators ───────────────────*/
