@@ -52,6 +52,9 @@ const fracMask uint64 = (1<<52 - 1) // Mask to isolate 52-bit fraction
 
 // Uint128 represents an unsigned 128-bit integer.
 // Used to hold fixed-point Q64.96 Uniswap-style prices.
+//
+//go:notinheap
+//go:inline
 type Uint128 struct {
 	Hi uint64 // high 64 bits
 	Lo uint64 // low 64 bits
