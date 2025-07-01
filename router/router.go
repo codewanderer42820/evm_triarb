@@ -106,47 +106,54 @@ func lookupPairID(addr40 []byte) PairID {
 type PairID uint32
 type PairTriplet [3]PairID
 
-// CycleState = 56 B = two cache-lines, fits ring24 slot.
-type CycleState struct {
-	Ticks [3]float64
-	Pairs PairTriplet
-	_     [4]byte // align to 40
+//go:align 64
+//go:notinheap
+type CycleState struct { // 64 B
+	Ticks [3]float64 // 24 B  ← hottest: used in every scoring op
+	Pairs [3]PairID  // 12 B
+	_     [28]byte   // pad → 64 B
+} // fills exactly one line
+
+// Always accessed via pointer → keep pointer first for early-deref
+type FanoutEntry struct { // 32 B
+	State   *CycleState                //  8 B  ← first cache miss pays for State prefetch
+	Queue   *quantumqueue.QuantumQueue //  8 B
+	Handle  quantumqueue.Handle        //  4 B
+	EdgeIdx uint16                     //  2 B
+	_       uint16                     //  2 B pad → 24
+	_       [8]byte                    //     pad → 32 B
 }
 
-type EdgeBinding struct {
-	Pairs   PairTriplet
-	EdgeIdx uint16
-	_       uint16
-}
-type PairShard struct {
-	Pair PairID
-	Bins []EdgeBinding
+// PairShard is cold; but slice header first lets len/cap live in same line
+type PairShard struct { // 32 B
+	Bins []EdgeBinding // 24 B  ← slice header (ptr,len,cap)
+	Pair PairID        //  4 B
+	_    [4]byte       //  4 B pad → 32 B
 }
 
-// FanoutEntry points to a CycleState in its owning QuantumQueue.
-type FanoutEntry struct {
-	State   *CycleState
-	Queue   *quantumqueue.QuantumQueue
-	Handle  quantumqueue.Handle
-	EdgeIdx uint16
-	_       [2]byte
+//go:notinheap
+type TickUpdate struct { // 24 B (ring slot)
+	FwdTick float64 //  8 B  ← fast path
+	RevTick float64 //  8 B
+	Pair    PairID  //  4 B
+	_       [4]byte //  4 B pad → 24 B
 }
 
-// CoreExecutor owns all state for one OS thread / logical core.
+// EdgeBinding only ever scanned in batch — keep array first for stride walk
+type EdgeBinding struct { // 32 B
+	Pairs   [3]PairID // 12 B
+	EdgeIdx uint16    //  2 B
+	_       uint16    //  2 B → 16
+}
+
+// CoreExecutor owns per-core queues and fan-out tables.
 type CoreExecutor struct {
-	Heaps     []*quantumqueue.QuantumQueue // *pointer* slice (API requires ptr)
-	Fanouts   [][]FanoutEntry
-	LocalIdx  localidx.Hash
-	IsReverse bool
+	Heaps     []*quantumqueue.QuantumQueue // 24 B, not 8 B
+	Fanouts   [][]FanoutEntry              // 24 B
+	LocalIdx  [1024]uint16                 // 2 KB (cold, never copied)
+	IsReverse bool                         // 1 B
+	_         [15]byte                     // pad → 24
 }
-
-// TickUpdate — 56-byte ring message (PairID + two ticks + padding)
-type TickUpdate struct {
-	FwdTick, RevTick float64
-	Pair             PairID
-}
-
-var _ [56 - unsafe.Sizeof(TickUpdate{})]byte
 
 /*──────────────────────────── Global state ──────────────────────────────────*/
 
