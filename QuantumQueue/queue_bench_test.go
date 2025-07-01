@@ -1,6 +1,20 @@
-// Package quantumqueue contains microbenchmarks for evaluating performance
-// characteristics of the QuantumQueue under hot-path and cold-path conditions.
-// These cover tick reuse, bitmap collapse, payload updates, and randomized churn.
+// ─────────────────────────────────────────────────────────────────────────────
+// queue_bench_test.go — Microbenchmarks for QuantumQueue
+//
+// Purpose:
+//   - Measure cost of core API: Push, PeepMin, MoveTick, UnlinkMin, etc.
+//   - Model ISR usage patterns: bursty updates, tick reuse, summary collapses
+//
+// Benchmark Notes:
+//   - All use pre-filled arenas (CapItems) unless noted
+//   - Edge tick usage (0, max) included for performance consistency
+//
+// Modes:
+//   - Hot path = same tick / repeated update
+//   - Cold path = random / spread tick patterns
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
 package quantumqueue
 
 import (
@@ -9,19 +23,19 @@ import (
 	"time"
 )
 
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
+/*─────────────────────────────────────────────────────────────────────────────*
+ * Constants                                                                   *
+ *─────────────────────────────────────────────────────────────────────────────*/
 
-// Use the full arena capacity (1 entry per tick) for maximal stress
-const benchSize = CapItems
+const benchSize = CapItems // use full arena for stress realism
+
+/*─────────────────────────────────────────────────────────────────────────────*
+ * Metadata Access: Empty(), Size()                                            *
+ *─────────────────────────────────────────────────────────────────────────────*/
 
 // -----------------------------------------------------------------------------
-// Metadata Access Benchmarks
+// BenchmarkEmpty measures cost of q.Empty(), a single field check
 // -----------------------------------------------------------------------------
-
-// BenchmarkEmpty measures the overhead of calling Empty().
-// This is a constant-time operation reading a field.
 func BenchmarkEmpty(b *testing.B) {
 	q := NewQuantumQueue()
 	b.ResetTimer()
@@ -30,8 +44,9 @@ func BenchmarkEmpty(b *testing.B) {
 	}
 }
 
-// BenchmarkSize measures the cost of calling Size().
-// This is also a constant-time operation reading an int field.
+// -----------------------------------------------------------------------------
+// BenchmarkSize measures cost of q.Size(), also a field load
+// -----------------------------------------------------------------------------
 func BenchmarkSize(b *testing.B) {
 	q := NewQuantumQueue()
 	b.ResetTimer()
@@ -40,12 +55,13 @@ func BenchmarkSize(b *testing.B) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Push Benchmarks
-// -----------------------------------------------------------------------------
+/*─────────────────────────────────────────────────────────────────────────────*
+ * Push Benchmarks                                                             *
+ *─────────────────────────────────────────────────────────────────────────────*/
 
-// BenchmarkPushUnique benchmarks Push on unique tick values.
-// Each tick is used exactly once, simulating cold inserts.
+// -----------------------------------------------------------------------------
+// BenchmarkPushUnique — cold path: new tick each time
+// -----------------------------------------------------------------------------
 func BenchmarkPushUnique(b *testing.B) {
 	q := NewQuantumQueue()
 	handles := make([]Handle, benchSize)
@@ -53,8 +69,7 @@ func BenchmarkPushUnique(b *testing.B) {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
 	}
-	var valArr [48]byte
-	val := &valArr
+	val := new([48]byte)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		h := handles[i%benchSize]
@@ -62,8 +77,9 @@ func BenchmarkPushUnique(b *testing.B) {
 	}
 }
 
-// BenchmarkPushUpdate benchmarks Push on the same tick repeatedly.
-// This hits the fast-path: no unlinking, just payload update.
+// -----------------------------------------------------------------------------
+// BenchmarkPushUpdate — hot path: update same tick
+// -----------------------------------------------------------------------------
 func BenchmarkPushUpdate(b *testing.B) {
 	q := NewQuantumQueue()
 	handles := make([]Handle, benchSize)
@@ -80,8 +96,9 @@ func BenchmarkPushUpdate(b *testing.B) {
 	}
 }
 
-// BenchmarkPushSameTickZero benchmarks repeated updates on tick 0.
-// This simulates multiple updates on the same tick (constant key).
+// -----------------------------------------------------------------------------
+// BenchmarkPushSameTickZero — repeated writes to tick 0
+// -----------------------------------------------------------------------------
 func BenchmarkPushSameTickZero(b *testing.B) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
@@ -92,8 +109,9 @@ func BenchmarkPushSameTickZero(b *testing.B) {
 	}
 }
 
-// BenchmarkPushSameTickMax benchmarks Push on the maximum tick value.
-// This tests the edge of the tick range (CapItems - 1).
+// -----------------------------------------------------------------------------
+// BenchmarkPushSameTickMax — test upper boundary tick
+// -----------------------------------------------------------------------------
 func BenchmarkPushSameTickMax(b *testing.B) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
@@ -104,8 +122,9 @@ func BenchmarkPushSameTickMax(b *testing.B) {
 	}
 }
 
-// BenchmarkPushRandom benchmarks Push on randomly selected tick values.
-// This simulates unordered, bursty traffic with no locality.
+// -----------------------------------------------------------------------------
+// BenchmarkPushRandom — fully random tick burst pattern
+// -----------------------------------------------------------------------------
 func BenchmarkPushRandom(b *testing.B) {
 	q := NewQuantumQueue()
 	handles := make([]Handle, benchSize)
@@ -118,8 +137,7 @@ func BenchmarkPushRandom(b *testing.B) {
 	for i := range ticks {
 		ticks[i] = rand.Int63n(benchSize)
 	}
-	var valArr [48]byte
-	val := &valArr
+	val := new([48]byte)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		h := handles[i%benchSize]
@@ -127,12 +145,13 @@ func BenchmarkPushRandom(b *testing.B) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Read and Pop Benchmarks
-// -----------------------------------------------------------------------------
+/*─────────────────────────────────────────────────────────────────────────────*
+ * PeepMin                                                                    *
+ *─────────────────────────────────────────────────────────────────────────────*/
 
-// BenchmarkPeepMin benchmarks the cost of retrieving the minimum item.
-// Assumes queue is fully populated with unique, increasing tick values.
+// -----------------------------------------------------------------------------
+// BenchmarkPeepMin — measure minimum extraction cost
+// -----------------------------------------------------------------------------
 func BenchmarkPeepMin(b *testing.B) {
 	q := NewQuantumQueue()
 	handles := make([]Handle, benchSize)
@@ -147,12 +166,13 @@ func BenchmarkPeepMin(b *testing.B) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// UnlinkMin Benchmarks (hot vs cold path variants)
-// -----------------------------------------------------------------------------
+/*─────────────────────────────────────────────────────────────────────────────*
+ * UnlinkMin (Hot + Collapse Paths)                                           *
+ *─────────────────────────────────────────────────────────────────────────────*/
 
-// BenchmarkUnlinkMin_StableBucket benchmarks UnlinkMin on a stable,
-// single-entry bucket that never clears summary bits.
+// -----------------------------------------------------------------------------
+// BenchmarkUnlinkMin_StableBucket — no summary update, just unlink
+// -----------------------------------------------------------------------------
 func BenchmarkUnlinkMin_StableBucket(b *testing.B) {
 	q := NewQuantumQueue()
 	h, _ := q.BorrowSafe()
@@ -165,8 +185,9 @@ func BenchmarkUnlinkMin_StableBucket(b *testing.B) {
 	}
 }
 
-// BenchmarkUnlinkMin_DenseBucket benchmarks UnlinkMin on a 3-handle bucket
-// that remains populated; no summary bit resets triggered.
+// -----------------------------------------------------------------------------
+// BenchmarkUnlinkMin_DenseBucket — 3-handle shared bucket (no collapse)
+// -----------------------------------------------------------------------------
 func BenchmarkUnlinkMin_DenseBucket(b *testing.B) {
 	q := NewQuantumQueue()
 	var hs [3]Handle
@@ -183,8 +204,9 @@ func BenchmarkUnlinkMin_DenseBucket(b *testing.B) {
 	}
 }
 
-// BenchmarkUnlinkMin_BitmapCollapse benchmarks UnlinkMin with full collapse.
-// Each unlink operation empties the bucket, triggering summary clear.
+// -----------------------------------------------------------------------------
+// BenchmarkUnlinkMin_BitmapCollapse — each unlink collapses entire summary
+// -----------------------------------------------------------------------------
 func BenchmarkUnlinkMin_BitmapCollapse(b *testing.B) {
 	q := NewQuantumQueue()
 	val := new([48]byte)
@@ -197,8 +219,9 @@ func BenchmarkUnlinkMin_BitmapCollapse(b *testing.B) {
 	}
 }
 
-// BenchmarkUnlinkMin_ScatterCollapse benchmarks UnlinkMin with randomized tick churn.
-// Models dynamic workloads with sparse locality and frequent summary updates.
+// -----------------------------------------------------------------------------
+// BenchmarkUnlinkMin_ScatterCollapse — fully random ticks with frequent collapse
+// -----------------------------------------------------------------------------
 func BenchmarkUnlinkMin_ScatterCollapse(b *testing.B) {
 	q := NewQuantumQueue()
 	val := new([48]byte)
@@ -215,8 +238,9 @@ func BenchmarkUnlinkMin_ScatterCollapse(b *testing.B) {
 	}
 }
 
-// BenchmarkUnlinkMin_ReinsertAfterCollapse benchmarks UnlinkMin where the same tick
-// is reused but collapsed each time, producing steady collapse + insert pattern.
+// -----------------------------------------------------------------------------
+// BenchmarkUnlinkMin_ReinsertAfterCollapse — always collapse + refill
+// -----------------------------------------------------------------------------
 func BenchmarkUnlinkMin_ReinsertAfterCollapse(b *testing.B) {
 	q := NewQuantumQueue()
 	val := new([48]byte)
@@ -229,12 +253,13 @@ func BenchmarkUnlinkMin_ReinsertAfterCollapse(b *testing.B) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Tick Relocation
-// -----------------------------------------------------------------------------
+/*─────────────────────────────────────────────────────────────────────────────*
+ * MoveTick                                                                   *
+ *─────────────────────────────────────────────────────────────────────────────*/
 
-// BenchmarkMoveTick benchmarks relocating existing handles to new ticks.
-// Triggers unlinking and relinking for each op.
+// -----------------------------------------------------------------------------
+// BenchmarkMoveTick — frequent tick relocations (unlink + reinsert)
+// -----------------------------------------------------------------------------
 func BenchmarkMoveTick(b *testing.B) {
 	q := NewQuantumQueue()
 	handles := make([]Handle, benchSize)
