@@ -234,3 +234,122 @@ func TestUnlinkMiddleNode(t *testing.T) {
 		t.Errorf("After removing h1, head = (%v, %d, %q); want (%v, 8, \"TWO\")", hLast, tickLast, data2[:3], h2)
 	}
 }
+
+// -----------------------------------------------------------------------------
+// Edge Case and Footgun-Expected Behavior Tests
+// -----------------------------------------------------------------------------
+
+// TestPeepMinWhenEmpty triggers PeepMin on an empty queue (Footgun 10).
+// Expected: panic or corruption when PeepMin is called on empty queue.
+func TestPeepMinWhenEmpty(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("PeepMin on empty queue did not panic; footgun 10 expected panic or fault")
+		}
+	}()
+	q := NewQuantumQueue()
+	_, _, _ = q.PeepMin() // Invalid per contract
+}
+
+// TestDoubleUnlink manually unlinks a node twice.
+// Expected: panic due to freelist corruption (Footgun 2, 4, 8).
+func TestDoubleUnlink(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("double unlink did not panic; footgun allows corruption")
+		}
+	}()
+	q := NewQuantumQueue()
+	h, _ := q.BorrowSafe()
+	q.Push(100, h, arr48([]byte("foo")))
+	q.UnlinkMin(h, 100)
+	q.UnlinkMin(h, 100) // Corrupt: node was already freed
+}
+
+// TestHandleReuseAfterUnlink ensures safe handle reuse across push/unlink cycles.
+func TestHandleReuseAfterUnlink(t *testing.T) {
+	q := NewQuantumQueue()
+	h, _ := q.BorrowSafe()
+	q.Push(123, h, arr48([]byte("x")))
+	q.UnlinkMin(h, 123)
+	q.Push(456, h, arr48([]byte("y")))
+	_, tick, data := q.PeepMin()
+	if tick != 456 || string(data[:1]) != "y" {
+		t.Errorf("Handle reuse failed: got tick %d, data %q; want 456, \"y\"", tick, data[:1])
+	}
+}
+
+// TestPushWithInvalidTicks accepts crashes for tick ∉ [0, 262143].
+// Footgun #3: both negative and overly large ticks may cause panics or memory corruption.
+func TestPushWithInvalidTicks(t *testing.T) {
+	q := NewQuantumQueue()
+	h, _ := q.BorrowSafe()
+
+	t.Run("NegativeTick", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Log("negative tick: no panic — corruption allowed")
+			} else {
+				t.Logf("negative tick: panicked as expected: %v", r)
+			}
+		}()
+		q.Push(-9999, h, arr48([]byte("neg")))
+	})
+
+	t.Run("OverflowTick", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Log("overflow tick: no panic — corruption allowed")
+			} else {
+				t.Logf("overflow tick: panicked as expected: %v", r)
+			}
+		}()
+		q.Push(int64(BucketCount+1000), h, arr48([]byte("high")))
+	})
+}
+
+// TestSizeTracking verifies Size() behavior through inserts, updates, and unlinks.
+func TestSizeTracking(t *testing.T) {
+	q := NewQuantumQueue()
+	h1, _ := q.BorrowSafe()
+	h2, _ := q.BorrowSafe()
+	q.Push(10, h1, arr48([]byte("a")))
+	q.Push(20, h2, arr48([]byte("b")))
+	if q.Size() != 2 {
+		t.Errorf("Size after 2 pushes = %d; want 2", q.Size())
+	}
+	q.Push(10, h1, arr48([]byte("c"))) // update path
+	if q.Size() != 2 {
+		t.Errorf("Size after tick-update = %d; want 2", q.Size())
+	}
+	q.UnlinkMin(h1, 10)
+	if q.Size() != 1 {
+		t.Errorf("Size after 1 unlink = %d; want 1", q.Size())
+	}
+	q.UnlinkMin(h2, 20)
+	if q.Size() != 0 {
+		t.Errorf("Size after 2 unlinks = %d; want 0", q.Size())
+	}
+}
+
+// TestFreelistCycle tests repeated arena reuse across full capacity.
+func TestFreelistCycle(t *testing.T) {
+	q := NewQuantumQueue()
+	var handles []Handle
+	for i := 0; i < CapItems; i++ {
+		h, err := q.BorrowSafe()
+		if err != nil {
+			t.Fatalf("unexpected error on borrow #%d: %v", i, err)
+		}
+		handles = append(handles, h)
+		q.Push(int64(i), h, arr48([]byte("x")))
+	}
+	for i, h := range handles {
+		q.UnlinkMin(h, int64(i))
+	}
+	for i := 0; i < CapItems; i++ {
+		if _, err := q.BorrowSafe(); err != nil {
+			t.Fatalf("freelist reuse failed at iteration %d: %v", i, err)
+		}
+	}
+}
