@@ -81,26 +81,30 @@ func handleFrame(p []byte) {
 		case keyBlockNumber:
 			if missing&wantBlk != 0 {
 				v.BlkNum = utils.SliceASCII(p, i+8+utils.FindQuote(p[i+8:]))
+				if len(v.BlkNum) == 0 {
+					return // malformed or missing blockNumber
+				}
 				missing &^= wantBlk
 			}
 		case keyTransactionIndex:
 			if missing&wantTx != 0 &&
-				len(p)-i >= 18 && // 👈 bounds guard
+				len(p)-i >= 18 &&
 				bytes.Equal(p[i:i+18], litTxIdx) {
 				v.TxIndex = utils.SliceASCII(p, i+18+utils.FindQuote(p[i+18:]))
+				if len(v.TxIndex) == 0 {
+					return // malformed or missing txIndex
+				}
 				missing &^= wantTx
 			}
 		case keyLogIndex:
 			if missing&wantLog != 0 {
 				v.LogIdx = utils.SliceASCII(p, i+8+utils.FindQuote(p[i+8:]))
+				if len(v.LogIdx) == 0 {
+					return // malformed or missing logIndex
+				}
 				missing &^= wantLog
 			}
 		}
-	}
-
-	// Drop incomplete payloads
-	if len(v.BlkNum) == 0 || len(v.TxIndex) == 0 || len(v.LogIdx) == 0 {
-		return
 	}
 
 	// ───── Derive fingerprint ─────
