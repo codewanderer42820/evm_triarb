@@ -20,7 +20,6 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"main/types"
 	"main/utils"
@@ -44,7 +43,6 @@ var (
 func handleFrame(p []byte) {
 	var v types.LogView
 
-	// Bitmask to track needed fields
 	const (
 		wantAddr = 1 << iota
 		wantTopics
@@ -55,21 +53,23 @@ func handleFrame(p []byte) {
 	)
 	missing := wantAddr | wantTopics | wantData | wantBlk | wantTx | wantLog
 
-	// 8-byte aligned scan across frame buffer
-	for i := 0; i <= len(p)-8 && missing != 0; i++ {
+	end := len(p) - 8
+	for i := 0; i <= end && missing != 0; i += 2 {
+		// First probe
 		tag := *(*[8]byte)(unsafe.Pointer(&p[i]))
-
 		switch tag {
 		case keyAddress:
 			if missing&wantAddr != 0 {
-				v.Addr = utils.SliceASCII(p, i+8+utils.FindQuote(p[i+8:]))
+				base := i + 8
+				v.Addr = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
 				missing &^= wantAddr
 			}
 		case keyTopics:
 			if missing&wantTopics != 0 {
-				v.Topics = utils.SliceJSONArray(p, i+8+utils.FindBracket(p[i+8:]))
+				base := i + 8
+				v.Topics = utils.SliceJSONArray(p, base+utils.FindBracket(p[base:]))
 				if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
-					return // early exit: not Sync()
+					return
 				}
 				missing &^= wantTopics
 			}
@@ -80,27 +80,92 @@ func handleFrame(p []byte) {
 			}
 		case keyBlockNumber:
 			if missing&wantBlk != 0 {
-				v.BlkNum = utils.SliceASCII(p, i+8+utils.FindQuote(p[i+8:]))
+				base := i + 8
+				v.BlkNum = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
 				if len(v.BlkNum) == 0 {
-					return // malformed or missing blockNumber
+					return
 				}
 				missing &^= wantBlk
 			}
 		case keyTransactionIndex:
-			if missing&wantTx != 0 &&
-				len(p)-i >= 18 &&
-				bytes.Equal(p[i:i+18], litTxIdx) {
-				v.TxIndex = utils.SliceASCII(p, i+18+utils.FindQuote(p[i+18:]))
-				if len(v.TxIndex) == 0 {
-					return // malformed or missing txIndex
+			if missing&wantTx != 0 && len(p)-i >= 18 {
+				lo := *(*uint64)(unsafe.Pointer(&p[i]))
+				hi := *(*uint64)(unsafe.Pointer(&p[i+8]))
+				if lo == txIdxLo && hi == txIdxHi {
+					base := i + 18
+					v.TxIndex = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+					if len(v.TxIndex) == 0 {
+						return
+					}
+					missing &^= wantTx
 				}
-				missing &^= wantTx
 			}
 		case keyLogIndex:
 			if missing&wantLog != 0 {
-				v.LogIdx = utils.SliceASCII(p, i+8+utils.FindQuote(p[i+8:]))
+				base := i + 8
+				v.LogIdx = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
 				if len(v.LogIdx) == 0 {
-					return // malformed or missing logIndex
+					return
+				}
+				missing &^= wantLog
+			}
+		}
+
+		// Second probe (unroll)
+		j := i + 1
+		if j > end || missing == 0 {
+			break
+		}
+		tag = *(*[8]byte)(unsafe.Pointer(&p[j]))
+		switch tag {
+		case keyAddress:
+			if missing&wantAddr != 0 {
+				base := j + 8
+				v.Addr = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+				missing &^= wantAddr
+			}
+		case keyTopics:
+			if missing&wantTopics != 0 {
+				base := j + 8
+				v.Topics = utils.SliceJSONArray(p, base+utils.FindBracket(p[base:]))
+				if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
+					return
+				}
+				missing &^= wantTopics
+			}
+		case keyData:
+			if missing&wantData != 0 {
+				v.Data = utils.SliceASCII(p, j+7)
+				missing &^= wantData
+			}
+		case keyBlockNumber:
+			if missing&wantBlk != 0 {
+				base := j + 8
+				v.BlkNum = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+				if len(v.BlkNum) == 0 {
+					return
+				}
+				missing &^= wantBlk
+			}
+		case keyTransactionIndex:
+			if missing&wantTx != 0 && len(p)-j >= 18 {
+				lo := *(*uint64)(unsafe.Pointer(&p[j]))
+				hi := *(*uint64)(unsafe.Pointer(&p[j+8]))
+				if lo == txIdxLo && hi == txIdxHi {
+					base := j + 18
+					v.TxIndex = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+					if len(v.TxIndex) == 0 {
+						return
+					}
+					missing &^= wantTx
+				}
+			}
+		case keyLogIndex:
+			if missing&wantLog != 0 {
+				base := j + 8
+				v.LogIdx = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+				if len(v.LogIdx) == 0 {
+					return
 				}
 				missing &^= wantLog
 			}
