@@ -131,3 +131,82 @@ func TestGetRobinHoodBound(t *testing.T) {
 		t.Fatalf("expected miss via bound-check, got %d,true", v)
 	}
 }
+
+// -----------------------------------------------------------------------------
+// ░░ Edge Case: Load Factor Saturation ░░
+// -----------------------------------------------------------------------------
+
+func TestNearFullCapacity(t *testing.T) {
+	h := New(8) // underlying table will be 16 slots
+	for i := uint32(1); i <= 16; i++ {
+		h.Put(i, i*100)
+	}
+	// All keys from 1–16 should be present and correct
+	for i := uint32(1); i <= 16; i++ {
+		v, ok := h.Get(i)
+		if !ok || v != i*100 {
+			t.Fatalf("Get(%d) = %d,%v ; want %d,true", i, v, ok, i*100)
+		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// ░░ Edge Case: Reserved Key Zero (Sentinel) ░░
+// -----------------------------------------------------------------------------
+
+func TestPutZeroKey(t *testing.T) {
+	h := New(4)
+	got := h.Put(0, 42) // reserved sentinel key
+	if got != 42 {
+		t.Fatalf("Put(0,42) = %d; want 42 (returned as if inserted)", got)
+	}
+	v, ok := h.Get(0)
+	if ok {
+		t.Fatalf("Get(0) = %d,true; want _,false (zero key should not be inserted)", v)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// ░░ Edge Case: Max uint32 Key ░░
+// -----------------------------------------------------------------------------
+
+func TestMaxUint32Key(t *testing.T) {
+	h := New(4)
+	const maxKey = ^uint32(0) // 0xFFFFFFFF
+	h.Put(maxKey, 999)
+	v, ok := h.Get(maxKey)
+	if !ok || v != 999 {
+		t.Fatalf("Get(%d) = %d,%v; want 999,true", maxKey, v, ok)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// ░░ Edge Case: Empty Hash Access ░░
+// -----------------------------------------------------------------------------
+
+func TestEmptyHashGet(t *testing.T) {
+	h := New(64)
+	if _, ok := h.Get(12345); ok {
+		t.Fatal("Get on empty hash should return false")
+	}
+}
+
+// -----------------------------------------------------------------------------
+// ░░ Edge Case: Soft Prefetch Boundary (no panic) ░░
+// -----------------------------------------------------------------------------
+
+func TestSoftPrefetchNoPanic(t *testing.T) {
+	h := New(2) // table of 4 slots
+	h.Put(1, 100)
+	h.Put(2, 200)
+	h.Put(3, 300)
+	h.Put(4, 400) // fill table to force wraparound probing
+
+	for i := uint32(1); i <= 4; i++ {
+		v, ok := h.Get(i)
+		if !ok || v != i*100 {
+			t.Fatalf("Get(%d) = %d,%v; want %d,true", i, v, ok, i*100)
+		}
+	}
+	// Success: didn't crash due to prefetch OOB access
+}
