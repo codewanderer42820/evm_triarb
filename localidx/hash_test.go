@@ -1,6 +1,16 @@
-// Package localidx provides correctness tests for the fixed-capacity,
-// Robin-Hood footgun hashmap. These tests validate behavior under high
-// collision, wraparound, overwrite suppression, and load factor saturation.
+// ─────────────────────────────────────────────────────────────────────────────
+// hash_test.go — Unit Tests for ISR-Optimized Robin-Hood Hashmap (localidx)
+//
+// Purpose:
+//   - Validates insertion, retrieval, overwrite, and probe logic
+//   - Verifies edge cases: wraparound, zero key, full capacity, max uint32
+//
+// Style:
+//   - All tests use deterministic seeds or known values
+//   - Grouped with banner-style comment blocks
+//   - Matches ISR-grade engineering test coverage
+// ─────────────────────────────────────────────────────────────────────────────
+
 package localidx
 
 import (
@@ -137,11 +147,10 @@ func TestGetRobinHoodBound(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 func TestNearFullCapacity(t *testing.T) {
-	h := New(8) // underlying table will be 16 slots
+	h := New(8)
 	for i := uint32(1); i <= 16; i++ {
 		h.Put(i, i*100)
 	}
-	// All keys from 1–16 should be present and correct
 	for i := uint32(1); i <= 16; i++ {
 		v, ok := h.Get(i)
 		if !ok || v != i*100 {
@@ -156,7 +165,7 @@ func TestNearFullCapacity(t *testing.T) {
 
 func TestPutZeroKey(t *testing.T) {
 	h := New(4)
-	got := h.Put(0, 42) // reserved sentinel key
+	got := h.Put(0, 42)
 	if got != 42 {
 		t.Fatalf("Put(0,42) = %d; want 42 (returned as if inserted)", got)
 	}
@@ -172,7 +181,7 @@ func TestPutZeroKey(t *testing.T) {
 
 func TestMaxUint32Key(t *testing.T) {
 	h := New(4)
-	const maxKey = ^uint32(0) // 0xFFFFFFFF
+	const maxKey = ^uint32(0)
 	h.Put(maxKey, 999)
 	v, ok := h.Get(maxKey)
 	if !ok || v != 999 {
@@ -196,11 +205,11 @@ func TestEmptyHashGet(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 func TestSoftPrefetchNoPanic(t *testing.T) {
-	h := New(2) // table of 4 slots
+	h := New(2)
 	h.Put(1, 100)
 	h.Put(2, 200)
 	h.Put(3, 300)
-	h.Put(4, 400) // fill table to force wraparound probing
+	h.Put(4, 400)
 
 	for i := uint32(1); i <= 4; i++ {
 		v, ok := h.Get(i)
@@ -208,5 +217,4 @@ func TestSoftPrefetchNoPanic(t *testing.T) {
 			t.Fatalf("Get(%d) = %d,%v; want %d,true", i, v, ok, i*100)
 		}
 	}
-	// Success: didn't crash due to prefetch OOB access
 }
