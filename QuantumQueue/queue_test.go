@@ -131,6 +131,32 @@ func TestPushAndPeepMin(t *testing.T) {
 	}
 }
 
+// -----------------------------------------------------------------------------
+// TestPushTriggersUnlink ensures Push calls unlink if tick changes
+// -----------------------------------------------------------------------------
+func TestPushTriggersUnlink(t *testing.T) {
+	q := NewQuantumQueue()
+	h, _ := q.BorrowSafe()
+
+	// Step 1: Push to tick A
+	q.Push(42, h, arr48([]byte("aaa")))
+
+	// Step 2: Push again to tick B (≠ A), triggering unlink + relink
+	q.Push(99, h, arr48([]byte("bbb")))
+
+	// Step 3: Validate outcome
+	if q.Size() != 1 {
+		t.Errorf("Size = %d; want 1 after relink", q.Size())
+	}
+	hGot, tickGot, data := q.PeepMin()
+	if hGot != h || tickGot != 99 {
+		t.Errorf("PeepMin mismatch: got (%v, %d); want (%v, 99)", hGot, tickGot, h)
+	}
+	if string(data[:3]) != "bbb" {
+		t.Errorf("Payload not updated correctly: %q", data[:3])
+	}
+}
+
 /*─────────────────────────────────────────────────────────────────────────────*
  * Ordering Tests: Same and Different Tick Logic                               *
  *─────────────────────────────────────────────────────────────────────────────*/
