@@ -66,8 +66,8 @@ func TestQueueStressRandomOperations(t *testing.T) {
 
 	rng := rand.New(rand.NewSource(69)) // deterministic seed
 
-	q := NewQuantumQueue() // test subject
-	ref := &stressHeap{}   // reference model
+	q := New()           // test subject
+	ref := &stressHeap{} // reference model
 	heap.Init(ref)
 
 	// Track available + live handles

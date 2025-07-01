@@ -95,7 +95,7 @@ type QuantumQueue struct {
 //go:nosplit
 //go:inline
 //go:registerparams
-func NewQuantumQueue() *QuantumQueue {
+func New() *QuantumQueue {
 	q := &QuantumQueue{freeHead: 0}
 	for i := Handle(0); i < CapItems-1; i++ {
 		q.arena[i].next = i + 1

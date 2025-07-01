@@ -38,7 +38,7 @@ func arr48(b []byte) *[48]byte {
 // TestNewQueueBehavior checks that the queue initializes empty and safe.
 // -----------------------------------------------------------------------------
 func TestNewQueueBehavior(t *testing.T) {
-	q := NewQuantumQueue()
+	q := New()
 	if !q.Empty() || q.Size() != 0 {
 		t.Errorf("new queue: Empty=%v Size=%d; want true, 0", q.Empty(), q.Size())
 	}
@@ -64,7 +64,7 @@ func TestNewQueueBehavior(t *testing.T) {
 // TestBorrowSafeExhaustion ensures the arena has fixed capacity.
 // -----------------------------------------------------------------------------
 func TestBorrowSafeExhaustion(t *testing.T) {
-	q := NewQuantumQueue()
+	q := New()
 	for i := 0; i < CapItems; i++ {
 		if _, err := q.BorrowSafe(); err != nil {
 			t.Fatalf("Borrow #%d failed: %v", i, err)
@@ -83,7 +83,7 @@ func TestBorrowSafeExhaustion(t *testing.T) {
 // TestPushAndPeepMin validates order, update path, and edge ticks.
 // -----------------------------------------------------------------------------
 func TestPushAndPeepMin(t *testing.T) {
-	q := NewQuantumQueue()
+	q := New()
 	h, _ := q.BorrowSafe()
 	q.Push(10, h, arr48([]byte("foo")))
 	if q.Empty() || q.Size() != 1 {
@@ -110,7 +110,7 @@ func TestPushAndPeepMin(t *testing.T) {
 	}
 
 	// Edge case: lowest and highest tick
-	q2 := NewQuantumQueue()
+	q2 := New()
 	h0, _ := q2.BorrowSafe()
 	hMax, _ := q2.BorrowSafe()
 	q2.Push(0, h0, arr48([]byte("low")))
@@ -135,7 +135,7 @@ func TestPushAndPeepMin(t *testing.T) {
 // TestPushTriggersUnlink ensures Push calls unlink if tick changes
 // -----------------------------------------------------------------------------
 func TestPushTriggersUnlink(t *testing.T) {
-	q := NewQuantumQueue()
+	q := New()
 	h, _ := q.BorrowSafe()
 
 	// Step 1: Push to tick A
@@ -162,7 +162,7 @@ func TestPushTriggersUnlink(t *testing.T) {
  *─────────────────────────────────────────────────────────────────────────────*/
 
 func TestMultipleSameTickOrdering(t *testing.T) {
-	q := NewQuantumQueue()
+	q := New()
 	h1, _ := q.BorrowSafe()
 	h2, _ := q.BorrowSafe()
 	q.Push(5, h1, arr48([]byte("a1")))
@@ -174,7 +174,7 @@ func TestMultipleSameTickOrdering(t *testing.T) {
 }
 
 func TestPushDifferentTicks(t *testing.T) {
-	q := NewQuantumQueue()
+	q := New()
 	h1, _ := q.BorrowSafe()
 	h2, _ := q.BorrowSafe()
 	q.Push(100, h1, arr48([]byte("one")))
@@ -190,7 +190,7 @@ func TestPushDifferentTicks(t *testing.T) {
  *─────────────────────────────────────────────────────────────────────────────*/
 
 func TestMoveTickBehavior(t *testing.T) {
-	q := NewQuantumQueue()
+	q := New()
 	h, _ := q.BorrowSafe()
 	q.Push(20, h, arr48([]byte("x")))
 	q.MoveTick(h, 20) // no-op
@@ -202,7 +202,7 @@ func TestMoveTickBehavior(t *testing.T) {
 }
 
 func TestUnlinkMinNonHead(t *testing.T) {
-	q := NewQuantumQueue()
+	q := New()
 	h1, _ := q.BorrowSafe()
 	h2, _ := q.BorrowSafe()
 	h3, _ := q.BorrowSafe()
@@ -221,7 +221,7 @@ func TestUnlinkMinNonHead(t *testing.T) {
  *─────────────────────────────────────────────────────────────────────────────*/
 
 func TestMixedOperations(t *testing.T) {
-	q := NewQuantumQueue()
+	q := New()
 	var hs [3]Handle
 	for i := range hs {
 		h, _ := q.BorrowSafe()
@@ -251,7 +251,7 @@ func TestPeepMinWhenEmpty(t *testing.T) {
 			t.Error("Expected panic on empty PeepMin")
 		}
 	}()
-	NewQuantumQueue().PeepMin()
+	New().PeepMin()
 }
 
 // Double unlink must panic (footgun 2/4/8)
@@ -261,7 +261,7 @@ func TestDoubleUnlink(t *testing.T) {
 			t.Error("Expected panic on double unlink")
 		}
 	}()
-	q := NewQuantumQueue()
+	q := New()
 	h, _ := q.BorrowSafe()
 	q.Push(100, h, arr48([]byte("foo")))
 	q.UnlinkMin(h, 100)
@@ -270,7 +270,7 @@ func TestDoubleUnlink(t *testing.T) {
 
 // Handle reuse should be safe after unlink
 func TestHandleReuseAfterUnlink(t *testing.T) {
-	q := NewQuantumQueue()
+	q := New()
 	h, _ := q.BorrowSafe()
 	q.Push(123, h, arr48([]byte("x")))
 	q.UnlinkMin(h, 123)
@@ -283,7 +283,7 @@ func TestHandleReuseAfterUnlink(t *testing.T) {
 
 // Invalid ticks must panic or corrupt
 func TestPushWithInvalidTicks(t *testing.T) {
-	q := NewQuantumQueue()
+	q := New()
 	h, _ := q.BorrowSafe()
 	t.Run("NegativeTick", func(t *testing.T) {
 		defer func() { recover() }()
@@ -300,7 +300,7 @@ func TestPushWithInvalidTicks(t *testing.T) {
  *─────────────────────────────────────────────────────────────────────────────*/
 
 func TestSizeTracking(t *testing.T) {
-	q := NewQuantumQueue()
+	q := New()
 	h1, _ := q.BorrowSafe()
 	h2, _ := q.BorrowSafe()
 	q.Push(10, h1, arr48([]byte("a")))
@@ -314,7 +314,7 @@ func TestSizeTracking(t *testing.T) {
 }
 
 func TestFreelistCycle(t *testing.T) {
-	q := NewQuantumQueue()
+	q := New()
 	var handles []Handle
 	for i := 0; i < CapItems; i++ {
 		h, _ := q.BorrowSafe()
