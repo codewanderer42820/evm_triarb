@@ -157,3 +157,55 @@ func TestPushDropOnOverflow(t *testing.T) {
 		t.Fatal("expected at least one push to fail on overflow")
 	}
 }
+
+// -----------------------------------------------------------------------------
+// ░░ Additional Edge Case Tests ░░
+// -----------------------------------------------------------------------------
+
+// TestDoublePopWithoutPush confirms repeated pops on empty ring are safe.
+func TestDoublePopWithoutPush(t *testing.T) {
+	r := New(4)
+	if r.Pop() != nil {
+		t.Fatal("First Pop on empty ring should return nil")
+	}
+	if r.Pop() != nil {
+		t.Fatal("Second Pop on empty ring should also return nil")
+	}
+}
+
+// TestFullWrapPushPop verifies full ring wrap-around under repeated push/pop cycles.
+func TestFullWrapPushPop(t *testing.T) {
+	const size = 4
+	r := New(size)
+	for i := 0; i < size*3; i++ {
+		val := &[24]byte{byte(i)}
+		if !r.Push(val) {
+			t.Fatalf("Push failed at iteration %d", i)
+		}
+		got := r.Pop()
+		if got == nil || got[0] != byte(i) {
+			t.Fatalf("iteration %d: got %v, want %v", i, got[0], val[0])
+		}
+	}
+}
+
+// TestPopImmediateReuse ensures Pop-returned pointers are valid before reuse.
+func TestPopImmediateReuse(t *testing.T) {
+	r := New(2)
+	val1 := &[24]byte{42}
+	val2 := &[24]byte{99}
+	if !r.Push(val1) {
+		t.Fatal("Push val1 failed")
+	}
+	ptr := r.Pop()
+	if ptr == nil || *ptr != *val1 {
+		t.Fatal("First Pop mismatch")
+	}
+	copy := *ptr // Copy before next Push
+	if !r.Push(val2) {
+		t.Fatal("Push val2 failed")
+	}
+	if copy != *val1 {
+		t.Fatal("Copied value changed after ring reuse")
+	}
+}
