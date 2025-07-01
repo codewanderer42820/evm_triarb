@@ -35,8 +35,6 @@ import (
 //go:notinheap
 //go:align 64
 //go:inline
-//go:registerparams
-//go:nosplit
 
 type slot struct {
 	val [24]byte // payload (bytes 0–23)
@@ -58,8 +56,6 @@ type slot struct {
 //go:notinheap
 //go:align 64
 //go:inline
-//go:registerparams
-//go:nosplit
 
 type Ring struct {
 	_    [64]byte // pad to isolate head
