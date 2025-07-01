@@ -229,3 +229,94 @@ func TestRandomizedFunctions(t *testing.T) {
 		}
 	}
 }
+
+/*─────────────────── additional edge case tests ───────────────────*/
+
+func TestLog2u64_EdgeCases(t *testing.T) {
+	x := uint64(1 << 52)
+	if got := log2u64(x); math.Abs(got-52) > tol {
+		t.Errorf("log2u64(2^52): expected 52, got %g", got)
+	}
+	if got := log2u64(x + 1); math.Abs(got-math.Log2(float64(x+1))) > tol {
+		t.Errorf("log2u64(2^52+1): expected approx %g, got %g", math.Log2(float64(x+1)), got)
+	}
+	if got := log2u64(math.MaxUint64); math.Abs(got-math.Log2(float64(math.MaxUint64))) > tol {
+		t.Errorf("log2u64(max): expected approx %g, got %g", math.Log2(float64(math.MaxUint64)), got)
+	}
+}
+
+func TestLog2u128_EdgeCases(t *testing.T) {
+	u := Uint128{0, math.MaxUint64}
+	got := log2u128(u)
+	want := math.Log2(float64(u.Lo))
+	if math.Abs(got-want) > tol {
+		t.Errorf("log2u128(Lo=max): expected %g, got %g", want, got)
+	}
+
+	u = Uint128{1, math.MaxUint64}
+	want = math.Log2(float64(u.Hi)*math.Ldexp(1, 64) + float64(u.Lo))
+	got = log2u128(u)
+	if math.Abs(got-want) > tol {
+		t.Errorf("log2u128(Hi=1,Lo=max): expected %g, got %g", want, got)
+	}
+}
+
+func TestLnReserveRatio_EdgeCases(t *testing.T) {
+	a, b := uint64(math.MaxUint64), uint64(1)
+	got, err := LnReserveRatio(a, b)
+	want := math.Log(float64(a) / float64(b))
+	if err != nil || math.Abs(got-want) > tol {
+		t.Errorf("LnReserveRatio(max,1): expected %g, got %g err=%v", want, got, err)
+	}
+}
+
+func TestLog2ReserveRatio_EdgeCases(t *testing.T) {
+	a, b := uint64(1<<30), uint64((1<<30)+1)
+	got, err := Log2ReserveRatio(a, b)
+	want := math.Log2(float64(a) / float64(b))
+	if err != nil || math.Abs(got-want) > tol {
+		t.Errorf("Log2ReserveRatio(near equal): expected %g, got %g err=%v", want, got, err)
+	}
+}
+
+func TestLogReserveRatioConst_InvalidConv(t *testing.T) {
+	if _, err := LogReserveRatioConst(1, 1, math.NaN()); err != ErrOutOfRange {
+		t.Errorf("LogReserveRatioConst NaN: expected ErrOutOfRange, got %v", err)
+	}
+	if _, err := LogReserveRatioConst(1, 1, math.Inf(1)); err != ErrOutOfRange {
+		t.Errorf("LogReserveRatioConst +Inf: expected ErrOutOfRange, got %v", err)
+	}
+	if _, err := LogReserveRatioConst(1, 1, math.Inf(-1)); err != ErrOutOfRange {
+		t.Errorf("LogReserveRatioConst -Inf: expected ErrOutOfRange, got %v", err)
+	}
+}
+
+func TestLog2PriceX96_InvalidInput(t *testing.T) {
+	_, err := Log2PriceX96(Uint128{0, 0})
+	if err != ErrZeroValue {
+		t.Errorf("Log2PriceX96(0,0): expected ErrZeroValue, got %v", err)
+	}
+}
+
+func TestLnPriceX96_EdgeCases(t *testing.T) {
+	if _, err := LnPriceX96(Uint128{0, 0}); err != ErrZeroValue {
+		t.Errorf("LnPriceX96(0,0): expected ErrZeroValue, got %v", err)
+	}
+	s := Uint128{Hi: 1 << 33, Lo: 0}
+	got, err := LnPriceX96(s)
+	want := (log2u128(s) - 96) * 2 * ln2
+	if err != nil || math.Abs(got-want) > tol {
+		t.Errorf("LnPriceX96(2^97): expected %g, got %g err=%v", want, got, err)
+	}
+}
+
+func TestLogPriceX96Const_InvalidCases(t *testing.T) {
+	_, err := LogPriceX96Const(Uint128{0, 0}, 1.0)
+	if err != ErrZeroValue {
+		t.Errorf("LogPriceX96Const(0,0): expected ErrZeroValue, got %v", err)
+	}
+	_, err = LogPriceX96Const(Uint128{Hi: 1 << 32, Lo: 0}, math.NaN())
+	if err != ErrOutOfRange {
+		t.Errorf("LogPriceX96Const(NaN): expected ErrOutOfRange, got %v", err)
+	}
+}
