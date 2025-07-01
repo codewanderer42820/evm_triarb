@@ -1,87 +1,88 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// [Filename]: dedupe.go — ISR-grade L1-resident de-duplication buffer
+//
+// Purpose:
+//   - Prevents redundant processing of reorg-sensitive logs in ISR pipelines
+//   - Lock-free and fully branchless for nanosecond-level latency
+//
+// Notes:
+//   - Total ring size = 8 MiB (if ringBits = 18) → fully L1/L2 cache-resident
+//   - Fingerprint-based deduplication using topic0 or data fallback
+//   - Safe for single-threaded use only (no locks, no atomics)
+//
+// Compiler Directives:
+//   - //go:nosplit
+//   - //go:inline
+//   - //go:registerparams
+//
+// ⚠️ Footgun mode: Corruption possible if misused across goroutines
+// ─────────────────────────────────────────────────────────────────────────────
+
 package main
 
 import "main/utils"
 
-///////////////////////////////////////////////////////////////////////////////
-// Deduper — Lock-free L1-resident de-duplication ring
-///////////////////////////////////////////////////////////////////////////////
-
-// dedupeSlot represents a single entry in the deduplication ring buffer.
-// Size: 32 bytes per slot — exactly two per 64-byte cache line.
-// This ensures optimal spatial locality and full L1 residency.
+// dedupeSlot represents a single deduplication entry.
+// Size: 32 bytes = 2 slots per cache line for maximum spatial locality.
 //
-// Fields:
-//   - blk, tx, log  → event coordinates
-//   - tagHi/Lo      → fingerprint of content (topic0 or data fallback)
-//   - age           → block height for staleness & reorg detection
+// Struct layout:
+//   - blk, tx, log: 96-bit composite event identity
+//   - tagHi, tagLo: 128-bit content fingerprint
+//   - age: block height for eviction windowing
 //
 //go:notinheap
 //go:align 64
 type dedupeSlot struct {
-	blk, _, tx, _, log, _ uint32 // 96-bit composite key
-	tagHi, tagLo          uint64 // 128-bit fingerprint
-	age, _                uint32
+	blk, _, tx, _, log, _ uint32 // 96-bit event identity key (blk/tx/log)
+	tagHi, tagLo          uint64 // 128-bit event fingerprint (topic0 preferred)
+	age, _                uint32 // block height of slot entry
 	_                     [2]uint64
 }
 
-// Deduper is a fixed-size ring buffer that stores recent event identities.
-// It rejects duplicate or stale logs and overwrites without branches.
-// Total size: (1 << ringBits) * 32 bytes = 8 MiB if ringBits = 18.
-//
-// Runtime behavior:
-//   - Evicts using `age` vs `latestBlk`
-//   - Fully branchless write path
-//   - Thread-local by design (not synchronized)
+// Deduper is a lock-free circular ring for recent log identities.
+// Eviction and overwrite strategy ensures reorg-tolerant freshness.
+// Total memory = (1 << ringBits) * 32B → 8 MiB at ringBits=18.
 type Deduper struct {
-	buf [1 << ringBits]dedupeSlot // power-of-two ring of slots (cache-aligned)
+	buf [1 << ringBits]dedupeSlot // deduplication ring buffer (power-of-two sized)
 }
 
-// Check returns true if the (blk, tx, log, tag) tuple is NEW (not seen recently).
+// Check tests if the given (blk, tx, log, tag) tuple is NEW.
+// If unseen or stale, it stores the new entry and returns true.
 //
 // Eviction strategy:
-//   - Each slot is evicted if older than `maxReorg` blocks
-//   - Writes always happen regardless of match (branchless overwrite)
+//   - Slot is overwritten if older than `maxReorg` blocks
 //
-// Hash strategy:
-//   - Key is a 64-bit fused triplet: blk (24b), tx (20b), log (20b)
-//   - Mixed with Murmur-style hash for uniform distribution
-//
-// Compiler Directives:
-//   - nosplit         → avoids stack checks, safe for flat logic
-//   - inline          → embeds into caller to remove call overhead
-//   - registerparams  → ABI-optimal on modern Go compilers
+// Write strategy:
+//   - Always overwrites (branchless)
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func (d *Deduper) Check(
-	blk, tx, log uint32, // EVM identity (composite key)
-	tagHi, tagLo uint64, // fingerprint of content
-	latestBlk uint32, // latest known block (for reorg eviction)
+	blk, tx, log uint32, // log event identifiers
+	tagHi, tagLo uint64, // fingerprint from topic0/data
+	latestBlk uint32, // current block tip for eviction judgment
 ) bool {
-	// ───── Step 1: Fuse key into a 64-bit pseudo-unique hash ─────
-	//   blk → top 24 bits
-	//   tx  → mid 20 bits
-	//   log → low 20 bits
+	// ───── 1. Fuse blk/tx/log into 64-bit hash ─────
 	key := (uint64(blk) << 40) ^ (uint64(tx) << 20) ^ uint64(log)
 
-	// ───── Step 2: Compute slot index using high-entropy hash ─────
+	// ───── 2. Compute ring slot index ─────
 	i := utils.Mix64(key) & (uint64(len(d.buf)) - 1)
 	slot := &d.buf[i]
 
-	// ───── Step 3: Check if slot is stale — evict on deep reorgs ─────
+	// ───── 3. Staleness check ─────
 	stale := latestBlk < slot.age || (latestBlk-slot.age) > maxReorg
 
-	// ───── Step 4: Determine match — event is duplicate if all fields match ─────
+	// ───── 4. Exact match check ─────
 	match := !stale &&
 		slot.blk == blk && slot.tx == tx && slot.log == log &&
 		slot.tagHi == tagHi && slot.tagLo == tagLo
 
-	// ───── Step 5: Write path — unconditional overwrite, branch-free ─────
+	// ───── 5. Branchless overwrite ─────
 	slot.blk, slot.tx, slot.log = blk, tx, log
 	slot.tagHi, slot.tagLo = tagHi, tagLo
 	slot.age = latestBlk
 
-	// Return true if this is a brand new event
+	// Return true if event is new (was not matched)
 	return !match
 }

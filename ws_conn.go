@@ -1,5 +1,21 @@
-// ws_conn.go — WebSocket setup: HTTP upgrade, frame mask prep, and buffer initialization.
-// Runs once at startup. All outputs are immutable and reused by the runtime.
+// ─────────────────────────────────────────────────────────────────────────────
+// [Filename]: ws_conn.go — ISR-class WebSocket setup & shared ring state
+//
+// Purpose:
+//   - Constructs immutable WebSocket upgrade request and subscription frame
+//   - Initializes shared buffers and frame ring for runtime parsing
+//
+// Notes:
+//   - All variables initialized exactly once in init()
+//   - Runtime reads never mutate shared state — safe for no-lock use
+//   - Payload masking complies with RFC 6455 client-to-server masking rules
+//
+// Compiler Directives:
+//   - //go:nosplit
+//   - //go:registerparams
+//
+// ⚠️ NEVER mutate shared state after init — ring buffer assumes immutability
+// ─────────────────────────────────────────────────────────────────────────────
 
 package main
 
@@ -9,53 +25,38 @@ import (
 )
 
 // ───────────────────────────── Shared Runtime State ─────────────────────────────
-//
-// All variables below are initialized once during program `init()`.
-// None are mutated during the hot path (readFrame/handleFrame).
-// This ensures:
-//   - No GC pressure from log loop
-//   - Zero heap allocation during operation
-//   - Deterministic memory footprint for circular buffers
 
 var (
-	// upgradeRequest is a raw WebSocket upgrade request (HTTP/1.1 format).
-	// It includes a randomized Sec-WebSocket-Key (base64-encoded, 16 bytes raw).
+	// HTTP upgrade handshake payload (static)
 	upgradeRequest []byte
 
-	// subscribePacket is a pre-masked WebSocket frame containing:
-	//   {"id":1,"method":"eth_subscribe","params":["logs",{}],"jsonrpc":"2.0"}
-	// The masking is RFC 6455-compliant and done once up front.
+	// RFC 6455-masked subscribe payload (precomputed)
 	subscribePacket []byte
 
-	// wsBuf is the ring buffer used for the raw TCP stream from WebSocket conn.
-	// wsStart/wsLen track the valid unread window [start : start+len)
+	// Raw TCP buffer backing WebSocket read loop
 	wsBuf          [maxFrameSize]byte
 	wsStart, wsLen int
 
-	// wsFrames is a circular ring of views into parsed WebSocket payloads.
-	// Each frame is a pointerless view over wsBuf, valid until overwritten.
+	// WebSocket frame ring: pre-allocated views into wsBuf
 	wsFrames [frameCap]wsFrame
-	wsHead   uint32 // write pointer into wsFrames (incremented on every frame)
+	wsHead   uint32
 )
 
-// wsFrame represents one parsed WebSocket payload slice.
-// Payload points directly into `wsBuf` and MUST NOT outlive it.
+// wsFrame holds a parsed WebSocket payload (view into wsBuf).
+// `End` is used to reclaim space after processing.
 type wsFrame struct {
-	Payload []byte // raw log JSON payload (zero-copy view)
-	Len     int    // length of payload (≤ maxFrameSize)
-	End     int    // end offset in wsBuf (used to reclaim space)
+	Payload []byte // log payload (zero-copy)
+	Len     int    // byte length
+	End     int    // end offset in wsBuf
 }
 
-// init constructs the handshake and subscribe frames once, before `main()`.
-//
-// Compiler Directives:
-//   - nosplit         → ensures early init path has no preemption
-//   - registerparams  → ABI optimized (though `init` has no input)
+// init prebuilds the upgrade request and masked subscribe frame.
+// Ensures fully deterministic runtime state — no allocs during execution.
 //
 //go:nosplit
 //go:registerparams
 func init() {
-	// ───── Step 1: Generate Sec-WebSocket-Key (16 random bytes) ─────
+	// ───── Step 1: Generate Sec-WebSocket-Key ─────
 	key := make([]byte, 16)
 	_, _ = rand.Read(key)
 
@@ -66,23 +67,19 @@ func init() {
 		"Sec-WebSocket-Key: " + base64.StdEncoding.EncodeToString(key) + "\r\n" +
 		"Sec-WebSocket-Version: 13\r\n\r\n")
 
-	// ───── Step 2: Prepare subscription JSON payload ─────
+	// ───── Step 2: Masked subscribe payload ─────
 	const payload = `{"id":1,"method":"eth_subscribe","params":["logs",{}],"jsonrpc":"2.0"}`
 
-	// Header: FIN (0x80) | OPCODE (0x1 = text) | MASK (0x80) | len
-	hdr := []byte{0x81, 0x80 | byte(len(payload))}
+	hdr := []byte{0x81, 0x80 | byte(len(payload))} // FIN|TEXT, MASKED
 
-	// ───── Step 3: Generate 4-byte random mask ─────
 	var mask [4]byte
 	_, _ = rand.Read(mask[:])
-	hdr = append(hdr, mask[:]...) // append masking key to header
+	hdr = append(hdr, mask[:]...)
 
-	// ───── Step 4: Mask payload in-place per RFC 6455 ─────
 	frame := append(hdr, payload...)
 	for i := range payload {
-		frame[len(hdr)+i] ^= mask[i&3]
+		frame[len(hdr)+i] ^= mask[i&3] // XOR mask per RFC 6455
 	}
 
-	// Final prebuilt frame: sent once after handshake
 	subscribePacket = frame
 }

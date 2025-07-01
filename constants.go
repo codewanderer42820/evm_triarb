@@ -1,87 +1,80 @@
-package main
-
-// constants.go — global runtime tunables and event field probes.
+// ─────────────────────────────────────────────────────────────────────────────
+// [Filename]: constants.go — Global ISR Tunables & Parsing Probes
 //
-// All constants are **intentionally oversized** for high-volume production use.
-// Sizing rationale is documented to justify over-provisioning.
+// Purpose:
+//   - Defines ISR-wide constants for deduplication, GC limits, and WebSocket caps
+//   - Includes unsafe JSON field match probes for zero-alloc scanning
+//
+// Notes:
+//   - All constants are aggressively over-provisioned for high-FPS chains (e.g. Polygon)
+//   - Probes are 8-byte aligned to support unsafe unaligned loads
+//   - Constants are sized with ≥10× margin for safety under burst loads
+//
+// ⚠️ No runtime logic here — all values must be compile-time resolvable
+// ─────────────────────────────────────────────────────────────────────────────
+
+package main
 
 // ───────────────────────────── Deduplication ──────────────────────────────
 
 const (
-	// ringBits controls the deduper ring size as 2^N slots.
-	// 2^18 = 262,144 entries = 8 MiB → stores ~24h of Polygon logs with 10× headroom.
+	// ringBits sets deduper size: 2^18 = 262,144 entries = 8 MiB
+	// Covers ~24h of Polygon logs @ peak, with 10× overcapacity
 	ringBits = 18
 
-	// maxReorg defines how deep a chain re-org can go before we discard history.
-	// Polygon rarely reorgs >3–4 blocks; 64 ensures 13+ minutes of cushion.
+	// maxReorg is the max reorg depth tolerated by deduper before eviction
+	// 64 blocks = ~13 min @ Polygon's 2.9s block time
 	maxReorg = 64
 )
 
 // ─────────────────────────── Memory Guardrails ─────────────────────────────
 
 const (
-	// heapSoftLimit triggers a manual GC cycle (non-blocking).
-	// Used to proactively trim memory under sustained pressure.
+	// heapSoftLimit triggers non-blocking GC when exceeded
 	heapSoftLimit = 128 << 20 // 128 MiB
 
-	// heapHardLimit triggers a panic if exceeded.
-	// Indicates a logic leak or infinite backlog. Safe to kill.
+	// heapHardLimit triggers panic — ISR logic considered failed
 	heapHardLimit = 512 << 20 // 512 MiB
 )
 
 // ───────────────────────── WebSocket Configuration ─────────────────────────
 
 const (
-	// wsDialAddr is the raw TCP dial target (no scheme).
-	// If running through Infura or proxy, ensure host+port match.
+	// wsDialAddr is the TCP address used for Infura dial (no schema)
 	wsDialAddr = "polygon-mainnet.infura.io:443"
 
-	// wsPath is the request path used during WebSocket upgrade.
-	// This embeds a project key inline; may be made configurable via env.
+	// wsPath is the HTTP upgrade path for WebSocket connection
 	wsPath = "/ws/v3/a2a3139d2ab24d59bed2dc3643664126"
 
-	// wsHost is used for TLS SNI — required for most CDN-backed endpoints.
+	// wsHost is the SNI hostname for TLS handshake
 	wsHost = "polygon-mainnet.infura.io"
 )
 
 // ──────────────────────── WebSocket Framing Caps ──────────────────────────
 
 const (
-	// maxFrameSize defines the buffer size for incoming WebSocket frames.
-	// Should be ≥ Infura's largest observed frame payload (max topics, logs).
+	// maxFrameSize is the raw payload buffer size
+	// 512 KiB covers max topic/data bloat in logs (worst-case from Infura)
 	maxFrameSize = 512 << 10 // 512 KiB
 
-	// frameCap controls the number of parsed WebSocket frames stored in ring.
-	// 262,144 entries cover ~2 minutes @ 2k FPS.
+	// frameCap defines number of retained parsed log frames
+	// Covers ~2 minutes @ 2k FPS
 	frameCap = 1 << 18 // 262,144
 )
 
 // ────────────────────── JSON Key Probes for Parsing ───────────────────────
-//
-// These 8-byte ASCII probes are used in unsafe scanning to match JSON keys.
-// Each one is loaded with an unaligned 8-byte read and must be ≥8 bytes.
-// These tags MUST be ASCII-safe and match only valid JSON field prefixes.
 
 var (
-	// Matches: `"address":"0xabc..."`
-	keyAddress = [8]byte{'"', 'a', 'd', 'd', 'r', 'e', 's', 's'}
+	// These 8-byte probes are used in unsafe JSON field detection.
+	// Each must be ASCII-safe and ≥8B to ensure alignment compatibility.
 
-	// Matches: `"data":"0xabc..."`
-	keyData = [8]byte{'"', 'd', 'a', 't', 'a', '"', ':', '"'}
-
-	// Matches: `"topics":[...`
-	keyTopics = [8]byte{'"', 't', 'o', 'p', 'i', 'c', 's', '"'}
-
-	// Matches: `"blockNumber":"0x..."`
-	keyBlockNumber = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'N', 'u'}
-
-	// Prefix match for `"transactionIndex":...`, validated via full 18B literal.
+	keyAddress          = [8]byte{'"', 'a', 'd', 'd', 'r', 'e', 's', 's'}
+	keyData             = [8]byte{'"', 'd', 'a', 't', 'a', '"', ':', '"'}
+	keyTopics           = [8]byte{'"', 't', 'o', 'p', 'i', 'c', 's', '"'}
+	keyBlockNumber      = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'N', 'u'}
 	keyTransactionIndex = [8]byte{'"', 't', 'r', 'a', 'n', 's', 'a', 'c'}
+	keyLogIndex         = [8]byte{'"', 'l', 'o', 'g', 'I', 'n', 'd', 'e'}
 
-	// Matches: `"logIndex":"0x..."`
-	keyLogIndex = [8]byte{'"', 'l', 'o', 'g', 'I', 'n', 'd', 'e'}
-
-	// sigSyncPrefix is used to quickly filter only Sync() logs from Uniswap V2.
-	// This is a content-based tag, not a JSON field name.
-	sigSyncPrefix = [8]byte{'1', 'c', '4', '1', '1', 'e', '9', 'a'} // topic0[3]
+	// Content signature for Uniswap V2 Sync() logs
+	sigSyncPrefix = [8]byte{'1', 'c', '4', '1', '1', 'e', '9', 'a'}
 )

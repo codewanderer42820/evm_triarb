@@ -1,5 +1,21 @@
-// ws_io.go — raw I/O helpers for the WebSocket transport.
-// Handles buffer management, handshake parsing, and zero-copy frame decoding.
+// ─────────────────────────────────────────────────────────────────────────────
+// [Filename]: ws_io.go — ISR-grade WebSocket frame I/O and buffer decoding
+//
+// Purpose:
+//   - Reads and parses RFC 6455 WebSocket frames from a raw TCP connection
+//   - Performs zero-alloc payload extraction and mask unwrapping
+//
+// Notes:
+//   - Supports only FIN=true, unfragmented, masked data frames (Infura style)
+//   - Buffer reuse guarantees zero heap pressure during all log ingestion
+//   - Frame ring (`wsFrames`) is used to queue zero-copy views into `wsBuf`
+//
+// Compiler Directives:
+//   - //go:nosplit
+//   - //go:registerparams
+//
+// ⚠️ Caller MUST not retain frame.Payload past next wsBuf overwrite
+// ─────────────────────────────────────────────────────────────────────────────
 
 package main
 
@@ -14,15 +30,12 @@ import (
 
 // ────────────────────────── Handshake Parsing ─────────────────────────────
 
-// hsBuf is a temporary 4 KiB buffer used to read the WebSocket upgrade response.
-// hsTerm is the CRLF–CRLF delimiter that terminates the HTTP header.
 var (
-	hsBuf  [4096]byte                       // 4 KiB scratch space
-	hsTerm = []byte{'\r', '\n', '\r', '\n'} // "\r\n\r\n"
+	hsBuf  [4096]byte                       // 4 KiB temporary buffer for HTTP headers
+	hsTerm = []byte{'\r', '\n', '\r', '\n'} // CRLF–CRLF delimiter
 )
 
-// readHandshake reads from the socket until the HTTP upgrade response is complete.
-// It returns the raw header bytes or an error if the header overflows or fails.
+// readHandshake reads until HTTP upgrade response is complete.
 //
 //go:nosplit
 //go:registerparams
@@ -30,9 +43,7 @@ func readHandshake(c net.Conn) ([]byte, error) {
 	n := 0
 	for {
 		if n == len(hsBuf) {
-			err := fmt.Errorf("handshake overflow: header exceeds %d bytes", len(hsBuf))
-			dropError("handshake overflow", err)
-			return nil, err
+			return nil, fmt.Errorf("handshake overflow: header exceeds %d bytes", len(hsBuf))
 		}
 		m, err := c.Read(hsBuf[n:])
 		if err != nil {
@@ -48,18 +59,16 @@ func readHandshake(c net.Conn) ([]byte, error) {
 
 // ────────────────────── Buffer Compaction Helper ──────────────────────────
 
-// ensureRoom guarantees at least `need` bytes are readable in `wsBuf`.
-// It compacts the buffer in-place if needed and refills via conn.Read().
+// ensureRoom guarantees ≥ `need` bytes in `wsBuf`, refilling from conn.
 //
 //go:registerparams
 func ensureRoom(conn net.Conn, need int) error {
-	// Reject frames larger than buffer size
 	if need > len(wsBuf) {
 		return fmt.Errorf("frame %d exceeds wsBuf capacity %d", need, len(wsBuf))
 	}
 
-	// Fill until at least `need` bytes available
 	for wsLen < need {
+		// compact if needed
 		if wsStart+wsLen == len(wsBuf) {
 			copy(wsBuf[0:], wsBuf[wsStart:wsStart+wsLen])
 			wsStart = 0
@@ -75,17 +84,13 @@ func ensureRoom(conn net.Conn, need int) error {
 
 // ───────────────────────────── Frame Decoder ──────────────────────────────
 
-// readFrame parses the next WebSocket frame from the TCP stream.
-// Assumes Infura-style:
-//   - Masked, non-fragmented data frames
-//   - ≤ maxFrameSize
-//   - PING/PONG/CLOSE frames are skipped
+// readFrame parses a single complete WebSocket frame from stream.
 //
 //go:nosplit
 //go:registerparams
 func readFrame(conn net.Conn) (*wsFrame, error) {
 	for {
-		// Step 1: Minimal 2-byte header
+		// Step 1: Minimal header (2 bytes)
 		if err := ensureRoom(conn, 2); err != nil {
 			return nil, err
 		}
@@ -97,20 +102,19 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 		masked := hdr1 & 0x80
 		plen7 := int(hdr1 & 0x7F)
 
-		// Step 2: Control frames
+		// Step 2: Handle control frames (skip)
 		switch opcode {
-		case 0x8: // CLOSE
-			return nil, io.EOF
-		case 0x9, 0xA: // PING / PONG
+		case 0x8:
+			return nil, io.EOF // CLOSE
+		case 0x9, 0xA:
 			wsStart += 2
 			wsLen -= 2
-			continue
+			continue // PING / PONG
 		}
 
-		// Step 3: Length
+		// Step 3: Decode payload length
 		offset := 2
 		var plen int
-
 		switch plen7 {
 		case 126:
 			if err := ensureRoom(conn, offset+2); err != nil {
@@ -132,7 +136,7 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 			plen = plen7
 		}
 
-		// Step 4: Masking key
+		// Step 4: Read masking key
 		var mkey uint32
 		if masked != 0 {
 			if err := ensureRoom(conn, offset+4); err != nil {
@@ -142,7 +146,7 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 			offset += 4
 		}
 
-		// Step 5: Payload
+		// Step 5: Read payload
 		if err := ensureRoom(conn, offset+plen); err != nil {
 			return nil, err
 		}
@@ -158,12 +162,12 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 			}
 		}
 
-		// Step 7: Reject fragmentation
+		// Step 7: Reject fragmented frames
 		if fin == 0 {
 			return nil, fmt.Errorf("fragmented frames not supported")
 		}
 
-		// Step 8: Store in ring
+		// Step 8: Store parsed frame in ring
 		idx := wsHead & (frameCap - 1)
 		f := &wsFrames[idx]
 		f.Payload = wsBuf[payloadStart:payloadEnd]
