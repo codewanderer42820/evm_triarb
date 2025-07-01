@@ -84,7 +84,9 @@ func handleFrame(p []byte) {
 				missing &^= wantBlk
 			}
 		case keyTransactionIndex:
-			if missing&wantTx != 0 && bytes.Equal(p[i:i+18], litTxIdx) {
+			if missing&wantTx != 0 &&
+				len(p)-i >= 18 && // 👈 bounds guard
+				bytes.Equal(p[i:i+18], litTxIdx) {
 				v.TxIndex = utils.SliceASCII(p, i+18+utils.FindQuote(p[i+18:]))
 				missing &^= wantTx
 			}
