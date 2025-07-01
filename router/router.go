@@ -148,12 +148,15 @@ type EdgeBinding struct { // 32 B
 
 // CoreExecutor owns per-core queues and fan-out tables.
 type CoreExecutor struct {
-	Heaps     []*quantumqueue.QuantumQueue // 24 B, not 8 B
-	Fanouts   [][]FanoutEntry              // 24 B
-	LocalIdx  localidx.Hash                // 2 KB (cold, never copied)
-	IsReverse bool                         // 1 B
-	_         [15]byte                     // pad → 24
-}
+	// ── hot header: always-touched fields, all within first 64 B ──
+	Heaps     []*quantumqueue.QuantumQueue // 24 B
+	Fanouts   [][]FanoutEntry              // 24 B  (offset 24 → 47)
+	IsReverse bool                         //  1 B  (offset 48)
+	_         [7]byte                      // pad → 56 B
+
+	// ── second line: 64-byte local index header (pointers & mask) ──
+	LocalIdx localidx.Hash // 64 B  (offset 64 → 127)
+} // total size = 128 B
 
 /*──────────────────────────── Global state ──────────────────────────────────*/
 
