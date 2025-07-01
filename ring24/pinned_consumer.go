@@ -43,12 +43,12 @@ const (
 //go:inline
 //go:registerparams
 func PinnedConsumer(
-	core int,                  // target logical CPU core (0-indexed)
-	ring *Ring,                // SPSC ring buffer
-	stop *uint32,              // stop flag: 1 = exit loop
-	hot *uint32,               // hot flag: 1 = producer active
-	handler func(*[24]byte),   // invoked on every Pop
-	done chan<- struct{},      // closed when consumer exits
+	core int, // target logical CPU core (0-indexed)
+	ring *Ring, // SPSC ring buffer
+	stop *uint32, // stop flag: 1 = exit loop
+	hot *uint32, // hot flag: 1 = producer active
+	handler func(*[24]byte), // invoked on every Pop
+	done chan<- struct{}, // closed when consumer exits
 ) {
 	go func() {
 		runtime.LockOSThread() // bind to single OS thread

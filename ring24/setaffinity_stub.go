@@ -11,7 +11,6 @@
 //   - Function is a no-op
 //   - Safe to call unconditionally
 //   - Fully inlined and stackless
-//   - Also defines cpuRelax fallback for compatibility
 //
 // Compiler directives:
 //   - nosplit: safe for ISR paths and spin loops
