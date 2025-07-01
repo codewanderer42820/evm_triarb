@@ -1,18 +1,23 @@
 // pinned_consumer.go — Dedicated consumer goroutine pinned to one CPU core.
 //
-// ⚠️ Footgun Mode: Designed for high-frequency tick pipelines with no safety net.
+// ⚠️ Footgun Mode: Designed for high-frequency ISR pipelines with zero margin for error.
+// Used in arbitrage/tick feed systems where latency budgets are sub-µs.
 //
 // Purpose:
-//   - Runs tight pop→callback loop locked to specific OS thread & CPU.
-//   - Spins during hot windows, backs off gently using cpuRelax() after inactivity.
+//   - Binds the goroutine to a physical CPU using LockOSThread + sched_setaffinity
+//   - Polls a local ring buffer and calls handler on each Pop
+//   - Spins while hot, relaxes politely on cooldown
 //
 // Assumptions:
-//   - Ring buffer must be SPSC and size-valid.
-//   - Payloads are [24]byte (cacheline-fit).
-//   - Caller controls lifecycle via atomic stop/hot flags.
-//   - Only call once per CPU — this is pinned.
+//   - Only one consumer per core — never duplicate
+//   - Caller owns lifecycle and ensures proper shutdown
+//   - Ring must be correctly constructed SPSC with [24]byte payloads
+//   - No bounds checks, no panic recovery, no fallback behavior
 //
-// No panics. No retries. No forgiveness.
+// Directives:
+//   - nosplit: guarantees stack won’t grow mid-loop
+//   - inline: encourages inlining of control logic
+//   - registerparams: ABI optimization (Go 1.21+)
 
 package ring24
 
@@ -22,64 +27,59 @@ import (
 )
 
 const (
-	hotWindow  = 5 * time.Second // how long to stay warm after traffic stops
-	spinBudget = 224             // # empty polls before we relax()
+	hotWindow  = 5 * time.Second // duration to stay hot after last hit
+	spinBudget = 224             // # of misses before calling cpuRelax
 )
 
-// PinnedConsumer runs a dedicated, CPU-bound goroutine locked to one core.
+// PinnedConsumer spins up a core-bound goroutine consuming from the ring.
 //
-// It repeatedly polls the ring for entries, invoking `handler(*[24]byte)`
-// when data is present. Exit is signaled by setting *stop = 1. External
-// activity hints can set *hot = 1 to keep it spinning longer.
+// It repeatedly polls the given SPSC ring. When data is available,
+// it invokes `handler(*[24]byte)` with the item. It stays hot while
+// *hot == 1 or until hotWindow timeout expires.
 //
-// When the consumer exits, the `done` channel is closed for cleanup.
-//
-// Compiler directives:
-//   - nosplit: avoid stack checks, safe due to fixed size and no runtime calls inside loop
-//   - inline: encourage aggressive inlining of caller
-//   - registerparams: pass arguments in registers (Go 1.21+ ABI)
+// Exit occurs when *stop is set to 1. Cleanup is signaled via `done <- struct{}{}`.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func PinnedConsumer(
-	core int, // Logical CPU core to bind this thread to
-	ring *Ring, // Ring to consume from (SPSC)
-	stop *uint32, // Pointer to atomic flag (set to 1 to stop)
-	hot *uint32, // Pointer to atomic flag (1 = producer active)
-	handler func(*[24]byte), // Callback invoked on each Pop
-	done chan<- struct{}, // Closed on graceful exit
+	core int,                  // target logical CPU core (0-indexed)
+	ring *Ring,                // SPSC ring buffer
+	stop *uint32,              // stop flag: 1 = exit loop
+	hot *uint32,               // hot flag: 1 = producer active
+	handler func(*[24]byte),   // invoked on every Pop
+	done chan<- struct{},      // closed when consumer exits
 ) {
 	go func() {
-		runtime.LockOSThread() // Pin this goroutine to a real OS thread
-		setAffinity(core)      // Linux-specific: syscall-based core pinning
+		runtime.LockOSThread() // bind to single OS thread
+		setAffinity(core)      // pin thread to desired CPU
 		defer func() {
 			runtime.UnlockOSThread()
-			close(done) // Notify caller that we’ve exited
+			close(done) // signal termination
 		}()
 
-		var miss int          // Empty poll streak counter
-		lastHit := time.Now() // Last time we successfully popped
+		var miss int
+		lastHit := time.Now()
 
 		for {
 			if *stop != 0 {
-				return // Exit cleanly on signal
+				return
 			}
 
 			if p := ring.Pop(); p != nil {
-				handler(p) // Call user logic
-				miss = 0   // Reset streak
+				handler(p)
+				miss = 0
 				lastHit = time.Now()
 				continue
 			}
 
 			if *hot == 1 || time.Since(lastHit) <= hotWindow {
-				continue // Stay hot
+				continue
 			}
 
 			if miss++; miss >= spinBudget {
 				miss = 0
-				cpuRelax() // Yield politely (PAUSE or Gosched)
+				cpuRelax()
 			}
 		}
 	}()

@@ -1,11 +1,14 @@
-// -----------------------------------------------------------------------------
-// ░░ Pinned Consumer Lifecycle Tests ░░
-// -----------------------------------------------------------------------------
+// pinned_consumer_test.go — Lifecycle tests for ISR-grade pinned consumers.
 //
-// These tests verify the correct lifecycle behavior of pinned consumers:
-//   - Push/poll semantics
-//   - Shutdown signaling
-//   - Hot window retention and cold resume
+// These tests validate core loop behavior of a core-bound ring consumer:
+//   - Correct callback triggering on Push
+//   - Shutdown via stop flag
+//   - Hot window preservation
+//   - Cold resume after idle
+//
+// All handlers used here are pure-memory side-effect callbacks.
+//
+// The tests are meant for real-time core-affine ISR systems with full SPSC discipline.
 
 package ring24
 
@@ -16,12 +19,10 @@ import (
 	"time"
 )
 
-// -----------------------------------------------------------------------------
-// ░░ Pinned Consumer Lifecycle Tests ░░
-// -----------------------------------------------------------------------------
+/*──────────────────── Helper: Launch Pinned Consumer ───────────────────*/
 
-// launch spins up a pinned consumer on its own thread.
-// Returns: stop, hot (control flags), and done (channel closed on exit).
+// launch spawns a pinned consumer for test.
+// Returns: stop flag, hot flag, done channel.
 func launch(r *Ring, fn func(*[24]byte)) (stop, hot *uint32, done chan struct{}) {
 	stop = new(uint32)
 	hot = new(uint32)
@@ -30,8 +31,10 @@ func launch(r *Ring, fn func(*[24]byte)) (stop, hot *uint32, done chan struct{})
 	return
 }
 
-// TestPinnedConsumerDeliversItem verifies handler fires once on push
-// and consumer shuts down cleanly on signal.
+/*──────────────────── Functional Behavior Tests ───────────────────*/
+
+// TestPinnedConsumerDeliversItem ensures callback fires on push
+// and shuts down cleanly via stop flag.
 func TestPinnedConsumerDeliversItem(t *testing.T) {
 	runtime.GOMAXPROCS(2)
 	r := New(8)
@@ -70,7 +73,7 @@ func TestPinnedConsumerDeliversItem(t *testing.T) {
 	}
 }
 
-// TestPinnedConsumerStopsNoWork confirms idle consumers exit cleanly.
+// TestPinnedConsumerStopsNoWork checks idle exit.
 func TestPinnedConsumerStopsNoWork(t *testing.T) {
 	r := New(4)
 	stop, _, done := launch(r, func(_ *[24]byte) {})
@@ -83,8 +86,9 @@ func TestPinnedConsumerStopsNoWork(t *testing.T) {
 	}
 }
 
-// TestPinnedConsumerHotWindow ensures consumer persists within hotWindow
-// even after producer stops.
+/*──────────────────── Hot Window Behavior ───────────────────*/
+
+// TestPinnedConsumerHotWindow ensures consumer remains live post-handler.
 func TestPinnedConsumerHotWindow(t *testing.T) {
 	r := New(4)
 	var hits atomic.Uint32
@@ -109,7 +113,7 @@ func TestPinnedConsumerHotWindow(t *testing.T) {
 	<-done
 }
 
-// TestPinnedConsumerBackoffThenWake tests cold-resume behavior after timeout.
+// TestPinnedConsumerBackoffThenWake ensures long idle is tolerated.
 func TestPinnedConsumerBackoffThenWake(t *testing.T) {
 	r := New(4)
 	var hits atomic.Uint32
@@ -133,11 +137,9 @@ func TestPinnedConsumerBackoffThenWake(t *testing.T) {
 	<-done
 }
 
-// -----------------------------------------------------------------------------
-// ░░ Late Consumer Start Test ░░
-// -----------------------------------------------------------------------------
+/*──────────────────── Delayed Start Behavior ───────────────────*/
 
-// TestDelayedConsumerStart validates a Push before consumer is active.
+// TestDelayedConsumerStart verifies post-push startup still receives message.
 func TestDelayedConsumerStart(t *testing.T) {
 	r := New(4)
 	var seen atomic.Bool

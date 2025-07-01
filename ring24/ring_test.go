@@ -1,11 +1,17 @@
-// -----------------------------------------------------------------------------
-// ░░ Constructor & Edge Case Validation ░░
-// -----------------------------------------------------------------------------
+// ring_test.go — Unit tests for ring24: lock-free 24-byte SPSC ring buffer
 //
-// Tests under this group verify ring buffer invariants:
-//   - Constructor rejects invalid sizes
-//   - Edge conditions (empty, full, wraparound)
-//   - Data integrity under interleaved push/pop patterns
+// These tests verify construction, full/empty logic, and interleaved operation
+// scenarios in real-time ISR-like conditions.
+//
+// Assumptions:
+//   - Tests only single-producer/single-consumer usage
+//   - Hot-spin, capacity, and lifecycle behaviors are validated
+//
+// Test Groups:
+//   - Constructor safety
+//   - Push/Pop roundtrip
+//   - Overflow and wraparound behavior
+//   - Interleaved and idle-state validation
 
 package ring24
 
@@ -14,12 +20,9 @@ import (
 	"time"
 )
 
-// -----------------------------------------------------------------------------
-// ░░ Constructor Tests ░░
-// -----------------------------------------------------------------------------
+/*──────────────────── Constructor & Sanity Tests ────────────────────*/
 
-// TestNewPanicsOnBadSize validates that the constructor panics
-// on non-power-of-two or non-positive sizes.
+// TestNewPanicsOnBadSize ensures constructor rejects invalid sizes.
 func TestNewPanicsOnBadSize(t *testing.T) {
 	bad := []int{0, 3, 1000}
 	for _, sz := range bad {
@@ -34,12 +37,9 @@ func TestNewPanicsOnBadSize(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// ░░ Core Ring Operation Tests ░░
-// -----------------------------------------------------------------------------
+/*──────────────────── Basic Operation Tests ────────────────────*/
 
-// TestPushPopRoundTrip confirms single element round-trip integrity
-// and checks that the ring is empty afterwards.
+// TestPushPopRoundTrip verifies one push-pop roundtrip and post-pop emptiness.
 func TestPushPopRoundTrip(t *testing.T) {
 	r := New(8)
 	val := &[24]byte{1, 2, 3}
@@ -56,8 +56,7 @@ func TestPushPopRoundTrip(t *testing.T) {
 	}
 }
 
-// TestPushFailsWhenFull fills the ring and verifies
-// that a full queue blocks further pushes.
+// TestPushFailsWhenFull ensures ring refuses overflow pushes.
 func TestPushFailsWhenFull(t *testing.T) {
 	r := New(4)
 	val := &[24]byte{7}
@@ -71,7 +70,7 @@ func TestPushFailsWhenFull(t *testing.T) {
 	}
 }
 
-// TestPopNil confirms that Pop returns nil on an empty ring.
+// TestPopNil ensures Pop returns nil when empty.
 func TestPopNil(t *testing.T) {
 	r := New(4)
 	if r.Pop() != nil {
@@ -79,8 +78,7 @@ func TestPopNil(t *testing.T) {
 	}
 }
 
-// TestPopWaitBlocksUntilItem verifies PopWait blocks until data arrives
-// and returns the correct value.
+// TestPopWaitBlocksUntilItem confirms PopWait blocks and returns next item.
 func TestPopWaitBlocksUntilItem(t *testing.T) {
 	r := New(2)
 	want := &[24]byte{42}
@@ -93,8 +91,7 @@ func TestPopWaitBlocksUntilItem(t *testing.T) {
 	}
 }
 
-// TestWrapAround ensures that cursor arithmetic works correctly
-// when wrapping around the ring buffer multiple times.
+// TestWrapAround checks correctness of pointer arithmetic over wrap cycles.
 func TestWrapAround(t *testing.T) {
 	const size = 4
 	r := New(size)
@@ -110,11 +107,9 @@ func TestWrapAround(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// ░░ Interleaved & Idle Edge Case Tests ░░
-// -----------------------------------------------------------------------------
+/*──────────────────── Interleaved & Idle Case Tests ────────────────────*/
 
-// TestPushPopInterleaved checks cursor safety under interleaved ops.
+// TestPushPopInterleaved ensures safety under alternating ops.
 func TestPushPopInterleaved(t *testing.T) {
 	r := New(8)
 	for i := 0; i < 64; i++ {
@@ -129,7 +124,7 @@ func TestPushPopInterleaved(t *testing.T) {
 	}
 }
 
-// TestPopAfterLongIdle ensures ring resumes correctly after inactivity.
+// TestPopAfterLongIdle ensures ring resumes after idle period.
 func TestPopAfterLongIdle(t *testing.T) {
 	r := New(2)
 	time.Sleep(50 * time.Millisecond)
@@ -143,7 +138,7 @@ func TestPopAfterLongIdle(t *testing.T) {
 	}
 }
 
-// TestPushDropOnOverflow simulates back-to-back Push beyond capacity.
+// TestPushDropOnOverflow simulates multiple over-capacity Push calls.
 func TestPushDropOnOverflow(t *testing.T) {
 	r := New(4)
 	val := &[24]byte{99}
@@ -158,11 +153,9 @@ func TestPushDropOnOverflow(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// ░░ Additional Edge Case Tests ░░
-// -----------------------------------------------------------------------------
+/*──────────────────── Extended Edge Case Tests ────────────────────*/
 
-// TestDoublePopWithoutPush confirms repeated pops on empty ring are safe.
+// TestDoublePopWithoutPush checks double-read is safe.
 func TestDoublePopWithoutPush(t *testing.T) {
 	r := New(4)
 	if r.Pop() != nil {
@@ -173,7 +166,7 @@ func TestDoublePopWithoutPush(t *testing.T) {
 	}
 }
 
-// TestFullWrapPushPop verifies full ring wrap-around under repeated push/pop cycles.
+// TestFullWrapPushPop performs full-capacity wrap cycles.
 func TestFullWrapPushPop(t *testing.T) {
 	const size = 4
 	r := New(size)
@@ -189,7 +182,7 @@ func TestFullWrapPushPop(t *testing.T) {
 	}
 }
 
-// TestPopImmediateReuse ensures Pop-returned pointers are valid before reuse.
+// TestPopImmediateReuse checks pointer safety on reuse.
 func TestPopImmediateReuse(t *testing.T) {
 	r := New(2)
 	val1 := &[24]byte{42}
@@ -201,7 +194,7 @@ func TestPopImmediateReuse(t *testing.T) {
 	if ptr == nil || *ptr != *val1 {
 		t.Fatal("First Pop mismatch")
 	}
-	copy := *ptr // Copy before next Push
+	copy := *ptr
 	if !r.Push(val2) {
 		t.Fatal("Push val2 failed")
 	}

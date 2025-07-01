@@ -1,4 +1,22 @@
-// setaffinity_linux.go — Linux-only binding for sched_setaffinity(2)
+// setaffinity_linux.go — Linux-specific syscall wrapper for sched_setaffinity(2)
+//
+// Used to pin the current OS thread to a specific logical CPU.
+// Required by ISR-grade pinned goroutines to maintain strict core-locality.
+//
+// Purpose:
+//   - Eliminates false sharing and scheduling jitter
+//   - Keeps cache-hot consumer goroutines fixed to a core
+//   - Zero-allocation, syscall-only approach
+//
+// Requirements:
+//   - Must run on Linux
+//   - Only used when `PinnedConsumer` is active
+//
+// Compiler directives:
+//   - nosplit: syscall-safe, no stack split allowed
+//   - inline: likely to be dropped into goroutine prelude
+//   - registerparams: ABI-optimized
+//
 //go:build linux && !tinygo
 
 package ring24
@@ -8,9 +26,9 @@ import (
 	"unsafe"
 )
 
-// cpuMasks holds precomputed one-word masks (bit = 1 << cpu) for CPUs 0–63.
-// Each is statically initialized so it can be passed directly to the syscall.
-// This avoids runtime heap allocations and stays entirely nosplit-friendly.
+// cpuMasks contains precomputed one-word bitmasks for CPUs 0–63.
+// These masks are static, stack-resident, and avoid heap allocation.
+// One mask per logical CPU: mask[i] = 1 << i
 var cpuMasks = [...][1]uintptr{
 	{1 << 0}, {1 << 1}, {1 << 2}, {1 << 3}, {1 << 4}, {1 << 5}, {1 << 6}, {1 << 7},
 	{1 << 8}, {1 << 9}, {1 << 10}, {1 << 11}, {1 << 12}, {1 << 13}, {1 << 14}, {1 << 15},
@@ -22,30 +40,21 @@ var cpuMasks = [...][1]uintptr{
 	{1 << 56}, {1 << 57}, {1 << 58}, {1 << 59}, {1 << 60}, {1 << 61}, {1 << 62}, {1 << 63},
 }
 
-// setAffinity binds the current OS thread to the specified logical CPU.
-//
-// On valid Linux platforms, this is implemented via syscall.SYS_SCHED_SETAFFINITY.
-// It uses a precomputed static mask (1<<cpu) to avoid heap allocations.
-//
-// Compiler directives:
-//   - nosplit: safe because we use static memory and make no heap calls
-//   - inline: encourages inlining into goroutine prologues like PinnedConsumer
+// setAffinity pins the current thread to the specified logical CPU.
+// On failure, the request is silently ignored (for safety).
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func setAffinity(cpu int) {
-	// Bounds check to ensure we don't access invalid mask
 	if cpu < 0 || cpu >= len(cpuMasks) {
-		return
+		return // invalid CPU
 	}
 	mask := &cpuMasks[cpu]
-
-	// sched_setaffinity(pid=0 → this thread, len=8, mask=ptr)
 	_, _, _ = syscall.RawSyscall(
 		syscall.SYS_SCHED_SETAFFINITY,
 		0,                               // current thread
-		uintptr(unsafe.Sizeof(mask[0])), // 8-byte bitmask
-		uintptr(unsafe.Pointer(mask)),
+		uintptr(unsafe.Sizeof(mask[0])), // bitmask length (8 bytes)
+		uintptr(unsafe.Pointer(mask)),   // pointer to mask
 	)
 }

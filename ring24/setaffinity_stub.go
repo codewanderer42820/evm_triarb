@@ -1,18 +1,26 @@
-// setaffinity_stub.go — No-op fallback for non-Linux or TinyGo builds
+// setaffinity_stub.go — No-op fallback for setAffinity on unsupported targets
+//
+// This stub is used when core pinning via sched_setaffinity is unavailable:
+//   - Non-Linux platforms (e.g. macOS, Windows, BSD)
+//   - TinyGo or restricted toolchains
+//
+// It ensures the API surface remains valid and eliminates the need for
+// conditional compilation in higher-level code.
+//
+// Behavior:
+//   - Function is a no-op
+//   - Safe to call unconditionally
+//   - Fully inlined and stackless
+//   - Also defines cpuRelax fallback for compatibility
+//
+// Compiler directives:
+//   - nosplit: safe for ISR paths and spin loops
+//   - inline: ensures total compiler elimination
+//
 //go:build !linux || tinygo
 
 package ring24
 
-// setAffinity is a no-op stub used when the Linux syscall version
-// is unavailable (non-Linux OS or restricted build toolchains).
-//
-// This allows the same API to be used across all targets without
-// conditional code in the caller — simply call unconditionally.
-//
-// Compiler directives:
-//   - nosplit: avoids stack growth for safe substitution in tight loops
-//   - inline: ensures complete elimination by inlining away as no-op
-//
 //go:nosplit
 //go:inline
 func setAffinity(cpu int) {}
