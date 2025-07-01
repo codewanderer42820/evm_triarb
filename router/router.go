@@ -152,7 +152,7 @@ type CoreExecutor struct {
 	Heaps     []*quantumqueue.QuantumQueue // 24 B
 	Fanouts   [][]FanoutEntry              // 24 B  (offset 24 → 47)
 	IsReverse bool                         //  1 B  (offset 48)
-	_         [7]byte                      // pad → 56 B
+	_         [15]byte                     // pad → 64 B
 
 	// ── second line: 64-byte local index header (pointers & mask) ──
 	LocalIdx localidx.Hash // 64 B  (offset 64 → 127)
