@@ -15,6 +15,8 @@
 
 package main
 
+import "unsafe"
+
 // ───────────────────────────── Deduplication ──────────────────────────────
 
 const (
@@ -74,6 +76,10 @@ var (
 	keyBlockNumber      = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'N', 'u'}
 	keyTransactionIndex = [8]byte{'"', 't', 'r', 'a', 'n', 's', 'a', 'c'}
 	keyLogIndex         = [8]byte{'"', 'l', 'o', 'g', 'I', 'n', 'd', 'e'}
+
+	// txIdxLo/Hi form a 16-byte inline match for "transactionIndex" (8+8 split)
+	txIdxLo = *(*uint64)(unsafe.Pointer(&keyTransactionIndex))
+	txIdxHi = *(*uint64)(unsafe.Pointer(&[8]byte{'t', 'i', 'o', 'n', 'I', 'n', 'd', 'e'}))
 
 	// Content signature for Uniswap V2 Sync() logs
 	sigSyncPrefix = [8]byte{'1', 'c', '4', '1', '1', 'e', '9', 'a'}
