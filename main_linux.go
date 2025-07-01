@@ -35,6 +35,8 @@ var (
 	memstats runtime.MemStats          // used for heap pressure tracking
 )
 
+//go:inline
+//go:registerparams
 func main() {
 	debug.SetGCPercent(-1)
 	runtime.LockOSThread()
@@ -59,7 +61,7 @@ func main() {
 
 // runPublisher builds the TLS→WS→epoll read pipeline
 //
-//go:nosplit
+//go:inline
 //go:registerparams
 func runPublisher() error {
 	// ───── Step 1: Dial TCP and wrap in TLS ─────

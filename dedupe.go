@@ -42,6 +42,9 @@ type dedupeSlot struct {
 // Deduper is a lock-free circular ring for recent log identities.
 // Eviction and overwrite strategy ensures reorg-tolerant freshness.
 // Total memory = (1 << ringBits) * 32B → 8 MiB at ringBits=18.
+//
+//go:notinheap
+//go:align 64
 type Deduper struct {
 	buf [1 << ringBits]dedupeSlot // deduplication ring buffer (power-of-two sized)
 }

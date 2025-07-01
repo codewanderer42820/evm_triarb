@@ -39,6 +39,7 @@ var (
 // If the frame contains a valid UniswapV2 Sync() event, it is deduped and printed.
 //
 //go:nosplit
+//go:inline
 //go:registerparams
 func handleFrame(p []byte) {
 	var v types.LogView
@@ -129,6 +130,8 @@ func handleFrame(p []byte) {
 
 // emitLog prints a deduplicated event in ASCII, converting all []byte to string.
 //
+//go:nosplit
+//go:inline
 //go:registerparams
 func emitLog(v *types.LogView) {
 	fmt.Println("[EVENT]")

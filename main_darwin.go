@@ -35,6 +35,8 @@ var (
 	memstats runtime.MemStats        // tracked heap stats for GC pressure
 )
 
+//go:inline
+//go:registerparams
 func main() {
 	debug.SetGCPercent(-1) // disable GC entirely (manual only)
 	runtime.LockOSThread() // pin this goroutine to avoid preemption
@@ -59,7 +61,7 @@ func main() {
 
 // runPublisher establishes the full WS + kqueue + parser pipeline.
 //
-//go:nosplit
+//go:inline
 //go:registerparams
 func runPublisher() error {
 	// ───── Step 1: Dial raw TCP and wrap in TLS ─────

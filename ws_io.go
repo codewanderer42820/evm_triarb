@@ -38,6 +38,7 @@ var (
 // readHandshake reads until HTTP upgrade response is complete.
 //
 //go:nosplit
+//go:inline
 //go:registerparams
 func readHandshake(c net.Conn) ([]byte, error) {
 	n := 0
@@ -61,6 +62,8 @@ func readHandshake(c net.Conn) ([]byte, error) {
 
 // ensureRoom guarantees ≥ `need` bytes in `wsBuf`, refilling from conn.
 //
+//go:nosplit
+//go:inline
 //go:registerparams
 func ensureRoom(conn net.Conn, need int) error {
 	if need > len(wsBuf) {
@@ -87,6 +90,7 @@ func ensureRoom(conn net.Conn, need int) error {
 // readFrame parses a single complete WebSocket frame from stream.
 //
 //go:nosplit
+//go:inline
 //go:registerparams
 func readFrame(conn net.Conn) (*wsFrame, error) {
 	for {

@@ -44,16 +44,22 @@ var (
 
 // wsFrame holds a parsed WebSocket payload (view into wsBuf).
 // `End` is used to reclaim space after processing.
+//
+//go:notinheap
+//go:align 64
 type wsFrame struct {
-	Payload []byte // log payload (zero-copy)
-	Len     int    // byte length
-	End     int    // end offset in wsBuf
+	Payload []byte // zero-copy payload view into wsBuf
+	Len     int    // payload length
+	End     int    // wsBuf offset for reclaim
+
+	_ [3]uint64 // 24-byte pad to bring struct to 64B
 }
 
 // init prebuilds the upgrade request and masked subscribe frame.
 // Ensures fully deterministic runtime state — no allocs during execution.
 //
 //go:nosplit
+//go:inline
 //go:registerparams
 func init() {
 	// ───── Step 1: Generate Sec-WebSocket-Key ─────
