@@ -14,8 +14,6 @@
 //   - Push fails if full (returns false), Pop returns nil if empty
 //   - Ring must be sized correctly at construction
 //   - All operations are wait-free under correct use
-//
-//go:build amd64 || arm64 || riscv64
 
 package ring24
 
