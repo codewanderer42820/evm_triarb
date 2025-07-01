@@ -47,13 +47,13 @@ func handleFrame(p []byte) {
 	// Bitmask to track needed fields
 	const (
 		wantAddr = 1 << iota
-		wantData
 		wantTopics
+		wantData
 		wantBlk
 		wantTx
 		wantLog
 	)
-	missing := wantAddr | wantData | wantTopics | wantBlk | wantTx | wantLog
+	missing := wantAddr | wantTopics | wantData | wantBlk | wantTx | wantLog
 
 	// 8-byte aligned scan across frame buffer
 	for i := 0; i <= len(p)-8 && missing != 0; i++ {
@@ -65,11 +65,6 @@ func handleFrame(p []byte) {
 				v.Addr = utils.SliceASCII(p, i+8+utils.FindQuote(p[i+8:]))
 				missing &^= wantAddr
 			}
-		case keyData:
-			if missing&wantData != 0 {
-				v.Data = utils.SliceASCII(p, i+7)
-				missing &^= wantData
-			}
 		case keyTopics:
 			if missing&wantTopics != 0 {
 				v.Topics = utils.SliceJSONArray(p, i+8+utils.FindBracket(p[i+8:]))
@@ -77,6 +72,11 @@ func handleFrame(p []byte) {
 					return // early exit: not Sync()
 				}
 				missing &^= wantTopics
+			}
+		case keyData:
+			if missing&wantData != 0 {
+				v.Data = utils.SliceASCII(p, i+7)
+				missing &^= wantData
 			}
 		case keyBlockNumber:
 			if missing&wantBlk != 0 {
