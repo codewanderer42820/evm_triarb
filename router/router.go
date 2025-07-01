@@ -150,7 +150,7 @@ type EdgeBinding struct { // 32 B
 type CoreExecutor struct {
 	Heaps     []*quantumqueue.QuantumQueue // 24 B, not 8 B
 	Fanouts   [][]FanoutEntry              // 24 B
-	LocalIdx  [1024]uint16                 // 2 KB (cold, never copied)
+	LocalIdx  localidx.Hash                // 2 KB (cold, never copied)
 	IsReverse bool                         // 1 B
 	_         [15]byte                     // pad → 24
 }
@@ -247,7 +247,7 @@ func shardWorker(coreID, half int, in <-chan PairShard) {
 	}
 
 	ring24.PinnedConsumer(coreID, rings[coreID], new(uint32), new(uint32),
-		func(p *[56]byte) { handleTick(ex, (*TickUpdate)(unsafe.Pointer(p))) },
+		func(p *[24]byte) { handleTick(ex, (*TickUpdate)(unsafe.Pointer(p))) },
 		make(chan struct{}))
 }
 
@@ -343,7 +343,7 @@ func DispatchUpdate(v *types.LogView) {
 	r1 := utils.LoadBE64(v.Data[56:])
 	tick, _ := fastuni.Log2ReserveRatio(r0, r1)
 
-	var msg [56]byte
+	var msg [24]byte
 	upd := (*TickUpdate)(unsafe.Pointer(&msg))
 	upd.Pair, upd.FwdTick, upd.RevTick = pid, tick, -tick
 
