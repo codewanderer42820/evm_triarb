@@ -1,8 +1,23 @@
-// fastuni_stress_test.go — parallel randomized correctness sweeps for reserve-ratio routines.
+// ─────────────────────────────────────────────────────────────────────────────
+// [Filename]: fastuni_stress_test.go — parallel randomized stress validation
 //
-// This file performs large-scale randomized validation for logarithmic ratio
-// functions (LnReserveRatio and Log2ReserveRatio) across various input regimes.
-// All checks compare implementation outputs to math.{Log,Log2} ground truth.
+// Purpose:
+//   - Validates `LnReserveRatio` and `Log2ReserveRatio` via randomized sweeping
+//   - Confirms output accuracy over millions/billions/trillions of ratio pairs
+//
+// Modes:
+//   - SMALL:    a ≈ b (tiny deltas, sensitive to float errors)
+//   - MEDIUM:   a = b × [8–32] (common ratio forms)
+//   - LARGE:    a ≫ b (shifted magnitude test)
+//
+// Infrastructure:
+//   - Parallel worker threads using GOMAXPROCS
+//   - Safe fail-on-first-error via `sync.Once`
+//   - Uses deterministic seed per regime, thread, and size
+//
+// ⚠️ These tests are compute-heavy and long-running — 1B/1T tests are gated
+//    behind `testing.Short()` and should be run selectively.
+// ─────────────────────────────────────────────────────────────────────────────
 
 package fastuni
 
@@ -15,28 +30,33 @@ import (
 	"testing"
 )
 
-/*─────────────────── constants ───────────────────*/
+/*──────────────────────────────────────────────────────────────────────────────
+  📦 Constants and Tuning
+──────────────────────────────────────────────────────────────────────────────*/
 
 const (
 	million  = 1_000_000
 	billion  = 1_000_000_000
 	trillion = 1_000_000_000_000
-	seedBase = 0x5eed // base for per-thread deterministic seeds
+
+	seedBase = 0x5eed // per-regime seed base
 )
 
-/*─────────────────── input generators ───────────────────*/
+/*──────────────────────────────────────────────────────────────────────────────
+  🔧 Input Generators by Regime
+──────────────────────────────────────────────────────────────────────────────*/
 
-// drawSmall returns (a, b) pairs with small differences (a ≈ b)
+// drawSmall returns (a ≈ b), exercising log1p path
 func drawSmall(r *rand.Rand) (a, b uint64) {
 	base := r.Uint64()%1_000_000_000_000 + 1 // avoid 0
-	delta := r.Uint64()%1_000_000 + 1        // small delta
+	delta := r.Uint64()%1_000_000 + 1        // small offset
 	if r.Intn(2) == 0 {
 		return base + delta, base
 	}
 	return base, base + delta
 }
 
-// drawMedium returns (a, b) pairs with moderate multiplicative gaps
+// drawMedium returns (a = b × [8–32]), moderate gaps
 func drawMedium(r *rand.Rand) (a, b uint64) {
 	base := r.Uint64()%1_000_000_000 + 1
 	factor := uint64(r.Intn(25) + 8)
@@ -46,7 +66,7 @@ func drawMedium(r *rand.Rand) (a, b uint64) {
 	return base, base * factor
 }
 
-// drawLarge returns (a, b) pairs with large magnitude differences
+// drawLarge returns (a ≫ b), wide magnitude ratio
 func drawLarge(r *rand.Rand) (a, b uint64) {
 	base := r.Uint64()%1_000_000 + 1
 	shift := uint(r.Intn(40) + 24)
@@ -60,9 +80,11 @@ func drawLarge(r *rand.Rand) (a, b uint64) {
 	return base, high
 }
 
-/*─────────────────── generic sweeping engine ───────────────────*/
+/*──────────────────────────────────────────────────────────────────────────────
+  🔬 Generic Parallel Stress Engine
+──────────────────────────────────────────────────────────────────────────────*/
 
-// sweepN tests 'impl(a,b)' against 'gold(a/b)' for N samples, possibly in parallel.
+// sweepN validates impl(a, b) ≈ gold(a/b) across N samples
 func sweepN(t *testing.T, regime string, n int,
 	gen func(*rand.Rand) (uint64, uint64),
 	gold func(float64) float64,
@@ -114,7 +136,7 @@ func sweepN(t *testing.T, regime string, n int,
 	}
 }
 
-// singleThreadSweep is a fallback sweep implementation without parallelism
+// singleThreadSweep is used when parallelism is not worthwhile
 func singleThreadSweep(t *testing.T, regime string, n int,
 	gen func(*rand.Rand) (uint64, uint64),
 	gold func(float64) float64,
@@ -134,7 +156,9 @@ func singleThreadSweep(t *testing.T, regime string, n int,
 	}
 }
 
-/*─────────────────── 1M-scale tests ───────────────────*/
+/*──────────────────────────────────────────────────────────────────────────────
+  🧪 1M-Scale Sweeps (default)
+──────────────────────────────────────────────────────────────────────────────*/
 
 func TestLnReserveRatioSmall1M(t *testing.T) {
 	sweepN(t, "SMALL", million, drawSmall, math.Log, LnReserveRatio)
@@ -145,6 +169,7 @@ func TestLnReserveRatioMedium1M(t *testing.T) {
 func TestLnReserveRatioLarge1M(t *testing.T) {
 	sweepN(t, "LARGE", million, drawLarge, math.Log, LnReserveRatio)
 }
+
 func TestLog2ReserveRatioSmall1M(t *testing.T) {
 	sweepN(t, "SMALL", million, drawSmall, math.Log2, Log2ReserveRatio)
 }
@@ -155,9 +180,9 @@ func TestLog2ReserveRatioLarge1M(t *testing.T) {
 	sweepN(t, "LARGE", million, drawLarge, math.Log2, Log2ReserveRatio)
 }
 
-/*─────────────────── 1B-scale tests ───────────────────*/
-
-// These are skipped by default when `go test -short` is used.
+/*──────────────────────────────────────────────────────────────────────────────
+  🧪 1B-Scale Sweeps (requires long mode)
+──────────────────────────────────────────────────────────────────────────────*/
 
 func TestLnReserveRatioSmall1B(t *testing.T) {
 	if testing.Short() {
@@ -196,43 +221,43 @@ func TestLog2ReserveRatioLarge1B(t *testing.T) {
 	sweepN(t, "LARGE", billion, drawLarge, math.Log2, Log2ReserveRatio)
 }
 
-/*─────────────────── 1T-scale tests ───────────────────*/
-
-// These are opt-in only. Not recommended for routine testing.
+/*──────────────────────────────────────────────────────────────────────────────
+  🧪 1T-Scale Sweeps (manual trigger only)
+──────────────────────────────────────────────────────────────────────────────*/
 
 func TestLnReserveRatioSmallTrillion(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skip Trillion SMALL sweep in short mode")
+		t.Skip("skip 1T SMALL sweep in short mode")
 	}
 	sweepN(t, "SMALL", trillion, drawSmall, math.Log, LnReserveRatio)
 }
 func TestLnReserveRatioMediumTrillion(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skip Trillion MEDIUM sweep in short mode")
+		t.Skip("skip 1T MEDIUM sweep in short mode")
 	}
 	sweepN(t, "MEDIUM", trillion, drawMedium, math.Log, LnReserveRatio)
 }
 func TestLnReserveRatioLargeTrillion(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skip Trillion LARGE sweep in short mode")
+		t.Skip("skip 1T LARGE sweep in short mode")
 	}
 	sweepN(t, "LARGE", trillion, drawLarge, math.Log, LnReserveRatio)
 }
 func TestLog2ReserveRatioSmallTrillion(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skip Trillion SMALL sweep in short mode")
+		t.Skip("skip 1T SMALL sweep in short mode")
 	}
 	sweepN(t, "SMALL", trillion, drawSmall, math.Log2, Log2ReserveRatio)
 }
 func TestLog2ReserveRatioMediumTrillion(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skip Trillion MEDIUM sweep in short mode")
+		t.Skip("skip 1T MEDIUM sweep in short mode")
 	}
 	sweepN(t, "MEDIUM", trillion, drawMedium, math.Log2, Log2ReserveRatio)
 }
 func TestLog2ReserveRatioLargeTrillion(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skip Trillion LARGE sweep in short mode")
+		t.Skip("skip 1T LARGE sweep in short mode")
 	}
 	sweepN(t, "LARGE", trillion, drawLarge, math.Log2, Log2ReserveRatio)
 }

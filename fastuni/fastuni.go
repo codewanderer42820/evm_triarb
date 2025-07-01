@@ -1,14 +1,25 @@
-// Package fastuni provides high-performance logarithm and ratio routines
-// for Ethereum-compatible fixed-point arithmetic.
+// ─────────────────────────────────────────────────────────────────────────────
+// [Filename]: fastuni.go — ISR-grade logarithmic utilities for EVM math
 //
-// The internal functions are tuned for latency-critical execution,
-// and therefore omit safety checks. Exported wrappers should be used
-// for validated, error-checked usage.
+// Purpose:
+//   - Provides high-throughput fixed-point log₂/ln computation for Uniswap-style
+//     Q64.96 prices and ratios
 //
-// ⚠️ Internal functions require the caller to uphold preconditions.
-//   - Inputs must be non-zero
-//   - Inputs must be within representable numeric ranges
-//   - Invalid inputs may cause panics or incorrect results
+// Notes:
+//   - Internal functions are footgun-mode (no checks, fast paths only)
+//   - All exported functions validate inputs and handle special cases (e.g. r ≈ 0)
+//   - Designed for sub-10ns tick processing in ISR pipelines
+//
+// Compiler Directives:
+//   - //go:nosplit
+//   - //go:inline
+//   - //go:registerparams
+//   - //go:notinheap (for Uint128 struct)
+//   - //go:align 64 (for alignment-critical structs)
+//
+// ⚠️ Internal routines assume valid input and WILL panic or misbehave otherwise.
+// ─────────────────────────────────────────────────────────────────────────────
+
 package fastuni
 
 import (
@@ -17,30 +28,29 @@ import (
 	"math/bits"
 )
 
-// -----------------------------------------------------------------------------
-// Error definitions
-// -----------------------------------------------------------------------------
+/*──────────────────────────────────────────────────────────────────────────────
+  📦 Errors: exported sentinel values for input validation
+──────────────────────────────────────────────────────────────────────────────*/
 
 var (
-	// ErrZeroValue is returned if any input is zero when non-zero is required
+	// ErrZeroValue indicates input value was zero (illegal for log)
 	ErrZeroValue = errors.New("input value must be non-zero")
 
-	// ErrOutOfRange is returned when an input is outside a valid domain
-	// For example: ln1pf(f) with f <= -1, or conv being NaN/Inf
+	// ErrOutOfRange indicates domain error (e.g. ln1pf(f) with f ≤ -1)
 	ErrOutOfRange = errors.New("input out of valid range")
 )
 
-// -----------------------------------------------------------------------------
-// Constants and types
-// -----------------------------------------------------------------------------
+/*──────────────────────────────────────────────────────────────────────────────
+  🔧 Constants: tuning values for polynomial and IEEE 754 manipulation
+──────────────────────────────────────────────────────────────────────────────*/
 
 const (
-	ln2    = 0x1.62e42fefa39efp-1 // ln(2), used to convert log₂ to natural log
-	invLn2 = 1 / ln2              // 1/ln(2), used to convert ln to log₂
+	ln2    = 0x1.62e42fefa39efp-1 // ln(2)
+	invLn2 = 1 / ln2              // 1/ln(2)
 )
 
 const (
-	// Polynomial coefficients for ln(1+f) approximation using Horner's method
+	// Horner’s method: ln(1+f) ≈ f·(c₁ + f·(c₂ + f·(…)))
 	c1 = +0.9990102443771056
 	c2 = -0.4891559897950173
 	c3 = +0.2833026021012029
@@ -48,10 +58,18 @@ const (
 	c5 = +0.0301022874045224
 )
 
-const fracMask uint64 = (1<<52 - 1) // Mask to isolate 52-bit fraction
+const fracMask uint64 = (1<<52 - 1) // Extracts fraction for IEEE float tricks
 
-// Uint128 represents an unsigned 128-bit integer.
-// Used to hold fixed-point Q64.96 Uniswap-style prices.
+/*──────────────────────────────────────────────────────────────────────────────
+  🧱 Type: 128-bit unsigned integer (Q64.96 fixed-point layout)
+──────────────────────────────────────────────────────────────────────────────*/
+
+// Uint128 is a high-precision unsigned integer.
+// Used to represent Q64.96 fixed-point prices (Uniswap V3).
+//
+// Layout:
+//   - Hi: high 64 bits
+//   - Lo: low 64 bits
 //
 //go:notinheap
 //go:align 64
@@ -60,16 +78,16 @@ type Uint128 struct {
 	Lo uint64 // low 64 bits
 }
 
-// -----------------------------------------------------------------------------
-// Internal helpers (high-performance, no safety checks)
-// -----------------------------------------------------------------------------
-// ⚠️ Callers must ensure:
-//    - All inputs are valid (e.g., x > 0, f > -1)
-//    - No zero values or NaNs are passed
-// Use exported wrappers for validated behavior.
+/*──────────────────────────────────────────────────────────────────────────────
+  🔩 Internal Routines: unsafe, high-performance, no checks
+──────────────────────────────────────────────────────────────────────────────*/
+// ⚠️ Internal routines:
+//    - Assume valid non-zero, in-range input
+//    - Will panic or corrupt if misused
+//    - Safe wrappers follow below
 
-// ln1pf approximates ln(1+f) for f > -1 using a 5th-degree polynomial.
-// Assumes |f| ≪ 1 for accuracy.
+// ln1pf returns ln(1+f) using a 5th-order Horner polynomial.
+// Accurate for |f| ≪ 1.
 //
 //go:nosplit
 //go:inline
@@ -82,51 +100,50 @@ func ln1pf(f float64) float64 {
 	return f * t
 }
 
-// log2u64 computes log₂(x) for x > 0 using bit tricks and ln1pf polynomial.
+// log2u64 computes log₂(x) using MSB location and ln1pf normalization.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func log2u64(x uint64) float64 {
-	// Preconditions: x > 0
-	k := 63 - bits.LeadingZeros64(x) // Find most significant bit
-	lead := uint64(1) << k           // Isolate MSB
-	frac := x ^ lead                 // Remove MSB to get fractional part
+	// ⚠️ Precondition: x > 0
+	k := 63 - bits.LeadingZeros64(x)
+	lead := uint64(1) << k
+	frac := x ^ lead
 
-	// Normalize frac into mantissa-like float64
 	if k > 52 {
 		frac >>= uint(k - 52)
 	} else {
 		frac <<= uint(52 - k)
 	}
 
-	mBits := (uint64(1023) << 52) | (frac & fracMask) // Construct IEEE 754 float64
-	m := math.Float64frombits(mBits)                  // Normalized: 1 ≤ m < 2
+	mBits := (uint64(1023) << 52) | (frac & fracMask)
+	m := math.Float64frombits(mBits) // Normalized mantissa in [1, 2)
 
 	return float64(k) + ln1pf(m-1)*invLn2
 }
 
-// log2u128 computes log₂(u) for u > 0 using float64 widening and polynomial approx.
+// log2u128 computes log₂ of a 128-bit integer via widening and normalization.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func log2u128(u Uint128) float64 {
-	// Preconditions: u.Hi ≠ 0 or u.Lo ≠ 0
+	// ⚠️ Precondition: u ≠ 0
 	if u.Hi == 0 {
 		return log2u64(u.Lo)
 	}
-	k := 127 - bits.LeadingZeros64(u.Hi)      // Find top bit in high 64 bits
-	x := float64(u.Hi)*0x1p64 + float64(u.Lo) // Promote to 64-bit float
+	k := 127 - bits.LeadingZeros64(u.Hi)
+	x := float64(u.Hi)*0x1p64 + float64(u.Lo)
 	exp := math.Float64frombits(uint64(1023+k) << 52)
 	return float64(k) + ln1pf(x/exp-1)*invLn2
 }
 
-// -----------------------------------------------------------------------------
-// Exported safe wrappers (error-checked)
-// -----------------------------------------------------------------------------
+/*──────────────────────────────────────────────────────────────────────────────
+  📤 Safe Wrappers: exported, validated, panic-free
+──────────────────────────────────────────────────────────────────────────────*/
 
-// Log2ReserveRatio returns log₂(a / b), with safety checks for zero inputs.
+// Log2ReserveRatio returns log₂(a / b), with safety validation.
 //
 //go:nosplit
 //go:inline
@@ -138,8 +155,8 @@ func Log2ReserveRatio(a, b uint64) (float64, error) {
 	return log2u64(a) - log2u64(b), nil
 }
 
-// LnReserveRatio returns ln(a / b) with fallback to log2 path for large deltas.
-// Automatically uses math.Log1p for near-equal a and b.
+// LnReserveRatio returns ln(a / b), optimized for near-unity deltas.
+// Automatically chooses Log1p or log₂ fallback.
 //
 //go:nosplit
 //go:inline
@@ -155,7 +172,7 @@ func LnReserveRatio(a, b uint64) (float64, error) {
 	return (log2u64(a) - log2u64(b)) * ln2, nil
 }
 
-// LogReserveRatioConst returns ln(a / b) scaled by a user-defined constant.
+// LogReserveRatioConst returns ln(a / b) * conv (user-specified base).
 //
 //go:nosplit
 //go:inline
@@ -170,8 +187,8 @@ func LogReserveRatioConst(a, b uint64, conv float64) (float64, error) {
 	return (log2u64(a) - log2u64(b)) * conv, nil
 }
 
-// Log2PriceX96 computes 2·log₂(sqrtPrice) − 192, where price is Q64.96.
-// Equivalent to log₂(price) for Uniswap V3 price encoding.
+// Log2PriceX96 computes 2·log₂(sqrtPrice) − 192 from Q64.96 value.
+// This yields log₂(price) in Uniswap V3 terms.
 //
 //go:nosplit
 //go:inline
@@ -183,7 +200,7 @@ func Log2PriceX96(s Uint128) (float64, error) {
 	return (log2u128(s) - 96) * 2, nil
 }
 
-// LnPriceX96 returns ln(price) for Q64.96 Uniswap-style prices.
+// LnPriceX96 returns ln(price) from a Q64.96 Uint128 price.
 //
 //go:nosplit
 //go:inline
@@ -196,8 +213,8 @@ func LnPriceX96(s Uint128) (float64, error) {
 	return v * ln2, nil
 }
 
-// LogPriceX96Const returns ln(price)·conv for price in Q64.96 format.
-// Useful for converting log values into other bases or units.
+// LogPriceX96Const returns ln(price) * conv for Q64.96 Uint128 price.
+// Supports user-defined scaling factor (e.g., base conversion).
 //
 //go:nosplit
 //go:inline
