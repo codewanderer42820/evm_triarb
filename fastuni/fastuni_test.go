@@ -150,7 +150,7 @@ func TestLnReserveRatio(t *testing.T) {
 }
 
 func TestLnReserveRatio_EdgeCases(t *testing.T) {
-	a, b := uint64(math.MaxUint64), 1
+	a, b := uint64(math.MaxUint64), uint64(1)
 	got, err := LnReserveRatio(a, b)
 	want := math.Log(float64(a))
 	if err != nil || math.Abs(got-want) > tol {
@@ -180,7 +180,7 @@ func TestLog2ReserveRatio(t *testing.T) {
 }
 
 func TestLog2ReserveRatio_EdgeCases(t *testing.T) {
-	a, b := uint64(1<<30), (1<<30)+1
+	a, b := uint64(1<<30), uint64((1<<30)+1)
 	got, err := Log2ReserveRatio(a, b)
 	want := math.Log2(float64(a) / float64(b))
 	if err != nil || math.Abs(got-want) > tol {
@@ -193,7 +193,7 @@ func TestLog2ReserveRatio_EdgeCases(t *testing.T) {
 ──────────────────────────────────────────────────────────────────────────────*/
 
 func TestLogReserveRatioConst(t *testing.T) {
-	a, b := uint64(12345), 67890
+	a, b := uint64(12345), uint64(67890)
 	for _, conv := range []float64{math.Pi, -2.5, 1e300, 1e-300} {
 		got, err := LogReserveRatioConst(a, b, conv)
 		want := (log2u64(a) - log2u64(b)) * conv
