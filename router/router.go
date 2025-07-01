@@ -165,30 +165,28 @@ var (
 	rings          [64]*ring24.Ring
 	pair2cores     [1 << 17]uint64
 	shardBucket    map[PairID][]PairShard
-	splitThreshold = 32_768
+	splitThreshold = 52428
 )
 
 const (
-	clamp   = 128.0
-	scale   = 16.0
-	maxTick = 4095
+	clamp   = 128.0                 // domain −128 … +128
+	maxTick = 262_143               // 18-bit ceiling
+	scale   = maxTick / (2 * clamp) // 262 143 / 256 ≈ 1023.99609375
 )
 
 //go:nosplit
 //go:inline
 //go:registerparams
 func log2ToTick(x float64) int64 {
-	if x < -clamp {
+	switch {
+	case x <= -clamp:
 		return 0
-	}
-	if x > clamp {
+	case x >= clamp:
 		return maxTick
+	default:
+		// (x + 128) ∈ (0‥256).  Truncation floors to nearest lower tick.
+		return int64((x + clamp) * scale)
 	}
-	t := int64((x + clamp) * scale)
-	if t > maxTick {
-		t = maxTick
-	}
-	return t
 }
 
 /*──────────────────────── Executor bootstrap ───────────────────────────────*/
