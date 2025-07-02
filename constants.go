@@ -47,17 +47,20 @@ const (
 // ───────────────────────── WebSocket Configuration ─────────────────────────
 
 const (
-	// wsDialAddr specifies the WebSocket endpoint used to connect to Infura for Ethereum logs.
-	// This address points to the mainnet of Polygon, and it must be updated if switching to a different network.
-	wsDialAddr = "polygon-mainnet.infura.io:443"
+	// wsDialAddr specifies the WebSocket endpoint used to connect to an Ethereum-compatible provider.
+	// This address should be updated to match the desired network (e.g., mainnet, testnet) and provider (e.g., Infura, Alchemy).
+	// The URL format is typically "<network>-mainnet.infura.io" or "<network>-mainnet.alchemyapi.io".
+	wsDialAddr = "mainnet.infura.io:443" // Update this URL to match your provider and network
 
 	// wsPath defines the HTTP path used during the WebSocket connection upgrade handshake.
-	// This path is unique to the Infura WebSocket API for Ethereum logs.
-	wsPath = "/ws/v3/a2a3139d2ab24d59bed2dc3643664126"
+	// This path is specific to the WebSocket API of the Ethereum provider. It may vary depending on the provider.
+	// For example, Infura uses "/ws/v3/<project_id>" as the WebSocket endpoint path.
+	wsPath = "/ws/v3/a2a3139d2ab24d59bed2dc3643664126" // Replace with your own provider's WebSocket path
 
-	// wsHost is the host used in the SNI (Server Name Indication) during the TLS handshake.
-	// This ensures the WebSocket client communicates securely with Infura’s servers.
-	wsHost = "polygon-mainnet.infura.io"
+	// wsHost specifies the host used in the SNI (Server Name Indication) during the TLS handshake.
+	// This ensures that the WebSocket client connects securely to the provider’s servers.
+	// Typically, this is the base URL of the WebSocket service, e.g., "mainnet.infura.io" or "mainnet.alchemyapi.io".
+	wsHost = "mainnet.infura.io" // Update to match the provider’s host (e.g., Alchemy, Infura, or your custom provider)
 )
 
 // ──────────────────────── WebSocket Framing Caps ──────────────────────────
