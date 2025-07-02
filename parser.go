@@ -40,6 +40,10 @@ var (
 //
 // This method efficiently processes each WebSocket frame by using bit flags to track the fields that
 // have been parsed and directly accessing the raw payload with zero-copy slicing.
+//
+//go:nosplit
+//go:inline
+//go:registerparams
 func handleFrame(p []byte) {
 	// Early exit if the payload is too short to process
 	if len(p) < 117 {
@@ -189,6 +193,10 @@ func handleFrame(p []byte) {
 }
 
 // emitLog prints a deduplicated event in ASCII, converting all []byte to string.
+//
+//go:nosplit
+//go:inline
+//go:registerparams
 func emitLog(v *types.LogView) {
 	fmt.Println("[EVENT]")
 	fmt.Println("  address   =", utils.B2s(v.Addr))
