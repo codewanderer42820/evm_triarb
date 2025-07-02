@@ -39,8 +39,10 @@ func B2s(b []byte) string {
 
 // ────────────── JSON Field Probes (Unsafe, Fixed Pattern) ──────────────
 
-// SkipToQuote finds the next '"' after a ':', using hop-based traversal for efficiency
-// This function helps locate the end of string fields in a JSON payload.
+// SkipToQuote locates the next occurrence of the double-quote character ('"') in the JSON data
+// starting from the given index, using a hop-based traversal method for efficiency.
+// It helps identify the end of a string field in a JSON payload, specifically looking for
+// the closing quote of a field value.
 //
 //go:nosplit
 //go:inline
@@ -48,17 +50,19 @@ func B2s(b []byte) string {
 func SkipToQuote(p []byte, startIdx int, hopSize int) int {
 	i := startIdx
 
+	// Traverse through the byte slice using hop-based traversal
 	for ; i < len(p); i += hopSize {
 		if p[i] == '"' {
-			return i
+			return i // Found the closing quote, return its index
 		}
 	}
 
-	return -1
+	return -1 // Return -1 if no quote is found
 }
 
-// SkipToOpeningBracket locates the first '[' in a JSON array field
-// This function is used for extracting topics (JSON arrays).
+// SkipToOpeningBracket locates the first occurrence of the opening bracket ('[”)
+// in a JSON array field, starting from the given index.
+// This function is used to find the beginning of an array (e.g., the start of the "topics" field in a log).
 //
 //go:nosplit
 //go:inline
@@ -66,17 +70,19 @@ func SkipToQuote(p []byte, startIdx int, hopSize int) int {
 func SkipToOpeningBracket(p []byte, startIdx int, hopSize int) int {
 	i := startIdx
 
+	// Traverse through the byte slice using hop-based traversal
 	for ; i < len(p); i += hopSize {
 		if p[i] == '[' {
-			return i
+			return i // Found the opening bracket, return its index
 		}
 	}
 
-	return -1
+	return -1 // Return -1 if no opening bracket is found
 }
 
-// SkipToClosingBracket locates the first ']' in a JSON array field
-// This function assists in parsing the closing bracket for topics.
+// SkipToClosingBracket locates the first occurrence of the closing bracket (']')
+// in a JSON array field, starting from the given index.
+// This function is used to find the end of an array (e.g., the end of the "topics" field in a log).
 //
 //go:nosplit
 //go:inline
@@ -84,13 +90,14 @@ func SkipToOpeningBracket(p []byte, startIdx int, hopSize int) int {
 func SkipToClosingBracket(p []byte, startIdx int, hopSize int) int {
 	i := startIdx
 
+	// Traverse through the byte slice using hop-based traversal
 	for ; i < len(p); i += hopSize {
 		if p[i] == ']' {
-			return i
+			return i // Found the closing bracket, return its index
 		}
 	}
 
-	return -1
+	return -1 // Return -1 if no closing bracket is found
 }
 
 // ───────────────────── Unaligned Memory Loaders ─────────────────────
