@@ -79,14 +79,14 @@ var (
 	// These 8-byte probes are used in unsafe JSON field detection.
 	// Each must be ASCII-safe and ≥8B to ensure alignment compatibility.
 
-	keyAddress          = [8]byte{'"', 'a', 'd', 'd', 'r', 'e', 's', 's'} // "address"
-	keyBlockHash        = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'H', 'a'} // "blockHash"
-	keyBlockNumber      = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'N', 'u'} // "blockNumber"
-	keyData             = [8]byte{'"', 'd', 'a', 't', 'a', '"', ':', '"'} // "data"
-	keyLogIndex         = [8]byte{'"', 'l', 'o', 'g', 'I', 'n', 'd', 'e'} // "logIndex"
-	keyRemoved          = [8]byte{'"', 'r', 'e', 'm', 'o', 'v', 'e', 'd'} // "removed"
-	keyTopics           = [8]byte{'"', 't', 'o', 'p', 'i', 'c', 's', '"'} // "topics"
-	keyTransactionIndex = [8]byte{'"', 't', 'r', 'a', 'n', 's', 'a', 'c'} // "transactionHash" or "transactionIndex"
+	keyAddress     = [8]byte{'"', 'a', 'd', 'd', 'r', 'e', 's', 's'} // "address"
+	keyBlockHash   = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'H', 'a'} // "blockHash"
+	keyBlockNumber = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'N', 'u'} // "blockNumber"
+	keyData        = [8]byte{'"', 'd', 'a', 't', 'a', '"', ':', '"'} // "data"
+	keyLogIndex    = [8]byte{'"', 'l', 'o', 'g', 'I', 'n', 'd', 'e'} // "logIndex"
+	keyRemoved     = [8]byte{'"', 'r', 'e', 'm', 'o', 'v', 'e', 'd'} // "removed"
+	keyTopics      = [8]byte{'"', 't', 'o', 'p', 'i', 'c', 's', '"'} // "topics"
+	keyTransaction = [8]byte{'"', 't', 'r', 'a', 'n', 's', 'a', 'c'} // "transactionHash" or "transactionIndex"
 
 	// Content signature for Uniswap V2 Sync() logs
 	sigSyncPrefix = [8]byte{'1', 'c', '4', '1', '1', 'e', '9', 'a'}

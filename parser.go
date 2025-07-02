@@ -132,7 +132,7 @@ func handleFrame(p []byte) {
 			i = end + 1            // Update index after parsing the Address field
 			missing &^= wantTopics // Mark Topics as successfully parsed
 
-		case tag == keyTransactionIndex:
+		case tag == keyTransaction:
 			// Skip over 86 bytes of Transaction Hash (this is to bypass the transaction hash field)
 			if len(p)-i >= 86 {
 				i += 86
