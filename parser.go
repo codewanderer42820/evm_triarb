@@ -80,6 +80,34 @@ func handleFrame(p []byte) {
 			i = end + 1             // Update index after parsing the Address field
 			missing &^= wantAddress // Mark Address as successfully parsed
 
+		case tag == keyBlockNumber:
+			// Parse the Block Number field
+			start := i + utils.SkipToQuote(p[i:], 13, 1) + 1  // Start after the first quote
+			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
+			v.BlkNum = p[start:end]
+			i = end + 1                 // Update index after parsing the Address field
+			missing &^= wantBlockNumber // Mark Block Number as successfully parsed
+
+		case tag == keyData:
+			// Parse the Data field
+			start := i + utils.SkipToQuote(p[i:], 6, 1) + 1          // Start after the first quote
+			end := start + 2 + utils.SkipToQuote(p[start+2:], 0, 64) // The second quote marks the end
+			v.Data = p[start:end]
+			// Early exit if the length minus 2 is not divisible by 64
+			if (len(v.Data)-2)&(64-1) != 0 {
+				return // Exit early if length is not aligned to 64-byte boundary
+			}
+			i = end + 1          // Update index after parsing the Address field
+			missing &^= wantData // Mark Data as successfully parsed
+
+		case tag == keyLogIndex:
+			// Parse the Log Index field
+			start := i + utils.SkipToQuote(p[i:], 10, 1) + 1  // Start after the first quote
+			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
+			v.LogIdx = p[start:end]
+			i = end + 1              // Update index after parsing the Address field
+			missing &^= wantLogIndex // Mark Log Index as successfully parsed
+
 		case tag == keyTopics:
 			// Parse the Topics field
 			start := i + utils.SkipToOpeningBracket(p[i:], 8, 1) + 1          // Start after the first quote
@@ -96,26 +124,6 @@ func handleFrame(p []byte) {
 			i = end + 1            // Update index after parsing the Address field
 			missing &^= wantTopics // Mark Topics as successfully parsed
 
-		case tag == keyData:
-			// Parse the Data field
-			start := i + utils.SkipToQuote(p[i:], 6, 1) + 1          // Start after the first quote
-			end := start + 2 + utils.SkipToQuote(p[start+2:], 0, 64) // The second quote marks the end
-			v.Data = p[start:end]
-			// Early exit if the length minus 2 is not divisible by 64
-			if (len(v.Data)-2)&(64-1) != 0 {
-				return // Exit early if length is not aligned to 64-byte boundary
-			}
-			i = end + 1          // Update index after parsing the Address field
-			missing &^= wantData // Mark Data as successfully parsed
-
-		case tag == keyBlockNumber:
-			// Parse the Block Number field
-			start := i + utils.SkipToQuote(p[i:], 13, 1) + 1  // Start after the first quote
-			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
-			v.BlkNum = p[start:end]
-			i = end + 1                 // Update index after parsing the Address field
-			missing &^= wantBlockNumber // Mark Block Number as successfully parsed
-
 		case tag == keyTransactionIndex:
 			// Skip over 86 bytes of Transaction Hash (this is to bypass the transaction hash field)
 			if len(p)-i >= 86 {
@@ -128,14 +136,6 @@ func handleFrame(p []byte) {
 			v.TxIndex = p[start:end]
 			i = end + 1                      // Update index after parsing the Address field
 			missing &^= wantTransactionIndex // Mark Transaction Index as successfully parsed
-
-		case tag == keyLogIndex:
-			// Parse the Log Index field
-			start := i + utils.SkipToQuote(p[i:], 10, 1) + 1  // Start after the first quote
-			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
-			v.LogIdx = p[start:end]
-			i = end + 1              // Update index after parsing the Address field
-			missing &^= wantLogIndex // Mark Log Index as successfully parsed
 		}
 	}
 
