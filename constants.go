@@ -6,7 +6,7 @@
 //   - Includes unsafe JSON field match probes for zero-alloc scanning.
 //
 // Notes:
-//   - All constants are aggressively over-provisioned for high-FPS chains (e.g. Polygon).
+//   - All constants are aggressively over-provisioned for high-FPS chains (e.g., Polygon).
 //   - Probes are 8-byte aligned to support unsafe unaligned loads.
 //   - Constants are sized with ≥10× margin for safety under burst loads.
 //
@@ -84,17 +84,34 @@ var (
 	// They are 8-byte aligned to ensure efficient memory access and compatibility with low-level parsing techniques.
 	// Each probe must be ASCII-safe to ensure proper comparison without encoding issues.
 
-	keyAddress     = [8]byte{'"', 'a', 'd', 'd', 'r', 'e', 's', 's'} // "address" field in JSON logs
-	keyBlockHash   = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'H', 'a'} // "blockHash" field in JSON logs
+	// keyAddress is a probe for detecting the "address" field in JSON logs.
+	keyAddress = [8]byte{'"', 'a', 'd', 'd', 'r', 'e', 's', 's'} // "address" field in JSON logs
+
+	// keyBlockHash is a probe for detecting the "blockHash" field in JSON logs.
+	keyBlockHash = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'H', 'a'} // "blockHash" field in JSON logs
+
+	// keyBlockNumber is a probe for detecting the "blockNumber" field in JSON logs.
 	keyBlockNumber = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'N', 'u'} // "blockNumber" field in JSON logs
-	keyData        = [8]byte{'"', 'd', 'a', 't', 'a', '"', ':', '"'} // "data" field in JSON logs
-	keyLogIndex    = [8]byte{'"', 'l', 'o', 'g', 'I', 'n', 'd', 'e'} // "logIndex" field in JSON logs
-	keyRemoved     = [8]byte{'"', 'r', 'e', 'm', 'o', 'v', 'e', 'd'} // "removed" field in JSON logs (indicates if the log was removed)
-	keyTopics      = [8]byte{'"', 't', 'o', 'p', 'i', 'c', 's', '"'} // "topics" field in JSON logs (typically an array)
+
+	// keyData is a probe for detecting the "data" field in JSON logs.
+	keyData = [8]byte{'"', 'd', 'a', 't', 'a', '"', ':', '"'} // "data" field in JSON logs
+
+	// keyLogIndex is a probe for detecting the "logIndex" field in JSON logs.
+	keyLogIndex = [8]byte{'"', 'l', 'o', 'g', 'I', 'n', 'd', 'e'} // "logIndex" field in JSON logs
+
+	// keyRemoved is a probe for detecting the "removed" field in JSON logs.
+	// The "removed" field indicates if the log was removed during reorganization.
+	keyRemoved = [8]byte{'"', 'r', 'e', 'm', 'o', 'v', 'e', 'd'} // "removed" field in JSON logs (indicates if the log was removed)
+
+	// keyTopics is a probe for detecting the "topics" field in JSON logs.
+	// The "topics" field typically holds an array of topics associated with the log.
+	keyTopics = [8]byte{'"', 't', 'o', 'p', 'i', 'c', 's', '"'} // "topics" field in JSON logs (typically an array)
+
+	// keyTransaction is a probe for detecting the "transactionHash" or "transactionIndex" field in JSON logs.
 	keyTransaction = [8]byte{'"', 't', 'r', 'a', 'n', 's', 'a', 'c'} // "transactionHash" or "transactionIndex" field in JSON logs
 
-	// Content signature for Uniswap V2 Sync() logs.
-	// This 8-byte signature is used to identify Sync() events in the logs. It is a constant prefix in the topics.
-	// The signature is checked for verifying the event type.
-	sigSyncPrefix = [8]byte{'1', 'c', '4', '1', '1', 'e', '9', 'a'}
+	// sigSyncPrefix is a constant signature used to identify Sync() events in the logs.
+	// This 8-byte signature is checked for verifying the event type for Uniswap V2 Sync() logs.
+	// It is a fixed prefix that appears in the topics of these logs.
+	sigSyncPrefix = [8]byte{'1', 'c', '4', '1', '1', 'e', '9', 'a'} // Sync event signature in Uniswap V2 logs
 )
