@@ -27,9 +27,6 @@ import (
 )
 
 var (
-	// Full literal match to disambiguate transactionIndex prefix
-	litTxIdx = []byte(`"transactionIndex"`)
-
 	deduper   Deduper
 	latestBlk uint32
 )
