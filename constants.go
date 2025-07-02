@@ -76,18 +76,22 @@ const (
 // ────────────────────── JSON Key Probes for Parsing ───────────────────────
 
 var (
-	// These 8-byte probes are used in unsafe JSON field detection.
-	// Each must be ASCII-safe and ≥8B to ensure alignment compatibility.
+	// These 8-byte probes are used for unsafe JSON field detection.
+	// Each probe is carefully designed to match specific field names in JSON payloads.
+	// They are 8-byte aligned to ensure efficient memory access and compatibility with low-level parsing techniques.
+	// Each probe must be ASCII-safe to ensure proper comparison without encoding issues.
 
-	keyAddress     = [8]byte{'"', 'a', 'd', 'd', 'r', 'e', 's', 's'} // "address"
-	keyBlockHash   = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'H', 'a'} // "blockHash"
-	keyBlockNumber = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'N', 'u'} // "blockNumber"
-	keyData        = [8]byte{'"', 'd', 'a', 't', 'a', '"', ':', '"'} // "data"
-	keyLogIndex    = [8]byte{'"', 'l', 'o', 'g', 'I', 'n', 'd', 'e'} // "logIndex"
-	keyRemoved     = [8]byte{'"', 'r', 'e', 'm', 'o', 'v', 'e', 'd'} // "removed"
-	keyTopics      = [8]byte{'"', 't', 'o', 'p', 'i', 'c', 's', '"'} // "topics"
-	keyTransaction = [8]byte{'"', 't', 'r', 'a', 'n', 's', 'a', 'c'} // "transactionHash" or "transactionIndex"
+	keyAddress     = [8]byte{'"', 'a', 'd', 'd', 'r', 'e', 's', 's'} // "address" field in JSON logs
+	keyBlockHash   = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'H', 'a'} // "blockHash" field in JSON logs
+	keyBlockNumber = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'N', 'u'} // "blockNumber" field in JSON logs
+	keyData        = [8]byte{'"', 'd', 'a', 't', 'a', '"', ':', '"'} // "data" field in JSON logs
+	keyLogIndex    = [8]byte{'"', 'l', 'o', 'g', 'I', 'n', 'd', 'e'} // "logIndex" field in JSON logs
+	keyRemoved     = [8]byte{'"', 'r', 'e', 'm', 'o', 'v', 'e', 'd'} // "removed" field in JSON logs (indicates if the log was removed)
+	keyTopics      = [8]byte{'"', 't', 'o', 'p', 'i', 'c', 's', '"'} // "topics" field in JSON logs (typically an array)
+	keyTransaction = [8]byte{'"', 't', 'r', 'a', 'n', 's', 'a', 'c'} // "transactionHash" or "transactionIndex" field in JSON logs
 
-	// Content signature for Uniswap V2 Sync() logs
+	// Content signature for Uniswap V2 Sync() logs.
+	// This 8-byte signature is used to identify Sync() events in the logs. It is a constant prefix in the topics.
+	// The signature is checked for verifying the event type.
 	sigSyncPrefix = [8]byte{'1', 'c', '4', '1', '1', 'e', '9', 'a'}
 )
