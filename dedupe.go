@@ -1,3 +1,24 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// [Filename]: dedupe.go — ISR-grade deduplication for Ethereum log events
+//
+// Purpose:
+//   - Provides a lock-free, high-performance deduplication mechanism for log events.
+//   - Ensures that only unique logs are processed based on the combination of
+//     (blockNumber, transactionIndex, logIndex) and event fingerprint (topics/data).
+//
+// Notes:
+//   - Designed for high-throughput systems, optimized for low-latency event processing
+//   - Uses zero-copy operations to maximize efficiency and minimize memory allocations
+//   - Ensures cache-line alignment for improved memory access patterns and CPU performance
+//
+// Compiler Directives:
+//   - //go:notinheap
+//   - //go:align 64
+//
+// ⚠️ The Deduper must not be used across multiple goroutines as it is not thread-safe
+//    and assumes exclusive access to each slot during event processing.
+// ─────────────────────────────────────────────────────────────────────────────
+
 package main
 
 import "main/utils"
@@ -22,7 +43,9 @@ type dedupeSlot struct {
 }
 
 // Check tests if the given (blk, tx, log, tag) tuple is NEW and should be processed.
-// If the log is either unseen or stale due to a reorg, it stores the new entry and returns true.
+// If the log is either unseen or stale due to a reorg, it stores the new entry and
+// returns true. This function is optimized for zero-allocation, branchless operation,
+// and tight memory access patterns suitable for ISR environments.
 //
 //go:nosplit
 //go:inline
