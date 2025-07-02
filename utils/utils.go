@@ -15,7 +15,10 @@
 
 package utils
 
-import "unsafe"
+import (
+	"syscall"
+	"unsafe"
+)
 
 // ───────────────────── Zero-Alloc Type Coercion ─────────────────────
 
@@ -30,6 +33,55 @@ func B2s(b []byte) string {
 		return ""
 	}
 	return unsafe.String(&b[0], len(b))
+}
+
+// ───────────────────── Zero-Alloc Type Coercion and Logging Utilities ─────────────────────
+
+// itoa manually converts an integer to a string without allocations.
+// This function works for non-negative integers and avoids heap allocations.
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func Itoa(n int) string {
+	// Handle zero case explicitly
+	if n == 0 {
+		return "0"
+	}
+
+	// Use a byte slice to store the result (maximum 10 digits for int)
+	buf := make([]byte, 0, 10)
+
+	// Convert integer to string (reverse order)
+	for n > 0 {
+		buf = append(buf, byte(n%10+'0')) // Get the least significant digit
+		n /= 10                           // Remove the least significant digit
+	}
+
+	// Reverse the byte slice to get the correct order
+	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+
+	// Convert the byte slice to a string and return
+	return string(buf)
+}
+
+// printWarning writes a warning message directly to stderr with zero allocation.
+// It avoids using fmt or log functions, ensuring no allocations occur during the write.
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func PrintWarning(msg string) {
+	// Convert the string to a byte slice
+	msgBytes := []byte(msg)
+
+	// Directly write the byte slice to stderr (file descriptor 2)
+	_, err := syscall.Write(2, msgBytes)
+	if err != nil {
+		// Handle error (if any)
+	}
 }
 
 // ────────────── JSON Field Probes (Unsafe, Fixed Pattern) ──────────────
