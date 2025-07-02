@@ -32,14 +32,25 @@ var (
 )
 
 // handleFrame processes a raw WebSocket frame containing a single log.
-// If the frame contains a valid UniswapV2 Sync() event, it is deduped and printed.
+// If the frame contains a valid UniswapV2 Sync() event, it is deduplicated and printed.
 //
-//go:nosplit
+// The function scans for critical fields in the payload and updates the LogView accordingly.
+// If the frame matches a valid event (like Sync), it derives a fingerprint and processes it.
+//
 //go:inline
 //go:registerparams
 func handleFrame(p []byte) {
+	// Early exit if payload is too short
+	if len(p) < 117 {
+		return
+	}
+
+	// Skip the initial 117 bytes as per protocol
+	p = p[117:]
+
 	var v types.LogView
 
+	// Define masks for required fields to be extracted from the frame
 	const (
 		wantAddr = 1 << iota
 		wantTopics
@@ -49,75 +60,90 @@ func handleFrame(p []byte) {
 		wantLog
 	)
 
+	// Start with all fields required
 	missing := wantAddr | wantTopics | wantData | wantBlk | wantTx | wantLog
-	end := len(p) - 8
+	end := len(p) - 8 // Offset where we stop parsing
 
-	// Precompute tag once
+	// Loop through the byte slice to extract key data
 	for i := 0; i <= end && missing != 0; i++ {
-		// Tag comparison at once
+		// Extract 8-byte tag for comparison
 		tag := *(*[8]byte)(unsafe.Pointer(&p[i]))
 
-		// Match tags and handle accordingly
+		// Handle each possible tag based on predefined keys (e.g., Address, Topics)
 		switch {
 		case tag == keyAddress:
+			// Parse the Address field
 			base := i + 8
 			v.Addr = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
-			i += len(v.Addr) + 8
-			missing &^= wantAddr
+			i = base + len(v.Addr) + 3 // Update index after parsing Address
+			missing &^= wantAddr       // Mark Address as extracted
+
 		case tag == keyTopics:
-			base := i + 8
+			// Parse the Topics field
+			base := i + 7
 			v.Topics = utils.SliceJSONArray(p, base+utils.FindBracket(p[base:]))
-			// Early exit for Sync() check
+			// Early exit if Sync() signature doesn't match
 			if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
-				return // exit early as it doesn't match Sync()
+				return // Exit early as it doesn't match Sync()
 			}
-			i += len(v.Topics) + 8
-			missing &^= wantTopics
+			i = base + len(v.Topics) + 2
+			missing &^= wantTopics // Mark Topics as extracted
+
 		case tag == keyData:
-			v.Data = utils.SliceASCII(p, i+7)
-			i += len(v.Data) + 7
-			missing &^= wantData
+			// Parse the Data field
+			base := i + 7
+			v.Data = utils.SliceASCII(p, base)
+			i = base + len(v.Data) + 1
+			missing &^= wantData // Mark Data as extracted
+
 		case tag == keyBlockNumber:
-			base := i + 8
+			// Parse Block Number field
+			base := i + 12
 			v.BlkNum = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
 			if len(v.BlkNum) == 0 {
-				return
+				return // If Block Number is missing, exit early
 			}
-			i += len(v.BlkNum) + 8
-			missing &^= wantBlk
-		case tag == keyTransactionIndex && len(p)-i >= 18:
+			i = base + len(v.BlkNum) + 3
+			missing &^= wantBlk // Mark Block Number as extracted
+
+		case tag == keyTransactionIndex && len(p)-i >= 17:
+			// Parse Transaction Index field
 			lo := *(*uint64)(unsafe.Pointer(&p[i]))
 			hi := *(*uint64)(unsafe.Pointer(&p[i+8]))
 			if lo == txIdxLo && hi == txIdxHi {
-				base := i + 18
+				base := i + 17
 				v.TxIndex = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
 				if len(v.TxIndex) == 0 {
-					return
+					return // If TxIndex is missing, exit early
 				}
-				i += len(v.TxIndex) + 18
-				missing &^= wantTx
+				missing &^= wantTx // Mark Transaction Index as extracted
 			}
+
 		case tag == keyLogIndex:
-			base := i + 8
+			// Parse Log Index field
+			base := i + 9
 			v.LogIdx = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
 			if len(v.LogIdx) == 0 {
-				return
+				return // If Log Index is missing, exit early
 			}
-			i += len(v.LogIdx) + 8
-			missing &^= wantLog
+			i = base + len(v.LogIdx) + 3
+			missing &^= wantLog // Mark Log Index as extracted
 		}
 	}
 
 	// ───── Derive fingerprint ─────
 	switch {
 	case len(v.Topics) >= 16:
+		// If Topics have more than 16 entries, load 128-bit fingerprint
 		v.TagHi, v.TagLo = utils.Load128(v.Topics)
 	case len(v.Topics) >= 8:
+		// If Topics have at least 8 entries, load 64-bit fingerprint
 		v.TagLo = utils.Load64(v.Topics)
 	case len(v.Data) >= 8:
+		// If Data has at least 8 bytes, load 64-bit fingerprint from Data
 		v.TagLo = utils.Load64(v.Data)
 	default:
-		return // no fingerprint available
+		return // No fingerprint available if no valid data found
 	}
 
 	// ───── Parse numeric fields ─────
@@ -125,12 +151,14 @@ func handleFrame(p []byte) {
 	tx32 := utils.ParseHexU32(v.TxIndex)
 	log32 := utils.ParseHexU32(v.LogIdx)
 
+	// Update the latest block number
 	if blk32 > latestBlk {
 		latestBlk = blk32
 	}
 
 	// ───── Dedupe + Emit ─────
 	if deduper.Check(blk32, tx32, log32, v.TagHi, v.TagLo, latestBlk) {
+		// If the log is not a duplicate, emit it
 		emitLog(&v)
 	}
 }
