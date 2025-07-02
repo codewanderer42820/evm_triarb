@@ -39,6 +39,60 @@ func B2s(b []byte) string {
 
 // ────────────── JSON Field Probes (Unsafe, Fixed Pattern) ──────────────
 
+// SkipToQuote finds the next '"' after a ':', using hop-based traversal for efficiency
+// This function helps locate the end of string fields in a JSON payload.
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func SkipToQuote(p []byte, startIdx int, hopSize int) int {
+	i := startIdx
+
+	for ; i < len(p); i += hopSize {
+		if p[i] == '"' {
+			return i
+		}
+	}
+
+	return -1
+}
+
+// SkipToOpeningBracket locates the first '[' in a JSON array field
+// This function is used for extracting topics (JSON arrays).
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func SkipToOpeningBracket(p []byte, startIdx int, hopSize int) int {
+	i := startIdx
+
+	for ; i < len(p); i += hopSize {
+		if p[i] == '[' {
+			return i
+		}
+	}
+
+	return -1
+}
+
+// SkipToClosingBracket locates the first ']' in a JSON array field
+// This function assists in parsing the closing bracket for topics.
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func SkipToClosingBracket(p []byte, startIdx int, hopSize int) int {
+	i := startIdx
+
+	for ; i < len(p); i += hopSize {
+		if p[i] == ']' {
+			return i
+		}
+	}
+
+	return -1
+}
+
 // FindQuote finds next '"' after a ':' → used for string fields
 //
 //go:nosplit

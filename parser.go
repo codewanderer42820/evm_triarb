@@ -31,52 +31,10 @@ var (
 	latestBlk uint32
 )
 
-// skipToQuote finds the next '"' after a ':', using hop-based traversal for efficiency
-func skipToQuote(p []byte, startIdx int, hopSize int) int {
-	i := startIdx
-
-	for ; i < len(p); i += hopSize {
-		if p[i] == '"' {
-			return i
-		}
-	}
-
-	return -1
-}
-
-// skipToBracket finds the next '"' after a ':', using hop-based traversal for efficiency
-func skipToOpeningBracket(p []byte, startIdx int, hopSize int) int {
-	i := startIdx
-
-	for ; i < len(p); i += hopSize {
-		if p[i] == '[' {
-			return i
-		}
-	}
-
-	return -1
-}
-
-// skipToBracket finds the next '"' after a ':', using hop-based traversal for efficiency
-func skipToClosingBracket(p []byte, startIdx int, hopSize int) int {
-	i := startIdx
-
-	for ; i < len(p); i += hopSize {
-		if p[i] == ']' {
-			return i
-		}
-	}
-
-	return -1
-}
-
 // handleFrame processes a raw WebSocket frame containing a single log.
 // If the frame contains a valid UniswapV2 Sync() event, it is deduplicated and printed.
 //
-// The function scans for critical fields in the payload, updates the LogView,
-// and derives a fingerprint if the event matches a valid Sync event.
-// It then checks for duplicates and emits the event if it's not a duplicate.
-//
+//go:nosplit
 //go:inline
 //go:registerparams
 func handleFrame(p []byte) {
@@ -114,16 +72,16 @@ func handleFrame(p []byte) {
 		switch {
 		case tag == keyAddress:
 			// Parse the Address field (assuming it follows the expected format)
-			start := i + skipToQuote(p[i:], 9, 1) + 1    // Start after the first quote
-			end := start + skipToQuote(p[start:], 0, 42) // The second quote marks the end
+			start := i + utils.SkipToQuote(p[i:], 9, 1) + 1    // Start after the first quote
+			end := start + utils.SkipToQuote(p[start:], 0, 42) // The second quote marks the end
 			v.Addr = p[start:end]
 			i = end + 1          // Update index after parsing the Address field
 			missing &^= wantAddr // Mark Address as successfully parsed
 
 		case tag == keyTopics:
 			// Parse the Topics field
-			start := i + skipToOpeningBracket(p[i:], 8, 1) + 1          // Start after the first quote
-			end := start - 1 + skipToClosingBracket(p[start-1:], 0, 69) // The second quote marks the end
+			start := i + utils.SkipToOpeningBracket(p[i:], 8, 1) + 1          // Start after the first quote
+			end := start - 1 + utils.SkipToClosingBracket(p[start-1:], 0, 69) // The second quote marks the end
 			// Ensure end is not less than start (self-correcting)
 			if end < start {
 				end = start
@@ -138,16 +96,16 @@ func handleFrame(p []byte) {
 
 		case tag == keyData:
 			// Parse the Data field
-			start := i + skipToQuote(p[i:], 6, 1) + 1          // Start after the first quote
-			end := start + 2 + skipToQuote(p[start+2:], 0, 64) // The second quote marks the end
+			start := i + utils.SkipToQuote(p[i:], 6, 1) + 1          // Start after the first quote
+			end := start + 2 + utils.SkipToQuote(p[start+2:], 0, 64) // The second quote marks the end
 			v.Data = p[start:end]
 			i = end + 1          // Update index after parsing the Address field
 			missing &^= wantData // Mark Data as successfully parsed
 
 		case tag == keyBlockNumber:
 			// Parse the Block Number field
-			start := i + skipToQuote(p[i:], 13, 1) + 1  // Start after the first quote
-			end := start + skipToQuote(p[start:], 0, 1) // The second quote marks the end
+			start := i + utils.SkipToQuote(p[i:], 13, 1) + 1  // Start after the first quote
+			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.BlkNum = p[start:end]
 			if len(v.BlkNum) == 0 {
 				return // Exit early if Block Number is missing
@@ -162,8 +120,8 @@ func handleFrame(p []byte) {
 				continue
 			}
 			// Parse the Transaction Index field
-			start := i + skipToQuote(p[i:], 18, 1) + 1  // Start after the first quote
-			end := start + skipToQuote(p[start:], 0, 1) // The second quote marks the end
+			start := i + utils.SkipToQuote(p[i:], 18, 1) + 1  // Start after the first quote
+			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.TxIndex = p[start:end]
 			if len(v.TxIndex) == 0 {
 				return // Exit early if Transaction Index is missing
@@ -173,8 +131,8 @@ func handleFrame(p []byte) {
 
 		case tag == keyLogIndex:
 			// Parse the Log Index field
-			start := i + skipToQuote(p[i:], 10, 1) + 1  // Start after the first quote
-			end := start + skipToQuote(p[start:], 0, 1) // The second quote marks the end
+			start := i + utils.SkipToQuote(p[i:], 10, 1) + 1  // Start after the first quote
+			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.LogIdx = p[start:end]
 			if len(v.LogIdx) == 0 {
 				return // Exit early if Log Index is missing
@@ -220,10 +178,6 @@ func handleFrame(p []byte) {
 }
 
 // emitLog prints a deduplicated event in ASCII, converting all []byte to string.
-//
-//go:nosplit
-//go:inline
-//go:registerparams
 func emitLog(v *types.LogView) {
 	fmt.Println("[EVENT]")
 	fmt.Println("  address   =", utils.B2s(v.Addr))
