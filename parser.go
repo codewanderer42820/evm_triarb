@@ -51,16 +51,18 @@ func handleFrame(p []byte) {
 
 	// Define bit flags to track which fields are required from the frame
 	const (
-		wantAddr = 1 << iota
-		wantTopics
+		wantAddress = 1 << iota
+		wantBlockHash
+		wantBlockNumber
 		wantData
-		wantBlk
-		wantTx
-		wantLog
+		wantLogIndex
+		wantRemoved
+		wantTopics
+		wantTransactionIndex
 	)
 
 	// Start with all fields marked as missing
-	missing := wantAddr | wantTopics | wantData | wantBlk | wantTx | wantLog
+	missing := wantAddress | wantBlockHash | wantBlockNumber | wantData | wantLogIndex | wantRemoved | wantTopics | wantTransactionIndex
 	end := len(p) - 8 // Set the end offset for parsing the frame
 
 	// Loop through the byte slice to extract key data
@@ -75,8 +77,8 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 9, 1) + 1    // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 42) // The second quote marks the end
 			v.Addr = p[start:end]
-			i = end + 1          // Update index after parsing the Address field
-			missing &^= wantAddr // Mark Address as successfully parsed
+			i = end + 1             // Update index after parsing the Address field
+			missing &^= wantAddress // Mark Address as successfully parsed
 
 		case tag == keyTopics:
 			// Parse the Topics field
@@ -111,8 +113,8 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 13, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.BlkNum = p[start:end]
-			i = end + 1         // Update index after parsing the Address field
-			missing &^= wantBlk // Mark Block Number as successfully parsed
+			i = end + 1                 // Update index after parsing the Address field
+			missing &^= wantBlockNumber // Mark Block Number as successfully parsed
 
 		case tag == keyTransactionIndex:
 			// Skip over 86 bytes of Transaction Hash (this is to bypass the transaction hash field)
@@ -124,16 +126,16 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 18, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.TxIndex = p[start:end]
-			i = end + 1        // Update index after parsing the Address field
-			missing &^= wantTx // Mark Transaction Index as successfully parsed
+			i = end + 1                      // Update index after parsing the Address field
+			missing &^= wantTransactionIndex // Mark Transaction Index as successfully parsed
 
 		case tag == keyLogIndex:
 			// Parse the Log Index field
 			start := i + utils.SkipToQuote(p[i:], 10, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.LogIdx = p[start:end]
-			i = end + 1         // Update index after parsing the Address field
-			missing &^= wantLog // Mark Log Index as successfully parsed
+			i = end + 1              // Update index after parsing the Address field
+			missing &^= wantLogIndex // Mark Log Index as successfully parsed
 		}
 	}
 
