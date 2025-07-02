@@ -21,7 +21,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"main/types"
 	"main/utils"
 	"unsafe"
@@ -89,8 +88,6 @@ func handleFrame(p []byte) {
 	// Skip the first 117 bytes of the payload as per protocol
 	p = p[117:]
 
-	log.Println(utils.B2s(p))
-
 	// Initialize LogView to store the extracted fields
 	var v types.LogView
 
@@ -133,10 +130,9 @@ func handleFrame(p []byte) {
 			}
 			v.Topics = p[start:end]
 			// Early exit if the Sync() signature doesn't match
-			//if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
-			//	return // Exit early if it doesn't match Sync()
-			//}
-			log.Println(utils.B2s(p[start:end]))
+			if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
+				return // Exit early if it doesn't match Sync()
+			}
 			i = end + 1            // Update index after parsing the Address field
 			missing &^= wantTopics // Mark Topics as successfully parsed
 
