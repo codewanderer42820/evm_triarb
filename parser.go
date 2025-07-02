@@ -21,6 +21,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"main/types"
 	"main/utils"
 	"unsafe"
@@ -111,6 +112,12 @@ func handleFrame(p []byte) {
 			v.LogIdx = p[start:end]
 			i = end + 1              // Update index after parsing the Address field
 			missing &^= wantLogIndex // Mark Log Index as successfully parsed
+
+		case tag == keyRemoved:
+			log.Println(utils.B2s(p[i:]))
+			i += 14 // "removed":true
+			log.Println(utils.B2s(p[i:]))
+			missing &^= wantRemoved
 
 		case tag == keyTopics:
 			// Parse the Topics field
