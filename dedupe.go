@@ -55,8 +55,8 @@ func (d *Deduper) Check(
 	// ───── 2. Single memory access to get slot pointer ─────
 	slot := &d.buf[utils.Mix64(key)&((1<<ringBits)-1)]
 
-	// ───── 3. Single staleness check with overflow protection ─────
-	stale := latestBlk >= slot.age && (latestBlk-slot.age) > maxReorg
+	// ───── 3. Three-condition staleness check: slot used + block progression + reorg threshold ─────
+	stale := slot.age > 0 && latestBlk > slot.age && (latestBlk-slot.age) > maxReorg
 
 	// ───── 4. Branchless exact match using bitwise operations ─────
 	blkMatch := slot.blk ^ blk
