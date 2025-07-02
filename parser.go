@@ -141,18 +141,18 @@ func handleFrame(p []byte) {
 			start := i + skipToQuote(p[i:], 6, 1) + 1          // Start after the first quote
 			end := start + 2 + skipToQuote(p[start+2:], 0, 64) // The second quote marks the end
 			v.Data = p[start:end]
-
 			i = end + 1          // Update index after parsing the Address field
 			missing &^= wantData // Mark Data as successfully parsed
 
 		case tag == keyBlockNumber:
 			// Parse the Block Number field
-			base := i + 12
-			v.BlkNum = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+			start := i + skipToQuote(p[i:], 13, 1) + 1  // Start after the first quote
+			end := start + skipToQuote(p[start:], 0, 1) // The second quote marks the end
+			v.BlkNum = p[start:end]
 			if len(v.BlkNum) == 0 {
 				return // Exit early if Block Number is missing
 			}
-			i = base + len(v.BlkNum) + 3
+			i = end + 1         // Update index after parsing the Address field
 			missing &^= wantBlk // Mark Block Number as successfully parsed
 
 		case tag == keyTransactionIndex:
