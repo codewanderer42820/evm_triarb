@@ -51,7 +51,7 @@ func handleFrame(p []byte) {
 	missing := wantAddr | wantTopics | wantData | wantBlk | wantTx | wantLog
 
 	end := len(p) - 8
-	for i := 0; i <= end && missing != 0; i += 1 {
+	for i := 0; i <= end && missing != 0; i++ {
 		tag := *(*[8]byte)(unsafe.Pointer(&p[i]))
 		switch tag {
 		case keyAddress:
