@@ -18,47 +18,58 @@ package main
 // ───────────────────────────── Deduplication ──────────────────────────────
 
 const (
-	// ringBits sets deduper size: 2^18 = 262,144 entries = 8 MiB
-	// Covers ~24h of Polygon logs @ peak, with 10× overcapacity
+	// ringBits defines the size of the deduplication ring buffer: 2^18 entries = 262,144 slots = 8 MiB.
+	// This is designed to hold approximately 24 hours of logs for high-FPS chains, such as Polygon,
+	// with 10× overcapacity for peak times. This constant ensures the deduplication system is
+	// adequately sized for typical workloads while maintaining performance under load.
 	ringBits = 18
 
-	// maxReorg is the max reorg depth tolerated by deduper before eviction
-	// 64 blocks = ~13 min @ Polygon's 2.9s block time
+	// maxReorg defines the maximum reorganization depth allowed before events are evicted.
+	// This is set to 64 blocks (approximately 13 minutes at Polygon's 2.9s block time), ensuring
+	// that we can handle minor chain reorganizations while still keeping the system responsive to recent changes.
 	maxReorg = 64
 )
 
 // ─────────────────────────── Memory Guardrails ─────────────────────────────
 
 const (
-	// heapSoftLimit triggers non-blocking GC when exceeded
+	// heapSoftLimit triggers non-blocking GC (garbage collection) when exceeded.
+	// If the heap size exceeds 128 MiB, the system will attempt to perform garbage collection
+	// without blocking, ensuring that memory pressure is handled efficiently while maintaining throughput.
 	heapSoftLimit = 128 << 20 // 128 MiB
 
-	// heapHardLimit triggers panic — ISR logic considered failed
+	// heapHardLimit triggers a panic if the heap size exceeds this limit (512 MiB), signaling a failure state.
+	// The system is considered to have failed if the memory usage exceeds this threshold, indicating a potential leak.
 	heapHardLimit = 512 << 20 // 512 MiB
 )
 
 // ───────────────────────── WebSocket Configuration ─────────────────────────
 
 const (
-	// wsDialAddr is the TCP address used for Infura dial (no schema)
+	// wsDialAddr specifies the WebSocket endpoint used to connect to Infura for Ethereum logs.
+	// This address points to the mainnet of Polygon, and it must be updated if switching to a different network.
 	wsDialAddr = "polygon-mainnet.infura.io:443"
 
-	// wsPath is the HTTP upgrade path for WebSocket connection
+	// wsPath defines the HTTP path used during the WebSocket connection upgrade handshake.
+	// This path is unique to the Infura WebSocket API for Ethereum logs.
 	wsPath = "/ws/v3/a2a3139d2ab24d59bed2dc3643664126"
 
-	// wsHost is the SNI hostname for TLS handshake
+	// wsHost is the host used in the SNI (Server Name Indication) during the TLS handshake.
+	// This ensures the WebSocket client communicates securely with Infura’s servers.
 	wsHost = "polygon-mainnet.infura.io"
 )
 
 // ──────────────────────── WebSocket Framing Caps ──────────────────────────
 
 const (
-	// maxFrameSize is the raw payload buffer size
-	// 512 KiB covers max topic/data bloat in logs (worst-case from Infura)
+	// maxFrameSize sets the maximum size for a raw WebSocket frame payload.
+	// This ensures the system can handle large topic or data blobs in logs without exceeding buffer limits.
+	// The value of 512 KiB is chosen based on the worst-case scenario of data bloat in logs (e.g., from Infura).
 	maxFrameSize = 512 << 10 // 512 KiB
 
-	// frameCap defines number of retained parsed log frames
-	// Covers ~2 minutes @ 2k FPS
+	// frameCap defines the number of WebSocket frames that can be retained for parsing.
+	// This is set to 262,144 frames, covering roughly 2 minutes of logs at 2k FPS.
+	// This ensures that we can process a large number of frames at once without exceeding buffer capacities.
 	frameCap = 1 << 18 // 262,144
 )
 
