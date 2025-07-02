@@ -104,6 +104,10 @@ func handleFrame(p []byte) {
 			v.Data = p[start:end]
 			// Early exit if the length minus 2 is not divisible by 64 (for proper alignment)
 			if (len(v.Data)-2)&(64-1) != 0 {
+				// Manually convert the length to a string without allocation
+				msg := "Warning: Skipping transaction due to Data field length (" + utils.Itoa(len(v.Data)-2) + ") not being divisible by 64 bytes\n"
+				// Call printWarning with zero-alloc print logic
+				utils.PrintWarning(msg)
 				return // Exit early if length is not aligned to 64-byte boundary
 			}
 			i = end + 1          // Update index after parsing the Data field
