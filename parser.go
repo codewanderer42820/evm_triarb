@@ -48,52 +48,62 @@ func handleFrame(p []byte) {
 		wantTx
 		wantLog
 	)
-	missing := wantAddr | wantTopics | wantData | wantBlk | wantTx | wantLog
 
+	missing := wantAddr | wantTopics | wantData | wantBlk | wantTx | wantLog
 	end := len(p) - 8
+
+	// Precompute tag once
 	for i := 0; i <= end && missing != 0; i++ {
+		// Tag comparison at once
 		tag := *(*[8]byte)(unsafe.Pointer(&p[i]))
-		switch tag {
-		case keyAddress:
+
+		// Match tags and handle accordingly
+		switch {
+		case tag == keyAddress:
 			base := i + 8
 			v.Addr = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+			i += len(v.Addr) + 8
 			missing &^= wantAddr
-		case keyTopics:
+		case tag == keyTopics:
 			base := i + 8
 			v.Topics = utils.SliceJSONArray(p, base+utils.FindBracket(p[base:]))
+			// Early exit for Sync() check
 			if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
-				return
+				return // exit early as it doesn't match Sync()
 			}
+			i += len(v.Topics) + 8
 			missing &^= wantTopics
-		case keyData:
+		case tag == keyData:
 			v.Data = utils.SliceASCII(p, i+7)
+			i += len(v.Data) + 7
 			missing &^= wantData
-		case keyBlockNumber:
+		case tag == keyBlockNumber:
 			base := i + 8
 			v.BlkNum = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
 			if len(v.BlkNum) == 0 {
 				return
 			}
+			i += len(v.BlkNum) + 8
 			missing &^= wantBlk
-		case keyTransactionIndex:
-			if len(p)-i >= 18 {
-				lo := *(*uint64)(unsafe.Pointer(&p[i]))
-				hi := *(*uint64)(unsafe.Pointer(&p[i+8]))
-				if lo == txIdxLo && hi == txIdxHi {
-					base := i + 18
-					v.TxIndex = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
-					if len(v.TxIndex) == 0 {
-						return
-					}
-					missing &^= wantTx
+		case tag == keyTransactionIndex && len(p)-i >= 18:
+			lo := *(*uint64)(unsafe.Pointer(&p[i]))
+			hi := *(*uint64)(unsafe.Pointer(&p[i+8]))
+			if lo == txIdxLo && hi == txIdxHi {
+				base := i + 18
+				v.TxIndex = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+				if len(v.TxIndex) == 0 {
+					return
 				}
+				i += len(v.TxIndex) + 18
+				missing &^= wantTx
 			}
-		case keyLogIndex:
+		case tag == keyLogIndex:
 			base := i + 8
 			v.LogIdx = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
 			if len(v.LogIdx) == 0 {
 				return
 			}
+			i += len(v.LogIdx) + 8
 			missing &^= wantLog
 		}
 	}
