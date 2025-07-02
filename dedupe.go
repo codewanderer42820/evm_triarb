@@ -35,13 +35,11 @@ type dedupeSlot struct {
 	blk, tx, log uint32    // 96-bit event identity key (blk/tx/log) - packed tight
 	age          uint32    // block height of slot entry
 	tagHi, tagLo uint64    // 128-bit fingerprint (topic0 preferred)
-	_            [4]uint64 // Padding for cache-line alignment (total struct size: 64 bytes)
+	_            [4]uint32 // Padding for cache-line alignment (total struct size: 64 bytes)
 }
 
 // Check tests if the given (blk, tx, log, tag) tuple is NEW and should be processed.
-// If the log is either unseen or stale due to a reorg, it stores the new entry and
-// returns true. This function is optimized for zero-allocation, branchless operation,
-// and tight memory access patterns suitable for ISR environments.
+// If the log is either unseen or stale due to a reorg, it stores the new entry and returns true.
 //
 //go:nosplit
 //go:inline
@@ -68,7 +66,7 @@ func (d *Deduper) Check(
 	tagLoMatch := slot.tagLo ^ tagLo
 
 	// Combine all matches into single comparison (0 means perfect match)
-	exactMatch := (blkMatch | txMatch | logMatch | uint32(tagHiMatch) | uint32(tagLoMatch>>32) | uint32(tagLoMatch)) == 0
+	exactMatch := (blkMatch | txMatch | logMatch | uint32(tagHiMatch) | uint32(tagHiMatch>>32) | uint32(tagLoMatch) | uint32(tagLoMatch>>32)) == 0
 
 	// ───── 5. Branchless update using conditional move semantics ─────
 	isDuplicate := exactMatch && !stale
