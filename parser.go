@@ -3,12 +3,12 @@
 //
 // Purpose:
 //   - Scans raw WebSocket JSON payloads for critical fields
-//   - Feeds the deduper with fingerprinted events
+//   - Feeds the deduper with fingerprinted events, ensuring unique event processing
 //
 // Notes:
 //   - No allocations, no heap pressure, no string conversions
-//   - All field detection uses 8-byte aligned probes from constants.go
-//   - LogView slices point directly into wsBuf — zero-copy until overwritten
+//   - All field detection uses 8-byte aligned probes from constants.go for efficient memory access
+//   - LogView slices point directly into wsBuf, enabling zero-copy operation until overwritten
 //
 // Compiler Directives:
 //   - //go:nosplit
@@ -34,9 +34,12 @@ var (
 // handleFrame processes a raw WebSocket frame containing a single log.
 // If the frame contains a valid UniswapV2 Sync() event, it is deduplicated and printed.
 //
-//go:nosplit
-//go:inline
-//go:registerparams
+// The function parses critical fields from the JSON payload (e.g., Address, Block Number, Data, Topics),
+// calculates a fingerprint for deduplication, and feeds it to the deduper. If no duplicate is found,
+// the event is passed on for further processing (e.g., emission).
+//
+// This method efficiently processes each WebSocket frame by using bit flags to track the fields that
+// have been parsed and directly accessing the raw payload with zero-copy slicing.
 func handleFrame(p []byte) {
 	// Early exit if the payload is too short to process
 	if len(p) < 117 {
@@ -50,6 +53,7 @@ func handleFrame(p []byte) {
 	var v types.LogView
 
 	// Define bit flags to track which fields are required from the frame
+	// Each field has a unique bit in this bitmask
 	const (
 		wantAddress = 1 << iota
 		wantBlockHash
@@ -58,11 +62,11 @@ func handleFrame(p []byte) {
 		wantLogIndex
 		wantRemoved
 		wantTopics
-		wantTransactionIndex
+		wantTransaction
 	)
 
-	// Start with all fields marked as missing
-	missing := wantAddress | wantBlockHash | wantBlockNumber | wantData | wantLogIndex | wantRemoved | wantTopics | wantTransactionIndex
+	// Start with all fields marked as missing (not yet parsed)
+	missing := wantAddress | wantBlockHash | wantBlockNumber | wantData | wantLogIndex | wantRemoved | wantTopics | wantTransaction
 	end := len(p) - 8 // Set the end offset for parsing the frame
 
 	// Loop through the byte slice to extract key data
@@ -81,6 +85,7 @@ func handleFrame(p []byte) {
 			missing &^= wantAddress // Mark Address as successfully parsed
 
 		case tag == keyBlockHash:
+			// Skip over the block hash (80 bytes for a 0x-prefixed hex string)
 			i += 80
 			missing &^= wantBlockHash
 
@@ -89,7 +94,7 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 13, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.BlkNum = p[start:end]
-			i = end + 1                 // Update index after parsing the Address field
+			i = end + 1                 // Update index after parsing the Block Number field
 			missing &^= wantBlockNumber // Mark Block Number as successfully parsed
 
 		case tag == keyData:
@@ -97,11 +102,11 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 6, 1) + 1          // Start after the first quote
 			end := start + 2 + utils.SkipToQuote(p[start+2:], 0, 64) // The second quote marks the end
 			v.Data = p[start:end]
-			// Early exit if the length minus 2 is not divisible by 64
+			// Early exit if the length minus 2 is not divisible by 64 (for proper alignment)
 			if (len(v.Data)-2)&(64-1) != 0 {
 				return // Exit early if length is not aligned to 64-byte boundary
 			}
-			i = end + 1          // Update index after parsing the Address field
+			i = end + 1          // Update index after parsing the Data field
 			missing &^= wantData // Mark Data as successfully parsed
 
 		case tag == keyLogIndex:
@@ -109,17 +114,18 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 10, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.LogIdx = p[start:end]
-			i = end + 1              // Update index after parsing the Address field
+			i = end + 1              // Update index after parsing the Log Index field
 			missing &^= wantLogIndex // Mark Log Index as successfully parsed
 
 		case tag == keyRemoved:
+			// Skip over the "removed":true field
 			i += 14 // "removed":true
 			missing &^= wantRemoved
 
 		case tag == keyTopics:
-			// Parse the Topics field
-			start := i + utils.SkipToOpeningBracket(p[i:], 8, 1) + 1          // Start after the first quote
-			end := start - 1 + utils.SkipToClosingBracket(p[start-1:], 0, 69) // The second quote marks the end
+			// Parse the Topics field (JSON array)
+			start := i + utils.SkipToOpeningBracket(p[i:], 8, 1) + 1          // Start after the opening bracket
+			end := start - 1 + utils.SkipToClosingBracket(p[start-1:], 0, 69) // The closing bracket marks the end
 			// Ensure end is not less than start (self-correcting)
 			if end < start {
 				end = start
@@ -129,7 +135,7 @@ func handleFrame(p []byte) {
 			if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
 				return // Exit early if it doesn't match Sync()
 			}
-			i = end + 1            // Update index after parsing the Address field
+			i = end + 1            // Update index after parsing the Topics field
 			missing &^= wantTopics // Mark Topics as successfully parsed
 
 		case tag == keyTransaction:
@@ -142,8 +148,8 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 18, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.TxIndex = p[start:end]
-			i = end + 1                      // Update index after parsing the Address field
-			missing &^= wantTransactionIndex // Mark Transaction Index as successfully parsed
+			i = end + 1                 // Update index after parsing the Transaction Index field
+			missing &^= wantTransaction // Mark Transaction Index as successfully parsed
 		}
 	}
 
