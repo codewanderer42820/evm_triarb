@@ -49,38 +49,44 @@ func (d *Deduper) Check(
 	tagHi, tagLo uint64, // Fingerprint derived from topic0/data
 	latestBlk uint32, // Current block tip for eviction judgment (reorg handling)
 ) bool {
-	// ───── 1. Compute hash using EVM-compliant ranges (blk: 32-bit, tx: 16-bit, log: 16-bit) ─────
+	// ───── 1. Compute a unique key using the EVM-compliant ranges (blk: 32-bit, tx: 16-bit, log: 16-bit) ─────
+	// Combining block, transaction, and log index into a single 64-bit key for easy lookups.
 	key := uint64(blk)<<32 | uint64(tx)<<16 | uint64(log)
 
-	// ───── 2. Single memory access to get slot pointer ─────
+	// ───── 2. Efficiently access the deduplication slot using a single memory access ─────
+	// We apply a hash function to the key to locate the appropriate slot in the buffer.
 	slot := &d.buf[utils.Mix64(key)&((1<<ringBits)-1)]
 
-	// ───── 3. Three-condition staleness check: slot used + block progression + reorg threshold ─────
+	// ───── 3. Check for staleness based on three conditions: slot used, block progression, and reorg threshold ─────
 	stale := slot.age > 0 && latestBlk > slot.age && (latestBlk-slot.age) > maxReorg
 
 	// ───── 4. Branchless exact match using bitwise operations ─────
+	// Compare the current log event's identifiers against the stored ones using XOR.
+	// If any match fails, the result will be non-zero, indicating no match.
 	blkMatch := slot.blk ^ blk
 	txMatch := slot.tx ^ tx
 	logMatch := slot.log ^ log
 	tagHiMatch := slot.tagHi ^ tagHi
 	tagLoMatch := slot.tagLo ^ tagLo
 
-	// Combine all matches into single comparison (0 means perfect match)
+	// Combine all matches into a single comparison (0 means perfect match)
 	exactMatch := (blkMatch | txMatch | logMatch | uint32(tagHiMatch) | uint32(tagHiMatch>>32) | uint32(tagLoMatch) | uint32(tagLoMatch>>32)) == 0
 
-	// ───── 5. Branchless update using conditional move semantics ─────
+	// ───── 5. Determine if the log is a duplicate using the result of the exact match and staleness check ─────
 	isDuplicate := exactMatch && !stale
 
 	// ───── Log Handling for Duplicates and Reorgs ─────
 	if isDuplicate {
-		// Print a warning for duplicates (only if not stale)
+		// Print a warning for duplicate logs (only if the log is not stale)
 		utils.PrintWarning("Duplicate log detected: blk=" + utils.Itoa(int(blk)) + ", tx=" + utils.Itoa(int(tx)) + ", log=" + utils.Itoa(int(log)) + "\n")
 	} else if stale {
-		// Print a warning for reorgs (stale logs that are being reprocessed)
+		// Print a warning for stale logs being reprocessed due to a reorg
 		utils.PrintWarning("Reorg detected, reprocessing log: blk=" + utils.Itoa(int(blk)) + ", tx=" + utils.Itoa(int(tx)) + ", log=" + utils.Itoa(int(log)) + "\n")
 	}
 
-	// ───── 6. Branchless assignment - only update if not a duplicate ─────
+	// ───── 6. Update the slot with the new log event if it's not a duplicate ─────
+	// Only update the deduplication slot if the log event is not a duplicate.
+	// The slot will be replaced with the new log event and its block height.
 	if !isDuplicate {
 		*slot = dedupeSlot{
 			blk:   blk,
@@ -92,5 +98,6 @@ func (d *Deduper) Check(
 		}
 	}
 
+	// Return true if the event is not a duplicate, indicating that it should be processed.
 	return !isDuplicate
 }
