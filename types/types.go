@@ -10,10 +10,6 @@
 //   - Aligned and padded for cache efficiency, ABA safety, and prefetch locality
 //   - 64-byte aligned for clean per-slot allocation in any struct ring or queue
 //
-// Compiler Directives:
-//   - //go:notinheap
-//   - //go:align 64
-//
 // ⚠️ Never store or reference LogView outside current tick — contents become invalid
 // ─────────────────────────────────────────────────────────────────────────────
 

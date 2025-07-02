@@ -10,10 +10,6 @@
 //   - Runtime reads never mutate shared state — safe for no-lock use
 //   - Payload masking complies with RFC 6455 client-to-server masking rules
 //
-// Compiler Directives:
-//   - //go:nosplit
-//   - //go:registerparams
-//
 // ⚠️ NEVER mutate shared state after init — ring buffer assumes immutability
 // ─────────────────────────────────────────────────────────────────────────────
 

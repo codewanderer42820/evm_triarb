@@ -10,11 +10,6 @@
 //   - No allocations, no reflection, no strings — everything byte-level and fused
 //   - Unsafe use is deliberate for ISR-class log ingestion
 //
-// Compiler Directives:
-//   - //go:nosplit
-//   - //go:inline
-//   - //go:registerparams
-//
 // ⚠️ All inputs must be bounds-safe and well-formed — no fallback handling
 // ─────────────────────────────────────────────────────────────────────────────
 

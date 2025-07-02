@@ -11,10 +11,6 @@
 //   - Uses zero-copy operations to maximize efficiency and minimize memory allocations.
 //   - Ensures cache-line alignment for improved memory access patterns and CPU performance.
 //
-// Compiler Directives:
-//   - //go:notinheap
-//   - //go:align 64
-//
 // ⚠️ The Deduper must not be used across multiple goroutines as it is not thread-safe
 //    and assumes exclusive access to each slot during event processing.
 // ─────────────────────────────────────────────────────────────────────────────

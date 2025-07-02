@@ -10,10 +10,6 @@
 //   - All field detection uses 8-byte aligned probes from constants.go for efficient memory access.
 //   - LogView slices point directly into wsBuf, enabling zero-copy operation until overwritten.
 //
-// Compiler Directives:
-//   - //go:nosplit
-//   - //go:registerparams
-//
 // ⚠️ Must not retain LogView after wsBuf rotation — pointer invalidation risk
 // ─────────────────────────────────────────────────────────────────────────────
 

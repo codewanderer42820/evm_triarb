@@ -10,10 +10,6 @@
 //   - Buffer reuse guarantees zero heap pressure during all log ingestion
 //   - Frame ring (`wsFrames`) is used to queue zero-copy views into `wsBuf`
 //
-// Compiler Directives:
-//   - //go:nosplit
-//   - //go:registerparams
-//
 // ⚠️ Caller MUST not retain frame.Payload past next wsBuf overwrite
 // ─────────────────────────────────────────────────────────────────────────────
 

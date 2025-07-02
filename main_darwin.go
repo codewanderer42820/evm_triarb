@@ -13,10 +13,6 @@
 //   - Buffer rotation and GC are manually controlled for latency determinism
 //   - Restart-on-error model ensures resilience without leak propagation
 //
-// Compiler Directives:
-//   - //go:nosplit
-//   - //go:registerparams
-//
 // ⚠️ Single-threaded loop — ISR model assumes core pinning and isolation
 // ─────────────────────────────────────────────────────────────────────────────
 

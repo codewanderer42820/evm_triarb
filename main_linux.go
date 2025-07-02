@@ -13,10 +13,6 @@
 //   - Buffer logic and parser flow are identical to macOS (see main_darwin.go)
 //   - GC is disabled and manually re-enabled when limits breached
 //
-// Compiler Directives:
-//   - //go:nosplit
-//   - //go:registerparams
-//
 // ⚠️ Assumes dedicated core. Thread is locked to CPU.
 // ─────────────────────────────────────────────────────────────────────────────
 

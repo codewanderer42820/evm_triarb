@@ -10,11 +10,6 @@
 //   - Uses stackless logging model: no alloc, no interfaces
 //   - Aggressively inlined and nosplit — safe for ISR pipelines
 //
-// Compiler Directives:
-//   - //go:nosplit
-//   - //go:inline
-//   - //go:registerparams
-//
 // ⚠️ Never invoke in hot loops — use only in failure diagnostics
 // ─────────────────────────────────────────────────────────────────────────────
 
