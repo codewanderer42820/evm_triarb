@@ -117,24 +117,27 @@ func handleFrame(p []byte) {
 		switch {
 		case tag == keyAddress:
 			// Parse the Address field (assuming it follows the expected format)
-			base := i + 8
 			start := i + skipToQuote(p[i:], 9, 1) + 1    // Start after the first quote
 			end := start + skipToQuote(p[start:], 0, 42) // The second quote marks the end
 			v.Addr = p[start:end]
-			i = base + len(v.Addr) + 3 // Update index after parsing the Address field
-			missing &^= wantAddr       // Mark Address as successfully parsed
+			i = end + 1          // Update index after parsing the Address field
+			missing &^= wantAddr // Mark Address as successfully parsed
 
 		case tag == keyTopics:
 			// Parse the Topics field
-			base := i + 7
-			start := base + skipToBracket0(p[base:], 2, 1) + 1    // Start after the first quote
+			start := i + skipToBracket0(p[i:], 8, 1) + 1          // Start after the first quote
 			end := start - 1 + skipToBracket1(p[start-1:], 0, 69) // The second quote marks the end
+			// Ensure end is not less than start (self-correcting)
+			if end < start {
+				end = start
+			}
 			v.Topics = p[start:end]
 			// Early exit if the Sync() signature doesn't match
 			//if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
 			//	return // Exit early if it doesn't match Sync()
 			//}
-			i = base + len(v.Topics) + 2
+			log.Println(utils.B2s(p[start:end]))
+			i = end + 1            // Update index after parsing the Address field
 			missing &^= wantTopics // Mark Topics as successfully parsed
 
 		case tag == keyData:
