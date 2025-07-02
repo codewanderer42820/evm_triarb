@@ -71,7 +71,16 @@ func (d *Deduper) Check(
 	// ───── 5. Branchless update using conditional move semantics ─────
 	isDuplicate := exactMatch && !stale
 
-	// Branchless assignment - only update if not a duplicate
+	// ───── Log Handling for Duplicates and Reorgs ─────
+	if isDuplicate {
+		// Print a warning for duplicates (only if not stale)
+		utils.PrintWarning("Duplicate log detected: blk=" + utils.Itoa(int(blk)) + ", tx=" + utils.Itoa(int(tx)) + ", log=" + utils.Itoa(int(log)) + "\n")
+	} else if stale {
+		// Print a warning for reorgs (stale logs that are being reprocessed)
+		utils.PrintWarning("Reorg detected, reprocessing log: blk=" + utils.Itoa(int(blk)) + ", tx=" + utils.Itoa(int(tx)) + ", log=" + utils.Itoa(int(log)) + "\n")
+	}
+
+	// ───── 6. Branchless assignment - only update if not a duplicate ─────
 	if !isDuplicate {
 		*slot = dedupeSlot{
 			blk:   blk,
