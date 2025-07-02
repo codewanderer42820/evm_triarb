@@ -25,6 +25,9 @@ import (
 // B2s converts []byte → string with zero alloc.
 // ⚠️ Input must not be mutated after conversion.
 //
+// This function converts a byte slice into a string without allocating new memory.
+// It is optimized to avoid unnecessary allocations by directly using unsafe methods.
+//
 //go:nosplit
 //go:inline
 //go:registerparams
