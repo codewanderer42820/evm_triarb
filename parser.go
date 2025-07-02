@@ -45,7 +45,7 @@ func skipToQuote(p []byte, startIdx int, hopSize int) int {
 }
 
 // skipToBracket finds the next '"' after a ':', using hop-based traversal for efficiency
-func skipToBracket0(p []byte, startIdx int, hopSize int) int {
+func skipToOpeningBracket(p []byte, startIdx int, hopSize int) int {
 	i := startIdx
 
 	for ; i < len(p); i += hopSize {
@@ -58,7 +58,7 @@ func skipToBracket0(p []byte, startIdx int, hopSize int) int {
 }
 
 // skipToBracket finds the next '"' after a ':', using hop-based traversal for efficiency
-func skipToBracket1(p []byte, startIdx int, hopSize int) int {
+func skipToClosingBracket(p []byte, startIdx int, hopSize int) int {
 	i := startIdx
 
 	for ; i < len(p); i += hopSize {
@@ -122,8 +122,8 @@ func handleFrame(p []byte) {
 
 		case tag == keyTopics:
 			// Parse the Topics field
-			start := i + skipToBracket0(p[i:], 8, 1) + 1          // Start after the first quote
-			end := start - 1 + skipToBracket1(p[start-1:], 0, 69) // The second quote marks the end
+			start := i + skipToOpeningBracket(p[i:], 8, 1) + 1          // Start after the first quote
+			end := start - 1 + skipToClosingBracket(p[start-1:], 0, 69) // The second quote marks the end
 			// Ensure end is not less than start (self-correcting)
 			if end < start {
 				end = start
