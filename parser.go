@@ -51,14 +51,21 @@ func skipToQuote(p []byte, startIdx int, hopSize int) int {
 }
 
 // skipToBracket finds the next '"' after a ':', using hop-based traversal for efficiency
-func skipToBracket(p []byte, startIdx int, hopSize int) int {
+func skipToBracket0(p []byte, startIdx int, hopSize int) int {
 	i := startIdx
 
-	for i = startIdx; i < len(p); i++ {
+	for ; i < len(p); i += hopSize {
 		if p[i] == '[' {
-			break
+			return i
 		}
 	}
+
+	return -1
+}
+
+// skipToBracket finds the next '"' after a ':', using hop-based traversal for efficiency
+func skipToBracket1(p []byte, startIdx int, hopSize int) int {
+	i := startIdx
 
 	for ; i < len(p); i += hopSize {
 		if p[i] == ']' {
@@ -123,7 +130,9 @@ func handleFrame(p []byte) {
 		case tag == keyTopics:
 			// Parse the Topics field
 			base := i + 7
-			v.Topics = utils.SliceJSONArray(p, base+utils.FindBracket(p[base:]))
+			start := base + skipToBracket0(p[base:], 2, 1) + 1    // Start after the first quote
+			end := start - 1 + skipToBracket1(p[start-1:], 0, 69) // The second quote marks the end
+			v.Topics = p[start:end]
 			// Early exit if the Sync() signature doesn't match
 			if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
 				return // Exit early if it doesn't match Sync()
