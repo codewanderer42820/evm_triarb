@@ -34,57 +34,39 @@ var (
 // skipToQuote finds the next '"' after a ':', using hop-based traversal for efficiency
 func skipToQuote(p []byte, startIdx int, hopSize int) int {
 	i := startIdx
-	// log.Printf("Starting skipToQuote: startIdx=%d, hopSize=%d, bufferLength=%d\n", startIdx, hopSize, len(p))
 
-	// First, iterate over the buffer to get close to the quote
-	for i = startIdx; i < len(p)-1; i++ {
-		if p[i] == ':' {
-			// log.Printf("Found ':' at index %d, start hopping\n", i)
-			break // We found the colon, let's start hopping
-		}
-	}
-
-	// Loop over the buffer in hops of hopSize, after we found the ':'
-	for ; i < len(p); i += hopSize {
-		// log.Printf("At index %d, byte: %v\n", i, utils.B2s(p[i:])) // Debug: Print current index and byte
-
-		// Check if the current character is a quote
+	for i = startIdx; i < len(p); i++ {
 		if p[i] == '"' {
-			// log.Printf("Found quote at index %d\n", i) // Debug: Found the quote
-			return i // Return the index of the quote
+			break
 		}
 	}
 
-	// log.Printf("No quote found, returning -1\n") // Debug: No quote found
-	return -1 // Return -1 if no quote is found
+	for ; i < len(p); i += hopSize {
+		if p[i] == '"' {
+			return i
+		}
+	}
+
+	return -1
 }
 
-// skipToBracket finds the first '[' for topics array using hop-based traversal for efficiency
+// skipToBracket finds the next '"' after a ':', using hop-based traversal for efficiency
 func skipToBracket(p []byte, startIdx int, hopSize int) int {
 	i := startIdx
-	// log.Printf("Starting skipToBracket: startIdx=%d, hopSize=%d, bufferLength=%d\n", startIdx, hopSize, len(p))
 
-	// First, iterate over the buffer to get close to the bracket
 	for i = startIdx; i < len(p); i++ {
 		if p[i] == '[' {
-			// log.Printf("Found '[' at index %d, start hopping\n", i)
-			break // We found the bracket, let's start hopping
+			break
 		}
 	}
 
-	// Loop over the buffer in hops of hopSize, after we found the '['
 	for ; i < len(p); i += hopSize {
-		// log.Printf("At index %d, byte: %v\n", i, utils.B2s(p[i:])) // Debug: Print current index and byte
-
-		// Check if the current character is a bracket
-		if p[i] == '[' {
-			// log.Printf("Found bracket at index %d\n", i) // Debug: Found the bracket
-			return i // Return the index of the bracket
+		if p[i] == ']' {
+			return i
 		}
 	}
 
-	// log.Printf("No bracket found, returning -1\n") // Debug: No bracket found
-	return -1 // Return -1 if no bracket is found
+	return -1
 }
 
 // handleFrame processes a raw WebSocket frame containing a single log.
