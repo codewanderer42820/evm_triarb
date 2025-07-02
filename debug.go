@@ -15,20 +15,22 @@
 
 package main
 
-import "log"
+import "main/utils"
 
-// dropError logs cold-path errors with optional suffix.
-// Avoids allocations by branching on nil and using raw Printf.
+// dropError logs error messages with a custom alloc-free print strategy.
+// It writes to stderr (file descriptor 2) directly, bypassing allocations.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func dropError(prefix string, err error) {
 	if err != nil {
-		// Rare case: print with error suffix
-		log.Printf("%s: %v", prefix, err)
+		// Rare case: print with error suffix using custom alloc-free printing
+		msg := prefix + ": " + err.Error() + "\n"
+		utils.PrintWarning(msg)
 	} else {
-		// Common for GC traces or tagged warnings
-		log.Print(prefix)
+		// Common case: print the prefix for GC traces or tagged warnings
+		msg := prefix + "\n"
+		utils.PrintWarning(msg)
 	}
 }
