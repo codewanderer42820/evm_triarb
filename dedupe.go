@@ -35,7 +35,7 @@ type dedupeSlot struct {
 	blk, tx, log uint32    // 96-bit event identity key (blk/tx/log) - packed tight
 	age          uint32    // block height of slot entry
 	tagHi, tagLo uint64    // 128-bit fingerprint (topic0 preferred)
-	_            [4]uint32 // Padding for cache-line alignment (total struct size: 64 bytes)
+	_            [4]uint64 // Padding for cache-line alignment (total struct size: 64 bytes)
 }
 
 // Check tests if the given (blk, tx, log, tag) tuple is NEW and should be processed.
