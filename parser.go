@@ -55,36 +55,28 @@ func handleFrame(p []byte) {
 		tag := *(*[8]byte)(unsafe.Pointer(&p[i]))
 		switch tag {
 		case keyAddress:
-			if missing&wantAddr != 0 {
-				base := i + 8
-				v.Addr = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
-				missing &^= wantAddr
-			}
+			base := i + 8
+			v.Addr = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+			missing &^= wantAddr
 		case keyTopics:
-			if missing&wantTopics != 0 {
-				base := i + 8
-				v.Topics = utils.SliceJSONArray(p, base+utils.FindBracket(p[base:]))
-				if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
-					return
-				}
-				missing &^= wantTopics
+			base := i + 8
+			v.Topics = utils.SliceJSONArray(p, base+utils.FindBracket(p[base:]))
+			if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
+				return
 			}
+			missing &^= wantTopics
 		case keyData:
-			if missing&wantData != 0 {
-				v.Data = utils.SliceASCII(p, i+7)
-				missing &^= wantData
-			}
+			v.Data = utils.SliceASCII(p, i+7)
+			missing &^= wantData
 		case keyBlockNumber:
-			if missing&wantBlk != 0 {
-				base := i + 8
-				v.BlkNum = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
-				if len(v.BlkNum) == 0 {
-					return
-				}
-				missing &^= wantBlk
+			base := i + 8
+			v.BlkNum = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+			if len(v.BlkNum) == 0 {
+				return
 			}
+			missing &^= wantBlk
 		case keyTransactionIndex:
-			if missing&wantTx != 0 && len(p)-i >= 18 {
+			if len(p)-i >= 18 {
 				lo := *(*uint64)(unsafe.Pointer(&p[i]))
 				hi := *(*uint64)(unsafe.Pointer(&p[i+8]))
 				if lo == txIdxLo && hi == txIdxHi {
@@ -97,14 +89,12 @@ func handleFrame(p []byte) {
 				}
 			}
 		case keyLogIndex:
-			if missing&wantLog != 0 {
-				base := i + 8
-				v.LogIdx = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
-				if len(v.LogIdx) == 0 {
-					return
-				}
-				missing &^= wantLog
+			base := i + 8
+			v.LogIdx = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+			if len(v.LogIdx) == 0 {
+				return
 			}
+			missing &^= wantLog
 		}
 	}
 
