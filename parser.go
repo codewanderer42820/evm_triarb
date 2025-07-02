@@ -80,6 +80,10 @@ func handleFrame(p []byte) {
 			i = end + 1             // Update index after parsing the Address field
 			missing &^= wantAddress // Mark Address as successfully parsed
 
+		case tag == keyBlockHash:
+			i += 80
+			missing &^= wantBlockHash
+
 		case tag == keyBlockNumber:
 			// Parse the Block Number field
 			start := i + utils.SkipToQuote(p[i:], 13, 1) + 1  // Start after the first quote
