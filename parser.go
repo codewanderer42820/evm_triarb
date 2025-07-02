@@ -21,6 +21,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"main/types"
 	"main/utils"
 	"unsafe"
@@ -34,12 +35,6 @@ var (
 // skipToQuote finds the next '"' after a ':', using hop-based traversal for efficiency
 func skipToQuote(p []byte, startIdx int, hopSize int) int {
 	i := startIdx
-
-	for i = startIdx; i < len(p); i++ {
-		if p[i] == '"' {
-			break
-		}
-	}
 
 	for ; i < len(p); i += hopSize {
 		if p[i] == '"' {
@@ -94,6 +89,8 @@ func handleFrame(p []byte) {
 	// Skip the first 117 bytes of the payload as per protocol
 	p = p[117:]
 
+	log.Println(utils.B2s(p))
+
 	// Initialize LogView to store the extracted fields
 	var v types.LogView
 
@@ -121,8 +118,8 @@ func handleFrame(p []byte) {
 		case tag == keyAddress:
 			// Parse the Address field (assuming it follows the expected format)
 			base := i + 8
-			start := base + skipToQuote(p[base:], 2, 1) + 1 // Start after the first quote
-			end := start + skipToQuote(p[start:], 0, 42)    // The second quote marks the end
+			start := i + skipToQuote(p[i:], 9, 1) + 1    // Start after the first quote
+			end := start + skipToQuote(p[start:], 0, 42) // The second quote marks the end
 			v.Addr = p[start:end]
 			i = base + len(v.Addr) + 3 // Update index after parsing the Address field
 			missing &^= wantAddr       // Mark Address as successfully parsed
@@ -134,9 +131,9 @@ func handleFrame(p []byte) {
 			end := start - 1 + skipToBracket1(p[start-1:], 0, 69) // The second quote marks the end
 			v.Topics = p[start:end]
 			// Early exit if the Sync() signature doesn't match
-			if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
-				return // Exit early if it doesn't match Sync()
-			}
+			//if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
+			//	return // Exit early if it doesn't match Sync()
+			//}
 			i = base + len(v.Topics) + 2
 			missing &^= wantTopics // Mark Topics as successfully parsed
 
