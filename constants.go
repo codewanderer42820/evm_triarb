@@ -18,16 +18,17 @@ package main
 // ───────────────────────────── Deduplication ──────────────────────────────
 
 const (
-	// ringBits defines the size of the deduplication ring buffer: 2^18 entries = 262,144 slots = 8 MiB.
-	// This is designed to hold approximately 24 hours of logs for high-FPS chains, such as Polygon,
-	// with 10× overcapacity for peak times. This constant ensures the deduplication system is
-	// adequately sized for typical workloads while maintaining performance under load.
-	ringBits = 18
+	// ringBits defines the size of the deduplication ring buffer: 2^21 entries = 2,097,152 slots ≈ 64 MiB.
+	// This is designed to hold approximately 24 hours of logs for high-FPS chains, such as Solana-like EVM chains.
+	// The buffer is sized for 2x throughput and has 10× overcapacity for peak times.
+	// This constant ensures the deduplication system can handle increased log rates while maintaining high performance under load.
+	ringBits = 21 // Increased for 2x throughput, accommodating more logs per second (≈ 2M entries)
 
 	// maxReorg defines the maximum reorganization depth allowed before events are evicted.
-	// This is set to 64 blocks (approximately 13 minutes at Polygon's 2.9s block time), ensuring
-	// that we can handle minor chain reorganizations while still keeping the system responsive to recent changes.
-	maxReorg = 64
+	// This is set to 256 blocks (approximately 6 minutes at 1.45s block time), ensuring that we can handle minor chain reorganizations
+	// while maintaining responsiveness to recent changes in high-throughput chains.
+	// A higher maxReorg depth ensures that the system can handle deeper reorganizations typical of Solana-like chains.
+	maxReorg = 256 // Increased to handle deeper reorgs in high-throughput chains (≈ 6 minutes at 1.45s block time)
 )
 
 // ─────────────────────────── Memory Guardrails ─────────────────────────────
