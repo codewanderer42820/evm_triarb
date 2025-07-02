@@ -107,9 +107,6 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 13, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.BlkNum = p[start:end]
-			if len(v.BlkNum) == 0 {
-				return // Exit early if Block Number is missing
-			}
 			i = end + 1         // Update index after parsing the Address field
 			missing &^= wantBlk // Mark Block Number as successfully parsed
 
@@ -123,9 +120,6 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 18, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.TxIndex = p[start:end]
-			if len(v.TxIndex) == 0 {
-				return // Exit early if Transaction Index is missing
-			}
 			i = end + 1        // Update index after parsing the Address field
 			missing &^= wantTx // Mark Transaction Index as successfully parsed
 
@@ -134,9 +128,6 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 10, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.LogIdx = p[start:end]
-			if len(v.LogIdx) == 0 {
-				return // Exit early if Log Index is missing
-			}
 			i = end + 1         // Update index after parsing the Address field
 			missing &^= wantLog // Mark Log Index as successfully parsed
 		}
