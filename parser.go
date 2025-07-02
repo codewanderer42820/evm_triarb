@@ -114,7 +114,9 @@ func handleFrame(p []byte) {
 		case tag == keyAddress:
 			// Parse the Address field (assuming it follows the expected format)
 			base := i + 8
-			v.Addr = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+			start := base + skipToQuote(p[base:], 2, 1) + 1 // Start after the first quote
+			end := start + skipToQuote(p[start:], 0, 42)    // The second quote marks the end
+			v.Addr = p[start:end]
 			i = base + len(v.Addr) + 3 // Update index after parsing the Address field
 			missing &^= wantAddr       // Mark Address as successfully parsed
 
