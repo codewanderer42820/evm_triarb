@@ -34,8 +34,8 @@ type LogView struct {
 	// ───────────── Metadata fields: passed to deduper for identity ─────────────
 
 	BlkNum  []byte // "blockNumber" — parsed via ParseHexU64
-	TxIndex []byte // "transactionIndex" — parsed via ParseHexU32
 	LogIdx  []byte // "logIndex" — parsed via ParseHexU32
+	TxIndex []byte // "transactionIndex" — parsed via ParseHexU32
 
 	// ───────────── Cold fingerprinting fields for deduplication ────────────────
 
