@@ -162,21 +162,24 @@ func handleFrame(p []byte) {
 				continue
 			}
 			// Parse the Transaction Index field
-			base := i + 17
-			v.TxIndex = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+			start := i + skipToQuote(p[i:], 18, 1) + 1  // Start after the first quote
+			end := start + skipToQuote(p[start:], 0, 1) // The second quote marks the end
+			v.TxIndex = p[start:end]
 			if len(v.TxIndex) == 0 {
 				return // Exit early if Transaction Index is missing
 			}
+			i = end + 1        // Update index after parsing the Address field
 			missing &^= wantTx // Mark Transaction Index as successfully parsed
 
 		case tag == keyLogIndex:
 			// Parse the Log Index field
-			base := i + 9
-			v.LogIdx = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+			start := i + skipToQuote(p[i:], 10, 1) + 1  // Start after the first quote
+			end := start + skipToQuote(p[start:], 0, 1) // The second quote marks the end
+			v.LogIdx = p[start:end]
 			if len(v.LogIdx) == 0 {
 				return // Exit early if Log Index is missing
 			}
-			i = base + len(v.LogIdx) + 3
+			i = end + 1         // Update index after parsing the Address field
 			missing &^= wantLog // Mark Log Index as successfully parsed
 		}
 	}
