@@ -99,6 +99,10 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 6, 1) + 1          // Start after the first quote
 			end := start + 2 + utils.SkipToQuote(p[start+2:], 0, 64) // The second quote marks the end
 			v.Data = p[start:end]
+			// Early exit if the length is less than 2, or if the length minus 2 is not divisible by 64
+			if len(v.Data) < 2 || (len(v.Data)-2)&(64-1) != 0 {
+				return // Exit early if length is invalid or not aligned to 64-byte boundary
+			}
 			i = end + 1          // Update index after parsing the Address field
 			missing &^= wantData // Mark Data as successfully parsed
 
