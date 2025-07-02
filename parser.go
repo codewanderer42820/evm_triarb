@@ -109,12 +109,6 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 10, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.LogIdx = p[start:end]
-			// Check if logIndex is empty
-			if len(v.LogIdx) == 0 {
-				// Handle empty logIndex field
-				utils.PrintWarning("Warning: Skipping log due to empty logIndex. This may indicate corrupted data or an invalid log entry.\n")
-				return
-			}
 			i = end + 1              // Update index after parsing the Log Index field
 			missing &^= wantLogIndex // Mark Log Index as successfully parsed
 
@@ -152,6 +146,13 @@ func handleFrame(p []byte) {
 			i = end + 1                 // Update index after parsing the Transaction Index field
 			missing &^= wantTransaction // Mark Transaction Index as successfully parsed
 		}
+	}
+
+	// Check if logIndex is empty
+	if len(v.LogIdx) == 0 {
+		// Handle empty logIndex field
+		utils.PrintWarning("Warning: Skipping log due to empty logIndex. This may indicate corrupted data or an invalid log entry.\n")
+		return
 	}
 
 	// ───── Derive fingerprint ─────
