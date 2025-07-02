@@ -138,9 +138,11 @@ func handleFrame(p []byte) {
 
 		case tag == keyData:
 			// Parse the Data field
-			base := i + 7
-			v.Data = utils.SliceASCII(p, base)
-			i = base + len(v.Data) + 1
+			start := i + skipToQuote(p[i:], 6, 1) + 1          // Start after the first quote
+			end := start + 2 + skipToQuote(p[start+2:], 0, 64) // The second quote marks the end
+			v.Data = p[start:end]
+
+			i = end + 1          // Update index after parsing the Address field
 			missing &^= wantData // Mark Data as successfully parsed
 
 		case tag == keyBlockNumber:
