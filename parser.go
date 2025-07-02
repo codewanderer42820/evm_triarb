@@ -156,9 +156,9 @@ func handleFrame(p []byte) {
 			missing &^= wantBlk // Mark Block Number as successfully parsed
 
 		case tag == keyTransactionIndex:
-			// Skip over 85 bytes of Transaction Hash (this is to bypass the transaction hash field)
-			if len(p)-i >= 85 {
-				i += 85
+			// Skip over 86 bytes of Transaction Hash (this is to bypass the transaction hash field)
+			if len(p)-i >= 86 {
+				i += 86
 				continue
 			}
 			// Parse the Transaction Index field
