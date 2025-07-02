@@ -40,7 +40,7 @@ func B2s(b []byte) string {
 
 // ───────────────────── Zero-Alloc Type Coercion and Logging Utilities ─────────────────────
 
-// itoa manually converts an integer to a string without allocations.
+// Itoa manually converts an integer to a string without allocations.
 // This function works for non-negative integers and avoids heap allocations.
 //
 //go:nosplit
@@ -70,7 +70,7 @@ func Itoa(n int) string {
 	return string(buf)
 }
 
-// printWarning writes a warning message directly to stderr with zero allocation.
+// PrintWarning writes a warning message directly to stderr with zero allocation.
 // It avoids using fmt or log functions, ensuring no allocations occur during the write.
 //
 //go:nosplit
