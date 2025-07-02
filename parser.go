@@ -21,7 +21,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"main/types"
 	"main/utils"
 	"unsafe"
@@ -114,9 +113,7 @@ func handleFrame(p []byte) {
 			missing &^= wantLogIndex // Mark Log Index as successfully parsed
 
 		case tag == keyRemoved:
-			log.Println(utils.B2s(p[i:]))
 			i += 14 // "removed":true
-			log.Println(utils.B2s(p[i:]))
 			missing &^= wantRemoved
 
 		case tag == keyTopics:
