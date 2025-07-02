@@ -2,13 +2,13 @@
 // [Filename]: constants.go — Global ISR Tunables & Parsing Probes
 //
 // Purpose:
-//   - Defines ISR-wide constants for deduplication, GC limits, and WebSocket caps
-//   - Includes unsafe JSON field match probes for zero-alloc scanning
+//   - Defines ISR-wide constants for deduplication, GC limits, and WebSocket caps.
+//   - Includes unsafe JSON field match probes for zero-alloc scanning.
 //
 // Notes:
-//   - All constants are aggressively over-provisioned for high-FPS chains (e.g. Polygon)
-//   - Probes are 8-byte aligned to support unsafe unaligned loads
-//   - Constants are sized with ≥10× margin for safety under burst loads
+//   - All constants are aggressively over-provisioned for high-FPS chains (e.g. Polygon).
+//   - Probes are 8-byte aligned to support unsafe unaligned loads.
+//   - Constants are sized with ≥10× margin for safety under burst loads.
 //
 // ⚠️ No runtime logic here — all values must be compile-time resolvable
 // ─────────────────────────────────────────────────────────────────────────────

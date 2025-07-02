@@ -2,13 +2,13 @@
 // [Filename]: parser.go — ISR-grade zero-alloc JSON log parser
 //
 // Purpose:
-//   - Scans raw WebSocket JSON payloads for critical fields
-//   - Feeds the deduper with fingerprinted events, ensuring unique event processing
+//   - Scans raw WebSocket JSON payloads for critical fields.
+//   - Feeds the deduper with fingerprinted events, ensuring unique event processing.
 //
 // Notes:
-//   - No allocations, no heap pressure, no string conversions
-//   - All field detection uses 8-byte aligned probes from constants.go for efficient memory access
-//   - LogView slices point directly into wsBuf, enabling zero-copy operation until overwritten
+//   - No allocations, no heap pressure, no string conversions.
+//   - All field detection uses 8-byte aligned probes from constants.go for efficient memory access.
+//   - LogView slices point directly into wsBuf, enabling zero-copy operation until overwritten.
 //
 // Compiler Directives:
 //   - //go:nosplit

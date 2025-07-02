@@ -60,7 +60,7 @@ func SkipToQuote(p []byte, startIdx int, hopSize int) int {
 	return -1 // Return -1 if no quote is found
 }
 
-// SkipToOpeningBracket locates the first occurrence of the opening bracket ('[”)
+// SkipToOpeningBracket locates the first occurrence of the opening bracket ('[')
 // in a JSON array field, starting from the given index.
 // This function is used to find the beginning of an array (e.g., the start of the "topics" field in a log).
 //

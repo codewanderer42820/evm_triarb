@@ -7,9 +7,9 @@
 //     (blockNumber, transactionIndex, logIndex) and event fingerprint (topics/data).
 //
 // Notes:
-//   - Designed for high-throughput systems, optimized for low-latency event processing
-//   - Uses zero-copy operations to maximize efficiency and minimize memory allocations
-//   - Ensures cache-line alignment for improved memory access patterns and CPU performance
+//   - Designed for high-throughput systems, optimized for low-latency event processing.
+//   - Uses zero-copy operations to maximize efficiency and minimize memory allocations.
+//   - Ensures cache-line alignment for improved memory access patterns and CPU performance.
 //
 // Compiler Directives:
 //   - //go:notinheap
