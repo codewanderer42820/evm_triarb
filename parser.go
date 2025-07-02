@@ -106,18 +106,17 @@ func handleFrame(p []byte) {
 			i = base + len(v.BlkNum) + 3
 			missing &^= wantBlk // Mark Block Number as extracted
 
-		case tag == keyTransactionIndex && len(p)-i >= 17:
-			// Parse Transaction Index field
-			lo := *(*uint64)(unsafe.Pointer(&p[i]))
-			hi := *(*uint64)(unsafe.Pointer(&p[i+8]))
-			if lo == txIdxLo && hi == txIdxHi {
-				base := i + 17
-				v.TxIndex = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
-				if len(v.TxIndex) == 0 {
-					return // If TxIndex is missing, exit early
-				}
-				missing &^= wantTx // Mark Transaction Index as extracted
+		case tag == keyTransactionIndex:
+			if len(p)-i >= 85 {
+				i += 85
+				continue
 			}
+			base := i + 17
+			v.TxIndex = utils.SliceASCII(p, base+utils.FindQuote(p[base:]))
+			if len(v.TxIndex) == 0 {
+				return // If TxIndex is missing, exit early
+			}
+			missing &^= wantTx // Mark Transaction Index as extracted
 
 		case tag == keyLogIndex:
 			// Parse Log Index field
