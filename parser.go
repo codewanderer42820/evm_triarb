@@ -200,9 +200,9 @@ func handleFrame(p []byte) {
 func emitLog(v *types.LogView) {
 	fmt.Println("[EVENT]")
 	fmt.Println("  address   =", utils.B2s(v.Addr))
-	fmt.Println("  data      =", utils.B2s(v.Data))
-	fmt.Println("  topics    =", utils.B2s(v.Topics))
 	fmt.Println("  block     =", utils.B2s(v.BlkNum))
-	fmt.Println("  txIndex   =", utils.B2s(v.TxIndex))
+	fmt.Println("  data      =", utils.B2s(v.Data))
 	fmt.Println("  logIndex  =", utils.B2s(v.LogIdx))
+	fmt.Println("  topics    =", utils.B2s(v.Topics))
+	fmt.Println("  txIndex   =", utils.B2s(v.TxIndex))
 }
