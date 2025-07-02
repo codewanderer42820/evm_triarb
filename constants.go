@@ -35,13 +35,13 @@ const (
 
 const (
 	// heapSoftLimit triggers non-blocking GC (garbage collection) when exceeded.
-	// If the heap size exceeds 128 MiB, the system will attempt to perform garbage collection
-	// without blocking, ensuring that memory pressure is handled efficiently while maintaining throughput.
-	heapSoftLimit = 128 << 20 // 128 MiB
+	// If the heap size exceeds 256 MiB, the system will attempt to perform garbage collection
+	// without blocking, ensuring efficient memory usage during high-throughput periods.
+	heapSoftLimit = 256 << 20 // 256 MiB
 
-	// heapHardLimit triggers a panic if the heap size exceeds this limit (512 MiB), signaling a failure state.
-	// The system is considered to have failed if the memory usage exceeds this threshold, indicating a potential leak.
-	heapHardLimit = 512 << 20 // 512 MiB
+	// heapHardLimit triggers a panic if the heap size exceeds this limit (1 GiB), signaling a failure state.
+	// This ensures that the system stops if there is a potential memory leak or excessive memory usage.
+	heapHardLimit = 1024 << 20 // 1 GiB
 )
 
 // ───────────────────────── WebSocket Configuration ─────────────────────────
@@ -64,14 +64,13 @@ const (
 
 const (
 	// maxFrameSize sets the maximum size for a raw WebSocket frame payload.
-	// This ensures the system can handle large topic or data blobs in logs without exceeding buffer limits.
-	// The value of 512 KiB is chosen based on the worst-case scenario of data bloat in logs (e.g., from Infura).
-	maxFrameSize = 512 << 10 // 512 KiB
+	// 1 MiB chosen to accommodate larger topic or data blobs in logs without exceeding buffer limits.
+	// This accommodates higher-frequency chains like Solana-like EVM chains.
+	maxFrameSize = 1024 << 10 // 1 MiB
 
 	// frameCap defines the number of WebSocket frames that can be retained for parsing.
-	// This is set to 262,144 frames, covering roughly 2 minutes of logs at 2k FPS.
-	// This ensures that we can process a large number of frames at once without exceeding buffer capacities.
-	frameCap = 1 << 18 // 262,144
+	// 524,288 frames for higher throughput scenarios, ensuring we can process more frames without exceeding buffer capacities.
+	frameCap = 1 << 19 // 524,288 frames (for 4k FPS or higher)
 )
 
 // ────────────────────── JSON Key Probes for Parsing ───────────────────────
