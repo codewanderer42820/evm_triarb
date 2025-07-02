@@ -101,14 +101,6 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 6, 1) + 1          // Start after the first quote
 			end := start + 2 + utils.SkipToQuote(p[start+2:], 0, 64) // The second quote marks the end
 			v.Data = p[start:end]
-			// Early exit if the length minus 2 is not divisible by 64 (for proper alignment)
-			if (len(v.Data)-2)&(64-1) != 0 {
-				// Manually convert the length to a string without allocation
-				msg := "Warning: Skipping transaction due to Data field length (" + utils.Itoa(len(v.Data)-2) + ") not being divisible by 64 bytes\n"
-				// Call printWarning with zero-alloc print logic
-				utils.PrintWarning(msg)
-				return // Exit early if length is not aligned to 64-byte boundary
-			}
 			i = end + 1          // Update index after parsing the Data field
 			missing &^= wantData // Mark Data as successfully parsed
 
@@ -117,6 +109,12 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 10, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.LogIdx = p[start:end]
+			// Check if logIndex is empty
+			if len(v.LogIdx) == 0 {
+				// Handle empty logIndex field
+				utils.PrintWarning("Warning: Skipping log due to empty logIndex. This may indicate corrupted data or an invalid log entry.\n")
+				return
+			}
 			i = end + 1              // Update index after parsing the Log Index field
 			missing &^= wantLogIndex // Mark Log Index as successfully parsed
 
