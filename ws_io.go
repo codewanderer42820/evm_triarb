@@ -24,6 +24,23 @@ import (
 	"unsafe"
 )
 
+// ────────────────────────── Predefined Error Objects ─────────────────────────────
+
+// Generic error for overflow during handshake
+var ErrHandshakeOverflow = fmt.Errorf("handshake header overflow")
+
+// Generic error for frame exceeding buffer capacity
+var ErrFrameExceedsBuffer = fmt.Errorf("frame exceeds buffer capacity")
+
+// Generic error for unsupported fragmented WebSocket frames
+var ErrFragmentedFrame = fmt.Errorf("fragmented frames not supported")
+
+// Generic error for exceeding maximum allowed frame size
+var ErrFrameExceedsMaxSize = fmt.Errorf("frame exceeds maximum size")
+
+// Generic error for failure to respond to Pong frame
+var ErrPongResponseFailed = fmt.Errorf("failed to respond with pong")
+
 // ────────────────────────── Handshake Parsing ─────────────────────────────
 
 var (
@@ -44,7 +61,7 @@ func readHandshake(c net.Conn) ([]byte, error) {
 	for {
 		if n == len(hsBuf) {
 			// If the buffer is full, return an error indicating that the header size exceeded the limit
-			return nil, fmt.Errorf("handshake overflow: header exceeds %d bytes", len(hsBuf))
+			return nil, ErrHandshakeOverflow
 		}
 		m, err := c.Read(hsBuf[n:])
 		if err != nil {
@@ -73,7 +90,7 @@ func readHandshake(c net.Conn) ([]byte, error) {
 func ensureRoom(conn net.Conn, need int) error {
 	if need > len(wsBuf) {
 		// If the required bytes exceed the buffer capacity, return an error
-		return fmt.Errorf("frame %d exceeds wsBuf capacity %d", need, len(wsBuf))
+		return ErrFrameExceedsBuffer
 	}
 
 	for wsLen < need {
@@ -131,7 +148,7 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 			// Respond to ping with pong frame
 			_, err := conn.Write(pongFrame)
 			if err != nil {
-				return nil, fmt.Errorf("pong response failed: %v", err)
+				return nil, ErrPongResponseFailed
 			}
 			continue
 		case 0xA: // PONG frame (opcode 0xA)
@@ -159,7 +176,7 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 			}
 			plen64 := binary.BigEndian.Uint64(wsBuf[wsStart+offset:])
 			if plen64 > maxFrameSize {
-				return nil, fmt.Errorf("frame %d exceeds cap", plen64)
+				return nil, ErrFrameExceedsMaxSize
 			}
 			plen = int(plen64)
 			offset += 8
@@ -197,7 +214,7 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 
 		// Step 7: Reject fragmented frames
 		if fin == 0 {
-			return nil, fmt.Errorf("fragmented frames not supported")
+			return nil, ErrFragmentedFrame
 		}
 
 		// Step 8: Store the parsed frame in the ring
