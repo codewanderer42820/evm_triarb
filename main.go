@@ -2,15 +2,15 @@
 // [Filename]: main.go — Cross-Platform Low Latency WebSocket (blocking reads)
 //
 // Purpose:
-//   - Minimal latency WebSocket ingestion using blocking reads
-//   - Cross-platform implementation with optimized TCP settings
+//   - Implements a low-latency WebSocket ingestion pipeline using blocking reads.
+//   - Cross-platform with optimized TCP settings for maximum throughput.
 //
-// Notes:
-//   - Uses simple blocking conn.Read() for maximum throughput
-//   - Maintains GC control and thread pinning for consistency
-//   - Eliminates all event system overhead for lowest latency
+// Key Features:
+//   - Utilizes a simple blocking conn.Read() for optimal throughput.
+//   - Maintains control over garbage collection and thread pinning for stability.
+//   - Eliminates event system overhead to minimize latency.
 //
-// ⚠️ Single-threaded blocking loop — assumes dedicated core
+// ⚠️ Single-threaded blocking loop — assumes execution on a dedicated core.
 // ─────────────────────────────────────────────────────────────────────────────
 
 package main
@@ -24,49 +24,56 @@ import (
 )
 
 var (
-	memstats runtime.MemStats // Tracked heap stats for GC pressure monitoring
+	memstats runtime.MemStats // Holds memory statistics to monitor heap usage
 )
 
-// WebSocket frame structure
+// Frame represents a WebSocket frame structure.
+//
+//go:notinheap
+//go:align 64
 type Frame struct {
-	Payload []byte
-	End     int
+	Payload []byte // Raw frame payload
+	End     int    // End index of the payload
 }
 
 //go:inline
 //go:registerparams
 func main() {
-	debug.SetGCPercent(-1) // Disable GC entirely (manual GC control only)
-	runtime.LockOSThread() // Pin this goroutine to a specific OS thread
+	// Disable GC and manage it manually for precise control over memory.
+	debug.SetGCPercent(-1)
+
+	// Lock this goroutine to a specific OS thread for performance consistency.
+	runtime.LockOSThread()
 
 	for {
-		// Step 1: Run the WebSocket publisher pipeline
+		// Run the WebSocket publisher pipeline.
 		if err := runPublisher(); err != nil {
-			dropError("main loop error", err) // Log and continue if an error occurs
+			dropError("main loop error", err) // Log and continue on error
 		}
 
-		// Step 2: Monitor memory stats and manage heap usage
+		// Monitor and manage memory usage.
 		runtime.ReadMemStats(&memstats)
 		if memstats.HeapAlloc > heapSoftLimit {
-			// Trigger garbage collection if heap exceeds soft limit
+			// Trigger garbage collection if heap exceeds soft limit.
 			debug.SetGCPercent(100)
-			runtime.GC() // Force a GC cycle
+			runtime.GC() // Force garbage collection cycle.
 			debug.SetGCPercent(-1)
-			dropError("[GC] heap trimmed", nil) // Log GC action
+			dropError("[GC] heap trimmed", nil) // Log GC activity.
 		}
-		// Step 3: Panic if heap usage exceeds hard limit
+
+		// Panic if heap exceeds hard memory limit (potential memory leak).
 		if memstats.HeapAlloc > heapHardLimit {
-			panic("heap usage exceeded hard cap — leak likely")
+			panic("heap usage exceeded hard cap — leak likely detected")
 		}
 	}
 }
 
-// runPublisher establishes WebSocket connection and runs blocking read loop
+// runPublisher establishes a WebSocket connection and handles the blocking read loop.
 //
 //go:inline
 //go:registerparams
 func runPublisher() error {
-	// ───── Step 1: Dial raw TCP connection ─────
+	// Step 1: Establish raw TCP connection to WebSocket server.
 	raw, err := net.Dial("tcp", wsDialAddr)
 	if err != nil {
 		dropError("tcp dial", err)
@@ -75,29 +82,29 @@ func runPublisher() error {
 
 	tcpConn := raw.(*net.TCPConn)
 
-	// ───── Step 2: Configure TCP settings BEFORE getting file descriptor ─────
-	tcpConn.SetNoDelay(true) // Disable Nagle's algorithm
+	// Step 2: Configure TCP settings before obtaining the file descriptor.
+	tcpConn.SetNoDelay(true) // Disable Nagle's algorithm for low-latency communication.
 	tcpConn.SetReadBuffer(maxFrameSize)
 	tcpConn.SetWriteBuffer(maxFrameSize)
 
-	// Apply low-level socket optimizations
+	// Apply platform-specific socket optimizations for better performance.
 	if rawFile, err := tcpConn.File(); err == nil {
 		fd := int(rawFile.Fd())
-		defer rawFile.Close() // Important: close the file descriptor
+		defer rawFile.Close() // Ensure the file descriptor is closed after use.
 
-		// Platform-specific optimizations
+		// Apply platform-specific optimizations for the socket.
 		applySocketOptimizations(fd)
 	}
 
-	// ───── Step 3: Wrap in TLS for secure WebSocket connection ─────
+	// Step 3: Wrap the raw connection with TLS for secure WebSocket communication.
 	tlsConfig := &tls.Config{
-		ServerName:             wsHost, // Ensure the ServerName is set for proper SNI handling
-		SessionTicketsDisabled: false,  // Enable session resumption
+		ServerName:             wsHost, // Set ServerName for correct SNI handling.
+		SessionTicketsDisabled: false,  // Enable session resumption for faster connections.
 	}
 	conn := tls.Client(raw, tlsConfig)
-	defer func() { _ = conn.Close() }() // Ensure connections are closed
+	defer func() { _ = conn.Close() }() // Ensure the TLS connection is closed when done.
 
-	// ───── Step 4: Perform WebSocket Upgrade ─────
+	// Step 4: Perform WebSocket upgrade handshake.
 	if _, err := conn.Write(upgradeRequest); err != nil {
 		dropError("ws upgrade write", err)
 		return err
@@ -111,20 +118,19 @@ func runPublisher() error {
 		return err
 	}
 
-	// ───── Step 5: MINIMAL BLOCKING READ LOOP ─────
-	// This is the absolute minimum latency path - no event systems
+	// Step 5: Block on reading WebSocket frames with minimal overhead.
 	for {
-		// Direct blocking read using existing frame parser
+		// Read the frame from the WebSocket connection.
 		f, err := readFrame(conn)
 		if err != nil {
 			dropError("read frame", err)
 			return err
 		}
 
-		// Process frame immediately using existing handler
+		// Process the frame immediately to minimize delay.
 		handleFrame(f.Payload)
 
-		// Update WebSocket read state after consuming the frame
+		// Update the WebSocket read state after processing the frame.
 		consumed := f.End - wsStart
 		wsStart = f.End
 		wsLen -= consumed
@@ -132,6 +138,9 @@ func runPublisher() error {
 }
 
 // applySocketOptimizations applies platform-specific socket optimizations for MAXIMUM performance
+//
+//go:inline
+//go:registerparams
 func applySocketOptimizations(fd int) {
 	// TCP_NODELAY is already set via SetNoDelay(), but ensuring it's set at syscall level
 	syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
@@ -139,8 +148,6 @@ func applySocketOptimizations(fd int) {
 	// Platform-specific optimizations
 	switch runtime.GOOS {
 	case "linux":
-		// ═══ LINUX MAXIMUM PERFORMANCE SETTINGS ═══
-
 		// TCP_QUICKACK for immediate ACK (Linux-specific) - disable delayed ACK
 		//syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_QUICKACK, 1)
 
@@ -177,8 +184,6 @@ func applySocketOptimizations(fd int) {
 		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_KEEPCNT, 3)   // 3 probes max
 
 	case "darwin":
-		// ═══ MACOS MAXIMUM PERFORMANCE SETTINGS ═══
-
 		// TCP_NODELAY is already set
 		// macOS doesn't have TCP_QUICKACK, but we can optimize other settings
 
@@ -202,8 +207,6 @@ func applySocketOptimizations(fd int) {
 		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, 4, 0) // TCP_NOPUSH = 4
 
 	case "windows":
-		// ═══ WINDOWS MAXIMUM PERFORMANCE SETTINGS ═══
-
 		// TCP_NODELAY is already set via SetNoDelay()
 		// Windows has different socket option constants
 
