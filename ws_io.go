@@ -124,13 +124,10 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 		// Step 2: Handle special control frames: Ping and Pong
 		switch opcode {
 		case 0x8: // CLOSE frame
-			// ─────────────────────────────────────────────────────────────────────────────
 			// Return EOF to signal closure
 			return nil, io.EOF
 		case 0x9: // PING frame (opcode 0x9)
-			// ─────────────────────────────────────────────────────────────────────────────
 			// Handle Ping frame by responding with Pong
-			// Adjust buffer pointers to skip the Ping frame header.
 			wsStart += 2
 			wsLen -= 2
 			// Inline sendPing: No allocation, use pre-allocated slice
@@ -140,7 +137,6 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 			}
 			continue
 		case 0xA: // PONG frame (opcode 0xA)
-			// ─────────────────────────────────────────────────────────────────────────────
 			// Just skip the Pong frame and continue to the next frame
 			wsStart += 2
 			wsLen -= 2
