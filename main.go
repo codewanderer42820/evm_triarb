@@ -23,71 +23,80 @@ import (
 	"syscall"
 )
 
+// memstats holds memory statistics for tracking heap usage and managing garbage collection.
 var (
 	memstats runtime.MemStats // Holds memory statistics to monitor heap usage
 )
 
-// Frame represents a WebSocket frame structure.
+// Frame represents a WebSocket frame structure with payload and its ending index.
 //
 //go:notinheap
 //go:align 64
 type Frame struct {
-	Payload []byte // Raw frame payload
-	End     int    // End index of the payload
+	Payload []byte    // Raw WebSocket frame payload
+	End     int       // End index of the frame payload within the buffer
+	_       [4]uint64 // Padding to ensure proper alignment for cache efficiency
 }
 
+// main is the entry point for the program. It initializes garbage collection control and runs the main event loop.
+//
 //go:inline
 //go:registerparams
 func main() {
-	// Disable GC and manage it manually for precise control over memory.
+	// Disable the automatic garbage collector and manage it manually for better performance.
+	// By setting the GC percentage to -1, we effectively disable the default GC behavior.
 	debug.SetGCPercent(-1)
 
-	// Lock this goroutine to a specific OS thread for performance consistency.
+	// Lock the goroutine to a specific operating system thread. This ensures that the goroutine
+	// is always executed on the same OS thread, which helps to avoid latency introduced by thread migrations.
 	runtime.LockOSThread()
 
+	// Start the main loop where WebSocket publisher is executed continuously.
 	for {
-		// Run the WebSocket publisher pipeline.
+		// Run the WebSocket publisher. If there's an error, log it and continue to the next iteration.
 		if err := runPublisher(); err != nil {
-			dropError("main loop error", err) // Log and continue on error
+			dropError("main loop error", err) // Log the error and continue on failure.
 		}
 
-		// Monitor and manage memory usage.
+		// Read memory stats to monitor heap allocation and trigger garbage collection if needed.
 		runtime.ReadMemStats(&memstats)
 		if memstats.HeapAlloc > heapSoftLimit {
-			// Trigger garbage collection if heap exceeds soft limit.
-			debug.SetGCPercent(100)
-			runtime.GC() // Force garbage collection cycle.
-			debug.SetGCPercent(-1)
-			dropError("[GC] heap trimmed", nil) // Log GC activity.
+			// Trigger garbage collection if heap allocation exceeds the soft memory limit.
+			debug.SetGCPercent(100)             // Set GC to run at 100% for manual garbage collection.
+			runtime.GC()                        // Force garbage collection.
+			debug.SetGCPercent(-1)              // Disable GC after manual collection.
+			dropError("[GC] heap trimmed", nil) // Log the GC activity.
 		}
 
-		// Panic if heap exceeds hard memory limit (potential memory leak).
+		// If memory allocation exceeds the hard limit, panic to indicate a potential memory leak.
 		if memstats.HeapAlloc > heapHardLimit {
 			panic("heap usage exceeded hard cap — leak likely detected")
 		}
 	}
 }
 
-// runPublisher establishes a WebSocket connection and handles the blocking read loop.
+// runPublisher establishes a WebSocket connection, performs the WebSocket handshake, and continuously processes frames.
 //
 //go:inline
 //go:registerparams
 func runPublisher() error {
-	// Step 1: Establish raw TCP connection to WebSocket server.
+	// Step 1: Establish a raw TCP connection to the WebSocket server.
+	// This is the first step in setting up a WebSocket connection over TCP.
 	raw, err := net.Dial("tcp", wsDialAddr)
 	if err != nil {
 		dropError("tcp dial", err)
 		return err
 	}
 
+	// Cast the raw connection to a TCP connection to apply TCP-specific settings.
 	tcpConn := raw.(*net.TCPConn)
 
 	// Step 2: Configure TCP settings before obtaining the file descriptor.
-	tcpConn.SetNoDelay(true) // Disable Nagle's algorithm for low-latency communication.
-	tcpConn.SetReadBuffer(maxFrameSize)
-	tcpConn.SetWriteBuffer(maxFrameSize)
+	tcpConn.SetNoDelay(true)             // Disable Nagle's algorithm for low-latency communication.
+	tcpConn.SetReadBuffer(maxFrameSize)  // Set read buffer size for the connection.
+	tcpConn.SetWriteBuffer(maxFrameSize) // Set write buffer size for the connection.
 
-	// Apply platform-specific socket optimizations for better performance.
+	// Apply platform-specific optimizations to the socket for better performance.
 	if rawFile, err := tcpConn.File(); err == nil {
 		fd := int(rawFile.Fd())
 		defer rawFile.Close() // Ensure the file descriptor is closed after use.
@@ -96,31 +105,36 @@ func runPublisher() error {
 		applySocketOptimizations(fd)
 	}
 
-	// Step 3: Wrap the raw connection with TLS for secure WebSocket communication.
+	// Step 3: Wrap the raw TCP connection with TLS for secure WebSocket communication.
+	// TLS is used to encrypt the WebSocket traffic to ensure secure communication.
 	tlsConfig := &tls.Config{
-		ServerName:             wsHost, // Set ServerName for correct SNI handling.
-		SessionTicketsDisabled: false,  // Enable session resumption for faster connections.
+		ServerName:             wsHost, // Set ServerName for correct SNI (Server Name Indication) handling.
+		SessionTicketsDisabled: false,  // Enable session resumption for faster reconnections.
 	}
-	conn := tls.Client(raw, tlsConfig)
+	conn := tls.Client(raw, tlsConfig)  // Create a TLS connection.
 	defer func() { _ = conn.Close() }() // Ensure the TLS connection is closed when done.
 
-	// Step 4: Perform WebSocket upgrade handshake.
+	// Step 4: Perform WebSocket upgrade handshake to initiate the WebSocket connection.
+	// This sends a WebSocket upgrade request to the server and awaits a response.
 	if _, err := conn.Write(upgradeRequest); err != nil {
 		dropError("ws upgrade write", err)
 		return err
 	}
+	// Read the WebSocket handshake response from the server.
 	if _, err := readHandshake(conn); err != nil {
 		dropError("ws handshake", err)
 		return err
 	}
+	// Once the WebSocket connection is established, send a subscribe packet to the server.
 	if _, err := conn.Write(subscribePacket); err != nil {
 		dropError("subscribe write", err)
 		return err
 	}
 
-	// Step 5: Block on reading WebSocket frames with minimal overhead.
+	// Step 5: Enter a blocking loop to read WebSocket frames and process them.
+	// This loop will continuously read frames from the WebSocket connection, process them, and update the state.
 	for {
-		// Read the frame from the WebSocket connection.
+		// Read a frame from the WebSocket connection.
 		f, err := readFrame(conn)
 		if err != nil {
 			dropError("read frame", err)
@@ -131,6 +145,7 @@ func runPublisher() error {
 		handleFrame(f.Payload)
 
 		// Update the WebSocket read state after processing the frame.
+		// This helps manage the buffer and ensures that subsequent frames are correctly read and processed.
 		consumed := f.End - wsStart
 		wsStart = f.End
 		wsLen -= consumed
