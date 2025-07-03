@@ -28,16 +28,6 @@ var (
 	memstats runtime.MemStats // Holds memory statistics to monitor heap usage
 )
 
-// Frame represents a WebSocket frame structure with payload and its ending index.
-//
-//go:notinheap
-//go:align 64
-type Frame struct {
-	Payload []byte    // Raw WebSocket frame payload
-	End     int       // End index of the frame payload within the buffer
-	_       [4]uint64 // Padding to ensure proper alignment for cache efficiency
-}
-
 // main is the entry point for the program. It initializes garbage collection control and runs the main event loop.
 //
 //go:inline
