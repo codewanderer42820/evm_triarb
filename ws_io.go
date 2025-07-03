@@ -94,6 +94,11 @@ func ensureRoom(conn net.Conn, need int) error {
 
 // ───────────────────────────── Frame Decoder ──────────────────────────────
 
+// This global slice holds the pre-allocated Ping frame. It ensures that there
+// is no allocation during runtime when sending the Ping frame.
+
+var pingFrame = []byte{0x89, 0x00} // Ping frame (FIN=1, Opcode=0x9)
+
 // readFrame parses a single complete WebSocket frame from the stream.
 //
 // This function decodes a WebSocket frame by processing its header, payload length, and mask, if present.
@@ -116,13 +121,27 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 		masked := hdr1 & 0x80
 		plen7 := int(hdr1 & 0x7F)
 
-		// Step 2: Handle control frames (skip)
+		// Step 2: Handle special control frames: Ping and Pong
 		switch opcode {
-		case 0x8:
-			// CLOSE frame, return EOF to signal closure
+		case 0x8: // CLOSE frame
+			// ─────────────────────────────────────────────────────────────────────────────
+			// Return EOF to signal closure
 			return nil, io.EOF
-		case 0x9, 0xA:
-			// PING/PONG frames, just move the pointer and continue
+		case 0x9: // PING frame (opcode 0x9)
+			// ─────────────────────────────────────────────────────────────────────────────
+			// Handle Ping frame by responding with Pong
+			// Adjust buffer pointers to skip the Ping frame header.
+			wsStart += 2
+			wsLen -= 2
+			// Inline sendPing: No allocation, use pre-allocated slice
+			_, err := conn.Write(pingFrame) // Directly use pre-allocated pingFrame
+			if err != nil {
+				return nil, fmt.Errorf("sendPing failed: %v", err)
+			}
+			continue
+		case 0xA: // PONG frame (opcode 0xA)
+			// ─────────────────────────────────────────────────────────────────────────────
+			// Just skip the Pong frame and continue to the next frame
 			wsStart += 2
 			wsLen -= 2
 			continue
