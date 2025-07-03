@@ -52,22 +52,19 @@ func Itoa(n int) string {
 		return "0"
 	}
 
-	// Use a byte slice to store the result (maximum 10 digits for int)
-	buf := make([]byte, 0, 10)
+	// Use a fixed-size buffer to store the result (maximum 10 digits for int)
+	var buf [10]byte
+	i := len(buf)
 
 	// Convert integer to string (reverse order)
 	for n > 0 {
-		buf = append(buf, byte(n%10+'0')) // Get the least significant digit
-		n /= 10                           // Remove the least significant digit
+		i--
+		buf[i] = byte(n%10 + '0') // Get the least significant digit
+		n /= 10                   // Remove the least significant digit
 	}
 
-	// Reverse the byte slice to get the correct order
-	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
-		buf[i], buf[j] = buf[j], buf[i]
-	}
-
-	// Convert the byte slice to a string and return
-	return string(buf)
+	// Return the string created from the buffer (ignoring unused parts of the array)
+	return string(buf[i:])
 }
 
 // PrintWarning writes a warning message directly to stderr with zero allocation.
@@ -77,8 +74,8 @@ func Itoa(n int) string {
 //go:inline
 //go:registerparams
 func PrintWarning(msg string) {
-	// Convert the string to a byte slice
-	msgBytes := []byte(msg)
+	// Convert the string to a byte slice without allocating memory
+	msgBytes := *(*[]byte)(unsafe.Pointer(&msg))
 
 	// Directly write the byte slice to stderr (file descriptor 2)
 	_, err := syscall.Write(2, msgBytes)
