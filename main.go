@@ -1,8 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// [Filename]: main.go — Cross-Platform Low Latency WebSocket (blocking reads)
+// [Filename]: main.go — ISR-grade Cross-Platform Low Latency WebSocket (blocking reads)
 //
 // Purpose:
-//   - Implements a low-latency WebSocket ingestion pipeline using blocking reads.
+//   - Implements an ISR-grade, low-latency WebSocket ingestion pipeline using blocking reads.
 //   - Cross-platform with optimized TCP settings for maximum throughput.
 //
 // Key Features:
