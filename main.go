@@ -1,19 +1,16 @@
-//go:build darwin
-// +build darwin
-
 // ─────────────────────────────────────────────────────────────────────────────
-// [Filename]: main_darwin.go — macOS ISR event loop (kqueue-powered)
+// [Filename]: main.go — Cross-Platform Low Latency WebSocket (blocking reads)
 //
 // Purpose:
-//   - Establishes TLS→WebSocket→kqueue event pipeline on macOS/BSD
-//   - Performs hot-path log parsing in a pinned, GC-suppressed goroutine
+//   - Minimal latency WebSocket ingestion using blocking reads
+//   - Cross-platform implementation with optimized TCP settings
 //
 // Notes:
-//   - All socket reads handled via syscall-triggered readiness (kqueue)
-//   - Buffer rotation and GC are manually controlled for latency determinism
-//   - Restart-on-error model ensures resilience without leak propagation
+//   - Uses simple blocking conn.Read() for maximum throughput
+//   - Maintains GC control and thread pinning for consistency
+//   - Eliminates all event system overhead for lowest latency
 //
-// ⚠️ Single-threaded loop — ISR model assumes core pinning and isolation
+// ⚠️ Single-threaded blocking loop — assumes dedicated core
 // ─────────────────────────────────────────────────────────────────────────────
 
 package main
@@ -23,19 +20,17 @@ import (
 	"net"
 	"runtime"
 	"runtime/debug"
-	"syscall"
 )
 
 var (
-	events   = [1]syscall.Kevent_t{} // Reusable single event slot for kqueue
-	memstats runtime.MemStats        // Tracked heap stats for GC pressure monitoring
+	memstats runtime.MemStats // Tracked heap stats for GC pressure monitoring
 )
 
 //go:inline
 //go:registerparams
 func main() {
 	debug.SetGCPercent(-1) // Disable GC entirely (manual GC control only)
-	runtime.LockOSThread() // Pin this goroutine to a specific OS thread to avoid preemption
+	runtime.LockOSThread() // Pin this goroutine to a specific OS thread
 
 	for {
 		// Step 1: Run the WebSocket publisher pipeline
@@ -52,14 +47,14 @@ func main() {
 			debug.SetGCPercent(-1)
 			dropError("[GC] heap trimmed", nil) // Log GC action
 		}
-		// Step 3: Panic if heap usage exceeds hard limit (indicating a memory leak)
+		// Step 3: Panic if heap usage exceeds hard limit
 		if memstats.HeapAlloc > heapHardLimit {
 			panic("heap usage exceeded hard cap — leak likely")
 		}
 	}
 }
 
-// runPublisher establishes the full WebSocket + kqueue + parser pipeline.
+// runPublisher establishes WebSocket connection and runs blocking read loop
 //
 //go:inline
 //go:registerparams
@@ -70,15 +65,22 @@ func runPublisher() error {
 		dropError("tcp dial", err)
 		return err
 	}
+
+	// Optimize TCP connection for low latency across all platforms
+	if tcpConn, ok := raw.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true) // Disable Nagle's algorithm
+		tcpConn.SetReadBuffer(maxFrameSize)
+		tcpConn.SetWriteBuffer(maxFrameSize)
+	}
+
 	tlsConfig := &tls.Config{
 		ServerName:             wsHost, // Ensure the ServerName is set for proper SNI handling
 		SessionTicketsDisabled: false,  // Enable session resumption
 	}
 	conn := tls.Client(raw, tlsConfig)
-	defer func() { _ = conn.Close(); _ = raw.Close() }() // Ensure connections are closed after use
+	defer func() { _ = conn.Close(); _ = raw.Close() }() // Ensure connections are closed
 
 	// ───── Step 2: Perform WebSocket Upgrade ─────
-	// Send WebSocket upgrade request and wait for a response
 	if _, err := conn.Write(upgradeRequest); err != nil {
 		dropError("ws upgrade write", err)
 		return err
@@ -92,43 +94,18 @@ func runPublisher() error {
 		return err
 	}
 
-	// ───── Step 3: Extract raw FD for kqueue ─────
-	// Retrieve file descriptor from the TCP connection for kqueue registration
-	tcp := raw.(*net.TCPConn)
-	rs, _ := tcp.SyscallConn()
-	var fd int
-	rs.Control(func(f uintptr) { fd = int(f) })
-	_ = syscall.SetNonblock(fd, true) // Set the socket to non-blocking mode
-
-	// ───── Step 4: Register socket with kqueue ─────
-	// Register the socket with the kqueue event system for read readiness
-	kq, _ := syscall.Kqueue()
-	change := syscall.Kevent_t{
-		Ident:  uint64(fd),
-		Filter: syscall.EVFILT_READ, // Monitor the socket for readable events
-		Flags:  syscall.EV_ADD,
-	}
-	syscall.Kevent(kq, []syscall.Kevent_t{change}, nil, nil)
-
-	// ───── Step 5: kqueue wait loop ─────
-	// Wait for events on kqueue and process frames when they are ready
+	// ───── Step 3: MINIMAL BLOCKING READ LOOP ─────
+	// This is the absolute minimum latency path - no event systems
 	for {
-		_, err := syscall.Kevent(kq, nil, events[:], nil)
-		if err == syscall.EINTR {
-			continue // Ignore interrupted system calls and retry
-		}
-		if err != nil {
-			dropError("kqueue wait", err)
-			return err
-		}
-
-		// Process the frame read from the WebSocket connection
+		// Direct blocking read using existing frame parser
 		f, err := readFrame(conn)
 		if err != nil {
 			dropError("read frame", err)
 			return err
 		}
-		handleFrame(f.Payload) // Handle the parsed frame payload
+
+		// Process frame immediately using existing handler
+		handleFrame(f.Payload)
 
 		// Update WebSocket read state after consuming the frame
 		consumed := f.End - wsStart
