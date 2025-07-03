@@ -70,7 +70,11 @@ func runPublisher() error {
 		dropError("tcp dial", err)
 		return err
 	}
-	conn := tls.Client(raw, &tls.Config{ServerName: wsHost})
+	tlsConfig := &tls.Config{
+		ServerName:             wsHost, // Ensure the ServerName is set for proper SNI handling
+		SessionTicketsDisabled: false,  // Enable session resumption
+	}
+	conn := tls.Client(raw, tlsConfig)
 	defer func() { _ = conn.Close(); _ = raw.Close() }() // Ensure proper closure of connections
 
 	// ───── Step 2: Perform WebSocket Upgrade ─────
