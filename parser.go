@@ -37,6 +37,7 @@ var (
 // This method efficiently processes each WebSocket frame by using bit flags to track the fields that
 // have been parsed and directly accessing the raw payload with zero-copy slicing.
 //
+//go:nosplit
 //go:inline
 //go:registerparams
 func handleFrame(p []byte) {

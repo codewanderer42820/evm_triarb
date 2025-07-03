@@ -41,7 +41,6 @@ type dedupeSlot struct {
 // Check tests if the given (blk, tx, log, tag) tuple is NEW and should be processed.
 // If the log is either unseen or stale due to a reorg, it stores the new entry and returns true.
 //
-//go:nosplit
 //go:inline
 //go:registerparams
 func (d *Deduper) Check(
