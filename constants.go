@@ -93,6 +93,9 @@ var (
 	// keyBlockNumber is a probe for detecting the "blockNumber" field in JSON logs.
 	keyBlockNumber = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'N', 'u'} // "blockNumber" field in JSON logs
 
+	// keyBlockTimestamp is a probe for detecting the "blockTimestamp" field in JSON logs.
+	keyBlockTimestamp = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'T', 'i'} // "blockTimestamp" field in JSON logs
+
 	// keyData is a probe for detecting the "data" field in JSON logs.
 	keyData = [8]byte{'"', 'd', 'a', 't', 'a', '"', ':', '"'} // "data" field in JSON logs
 
