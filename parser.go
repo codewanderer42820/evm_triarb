@@ -77,7 +77,7 @@ func handleFrame(p []byte) {
 		switch tag {
 		case keyAddress:
 			// Parse the Address field (assuming it follows the expected format)
-			start := i + utils.SkipToQuote(p[i:], 9, 1) + 1    // Start after the first quote
+			start := i + utils.SkipToQuote(p[i:], 10, 1) + 1   // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 42) // The second quote marks the end
 			v.Addr = p[start:end]
 			i = end + 1             // Update index after parsing the Address field
@@ -90,7 +90,7 @@ func handleFrame(p []byte) {
 
 		case keyBlockNumber:
 			// Parse the Block Number field
-			start := i + utils.SkipToQuote(p[i:], 13, 1) + 1  // Start after the first quote
+			start := i + utils.SkipToQuote(p[i:], 14, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.BlkNum = p[start:end]
 			i = end + 1                 // Update index after parsing the Block Number field
@@ -103,7 +103,7 @@ func handleFrame(p []byte) {
 
 		case keyData:
 			// Parse the Data field
-			start := i + utils.SkipToQuote(p[i:], 6, 1) + 1          // Start after the first quote
+			start := i + utils.SkipToQuote(p[i:], 7, 1) + 1          // Start after the first quote
 			end := start + 2 + utils.SkipToQuote(p[start+2:], 0, 64) // The second quote marks the end
 			v.Data = p[start:end]
 			i = end + 1          // Update index after parsing the Data field
@@ -111,7 +111,7 @@ func handleFrame(p []byte) {
 
 		case keyLogIndex:
 			// Parse the Log Index field
-			start := i + utils.SkipToQuote(p[i:], 10, 1) + 1  // Start after the first quote
+			start := i + utils.SkipToQuote(p[i:], 11, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.LogIdx = p[start:end]
 			i = end + 1              // Update index after parsing the Log Index field
@@ -124,7 +124,7 @@ func handleFrame(p []byte) {
 
 		case keyTopics:
 			// Parse the Topics field (JSON array)
-			start := i + utils.SkipToOpeningBracket(p[i:], 8, 1) + 1          // Start after the opening bracket
+			start := i + utils.SkipToOpeningBracket(p[i:], 9, 1) + 1          // Start after the opening bracket
 			end := start - 1 + utils.SkipToClosingBracket(p[start-1:], 0, 69) // The closing bracket marks the end
 			// Ensure end is not less than start (self-correcting)
 			if end < start {
@@ -145,7 +145,7 @@ func handleFrame(p []byte) {
 				continue
 			}
 			// Parse the Transaction Index field
-			start := i + utils.SkipToQuote(p[i:], 18, 1) + 1  // Start after the first quote
+			start := i + utils.SkipToQuote(p[i:], 19, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.TxIndex = p[start:end]
 			i = end + 1                 // Update index after parsing the Transaction Index field
