@@ -17,13 +17,15 @@ package main
 
 import (
 	"fmt"
+	"main/constants"
+	"main/dedupe"
 	"main/types"
 	"main/utils"
 	"unsafe"
 )
 
 var (
-	deduper   Deduper
+	dedup     dedupe.Deduper
 	latestBlk uint32
 )
 
@@ -79,7 +81,7 @@ func handleFrame(p []byte) {
 
 		// Handle each tag by matching it to predefined keys and parsing accordingly
 		switch tag {
-		case keyAddress:
+		case constants.KeyAddress:
 			// Parse the Address field (assuming it follows the expected format)
 			start := i + utils.SkipToQuote(p[i:], 10, 1) + 1   // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 42) // The second quote marks the end
@@ -87,12 +89,12 @@ func handleFrame(p []byte) {
 			i = end + 1 // Update index after parsing the Address field
 			//missing &^= wantAddress // Mark Address as successfully parsed
 
-		case keyBlockHash:
+		case constants.KeyBlockHash:
 			// Skip over the block hash (80 bytes for a 0x-prefixed hex string)
 			i += 80
 			//missing &^= wantBlockHash
 
-		case keyBlockNumber:
+		case constants.KeyBlockNumber:
 			// Parse the Block Number field
 			start := i + utils.SkipToQuote(p[i:], 14, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
@@ -100,12 +102,12 @@ func handleFrame(p []byte) {
 			i = end + 1 // Update index after parsing the Block Number field
 			//missing &^= wantBlockNumber // Mark Block Number as successfully parsed
 
-		case keyBlockTimestamp:
+		case constants.KeyBlockTimestamp:
 			// Skip over the block timestamp (29 bytes for Infura's "blockTimestamp" field)
 			// This field is specific to Infura and doesn't require missing bitmask tracking.
 			i += 29
 
-		case keyData:
+		case constants.KeyData:
 			// Parse the Data field
 			start := i + utils.SkipToQuote(p[i:], 7, 1) + 1 // Start after the first quote
 			end, exit := utils.SkipToQuoteEarlyExit(p[start+2:], 0, 64, 3)
@@ -118,7 +120,7 @@ func handleFrame(p []byte) {
 			i = end + 1 // Update index after parsing the Data field
 			//missing &^= wantData // Mark Data as successfully parsed
 
-		case keyLogIndex:
+		case constants.KeyLogIndex:
 			// Parse the Log Index field
 			start := i + utils.SkipToQuote(p[i:], 11, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
@@ -126,12 +128,12 @@ func handleFrame(p []byte) {
 			i = end + 1 // Update index after parsing the Log Index field
 			//missing &^= wantLogIndex // Mark Log Index as successfully parsed
 
-		case keyRemoved:
+		case constants.KeyRemoved:
 			// Skip over the "removed":true field
 			i += 14 // "removed":true
 			//missing &^= wantRemoved
 
-		case keyTopics:
+		case constants.KeyTopics:
 			// Parse the Topics field (JSON array)
 			start := i + utils.SkipToOpeningBracket(p[i:], 9, 1) + 1 // Start after the opening bracket
 			end, exit := utils.SkipToClosingBracketEarlyExit(p[start-1:], 0, 69, 2)
@@ -146,13 +148,13 @@ func handleFrame(p []byte) {
 			}
 			v.Topics = p[start:end]
 			// Early exit if the Sync() signature doesn't match
-			if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
+			if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != constants.SigSyncPrefix {
 				return // Exit early if it doesn't match Sync()
 			}
 			i = end + 1 // Update index after parsing the Topics field
 			//missing &^= wantTopics // Mark Topics as successfully parsed
 
-		case keyTransaction:
+		case constants.KeyTransaction:
 			// Skip over 86 bytes of Transaction Hash (this is to bypass the transaction hash field)
 			if len(p)-i >= 86 {
 				i += 86
@@ -203,7 +205,7 @@ func handleFrame(p []byte) {
 
 	// ───── Dedupe + Emit ─────
 	// Check if the event is a duplicate based on the parsed fields and deduper logic
-	if deduper.Check(blk32, tx32, log32, v.TagHi, v.TagLo, latestBlk) {
+	if dedup.Check(blk32, tx32, log32, v.TagHi, v.TagLo, latestBlk) {
 		// If the log is not a duplicate, emit it
 		emitLog(&v)
 	}

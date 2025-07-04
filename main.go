@@ -17,6 +17,7 @@ package main
 
 import (
 	"crypto/tls"
+	"main/constants"
 	"net"
 	"runtime"
 	"runtime/debug"
@@ -50,7 +51,7 @@ func main() {
 
 		// Read memory stats to monitor heap allocation and trigger garbage collection if needed.
 		runtime.ReadMemStats(&memstats)
-		if memstats.HeapAlloc > heapSoftLimit {
+		if memstats.HeapAlloc > constants.HeapSoftLimit {
 			// Trigger garbage collection if heap allocation exceeds the soft memory limit.
 			debug.SetGCPercent(100)             // Set GC to run at 100% for manual garbage collection.
 			runtime.GC()                        // Force garbage collection.
@@ -59,7 +60,7 @@ func main() {
 		}
 
 		// If memory allocation exceeds the hard limit, panic to indicate a potential memory leak.
-		if memstats.HeapAlloc > heapHardLimit {
+		if memstats.HeapAlloc > constants.HeapHardLimit {
 			panic("heap usage exceeded hard cap — leak likely detected")
 		}
 	}
@@ -72,7 +73,7 @@ func main() {
 func runPublisher() error {
 	// Step 1: Establish a raw TCP connection to the WebSocket server.
 	// This is the first step in setting up a WebSocket connection over TCP.
-	raw, err := net.Dial("tcp", wsDialAddr)
+	raw, err := net.Dial("tcp", constants.WsDialAddr)
 	if err != nil {
 		dropError("tcp dial", err)
 		return err
@@ -82,9 +83,9 @@ func runPublisher() error {
 	tcpConn := raw.(*net.TCPConn)
 
 	// Step 2: Configure TCP settings before obtaining the file descriptor.
-	tcpConn.SetNoDelay(true)             // Disable Nagle's algorithm for low-latency communication.
-	tcpConn.SetReadBuffer(maxFrameSize)  // Set read buffer size for the connection.
-	tcpConn.SetWriteBuffer(maxFrameSize) // Set write buffer size for the connection.
+	tcpConn.SetNoDelay(true)                       // Disable Nagle's algorithm for low-latency communication.
+	tcpConn.SetReadBuffer(constants.MaxFrameSize)  // Set read buffer size for the connection.
+	tcpConn.SetWriteBuffer(constants.MaxFrameSize) // Set write buffer size for the connection.
 
 	// Apply platform-specific optimizations to the socket for better performance.
 	if rawFile, err := tcpConn.File(); err == nil {
@@ -98,8 +99,8 @@ func runPublisher() error {
 	// Step 3: Wrap the raw TCP connection with TLS for secure WebSocket communication.
 	// TLS is used to encrypt the WebSocket traffic to ensure secure communication.
 	tlsConfig := &tls.Config{
-		ServerName:             wsHost, // Set ServerName for correct SNI (Server Name Indication) handling.
-		SessionTicketsDisabled: false,  // Enable session resumption for faster reconnections.
+		ServerName:             constants.WsHost, // Set ServerName for correct SNI (Server Name Indication) handling.
+		SessionTicketsDisabled: false,            // Enable session resumption for faster reconnections.
 	}
 	conn := tls.Client(raw, tlsConfig)  // Create a TLS connection.
 	defer func() { _ = conn.Close() }() // Ensure the TLS connection is closed when done.
@@ -171,8 +172,8 @@ func applySocketOptimizations(fd int) {
 		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, 17, 1) // TCP_THIN_DUPACK = 17
 
 		// SO_RCVBUF and SO_SNDBUF - set to exact frame size for minimal buffering
-		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, maxFrameSize)
-		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, maxFrameSize)
+		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, constants.MaxFrameSize)
+		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, constants.MaxFrameSize)
 
 		// TCP_CONGESTION - use BBR if available, otherwise CUBIC
 		syscall.SetsockoptString(fd, syscall.IPPROTO_TCP, 13, "bbr") // TCP_CONGESTION = 13
@@ -200,8 +201,8 @@ func applySocketOptimizations(fd int) {
 		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, 0x102, 3) // TCP_KEEPCNT equivalent
 
 		// SO_RCVBUF and SO_SNDBUF
-		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, maxFrameSize)
-		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, maxFrameSize)
+		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, constants.MaxFrameSize)
+		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, constants.MaxFrameSize)
 
 		// SO_REUSEADDR for faster port reuse
 		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
@@ -220,8 +221,8 @@ func applySocketOptimizations(fd int) {
 		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_KEEPALIVE, 1)
 
 		// Buffer sizes
-		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, maxFrameSize)
-		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, maxFrameSize)
+		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, constants.MaxFrameSize)
+		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, constants.MaxFrameSize)
 
 		// SO_REUSEADDR
 		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
