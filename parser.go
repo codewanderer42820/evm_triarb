@@ -135,7 +135,7 @@ func handleFrame(p []byte) {
 			// Parse the Topics field (JSON array)
 			start := i + utils.SkipToOpeningBracket(p[i:], 9, 1) + 1          // Start after the opening bracket
 			end := start - 1 + utils.SkipToClosingBracket(p[start-1:], 0, 69) // The closing bracket marks the end
-			// Ensure end is not less than start (self-correcting)
+			// Ensure end is not less than start (self-correcting, empty topic is valid)
 			if end < start {
 				end = start
 			}
