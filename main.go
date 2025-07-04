@@ -106,7 +106,7 @@ func runPublisher() error {
 
 	// Step 4: Perform WebSocket upgrade handshake to initiate the WebSocket connection.
 	// This sends a WebSocket upgrade request to the server and awaits a response.
-	if _, err := conn.Write(upgradeRequest); err != nil {
+	if _, err := conn.Write(getUpgradeRequest()); err != nil {
 		dropError("ws upgrade write", err)
 		return err
 	}
@@ -116,7 +116,7 @@ func runPublisher() error {
 		return err
 	}
 	// Once the WebSocket connection is established, send a subscribe packet to the server.
-	if _, err := conn.Write(subscribePacket); err != nil {
+	if _, err := conn.Write(getSubscribePacket()); err != nil {
 		dropError("subscribe write", err)
 		return err
 	}
@@ -132,13 +132,11 @@ func runPublisher() error {
 		}
 
 		// Process the frame immediately to minimize delay.
-		handleFrame(f.Payload)
+		handleFrame(f.GetPayload())
 
-		// Update the WebSocket read state after processing the frame.
-		// This helps manage the buffer and ensures that subsequent frames are correctly read and processed.
-		consumed := f.End - wsStart
-		wsStart = f.End
-		wsLen -= consumed
+		// Reclaim the frame's buffer space immediately after processing.
+		// This prevents buffer compaction overhead and keeps memory usage optimal.
+		reclaimFrame(f)
 	}
 }
 

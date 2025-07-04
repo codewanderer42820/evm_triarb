@@ -38,6 +38,9 @@ var (
 )
 
 // wsError is a pre-allocated error type to avoid allocations
+//
+//go:notinheap
+//go:align 64
 type wsError struct {
 	msg string
 }
@@ -49,8 +52,7 @@ func (e *wsError) Error() string {
 // ────────────────────────── Handshake Parsing ─────────────────────────────
 
 var (
-	hsBuf  [4096]byte                        // 4 KiB temporary buffer for HTTP headers
-	hsTerm = [4]byte{'\r', '\n', '\r', '\n'} // CRLF–CRLF delimiter as array
+	hsBuf [4096]byte // 4 KiB temporary buffer for HTTP headers
 )
 
 // readHandshake reads until HTTP upgrade response is complete.
@@ -71,23 +73,24 @@ func readHandshake(c net.Conn) ([]byte, error) {
 			return nil, err
 		}
 		n += m
-		// Zero-copy search for CRLF-CRLF delimiter
+		// Zero-copy search for CRLF-CRLF delimiter using pre-computed pattern
 		if findTerminator(hsBuf[:n]) >= 0 {
 			return hsBuf[:n], nil
 		}
 	}
 }
 
-// findTerminator searches for CRLF-CRLF without allocating
+// findTerminator searches for CRLF-CRLF using architecture-specific pattern
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func findTerminator(data []byte) int {
 	if len(data) < 4 {
 		return -1
 	}
 	for i := 0; i <= len(data)-4; i++ {
-		if *(*uint32)(unsafe.Pointer(&data[i])) == *(*uint32)(unsafe.Pointer(&hsTerm[0])) {
+		if *(*uint32)(unsafe.Pointer(&data[i])) == crlfcrlfPattern {
 			return i
 		}
 	}
@@ -247,6 +250,7 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func unmaskPayload(payload []byte, maskKey uint32) {
 	if len(payload) == 0 {
 		return
@@ -288,6 +292,7 @@ func unmaskPayload(payload []byte, maskKey uint32) {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func getUpgradeRequest() []byte {
 	return upgradeRequest[:upgradeLen]
 }
@@ -296,6 +301,7 @@ func getUpgradeRequest() []byte {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func getSubscribePacket() []byte {
 	return subscribePacket[:subscribeLen]
 }
@@ -304,6 +310,7 @@ func getSubscribePacket() []byte {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func reclaimFrame(f *wsFrame) {
 	// Move the start position forward to reclaim space
 	if wsStart < f.End {

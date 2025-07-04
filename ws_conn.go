@@ -49,6 +49,9 @@ var (
 
 	// Pre-allocated Pong frame for responding to Ping frames
 	pongFrame [2]byte // = {0x8A, 0x00}
+
+	// Architecture-specific CRLF-CRLF pattern (computed at init)
+	crlfcrlfPattern uint32
 )
 
 // wsFrame holds a parsed WebSocket payload (view into wsBuf).
@@ -70,6 +73,7 @@ type wsFrame struct {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func (f *wsFrame) GetPayload() []byte {
 	if f.PayloadPtr == nil {
 		return nil
@@ -81,6 +85,7 @@ func (f *wsFrame) GetPayload() []byte {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func (f *wsFrame) GetPayloadUnsafe() (unsafe.Pointer, int) {
 	return f.PayloadPtr, f.Len
 }
@@ -89,8 +94,14 @@ func (f *wsFrame) GetPayloadUnsafe() (unsafe.Pointer, int) {
 // Ensures fully deterministic runtime state — no allocs during execution.
 //
 //go:nosplit
+//go:inline
+//go:registerparams
 func init() {
-	// ───── Step 1: Generate Sec-WebSocket-Key (zero-copy) ─────
+	// ───── Step 1: Initialize CRLF-CRLF pattern for current architecture ─────
+	hsTerm := [4]byte{'\r', '\n', '\r', '\n'}
+	crlfcrlfPattern = *(*uint32)(unsafe.Pointer(&hsTerm[0]))
+
+	// ───── Step 2: Generate Sec-WebSocket-Key (zero-copy) ─────
 	var keyBytes [16]byte
 	_, _ = rand.Read(keyBytes[:])
 
@@ -107,7 +118,7 @@ func init() {
 	upgradeLen += copyBytes(upgradeRequest[upgradeLen:], keyBuf[:24])
 	upgradeLen += copyBytes(upgradeRequest[upgradeLen:], []byte("\r\nSec-WebSocket-Version: 13\r\n\r\n"))
 
-	// ───── Step 2: Masked subscribe payload (zero-copy) ─────
+	// ───── Step 3: Masked subscribe payload (zero-copy) ─────
 	// Build JSON payload directly into buffer
 	jsonPayload := []byte(`{"id":1,"method":"eth_subscribe","params":["logs",{}],"jsonrpc":"2.0"}`)
 	payloadLen := copy(payloadBuf[:], jsonPayload)
@@ -136,6 +147,7 @@ func init() {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func copyBytes(dst, src []byte) int {
 	return copy(dst, src)
 }
