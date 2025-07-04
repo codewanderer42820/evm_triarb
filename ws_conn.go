@@ -131,9 +131,9 @@ func init() {
 	// Build the upgrade request directly into fixed buffer (no string allocs)
 	upgradeLen = 0
 	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte("GET "))
-	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte(wsPath))
+	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte(constants.WsPath))
 	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte(" HTTP/1.1\r\nHost: "))
-	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte(wsHost))
+	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte(constants.WsHost))
 	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte("\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: "))
 	upgradeLen += copy(upgradeRequest[upgradeLen:], keyBuf[:24])
 	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte("\r\nSec-WebSocket-Version: 13\r\n\r\n"))
