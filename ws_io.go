@@ -22,6 +22,7 @@ package main
 import (
 	"encoding/binary"
 	"io"
+	"main/constants"
 	"net"
 	"unsafe"
 )
@@ -190,7 +191,7 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 				return nil, err
 			}
 			plen64 := binary.BigEndian.Uint64(wsBuf[wsStart+offset:])
-			if plen64 > maxFrameSize {
+			if plen64 > constants.MaxFrameSize {
 				return nil, errFrameExceedsMaxSize
 			}
 			plen = int(plen64)
@@ -227,7 +228,7 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 		}
 
 		// Step 8: Store frame in ring (truly zero-copy)
-		idx := wsHead & (frameCap - 1)
+		idx := wsHead & (constants.FrameCap - 1)
 		f := &wsFrames[idx]
 		f.PayloadPtr = unsafe.Pointer(&wsBuf[payloadStart])
 		f.PayloadStart = payloadStart
