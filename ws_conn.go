@@ -90,6 +90,24 @@ func (f *wsFrame) GetPayloadUnsafe() (unsafe.Pointer, int) {
 	return f.PayloadPtr, f.Len
 }
 
+// getUpgradeRequest returns the pre-built upgrade request without allocation
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func getUpgradeRequest() []byte {
+	return upgradeRequest[:upgradeLen]
+}
+
+// getSubscribePacket returns the pre-built subscribe packet without allocation
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func getSubscribePacket() []byte {
+	return subscribePacket[:subscribeLen]
+}
+
 // init prebuilds the upgrade request and masked subscribe frame.
 // Ensures fully deterministic runtime state — no allocs during execution.
 //

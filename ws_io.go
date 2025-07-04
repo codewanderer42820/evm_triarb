@@ -288,24 +288,6 @@ func unmaskPayload(payload []byte, maskKey uint32) {
 	}
 }
 
-// getUpgradeRequest returns the pre-built upgrade request without allocation
-//
-//go:nosplit
-//go:inline
-//go:registerparams
-func getUpgradeRequest() []byte {
-	return upgradeRequest[:upgradeLen]
-}
-
-// getSubscribePacket returns the pre-built subscribe packet without allocation
-//
-//go:nosplit
-//go:inline
-//go:registerparams
-func getSubscribePacket() []byte {
-	return subscribePacket[:subscribeLen]
-}
-
 // reclaimFrame marks a frame as processed and reclaims buffer space
 //
 //go:nosplit
