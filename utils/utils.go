@@ -89,6 +89,10 @@ func PrintWarning(msg string) {
 // SkipToQuoteEarlyExit locates the next occurrence of the double-quote character ('"')
 // in the JSON data starting from the given index, using hop-based traversal method for efficiency.
 // The function will stop if the hop count exceeds the defined maxHop and advise whether to exit immediately.
+//
+//go:nosplit
+//go:inline
+//go:registerparams
 func SkipToQuoteEarlyExit(p []byte, startIdx int, hopSize int, maxHops int) (int, bool) {
 	i := startIdx
 	hops := 0
@@ -110,6 +114,10 @@ func SkipToQuoteEarlyExit(p []byte, startIdx int, hopSize int, maxHops int) (int
 // SkipToClosingBracketEarlyExit locates the first occurrence of the closing bracket (']')
 // in a JSON array field, starting from the given index, using hop-based traversal.
 // It returns the index and a bool advising if the caller should exit early after exceeding max hops.
+//
+//go:nosplit
+//go:inline
+//go:registerparams
 func SkipToClosingBracketEarlyExit(p []byte, startIdx int, hopSize int, maxHops int) (int, bool) {
 	i := startIdx
 	hops := 0
