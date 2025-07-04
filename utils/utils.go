@@ -107,6 +107,27 @@ func SkipToQuoteEarlyExit(p []byte, startIdx int, hopSize int, maxHops int) (int
 	return -1, false // No quote found, continue normal flow
 }
 
+// SkipToClosingBracketEarlyExit locates the first occurrence of the closing bracket (']')
+// in a JSON array field, starting from the given index, using hop-based traversal.
+// It returns the index and a bool advising if the caller should exit early after exceeding max hops.
+func SkipToClosingBracketEarlyExit(p []byte, startIdx int, hopSize int, maxHops int) (int, bool) {
+	i := startIdx
+	hops := 0
+
+	// Traverse through the byte slice using hop-based traversal
+	for ; i < len(p); i += hopSize {
+		hops++
+		if hops > maxHops {
+			return i, true // Return the index and advise to exit early
+		}
+		if p[i] == ']' {
+			return i, false // Found the closing bracket, return its index and continue
+		}
+	}
+
+	return -1, false // No closing bracket found, continue normal flow
+}
+
 // SkipToQuote locates the next occurrence of the double-quote character ('"') in the JSON data
 // starting from the given index, using a hop-based traversal method for efficiency.
 // It helps identify the end of a string field in a JSON payload, specifically looking for
