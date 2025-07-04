@@ -1,20 +1,20 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// [Filename]: ws_io.go — Zero-alloc WebSocket frame I/O and buffer decoding
+// [Filename]: ws_io.go — ISR-grade zero-alloc WebSocket frame I/O and buffer decoding
 //
 // Purpose:
 //   - Reads and parses RFC 6455 WebSocket frames from a raw TCP connection
-//   - Performs zero-alloc payload extraction and mask unwrapping
-//   - Eliminates ALL runtime allocations including error objects
+//   - Performs zero-alloc payload extraction and mask unwrapping in-place
+//   - Eliminates ALL runtime allocations, including error objects and temporary buffers
 //
 // Notes:
-//   - Supports only FIN=true, unfragmented, masked data frames (Infura style)
-//   - Buffer reuse guarantees zero heap pressure during all log ingestion
-//   - Frame ring (`wsFrames`) is used to queue zero-copy views into `wsBuf`
-//   - All errors are pre-allocated to avoid allocation during error handling
-//   - SINGLE-THREADED ONLY — no concurrent access protection
+//   - Only supports FIN=true, unfragmented, masked data frames (Infura style)
+//   - Buffer reuse ensures zero heap pressure during log ingestion
+//   - Frame ring (`wsFrames`) is used for direct zero-copy views into `wsBuf`
+//   - All errors are pre-allocated to avoid runtime allocation during error handling
+//   - Highly optimized for single-threaded operation with no concurrent access protection
 //
-// ⚠️ Caller MUST not retain frame.Payload past next wsBuf overwrite
-// ⚠️ Buffer compaction triggers earlier for better memory utilization
+// ⚠️ Caller MUST NOT retain frame.Payload beyond the next wsBuf overwrite — pointer invalidation risk
+// ⚠️ Buffer compaction is triggered early for better memory utilization and cache locality
 // ─────────────────────────────────────────────────────────────────────────────
 
 package main
