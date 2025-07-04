@@ -22,6 +22,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"main/constants"
 	"unsafe"
 )
 
@@ -37,11 +38,11 @@ var (
 	subscribeLen    int       // Actual length of subscribe packet
 
 	// Raw TCP buffer backing WebSocket read loop
-	wsBuf          [maxFrameSize]byte
+	wsBuf          [constants.MaxFrameSize]byte
 	wsStart, wsLen int
 
 	// WebSocket frame ring: pre-allocated views into wsBuf
-	wsFrames [frameCap]wsFrame
+	wsFrames [constants.FrameCap]wsFrame
 	wsHead   uint32
 
 	// Pre-allocated buffers for string operations (zero-copy)
