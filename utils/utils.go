@@ -86,6 +86,27 @@ func PrintWarning(msg string) {
 
 // ────────────── JSON Field Probes (Unsafe, Fixed Pattern) ──────────────
 
+// SkipToQuoteEarlyExit locates the next occurrence of the double-quote character ('"')
+// in the JSON data starting from the given index, using hop-based traversal method for efficiency.
+// The function will stop if the hop count exceeds the defined maxHop and advise whether to exit immediately.
+func SkipToQuoteEarlyExit(p []byte, startIdx int, hopSize int, maxHops int) (int, bool) {
+	i := startIdx
+	hops := 0
+
+	// Traverse through the byte slice using hop-based traversal
+	for ; i < len(p); i += hopSize {
+		hops++
+		if hops > maxHops {
+			return i, true // Return the index and advise to exit early
+		}
+		if p[i] == '"' {
+			return i, false // Found the closing quote, return its index and continue
+		}
+	}
+
+	return -1, false // No quote found, continue normal flow
+}
+
 // SkipToQuote locates the next occurrence of the double-quote character ('"') in the JSON data
 // starting from the given index, using a hop-based traversal method for efficiency.
 // It helps identify the end of a string field in a JSON payload, specifically looking for
