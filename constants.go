@@ -18,11 +18,10 @@ package main
 // ───────────────────────────── Deduplication ──────────────────────────────
 
 const (
-	// ringBits defines the size of the deduplication ring buffer: 2^21 entries = 2,097,152 slots ≈ 64 MiB.
-	// This is designed to hold approximately 24 hours of logs for high-FPS chains, such as Solana-like EVM chains.
-	// The buffer is sized for 2x throughput and has 10× overcapacity for peak times.
-	// This constant ensures the deduplication system can handle increased log rates while maintaining high performance under load.
-	ringBits = 21 // Increased for 2x throughput, accommodating more logs per second (≈ 2M entries)
+	// ringBits defines the size of the deduplication ring buffer: 2^19 entries = 524,288 slots ≈ 16 MiB.
+	// This buffer size is designed to accommodate high-FPS chains like Solana with a reduced memory footprint, while still ensuring efficient log handling.
+	// The buffer size is sufficient for typical bursts in log processing while maintaining high performance and low latency under load.
+	ringBits = 19 // Adjusted for optimal memory usage and throughput, accommodating logs for high-FPS chains such as Solana (~500k entries)
 
 	// maxReorg defines the maximum reorganization depth allowed before events are evicted.
 	// This is set to 256 blocks (approximately 6 minutes at 1.45s block time), ensuring that we can handle minor chain reorganizations
