@@ -107,8 +107,13 @@ func handleFrame(p []byte) {
 
 		case keyData:
 			// Parse the Data field
-			start := i + utils.SkipToQuote(p[i:], 7, 1) + 1          // Start after the first quote
-			end := start + 2 + utils.SkipToQuote(p[start+2:], 0, 64) // The second quote marks the end
+			start := i + utils.SkipToQuote(p[i:], 7, 1) + 1 // Start after the first quote
+			end, exit := utils.SkipToQuoteEarlyExit(p[start+2:], 0, 64, 3)
+			if exit {
+				// Not what we are looking for, exit early due to max hops exceeded
+				return
+			}
+			end += start + 2 // The second quote marks the end
 			v.Data = p[start:end]
 			i = end + 1 // Update index after parsing the Data field
 			//missing &^= wantData // Mark Data as successfully parsed
