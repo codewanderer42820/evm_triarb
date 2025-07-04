@@ -17,14 +17,17 @@
 
 package main
 
-import "main/utils"
+import (
+	"main/constants"
+	"main/utils"
+)
 
 // Deduper is a lock-free circular buffer that tracks recent log identities.
 //
 //go:notinheap
 //go:align 64
 type Deduper struct {
-	buf [1 << ringBits]dedupeSlot // Deduplication ring buffer (power-of-two sized)
+	buf [1 << constants.RingBits]dedupeSlot // Deduplication ring buffer (power-of-two sized)
 }
 
 // dedupeSlot represents a single deduplication entry.
@@ -54,10 +57,10 @@ func (d *Deduper) Check(
 
 	// ───── 2. Efficiently access the deduplication slot using a single memory access ─────
 	// We apply a hash function to the key to locate the appropriate slot in the buffer.
-	slot := &d.buf[utils.Mix64(key)&((1<<ringBits)-1)]
+	slot := &d.buf[utils.Mix64(key)&((1<<constants.RingBits)-1)]
 
 	// ───── 3. Check for staleness based on three conditions: slot used, block progression, and reorg threshold ─────
-	stale := slot.age > 0 && latestBlk > slot.age && (latestBlk-slot.age) > maxReorg
+	stale := slot.age > 0 && latestBlk > slot.age && (latestBlk-slot.age) > constants.MaxReorg
 
 	// ───── 4. Branchless exact match using bitwise operations ─────
 	// Compare the current log event's identifiers against the stored ones using XOR.
