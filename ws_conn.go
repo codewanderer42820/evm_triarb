@@ -62,9 +62,9 @@ var (
 //go:align 64
 type wsFrame struct {
 	PayloadPtr   unsafe.Pointer // Direct pointer to payload in wsBuf
+	Len          int            // payload length
 	PayloadStart int            // Start offset in wsBuf
 	PayloadEnd   int            // End offset in wsBuf
-	Len          int            // payload length
 	End          int            // wsBuf offset for reclaim
 
 	_ [2]uint64 // Padding to maintain 64B alignment
