@@ -8,11 +8,12 @@
 //
 // Notes:
 //   - All variables initialized exactly once in init()
-//   - Runtime reads never mutate shared state — safe for no-lock use
+//   - Runtime reads never mutate shared state — safe for single-threaded use
 //   - Payload masking complies with RFC 6455 client-to-server masking rules
 //   - Zero-copy: no []byte allocations, no string conversions, no interface{}
 //
 // ⚠️ NEVER mutate shared state after init — ring buffer assumes immutability
+// ⚠️ SINGLE-THREADED ONLY — no concurrent access protection
 // ─────────────────────────────────────────────────────────────────────────────
 
 package main

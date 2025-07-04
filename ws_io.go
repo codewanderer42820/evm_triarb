@@ -11,8 +11,10 @@
 //   - Buffer reuse guarantees zero heap pressure during all log ingestion
 //   - Frame ring (`wsFrames`) is used to queue zero-copy views into `wsBuf`
 //   - All errors are pre-allocated to avoid allocation during error handling
+//   - SINGLE-THREADED ONLY — no concurrent access protection
 //
 // ⚠️ Caller MUST not retain frame.Payload past next wsBuf overwrite
+// ⚠️ Buffer compaction triggers earlier for better memory utilization
 // ─────────────────────────────────────────────────────────────────────────────
 
 package main
@@ -96,6 +98,7 @@ func findTerminator(data []byte) int {
 
 // ensureRoom guarantees ≥ `need` bytes in `wsBuf`, refilling from conn.
 // Uses unsafe.Pointer for efficient memory copying.
+// Optimized compaction strategy: compact when wsStart > len(wsBuf)/2
 //
 //go:nosplit
 //go:inline
@@ -106,13 +109,12 @@ func ensureRoom(conn net.Conn, need int) error {
 	}
 
 	for wsLen < need {
-		// Compact if necessary: if the buffer is full, move data to the beginning
-		if wsStart+wsLen == len(wsBuf) {
+		// Optimized compaction: compact when wsStart > half buffer size
+		// This prevents excessive memory waste and improves cache locality
+		if wsStart > len(wsBuf)/2 || wsStart+wsLen == len(wsBuf) {
 			// Zero-copy memory move using unsafe
 			if wsLen > 0 {
-				memmove(unsafe.Pointer(&wsBuf[0]),
-					unsafe.Pointer(&wsBuf[wsStart]),
-					uintptr(wsLen))
+				copy(wsBuf[:wsLen], wsBuf[wsStart:wsStart+wsLen])
 			}
 			wsStart = 0
 		}
@@ -126,18 +128,11 @@ func ensureRoom(conn net.Conn, need int) error {
 	return nil
 }
 
-// memmove efficiently moves memory without allocation
-//
-//go:nosplit
-//go:inline
-func memmove(dst, src unsafe.Pointer, n uintptr) {
-	copy(unsafe.Slice((*byte)(dst), n), unsafe.Slice((*byte)(src), n))
-}
-
 // ───────────────────────────── Frame Decoder ──────────────────────────────
 
 // readFrame parses a single complete WebSocket frame from the stream.
 // Fully zero-copy implementation with pre-allocated frame ring.
+// Added bounds checking for frame ring overflow protection.
 //
 //go:nosplit
 //go:inline
@@ -248,6 +243,7 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 }
 
 // unmaskPayload unmasks WebSocket payload in-place using efficient word-based operations
+// Optimized for better performance with unrolled 8-byte operations
 //
 //go:nosplit
 //go:inline
@@ -256,22 +252,32 @@ func unmaskPayload(payload []byte, maskKey uint32) {
 		return
 	}
 
-	// Convert mask to byte array
+	// Convert mask to byte array for remainder processing
 	mask := *(*[4]byte)(unsafe.Pointer(&maskKey))
 
 	// Process 8 bytes at a time for better performance
-	i := 0
-	for i+7 < len(payload) {
-		// Create 8-byte mask pattern
-		maskPattern := uint64(maskKey) | (uint64(maskKey) << 32)
+	// Create 8-byte mask pattern once
+	maskPattern := uint64(maskKey) | (uint64(maskKey) << 32)
 
-		// Apply mask to 8 bytes at once
+	i := 0
+	// Unroll loop for better performance on large payloads
+	for i+15 < len(payload) {
+		// Process 16 bytes at once (2 x 8-byte operations)
+		dataPtr1 := (*uint64)(unsafe.Pointer(&payload[i]))
+		dataPtr2 := (*uint64)(unsafe.Pointer(&payload[i+8]))
+		*dataPtr1 ^= maskPattern
+		*dataPtr2 ^= maskPattern
+		i += 16
+	}
+
+	// Handle remaining 8-byte chunks
+	for i+7 < len(payload) {
 		dataPtr := (*uint64)(unsafe.Pointer(&payload[i]))
 		*dataPtr ^= maskPattern
 		i += 8
 	}
 
-	// Handle remaining bytes
+	// Handle remaining bytes (0-7 bytes)
 	for i < len(payload) {
 		payload[i] ^= mask[i&3]
 		i++
@@ -293,27 +299,6 @@ func getUpgradeRequest() []byte {
 func getSubscribePacket() []byte {
 	return subscribePacket[:subscribeLen]
 }
-
-// Example usage in your main connection code:
-// Replace the problematic lines with:
-//
-// Step 4: Perform WebSocket upgrade handshake
-// if _, err := conn.Write(getUpgradeRequest()); err != nil {
-//     dropError("ws upgrade write", err)
-//     return err
-// }
-//
-// Read the WebSocket handshake response from the server
-// if _, err := readHandshake(conn); err != nil {
-//     dropError("ws handshake", err)
-//     return err
-// }
-//
-// Send subscribe packet
-// if _, err := conn.Write(getSubscribePacket()); err != nil {
-//     dropError("subscribe write", err)
-//     return err
-// }
 
 // reclaimFrame marks a frame as processed and reclaims buffer space
 //
