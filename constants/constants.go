@@ -13,7 +13,7 @@
 // ⚠️ No runtime logic here — all values must be compile-time resolvable
 // ─────────────────────────────────────────────────────────────────────────────
 
-package main
+package constants
 
 // ───────────────────────────── Deduplication ──────────────────────────────
 
