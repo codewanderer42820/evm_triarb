@@ -52,25 +52,28 @@ func handleFrame(p []byte) {
 	// Initialize LogView to store the extracted fields
 	var v types.LogView
 
-	// Define bit flags to track which fields are required from the frame
-	// Each field has a unique bit in this bitmask
-	const (
-		wantAddress = 1 << iota
-		wantBlockHash
-		wantBlockNumber
-		wantData
-		wantLogIndex
-		wantRemoved
-		wantTopics
-		wantTransaction
-	)
+	/*
+		// Define bit flags to track which fields are required from the frame
+		// Each field has a unique bit in this bitmask
+		const (
+			wantAddress = 1 << iota
+			wantBlockHash
+			wantBlockNumber
+			wantData
+			wantLogIndex
+			wantRemoved
+			wantTopics
+			wantTransaction
+		)
 
-	// Start with all fields marked as missing (not yet parsed)
-	missing := wantAddress | wantBlockHash | wantBlockNumber | wantData | wantLogIndex | wantRemoved | wantTopics | wantTransaction
+		// Start with all fields marked as missing (not yet parsed)
+		missing := wantAddress | wantBlockHash | wantBlockNumber | wantData | wantLogIndex | wantRemoved | wantTopics | wantTransaction
+	*/
 	end := len(p) - 8 // Set the end offset for parsing the frame
 
 	// Loop through the byte slice to extract key data
-	for i := 0; i <= end && missing != 0; i++ {
+	//for i := 0; i <= end && missing != 0; i++ {
+	for i := 0; i <= end; i++ {
 		// Extract an 8-byte tag for comparison
 		tag := *(*[8]byte)(unsafe.Pointer(&p[i]))
 
@@ -81,21 +84,21 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 10, 1) + 1   // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 42) // The second quote marks the end
 			v.Addr = p[start:end]
-			i = end + 1             // Update index after parsing the Address field
-			missing &^= wantAddress // Mark Address as successfully parsed
+			i = end + 1 // Update index after parsing the Address field
+			//missing &^= wantAddress // Mark Address as successfully parsed
 
 		case keyBlockHash:
 			// Skip over the block hash (80 bytes for a 0x-prefixed hex string)
 			i += 80
-			missing &^= wantBlockHash
+			//missing &^= wantBlockHash
 
 		case keyBlockNumber:
 			// Parse the Block Number field
 			start := i + utils.SkipToQuote(p[i:], 14, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.BlkNum = p[start:end]
-			i = end + 1                 // Update index after parsing the Block Number field
-			missing &^= wantBlockNumber // Mark Block Number as successfully parsed
+			i = end + 1 // Update index after parsing the Block Number field
+			//missing &^= wantBlockNumber // Mark Block Number as successfully parsed
 
 		case keyBlockTimestamp:
 			// Skip over the block timestamp (29 bytes for Infura's "blockTimestamp" field)
@@ -107,21 +110,21 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 7, 1) + 1          // Start after the first quote
 			end := start + 2 + utils.SkipToQuote(p[start+2:], 0, 64) // The second quote marks the end
 			v.Data = p[start:end]
-			i = end + 1          // Update index after parsing the Data field
-			missing &^= wantData // Mark Data as successfully parsed
+			i = end + 1 // Update index after parsing the Data field
+			//missing &^= wantData // Mark Data as successfully parsed
 
 		case keyLogIndex:
 			// Parse the Log Index field
 			start := i + utils.SkipToQuote(p[i:], 11, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.LogIdx = p[start:end]
-			i = end + 1              // Update index after parsing the Log Index field
-			missing &^= wantLogIndex // Mark Log Index as successfully parsed
+			i = end + 1 // Update index after parsing the Log Index field
+			//missing &^= wantLogIndex // Mark Log Index as successfully parsed
 
 		case keyRemoved:
 			// Skip over the "removed":true field
 			i += 14 // "removed":true
-			missing &^= wantRemoved
+			//missing &^= wantRemoved
 
 		case keyTopics:
 			// Parse the Topics field (JSON array)
@@ -136,8 +139,8 @@ func handleFrame(p []byte) {
 			if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != sigSyncPrefix {
 				return // Exit early if it doesn't match Sync()
 			}
-			i = end + 1            // Update index after parsing the Topics field
-			missing &^= wantTopics // Mark Topics as successfully parsed
+			i = end + 1 // Update index after parsing the Topics field
+			//missing &^= wantTopics // Mark Topics as successfully parsed
 
 		case keyTransaction:
 			// Skip over 86 bytes of Transaction Hash (this is to bypass the transaction hash field)
@@ -149,8 +152,8 @@ func handleFrame(p []byte) {
 			start := i + utils.SkipToQuote(p[i:], 19, 1) + 1  // Start after the first quote
 			end := start + utils.SkipToQuote(p[start:], 0, 1) // The second quote marks the end
 			v.TxIndex = p[start:end]
-			i = end + 1                 // Update index after parsing the Transaction Index field
-			missing &^= wantTransaction // Mark Transaction Index as successfully parsed
+			i = end + 1 // Update index after parsing the Transaction Index field
+			//missing &^= wantTransaction // Mark Transaction Index as successfully parsed
 		}
 	}
 
