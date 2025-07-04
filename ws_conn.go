@@ -110,13 +110,13 @@ func init() {
 
 	// Build the upgrade request directly into fixed buffer (no string allocs)
 	upgradeLen = 0
-	upgradeLen += copyBytes(upgradeRequest[upgradeLen:], []byte("GET "))
-	upgradeLen += copyBytes(upgradeRequest[upgradeLen:], []byte(wsPath))
-	upgradeLen += copyBytes(upgradeRequest[upgradeLen:], []byte(" HTTP/1.1\r\nHost: "))
-	upgradeLen += copyBytes(upgradeRequest[upgradeLen:], []byte(wsHost))
-	upgradeLen += copyBytes(upgradeRequest[upgradeLen:], []byte("\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: "))
-	upgradeLen += copyBytes(upgradeRequest[upgradeLen:], keyBuf[:24])
-	upgradeLen += copyBytes(upgradeRequest[upgradeLen:], []byte("\r\nSec-WebSocket-Version: 13\r\n\r\n"))
+	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte("GET "))
+	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte(wsPath))
+	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte(" HTTP/1.1\r\nHost: "))
+	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte(wsHost))
+	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte("\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: "))
+	upgradeLen += copy(upgradeRequest[upgradeLen:], keyBuf[:24])
+	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte("\r\nSec-WebSocket-Version: 13\r\n\r\n"))
 
 	// ───── Step 3: Masked subscribe payload (zero-copy) ─────
 	// Build JSON payload directly into buffer
@@ -141,13 +141,4 @@ func init() {
 	// Initialize pong frame
 	pongFrame[0] = 0x8A // FIN=1, Opcode=0xA (Pong)
 	pongFrame[1] = 0x00 // No payload
-}
-
-// copyBytes copies bytes without string conversion
-//
-//go:nosplit
-//go:inline
-//go:registerparams
-func copyBytes(dst, src []byte) int {
-	return copy(dst, src)
 }
