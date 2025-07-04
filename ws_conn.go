@@ -1,19 +1,20 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// [Filename]: ws_conn.go — Zero-alloc WebSocket setup & shared ring state
+// [Filename]: ws_conn.go — ISR-grade zero-alloc WebSocket setup & shared ring state
 //
 // Purpose:
 //   - Constructs immutable WebSocket upgrade request and subscription frame
-//   - Initializes shared buffers and frame ring for runtime parsing
+//   - Initializes shared buffers and frame ring for efficient, high-throughput parsing
 //   - Eliminates ALL allocations during runtime operation
 //
 // Notes:
-//   - All variables initialized exactly once in init()
-//   - Runtime reads never mutate shared state — safe for single-threaded use
+//   - All variables are initialized exactly once in init()
+//   - Shared runtime state is immutable post-init — guarantees no heap pressure
 //   - Payload masking complies with RFC 6455 client-to-server masking rules
 //   - Zero-copy: no []byte allocations, no string conversions, no interface{}
+//   - High-performance ring buffer provides direct, non-mutating frame views
 //
-// ⚠️ NEVER mutate shared state after init — ring buffer assumes immutability
-// ⚠️ SINGLE-THREADED ONLY — no concurrent access protection
+// ⚠️ NEVER mutate shared state after init — ensures immutability of the ring buffer
+// ⚠️ SINGLE-THREADED ONLY — no concurrent access protection (not designed for multi-core environments)
 // ─────────────────────────────────────────────────────────────────────────────
 
 package main
