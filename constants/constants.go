@@ -26,7 +26,7 @@ const (
 	// MaxReorg defines the maximum reorganization depth allowed before events are evicted.
 	// This is set to 256 blocks (approximately 6 minutes at 1.45s block time), ensuring that we can handle minor chain reorganizations
 	// while maintaining responsiveness to recent changes in high-throughput chains.
-	// A higher maxReorg depth ensures that the system can handle deeper reorganizations typical of Solana-like chains.
+	// A higher MaxReorg depth ensures that the system can handle deeper reorganizations typical of Solana-like chains.
 	MaxReorg = 256 // Increased to handle deeper reorgs in high-throughput chains (≈ 6 minutes at 1.45s block time)
 )
 
@@ -57,9 +57,9 @@ const (
 	WsPath = "/ws/v3/a2a3139d2ab24d59bed2dc3643664126" // Replace with your own provider's WebSocket path
 
 	// WsHost specifies the host used in the SNI (Server Name Indication) during the TLS handshake.
-	// This ensures that the WebSocket client connects securely to the provider’s servers.
+	// This ensures that the WebSocket client connects securely to the provider's servers.
 	// Typically, this is the base URL of the WebSocket service, e.g., "mainnet.infura.io" or "mainnet.alchemyapi.io".
-	WsHost = "mainnet.infura.io" // Update to match the provider’s host (e.g., Alchemy, Infura, or your custom provider)
+	WsHost = "mainnet.infura.io" // Update to match the provider's host (e.g., Alchemy, Infura, or your custom provider)
 )
 
 // ──────────────────────── WebSocket Framing Caps ──────────────────────────
