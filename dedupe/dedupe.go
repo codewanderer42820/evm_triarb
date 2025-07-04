@@ -15,7 +15,7 @@
 //    and assumes exclusive access to each slot during event processing.
 // ─────────────────────────────────────────────────────────────────────────────
 
-package main
+package dedupe
 
 import (
 	"main/constants"
