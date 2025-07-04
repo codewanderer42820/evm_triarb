@@ -442,7 +442,6 @@ func TestDeduper_HighFrequencyChain(t *testing.T) {
 	d := NewDeduper()
 
 	// Simulate Solana-like high frequency (400ms blocks with many transactions)
-	const blocksPerSecond = 2.5 // ~400ms blocks
 	const txPerBlock = 1000
 	const logsPerTx = 5
 
