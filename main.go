@@ -114,6 +114,8 @@ func runDEXStream() error {
 		}
 
 		processDEXEvent(frame)
+
+		ws.Reset()
 	}
 }
 
