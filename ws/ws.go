@@ -160,7 +160,7 @@ var errorData struct {
 // This function must complete successfully for the package to function correctly.
 //
 //go:nosplit
-//go:noinline
+//go:inline
 //go:registerparams
 func init() {
 	// Pre-compile CRLF-CRLF pattern for fast HTTP response terminator detection
@@ -470,6 +470,7 @@ func processFrameDirect(data []byte, dataLen int) (payloadStart, payloadLen int,
 // retained beyond immediate processing.
 //
 //go:nosplit
+//go:inline
 //go:registerparams
 func ReadHandshake(c net.Conn) ([]byte, error) {
 	n := 0
@@ -519,6 +520,7 @@ func ReadHandshake(c net.Conn) ([]byte, error) {
 // access to the WebSocket connection and internal buffers.
 //
 //go:nosplit
+//go:inline
 //go:registerparams
 func ReadFrame(conn net.Conn) (*wsFrame, error) {
 	wsStart := hotData.wsStart
