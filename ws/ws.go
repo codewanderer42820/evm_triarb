@@ -86,10 +86,11 @@ var hotData struct {
 }
 
 // wsBuf is the main buffer for all WebSocket operations.
+// Sized at 2x largest Uniswap V3 event (~1KB max) = 2KB total
 //
 //go:notinheap
 //go:align 64
-var wsBuf [constants.MaxFrameSize]byte
+var wsBuf [2048]byte
 
 // staticData contains initialization-time data and pre-built messages.
 //
@@ -98,7 +99,7 @@ var wsBuf [constants.MaxFrameSize]byte
 var staticData struct {
 	hsBuf           [1024]byte // HTTP handshake buffer
 	upgradeRequest  [256]byte  // Pre-built upgrade request
-	payloadBuf      [128]byte  // Temp buffer for payload construction
+	payloadBuf      [128]byte  // Temp buffer for payload construction (fine - only for our subscribe)
 	subscribePacket [96]byte   // Pre-built subscribe frame
 	keyBuf          [24]byte   // Base64 WebSocket key
 	pongFrame       [2]byte    // Pre-built pong response
@@ -340,7 +341,7 @@ func processFrameDirect(data []byte, dataLen int) (payloadStart, payloadLen int,
 			return 0, 0, 1
 		}
 		plen64 := binary.BigEndian.Uint64(data[offset:])
-		if plen64 > constants.MaxFrameSize {
+		if plen64 > 2048 {
 			return 0, 0, 5
 		}
 		payloadLen = int(plen64)
@@ -440,7 +441,7 @@ func ReadFrame(conn net.Conn) (*wsFrame, error) {
 			requiredSize += 8
 			if bufLen >= 10 {
 				plen64 := binary.BigEndian.Uint64(wsBuf[2:10])
-				if plen64 > constants.MaxFrameSize {
+				if plen64 > 2048 {
 					return nil, errorData.oversizeError
 				}
 				requiredSize += int(plen64)
@@ -450,7 +451,7 @@ func ReadFrame(conn net.Conn) (*wsFrame, error) {
 					return nil, errorData.readError
 				}
 				plen64 := binary.BigEndian.Uint64(wsBuf[2:10])
-				if plen64 > constants.MaxFrameSize {
+				if plen64 > 2048 {
 					return nil, errorData.oversizeError
 				}
 				requiredSize += int(plen64)
