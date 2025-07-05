@@ -1,20 +1,19 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// [Filename]: ws_conn.go — ISR-grade zero-alloc WebSocket setup & shared ring state
+// [Filename]: ws_conn.go — Ultra-lean ISR-grade zero-alloc WebSocket setup
 //
 // Purpose:
 //   - Constructs immutable WebSocket upgrade request and subscription frame
-//   - Initializes shared buffers and frame ring for efficient, high-throughput parsing
 //   - Eliminates ALL allocations during runtime operation
+//   - Single-frame streaming parser for maximum performance
 //
 // Notes:
 //   - All variables are initialized exactly once in init()
 //   - Shared runtime state is immutable post-init — guarantees no heap pressure
-//   - Payload masking complies with RFC 6455 client-to-server masking rules
-//   - Zero-copy: no []byte allocations, no string conversions, no interface{}
-//   - High-performance ring buffer provides direct, non-mutating frame views
+//   - No frame ring - direct streaming processing only
+//   - Single-threaded, zero-copy, no interfaces
 //
-// ⚠️ NEVER mutate shared state after init — ensures immutability of the ring buffer
-// ⚠️ SINGLE-THREADED ONLY — no concurrent access protection (not designed for multi-core environments)
+// ⚠️ NEVER mutate shared state after init
+// ⚠️ SINGLE-THREADED ONLY — no concurrent access protection
 // ─────────────────────────────────────────────────────────────────────────────
 
 package ws
@@ -41,9 +40,8 @@ var (
 	wsBuf          [constants.MaxFrameSize]byte
 	wsStart, wsLen int
 
-	// WebSocket frame ring: pre-allocated views into wsBuf
-	wsFrames [constants.FrameCap]wsFrame
-	wsHead   uint32
+	// Single reusable frame (no ring buffer overhead)
+	currentFrame wsFrame
 
 	// Pre-allocated buffers for string operations (zero-copy)
 	keyBuf     [24]byte  // Base64-encoded key buffer
@@ -56,50 +54,28 @@ var (
 	crlfcrlfPattern uint32
 )
 
-// wsFrame holds a parsed WebSocket payload (view into wsBuf).
-// `End` is used to reclaim space after processing for optimal memory management.
-// Designed for ISR-grade performance with cache-aligned structure layout.
+// wsFrame holds a parsed WebSocket payload (direct view into wsBuf).
+// Ultra-lean: removed redundant fields, optimized for cache alignment.
 //
 //go:notinheap
 //go:align 64
 type wsFrame struct {
-	PayloadPtr   unsafe.Pointer // Direct pointer to payload in wsBuf
-	Len          int            // payload length
-	PayloadStart int            // Start offset in wsBuf
-	PayloadEnd   int            // End offset in wsBuf
-	End          int            // wsBuf offset for reclaim
-
-	_ [2]uint64 // Padding to maintain 64B alignment
+	PayloadPtr unsafe.Pointer // Direct pointer to payload in wsBuf
+	Len        int            // payload length
+	End        int            // wsBuf offset for reclaim
+	_          [5]uint64      // Padding to maintain 64B alignment
 }
 
 // GetPayload returns payload as []byte without allocating slice header.
-// Provides safe access to frame payload data using zero-copy semantics.
-// Designed for ISR-grade performance with minimal overhead.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func (f *wsFrame) GetPayload() []byte {
-	if f.PayloadPtr == nil {
-		return nil
-	}
 	return unsafe.Slice((*byte)(f.PayloadPtr), f.Len)
 }
 
-// GetPayloadUnsafe returns direct pointer access (most efficient).
-// Provides raw unsafe access for maximum performance in ISR-critical paths.
-// Use only when performance is critical and safety is guaranteed by caller.
-//
-//go:nosplit
-//go:inline
-//go:registerparams
-func (f *wsFrame) GetPayloadUnsafe() (unsafe.Pointer, int) {
-	return f.PayloadPtr, f.Len
-}
-
 // GetUpgradeRequest returns the pre-built upgrade request without allocation.
-// Provides access to the immutable HTTP upgrade handshake payload.
-// Designed for ISR-grade performance with zero-copy semantics.
 //
 //go:nosplit
 //go:inline
@@ -109,8 +85,6 @@ func GetUpgradeRequest() []byte {
 }
 
 // GetSubscribePacket returns the pre-built subscribe packet without allocation.
-// Provides access to the RFC 6455-compliant masked subscription frame.
-// Designed for ISR-grade performance with zero heap pressure.
 //
 //go:nosplit
 //go:inline
@@ -120,25 +94,21 @@ func GetSubscribePacket() []byte {
 }
 
 // init prebuilds the upgrade request and masked subscribe frame.
-// Ensures fully deterministic runtime state — no allocs during execution.
-// Initializes all shared buffers and immutable state for ISR-grade performance.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func init() {
-	// ───── Step 1: Initialize CRLF-CRLF pattern for current architecture ─────
+	// Initialize CRLF-CRLF pattern for current architecture
 	hsTerm := [4]byte{'\r', '\n', '\r', '\n'}
 	crlfcrlfPattern = *(*uint32)(unsafe.Pointer(&hsTerm[0]))
 
-	// ───── Step 2: Generate Sec-WebSocket-Key (zero-copy) ─────
+	// Generate Sec-WebSocket-Key (zero-copy)
 	var keyBytes [16]byte
 	_, _ = rand.Read(keyBytes[:])
-
-	// Encode to base64 directly into pre-allocated buffer
 	base64.StdEncoding.Encode(keyBuf[:], keyBytes[:])
 
-	// Build the upgrade request directly into fixed buffer (no string allocs)
+	// Build the upgrade request directly into fixed buffer
 	upgradeLen = 0
 	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte("GET "))
 	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte(constants.WsPath))
@@ -148,27 +118,22 @@ func init() {
 	upgradeLen += copy(upgradeRequest[upgradeLen:], keyBuf[:24])
 	upgradeLen += copy(upgradeRequest[upgradeLen:], []byte("\r\nSec-WebSocket-Version: 13\r\n\r\n"))
 
-	// ───── Step 3: Masked subscribe payload (zero-copy) ─────
-	// Build JSON payload directly into buffer
+	// Masked subscribe payload (zero-copy)
 	jsonPayload := []byte(`{"id":1,"method":"eth_subscribe","params":["logs",{}],"jsonrpc":"2.0"}`)
 	payloadLen := copy(payloadBuf[:], jsonPayload)
 
-	// Prepare the WebSocket frame header
 	subscribePacket[0] = 0x81                    // FIN|TEXT
 	subscribePacket[1] = 0x80 | byte(payloadLen) // MASKED | length
 
-	// Generate mask directly into frame
 	var maskBytes [4]byte
 	_, _ = rand.Read(maskBytes[:])
 	copy(subscribePacket[2:6], maskBytes[:])
 
-	// Copy and mask payload in one pass
 	for i := 0; i < payloadLen; i++ {
 		subscribePacket[6+i] = payloadBuf[i] ^ maskBytes[i&3]
 	}
 	subscribeLen = 6 + payloadLen
 
-	// Initialize pong frame
 	pongFrame[0] = 0x8A // FIN=1, Opcode=0xA (Pong)
 	pongFrame[1] = 0x00 // No payload
 }

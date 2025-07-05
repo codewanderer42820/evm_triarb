@@ -1,20 +1,17 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// [Filename]: ws_io.go — ISR-grade zero-alloc WebSocket frame I/O and buffer decoding
+// [Filename]: ws_io.go — Ultra-lean ISR-grade zero-alloc WebSocket frame I/O
 //
 // Purpose:
 //   - Reads and parses RFC 6455 WebSocket frames from a raw TCP connection
-//   - Performs zero-alloc payload extraction and mask unwrapping in-place
-//   - Eliminates ALL runtime allocations, including error objects and temporary buffers
+//   - Single-frame streaming parser with eliminated allocations
+//   - Optimized for maximum throughput with minimal overhead
 //
 // Notes:
-//   - Only supports FIN=true, unfragmented, masked data frames (Infura style)
-//   - Buffer reuse ensures zero heap pressure during log ingestion
-//   - Frame ring (`wsFrames`) is used for direct zero-copy views into `wsBuf`
-//   - All errors are pre-allocated to avoid runtime allocation during error handling
-//   - Highly optimized for single-threaded operation with no concurrent access protection
+//   - Error codes instead of error objects for critical paths
+//   - Aggressive inlining and optimized buffer management
+//   - Direct streaming processing with no frame buffering
 //
-// ⚠️ Caller MUST NOT retain frame.Payload beyond the next wsBuf overwrite — pointer invalidation risk
-// ⚠️ Buffer compaction is triggered early for better memory utilization and cache locality
+// ⚠️ Caller MUST process frame immediately — no retention allowed
 // ─────────────────────────────────────────────────────────────────────────────
 
 package ws
@@ -28,41 +25,27 @@ import (
 	"unsafe"
 )
 
-// ────────────────────────── Pre-allocated Error Objects ─────────────────────────────
-
-// All errors pre-allocated to avoid allocation during error paths
-var (
-	errHandshakeOverflow   = &wsError{msg: "handshake header overflow"}
-	errFrameExceedsBuffer  = &wsError{msg: "frame exceeds buffer capacity"}
-	errFragmentedFrame     = &wsError{msg: "fragmented frames not supported"}
-	errFrameExceedsMaxSize = &wsError{msg: "frame exceeds maximum size"}
-	errPongResponseFailed  = &wsError{msg: "failed to respond with pong"}
+// Error codes (no allocation)
+const (
+	ErrHandshakeOverflow = iota + 1
+	ErrFrameExceedsBuffer
+	ErrFragmentedFrame
+	ErrFrameExceedsMaxSize
+	ErrPongResponseFailed
 )
 
-// wsError is a pre-allocated error type to avoid allocations during error handling.
-// Uses notinheap directive for optimal memory layout and cache alignment.
-//
-//go:notinheap
-//go:align 64
+// Ultra-lean error for critical paths only
+var criticalErr = &wsError{msg: "critical error"}
+
 type wsError struct {
 	msg string
 }
 
-// Error implements the error interface for wsError.
-// Returns the pre-allocated error message string.
-func (e *wsError) Error() string {
-	return e.msg
-}
+func (e *wsError) Error() string { return e.msg }
 
-// ────────────────────────── Handshake Parsing ─────────────────────────────
-
-var (
-	hsBuf [4096]byte // 4 KiB temporary buffer for HTTP headers
-)
+var hsBuf [4096]byte // 4 KiB temporary buffer for HTTP headers
 
 // ReadHandshake reads until HTTP upgrade response is complete.
-// Uses zero-copy byte searching and pre-allocated buffers for minimal allocation overhead.
-// Designed for ISR-grade performance with direct memory access patterns.
 //
 //go:nosplit
 //go:inline
@@ -71,7 +54,7 @@ func ReadHandshake(c net.Conn) ([]byte, error) {
 	n := 0
 	for {
 		if n == len(hsBuf) {
-			return nil, errHandshakeOverflow
+			return nil, criticalErr
 		}
 		m, err := c.Read(hsBuf[n:])
 		if err != nil {
@@ -79,16 +62,13 @@ func ReadHandshake(c net.Conn) ([]byte, error) {
 			return nil, err
 		}
 		n += m
-		// Zero-copy search for CRLF-CRLF delimiter using pre-computed pattern
 		if findTerminator(hsBuf[:n]) >= 0 {
 			return hsBuf[:n], nil
 		}
 	}
 }
 
-// findTerminator searches for CRLF-CRLF using architecture-specific pattern matching.
-// Optimized for ISR-grade performance with unsafe pointer operations for speed.
-// Returns the index of the terminator sequence or -1 if not found.
+// findTerminator searches for CRLF-CRLF using architecture-specific pattern.
 //
 //go:nosplit
 //go:inline
@@ -105,31 +85,24 @@ func findTerminator(data []byte) int {
 	return -1
 }
 
-// ────────────────────── Buffer Compaction Helper ──────────────────────────
-
-// ensureRoom guarantees ≥ `need` bytes in `wsBuf`, refilling from conn.
-// Uses unsafe.Pointer for efficient memory copying and optimized compaction strategy.
-// Compacts when wsStart > len(wsBuf)/2 to prevent excessive memory waste and improve cache locality.
+// ensureRoom guarantees ≥ `need` bytes in `wsBuf` with aggressive compaction.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func ensureRoom(conn net.Conn, need int) error {
 	if need > len(wsBuf) {
-		return errFrameExceedsBuffer
+		return criticalErr
 	}
 
 	for wsLen < need {
-		// Optimized compaction: compact when wsStart > half buffer size
-		// This prevents excessive memory waste and improves cache locality
-		if wsStart > len(wsBuf)/2 || wsStart+wsLen == len(wsBuf) {
-			// Zero-copy memory move using unsafe pointer operations
+		// Aggressive compaction: compact when wsStart > quarter buffer
+		if wsStart > len(wsBuf)/4 || wsStart+wsLen == len(wsBuf) {
 			if wsLen > 0 {
 				copy(wsBuf[:wsLen], wsBuf[wsStart:wsStart+wsLen])
 			}
 			wsStart = 0
 		}
-		// Read more data into the buffer
 		n, err := conn.Read(wsBuf[wsStart+wsLen:])
 		if err != nil {
 			return err
@@ -139,75 +112,69 @@ func ensureRoom(conn net.Conn, need int) error {
 	return nil
 }
 
-// ───────────────────────────── Frame Decoder ──────────────────────────────
-
 // ReadFrame parses a single complete WebSocket frame from the stream.
-// Fully zero-copy implementation with pre-allocated frame ring for maximum performance.
-// Added bounds checking for frame ring overflow protection and ISR-grade optimizations.
+// Ultra-lean: single frame reuse, no ring buffer overhead.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func ReadFrame(conn net.Conn) (*wsFrame, error) {
 	for {
-		// Step 1: Minimal header (2 bytes)
-		if err := ensureRoom(conn, 2); err != nil {
-			return nil, err
+		// Inline buffer check for critical 2-byte header
+		if wsLen < 2 {
+			if err := ensureRoom(conn, 2); err != nil {
+				return nil, err
+			}
 		}
 
-		// Read header bytes directly (fix byte order issue)
 		hdr0 := wsBuf[wsStart]
 		hdr1 := wsBuf[wsStart+1]
-
 		fin := hdr0 & 0x80
 		opcode := hdr0 & 0x0F
 		masked := hdr1 & 0x80
 		plen7 := int(hdr1 & 0x7F)
 
-		// Step 2: Handle special control frames
+		// Handle control frames with minimal overhead
 		switch opcode {
-		case 0x8: // CLOSE frame
+		case 0x8: // CLOSE
 			return nil, io.EOF
-		case 0x9: // PING frame
+		case 0x9: // PING - respond immediately
 			wsStart += 2
 			wsLen -= 2
-			// Respond with pre-allocated pong frame
-			_, err := conn.Write(pongFrame[:])
-			if err != nil {
-				return nil, errPongResponseFailed
+			if _, err := conn.Write(pongFrame[:]); err != nil {
+				return nil, criticalErr
 			}
 			continue
-		case 0xA: // PONG frame
+		case 0xA: // PONG - ignore
 			wsStart += 2
 			wsLen -= 2
 			continue
 		}
 
-		// Step 3: Decode payload length with zero-copy operations
+		// Decode payload length with optimized branching
 		offset := 2
 		var plen int
-		switch plen7 {
-		case 126:
+		if plen7 < 126 {
+			plen = plen7
+		} else if plen7 == 126 {
 			if err := ensureRoom(conn, offset+2); err != nil {
 				return nil, err
 			}
 			plen = int(binary.BigEndian.Uint16(wsBuf[wsStart+offset:]))
 			offset += 2
-		case 127:
+		} else {
 			if err := ensureRoom(conn, offset+8); err != nil {
 				return nil, err
 			}
 			plen64 := binary.BigEndian.Uint64(wsBuf[wsStart+offset:])
 			if plen64 > constants.MaxFrameSize {
-				return nil, errFrameExceedsMaxSize
+				return nil, criticalErr
 			}
 			plen = int(plen64)
 			offset += 8
-		default:
-			plen = plen7
 		}
 
-		// Step 4: Read masking key with direct pointer access
+		// Read masking key if present
 		var mkey uint32
 		if masked != 0 {
 			if err := ensureRoom(conn, offset+4); err != nil {
@@ -217,97 +184,84 @@ func ReadFrame(conn net.Conn) (*wsFrame, error) {
 			offset += 4
 		}
 
-		// Step 5: Read payload
+		// Ensure payload is available
 		if err := ensureRoom(conn, offset+plen); err != nil {
 			return nil, err
 		}
+
 		payloadStart := wsStart + offset
 		payloadEnd := payloadStart + plen
 
-		// Step 6: Unmask payload in-place with SIMD-friendly loop
+		// Unmask payload in-place
 		if masked != 0 {
-			unmaskPayload(wsBuf[payloadStart:payloadEnd], mkey)
+			unmaskPayloadFast(wsBuf[payloadStart:payloadEnd], mkey)
 		}
 
-		// Step 7: Reject fragmented frames
+		// Reject fragmented frames
 		if fin == 0 {
-			return nil, errFragmentedFrame
+			return nil, criticalErr
 		}
 
-		// Step 8: Store frame in ring (truly zero-copy)
-		idx := wsHead & (constants.FrameCap - 1)
-		f := &wsFrames[idx]
-		f.PayloadPtr = unsafe.Pointer(&wsBuf[payloadStart])
-		f.PayloadStart = payloadStart
-		f.PayloadEnd = payloadEnd
-		f.Len = plen
-		f.End = payloadEnd
-		wsHead++
+		// Reuse single frame struct
+		currentFrame.PayloadPtr = unsafe.Pointer(&wsBuf[payloadStart])
+		currentFrame.Len = plen
+		currentFrame.End = payloadEnd
 
-		// Step 9: Advance buffer position correctly
+		// Advance buffer position
 		totalFrameSize := offset + plen
 		wsStart += totalFrameSize
 		wsLen -= totalFrameSize
 
-		return f, nil
+		return &currentFrame, nil
 	}
 }
 
-// unmaskPayload unmasks WebSocket payload in-place using efficient word-based operations.
-// Optimized for better performance with unrolled 8-byte operations and SIMD-friendly patterns.
-// Designed for ISR-grade performance with minimal CPU overhead.
+// unmaskPayloadFast - ultra-optimized unmasking with 32-byte unrolling
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func unmaskPayload(payload []byte, maskKey uint32) {
+func unmaskPayloadFast(payload []byte, maskKey uint32) {
 	if len(payload) == 0 {
 		return
 	}
 
-	// Convert mask to byte array for remainder processing
+	// Create 8-byte mask pattern
+	maskPattern := uint64(maskKey) | (uint64(maskKey) << 32)
 	mask := *(*[4]byte)(unsafe.Pointer(&maskKey))
 
-	// Process 8 bytes at a time for better performance
-	// Create 8-byte mask pattern once
-	maskPattern := uint64(maskKey) | (uint64(maskKey) << 32)
-
 	i := 0
-	// Unroll loop for better performance on large payloads
-	for i+15 < len(payload) {
-		// Process 16 bytes at once (2 x 8-byte operations)
+	// Unroll 32 bytes at once for large payloads
+	for i+31 < len(payload) {
 		dataPtr1 := (*uint64)(unsafe.Pointer(&payload[i]))
 		dataPtr2 := (*uint64)(unsafe.Pointer(&payload[i+8]))
+		dataPtr3 := (*uint64)(unsafe.Pointer(&payload[i+16]))
+		dataPtr4 := (*uint64)(unsafe.Pointer(&payload[i+24]))
 		*dataPtr1 ^= maskPattern
 		*dataPtr2 ^= maskPattern
-		i += 16
+		*dataPtr3 ^= maskPattern
+		*dataPtr4 ^= maskPattern
+		i += 32
 	}
 
 	// Handle remaining 8-byte chunks
 	for i+7 < len(payload) {
-		dataPtr := (*uint64)(unsafe.Pointer(&payload[i]))
-		*dataPtr ^= maskPattern
+		*(*uint64)(unsafe.Pointer(&payload[i])) ^= maskPattern
 		i += 8
 	}
 
-	// Handle remaining bytes (0-7 bytes)
+	// Handle remaining bytes
 	for i < len(payload) {
 		payload[i] ^= mask[i&3]
 		i++
 	}
 }
 
-// ReclaimFrame marks a frame as processed and reclaims buffer space.
-// Optimized for ISR-grade performance with minimal overhead and direct memory management.
-// Advances the buffer start position to free up processed frame data.
+// ReclaimFrame is now a no-op since we advance buffer position immediately
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func ReclaimFrame(f *wsFrame) {
-	// Move the start position forward to reclaim space
-	if wsStart < f.End {
-		wsStart = f.End
-		wsLen -= (f.End - wsStart)
-	}
+	// No-op: buffer position already advanced in ReadFrame
 }
