@@ -1,22 +1,32 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Package ws: Ultra-Fast WebSocket Client for DEX Arbitrage
+// Package ws: True Zero-Copy Zero-Allocation WebSocket Client for DEX Arbitrage
 //
-// Zero-allocation WebSocket client optimized for sub-nanosecond frame processing.
-// Designed specifically for high-frequency DEX trading where speed is critical.
+// Architecture: Zero-allocation, zero-copy, direct memory access frame processor
+// Target: Sub-50ns frame processing latency on Apple Silicon M4 Pro
 //
-// Performance: Sub-1ns frame processing, zero heap allocations, zero-copy I/O
-// Trade-offs: Skips fragmented frames for maximum speed (perfect for DEX sync events)
+// Design Principles:
+//   - TRUE ZERO-COPY: Direct pointers to network buffer, no payload copying
+//   - TRUE ZERO-ALLOCATION: Single allocation at init, zero heap allocations during operation
+//   - Cache-line aligned data structures for maximum memory bandwidth
+//   - Branch predictor friendly hot paths with minimal conditional logic
+//   - Aggressive compiler optimizations with manual loop unrolling
+//   - Direct unsafe memory operations for maximum speed
 //
-// CRITICAL LIMITATIONS:
-//   - Single-threaded only
-//   - Skips fragmented WebSocket frames (maintains maximum speed)
-//   - Minimal error recovery
-//   - Apple Silicon optimized
+// Performance Targets:
+//   - Frame parsing: <25ns for typical 1KB DEX events
+//   - Memory bandwidth: Direct access to L1 cache at full speed
+//   - CPU utilization: <3% on dedicated core for 100K frames/sec
 //
-// SAFETY WARNINGS:
-//   - Extensive unsafe pointer operations
-//   - No bounds checking for performance
-//   - Multi-threaded usage causes data races
+// CRITICAL ZERO-COPY CONTRACT:
+//   - Payload data is ONLY valid until the next IngestFrame() call
+//   - Must process payload immediately - cannot store pointers
+//   - Buffer compaction will invalidate all previous payload pointers
+//   - Single-threaded only - no concurrent access allowed
+//
+// CRITICAL SAFETY WARNINGS:
+//   - Extensive unsafe pointer arithmetic - bounds checking disabled
+//   - Manual memory management - buffer corruption will cause crashes
+//   - Apple Silicon optimized - may underperform on other architectures
 // ─────────────────────────────────────────────────────────────────────────────
 
 package ws
@@ -32,194 +42,320 @@ import (
 	"unsafe"
 )
 
-// ───────────────────────────── Constants and Error Codes ─────────────────────────────
+// ───────────────────────────── Performance-Critical Constants ─────────────────────────────
 
 const (
-	ErrHandshakeOverflow = iota + 1
-	ErrFrameExceedsBuffer
-	ErrFragmentedFrame
-	ErrFrameExceedsMaxSize
-	ErrPongResponseFailed
+	// Buffer sizing for optimal cache behavior and zero-copy access
+	RingBufSize  = 32768 // Primary ring buffer (32KB - fits in L1/L2 cache)
+	HandshakeBuf = 1024  // HTTP handshake buffer
+
+	// Performance thresholds for zero-copy operation
+	CompactionThreshold = 24576 // Trigger compaction when readPos exceeds this (75% of buffer)
+	FrameSizeLimit      = 8192  // Maximum single frame size we'll process
+	MinReadSpace        = 4096  // Minimum space required before compaction
+
+	// Error codes for ultra-fast path selection
+	Success       = 0
+	NeedMoreData  = 1
+	CloseFrame    = 2
+	PingFrame     = 3
+	PongFrame     = 4
+	OversizeFrame = 5
+	FragmentFrame = 6
+	ParseError    = 7
 )
 
-// ───────────────────────────── Type Definitions ─────────────────────────────
+// ───────────────────────────── Zero-Copy Data Structures ─────────────────────────────
 
-// wsFrame represents a parsed WebSocket frame with direct buffer references.
-//
-//go:notinheap
-//go:align 32
-type wsFrame struct {
-	PayloadPtr unsafe.Pointer // Direct pointer to payload in buffer
-	Len        int            // Payload length
-	End        int            // Buffer end position
-	_          uint64         // Padding
-}
-
-// wsError provides zero-allocation error handling.
-//
-//go:notinheap
-type wsError struct {
-	msg  string
-	code int
-}
-
-//go:nosplit
-//go:inline
-//go:registerparams
-func (e *wsError) Error() string { return e.msg }
-
-//go:nosplit
-//go:inline
-//go:registerparams
-func (e *wsError) Code() int { return e.code }
-
-// ───────────────────────────── Global State Variables ─────────────────────────────
-
-// hotData contains frequently accessed variables in a single cache line.
+// Frame represents a parsed WebSocket frame with DIRECT zero-copy payload access
+// WARNING: Payload is only valid until next IngestFrame() call
 //
 //go:notinheap
 //go:align 64
-var hotData struct {
-	currentFrame    wsFrame // Reusable frame instance
-	crlfcrlfPattern uint32  // HTTP response terminator pattern
-	_               uint32
-	_               [24]byte // Padding
+type Frame struct {
+	PayloadPtr unsafe.Pointer // DIRECT pointer to payload in ring buffer (ZERO-COPY)
+	Size       int            // Payload size in bytes
+	_          [56]byte       // Cache line padding
 }
 
-// wsBuf is the main buffer for all WebSocket operations.
-// Sized at 2x largest Uniswap V3 event (~1KB max) = 2KB total
+// RingBufferState contains all ring buffer state in a single cache line
 //
 //go:notinheap
 //go:align 64
-var wsBuf [2048]byte
+type RingBufferState struct {
+	ReadCursor  int      // Current read position in ring buffer
+	WriteCursor int      // Current write position in ring buffer
+	DataSize    int      // Total valid data in ring buffer
+	FrameCount  uint64   // Total frames processed (for debugging)
+	_           [32]byte // Cache line padding
+}
 
-// staticData contains initialization-time data and pre-built messages.
+// ───────────────────────────── Global Zero-Allocation State ─────────────────────────────
+
+// High-performance ring buffer - allocated once at init, never reallocated
 //
 //go:notinheap
 //go:align 64
-var staticData struct {
-	hsBuf           [1024]byte // HTTP handshake buffer
-	upgradeRequest  [256]byte  // Pre-built upgrade request
-	payloadBuf      [128]byte  // Temp buffer for payload construction
-	subscribePacket [96]byte   // Pre-built subscribe frame
-	keyBuf          [24]byte   // Base64 WebSocket key
-	pongFrame       [2]byte    // Pre-built pong response
-	upgradeLen      int        // Upgrade request length
-	subscribeLen    int        // Subscribe packet length
-	_               [22]byte   // Padding
-}
+var ringBuffer [RingBufSize]byte
 
-// errorData contains error handling state.
+// HTTP handshake buffer - separate from main data path
 //
 //go:notinheap
-//go:align 32
-var errorData struct {
-	readError     *wsError
-	oversizeError *wsError
-	parseError    *wsError
-	pongError     *wsError
-	_             [16]byte // Padding
+//go:align 64
+var handshakeBuffer [HandshakeBuf]byte
+
+// Ring buffer state - single cache line for maximum access speed
+//
+//go:notinheap
+//go:align 64
+var ring RingBufferState
+
+// Pre-built protocol packets - constructed once at init
+//
+//go:notinheap
+//go:align 64
+var protocolData struct {
+	upgradeRequest  [256]byte // HTTP WebSocket upgrade request
+	subscribePacket [96]byte  // WebSocket subscribe frame
+	pongResponse    [2]byte   // WebSocket pong response
+	upgradeSize     int       // Size of upgrade request
+	subscribeSize   int       // Size of subscribe packet
+	_               [32]byte  // Cache line padding
 }
+
+// Current frame instance - reused for zero allocation
+//
+//go:notinheap
+//go:align 64
+var currentFrame Frame
 
 // ───────────────────────────── Initialization ─────────────────────────────
 
-//go:nosplit
-//go:inline
-//go:registerparams
+// init performs one-time initialization of all WebSocket protocol data
 func init() {
-	// Initialize HTTP terminator pattern
-	hsTerm := [4]byte{'\r', '\n', '\r', '\n'}
-	hotData.crlfcrlfPattern = *(*uint32)(unsafe.Pointer(&hsTerm[0]))
-
-	// Initialize error instances
-	errorData.readError = &wsError{msg: "WebSocket read error", code: 1}
-	errorData.oversizeError = &wsError{msg: "WebSocket frame too large", code: 2}
-	errorData.parseError = &wsError{msg: "WebSocket parse error", code: 3}
-	errorData.pongError = &wsError{msg: "WebSocket pong write error", code: 4}
-
-	// Generate WebSocket key
+	// Generate cryptographically secure WebSocket key
 	var keyBytes [16]byte
 	if _, err := rand.Read(keyBytes[:]); err != nil {
-		panic("failed to generate WebSocket key: " + err.Error())
+		panic("WebSocket key generation failed: " + err.Error())
 	}
-	base64.StdEncoding.Encode(staticData.keyBuf[:], keyBytes[:])
 
-	// Build HTTP upgrade request
-	staticData.upgradeLen = 0
-	staticData.upgradeLen += copy(staticData.upgradeRequest[staticData.upgradeLen:], []byte("GET "))
-	staticData.upgradeLen += copy(staticData.upgradeRequest[staticData.upgradeLen:], []byte(constants.WsPath))
-	staticData.upgradeLen += copy(staticData.upgradeRequest[staticData.upgradeLen:], []byte(" HTTP/1.1\r\nHost: "))
-	staticData.upgradeLen += copy(staticData.upgradeRequest[staticData.upgradeLen:], []byte(constants.WsHost))
-	staticData.upgradeLen += copy(staticData.upgradeRequest[staticData.upgradeLen:], []byte("\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: "))
-	staticData.upgradeLen += copy(staticData.upgradeRequest[staticData.upgradeLen:], staticData.keyBuf[:24])
-	staticData.upgradeLen += copy(staticData.upgradeRequest[staticData.upgradeLen:], []byte("\r\nSec-WebSocket-Version: 13\r\n\r\n"))
+	var encodedKey [24]byte
+	base64.StdEncoding.Encode(encodedKey[:], keyBytes[:])
+
+	// Build HTTP upgrade request with zero allocations
+	upgradeTemplate := [][]byte{
+		[]byte("GET "), []byte(constants.WsPath), []byte(" HTTP/1.1\r\n"),
+		[]byte("Host: "), []byte(constants.WsHost), []byte("\r\n"),
+		[]byte("Upgrade: websocket\r\n"),
+		[]byte("Connection: Upgrade\r\n"),
+		[]byte("Sec-WebSocket-Key: "), encodedKey[:], []byte("\r\n"),
+		[]byte("Sec-WebSocket-Version: 13\r\n\r\n"),
+	}
+
+	pos := 0
+	for _, chunk := range upgradeTemplate {
+		pos += copy(protocolData.upgradeRequest[pos:], chunk)
+	}
+	protocolData.upgradeSize = pos
 
 	// Build pre-masked subscribe frame
-	jsonPayload := []byte(`{"id":1,"method":"eth_subscribe","params":["logs",{}],"jsonrpc":"2.0"}`)
-	payloadLen := copy(staticData.payloadBuf[:], jsonPayload)
+	payload := []byte(`{"id":1,"method":"eth_subscribe","params":["logs",{}],"jsonrpc":"2.0"}`)
 
-	staticData.subscribePacket[0] = 0x81                    // FIN=1, TEXT
-	staticData.subscribePacket[1] = 0x80 | byte(payloadLen) // MASKED | length
+	// Generate masking key
+	var maskKey [4]byte
+	rand.Read(maskKey[:])
 
-	var maskBytes [4]byte
-	if _, err := rand.Read(maskBytes[:]); err != nil {
-		panic("failed to generate masking key: " + err.Error())
+	// Construct WebSocket frame header
+	protocolData.subscribePacket[0] = 0x81                      // FIN=1, TEXT frame
+	protocolData.subscribePacket[1] = 0x80 | byte(len(payload)) // MASKED + payload length
+	copy(protocolData.subscribePacket[2:6], maskKey[:])
+
+	// Apply XOR masking to payload
+	for i, b := range payload {
+		protocolData.subscribePacket[6+i] = b ^ maskKey[i&3]
 	}
-	copy(staticData.subscribePacket[2:6], maskBytes[:])
+	protocolData.subscribeSize = 6 + len(payload)
 
-	// Apply masking
-	for i := 0; i < payloadLen; i++ {
-		staticData.subscribePacket[6+i] = staticData.payloadBuf[i] ^ maskBytes[i&3]
-	}
-	staticData.subscribeLen = 6 + payloadLen
+	// Build pong response frame
+	protocolData.pongResponse[0] = 0x8A // FIN=1, PONG frame
+	protocolData.pongResponse[1] = 0x00 // No payload
 
-	// Build pong frame
-	staticData.pongFrame[0] = 0x8A // FIN=1, PONG
-	staticData.pongFrame[1] = 0x00 // No payload
+	debug.DropMessage("WebSocket", "zero-copy initialization complete")
 }
 
-// ───────────────────────────── Low-Level Utility Functions ─────────────────────────────
+// ───────────────────────────── True Zero-Copy Memory Operations ─────────────────────────────
 
-// unmaskPayload performs in-place WebSocket payload unmasking with aggressive
-// loop unrolling optimized for Apple Silicon.
+// compactRingBuffer performs zero-copy buffer compaction with bulk memory move
+// CRITICAL: This invalidates ALL existing payload pointers
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func unmaskPayload(payload []byte, maskKey uint32) {
+func compactRingBuffer() {
+	if ring.ReadCursor == 0 {
+		return // Already compacted
+	}
+
+	remainingBytes := ring.DataSize - ring.ReadCursor
+	if remainingBytes > 0 {
+		// Use bulk memory move for maximum speed - this is the ONLY copy operation
+		copy(ringBuffer[:remainingBytes], ringBuffer[ring.ReadCursor:ring.ReadCursor+remainingBytes])
+	}
+
+	// Reset cursors to beginning
+	ring.WriteCursor = remainingBytes
+	ring.ReadCursor = 0
+	ring.DataSize = remainingBytes
+}
+
+// ingestNetworkData reads from network connection directly into ring buffer
+// TRUE ZERO-COPY: Network data goes directly into ring buffer
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func ingestNetworkData(conn net.Conn) bool {
+	// Ensure buffer space is available for network ingestion
+	availableSpace := RingBufSize - ring.WriteCursor
+	if availableSpace < MinReadSpace {
+		compactRingBuffer()
+		availableSpace = RingBufSize - ring.WriteCursor
+		if availableSpace < MinReadSpace {
+			return false // Buffer completely full
+		}
+	}
+
+	// Read directly into ring buffer - TRUE ZERO-COPY from network
+	bytesRead, err := conn.Read(ringBuffer[ring.WriteCursor:])
+	if err != nil {
+		debug.DropError("network ingestion failed", err)
+		return false
+	}
+
+	// Update cursors - no data copying involved
+	ring.WriteCursor += bytesRead
+	ring.DataSize += bytesRead
+
+	return true
+}
+
+// ───────────────────────────── Hyper-Optimized Zero-Copy Frame Parser ─────────────────────────────
+
+// parseFrameHeaderZeroCopy extracts WebSocket frame metadata with zero memory copying
+// Returns DIRECT pointers into ring buffer for true zero-copy access
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func parseFrameHeaderZeroCopy() (headerBytes, payloadBytes int, resultCode int) {
+	dataAvailable := ring.DataSize - ring.ReadCursor
+	if dataAvailable < 2 {
+		return 0, 0, NeedMoreData
+	}
+
+	// Read frame header as single 16-bit operation for speed
+	headerWord := *(*uint16)(unsafe.Pointer(&ringBuffer[ring.ReadCursor]))
+	firstByte := byte(headerWord)
+	secondByte := byte(headerWord >> 8)
+
+	// Extract frame metadata with bit operations
+	finFlag := firstByte & 0x80
+	opcode := firstByte & 0x0F
+	maskFlag := secondByte & 0x80
+	initialLength := int(secondByte & 0x7F)
+
+	// Fast path rejection for fragmented frames
+	if finFlag == 0 || opcode == 0 {
+		// Still need to calculate frame size to properly skip fragment
+		// Continue with size calculation to skip entire fragment properly
+	}
+
+	// Control frame fast path
+	if opcode >= 8 {
+		switch opcode {
+		case 0x8:
+			return 2, 0, CloseFrame
+		case 0x9:
+			return 2, 0, PingFrame
+		case 0xA:
+			return 2, 0, PongFrame
+		}
+	}
+
+	// Calculate total header size and payload length
+	headerSize := 2
+	var payloadSize int
+
+	if initialLength < 126 {
+		payloadSize = initialLength
+	} else if initialLength == 126 {
+		if dataAvailable < 4 {
+			return 0, 0, NeedMoreData
+		}
+		payloadSize = int(binary.BigEndian.Uint16(ringBuffer[ring.ReadCursor+2:]))
+		headerSize = 4
+	} else {
+		if dataAvailable < 10 {
+			return 0, 0, NeedMoreData
+		}
+		length64 := binary.BigEndian.Uint64(ringBuffer[ring.ReadCursor+2:])
+		if length64 > FrameSizeLimit {
+			return 0, 0, OversizeFrame
+		}
+		payloadSize = int(length64)
+		headerSize = 10
+	}
+
+	// Account for masking key
+	if maskFlag != 0 {
+		headerSize += 4
+	}
+
+	// Verify complete frame is available
+	totalFrameSize := headerSize + payloadSize
+	if dataAvailable < totalFrameSize {
+		return 0, 0, NeedMoreData
+	}
+
+	// Check if this is a fragment after size calculation
+	isFragment := (finFlag == 0 || opcode == 0)
+
+	// Unmask payload IN-PLACE in ring buffer - no copying
+	if maskFlag != 0 {
+		maskKey := *(*uint32)(unsafe.Pointer(&ringBuffer[ring.ReadCursor+headerSize-4]))
+		payloadStart := ring.ReadCursor + headerSize
+		unmaskPayloadInPlace(ringBuffer[payloadStart:payloadStart+payloadSize], maskKey)
+	}
+
+	// Return appropriate result code
+	if isFragment {
+		return headerSize, payloadSize, FragmentFrame
+	}
+
+	return headerSize, payloadSize, Success
+}
+
+// unmaskPayloadInPlace performs in-place payload unmasking directly in ring buffer
+// TRUE ZERO-COPY: Unmasks data in original location, no memory copying
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func unmaskPayloadInPlace(payload []byte, maskKey uint32) {
 	if len(payload) == 0 {
 		return
 	}
 
+	// Create 64-bit mask for word-level operations
 	mask64 := uint64(maskKey) | (uint64(maskKey) << 32)
+
 	i := 0
-	plen := len(payload)
+	payloadLen := len(payload)
 
-	// 128-byte unrolled loop for Apple Silicon M4 Pro
-	for i+127 < plen {
+	// Unroll loop for 64-byte chunks (optimal for Apple Silicon cache lines)
+	for i+63 < payloadLen {
 		ptr := unsafe.Pointer(&payload[i])
-		*(*uint64)(ptr) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 8)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 16)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 24)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 32)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 40)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 48)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 56)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 64)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 72)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 80)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 88)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 96)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 104)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 112)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 120)) ^= mask64
-		i += 128
-	}
-
-	// 64-byte chunks
-	for i+63 < plen {
-		ptr := unsafe.Pointer(&payload[i])
+		// Process 8 uint64 values (64 bytes) per iteration
 		*(*uint64)(ptr) ^= mask64
 		*(*uint64)(unsafe.Add(ptr, 8)) ^= mask64
 		*(*uint64)(unsafe.Add(ptr, 16)) ^= mask64
@@ -231,303 +367,168 @@ func unmaskPayload(payload []byte, maskKey uint32) {
 		i += 64
 	}
 
-	// 32-byte chunks
-	for i+31 < plen {
-		ptr := unsafe.Pointer(&payload[i])
-		*(*uint64)(ptr) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 8)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 16)) ^= mask64
-		*(*uint64)(unsafe.Add(ptr, 24)) ^= mask64
-		i += 32
-	}
-
-	// 8-byte chunks
-	for i+7 < plen {
+	// Process remaining 8-byte chunks
+	for i+7 < payloadLen {
 		*(*uint64)(unsafe.Pointer(&payload[i])) ^= mask64
 		i += 8
 	}
 
-	// Remaining bytes
+	// Handle final bytes individually
 	mask4 := *(*[4]byte)(unsafe.Pointer(&maskKey))
-	for i < plen {
+	for i < payloadLen {
 		payload[i] ^= mask4[i&3]
 		i++
 	}
 }
 
-// ensureData reads from connection until we have at least 'need' bytes.
+// ───────────────────────────── Public True Zero-Copy API ─────────────────────────────
+
+// ProcessHandshake reads and validates WebSocket upgrade response
 //
-//go:nosplit
 //go:inline
 //go:registerparams
-func ensureData(conn net.Conn, currentLen, need int) int {
-	if need > len(wsBuf) {
-		return -1
-	}
+func ProcessHandshake(conn net.Conn) error {
+	bytesRead := 0
 
-	for currentLen < need {
-		n, err := conn.Read(wsBuf[currentLen:])
+	for bytesRead < HandshakeBuf {
+		n, err := conn.Read(handshakeBuffer[bytesRead:])
 		if err != nil {
-			debug.DropError("ensureData", err)
-			return -1
+			debug.DropError("handshake read failed", err)
+			return err
 		}
-		currentLen += n
-	}
+		bytesRead += n
 
-	return currentLen
-}
-
-// ───────────────────────────── Ultra-Fast Frame Processing ─────────────────────────────
-
-// processFrameDirect performs WebSocket frame parsing optimized for DEX arbitrage.
-// Skips fragmented frames for maximum speed - perfect for Uniswap V2 sync events.
-//
-//go:nosplit
-//go:inline
-//go:registerparams
-func processFrameDirect(data []byte, dataLen int) (payloadStart, payloadLen int, errCode int) {
-	if dataLen < 2 {
-		return 0, 0, 1
-	}
-
-	// Read header as single 16-bit operation
-	header := *(*uint16)(unsafe.Pointer(&data[0]))
-	hdr0 := byte(header)
-	hdr1 := byte(header >> 8)
-
-	// Ultra-fast path: small unmasked text frame (most common for DEX events)
-	if hdr0 == 0x81 && hdr1 < 126 && hdr1&0x80 == 0 {
-		payloadLen = int(hdr1)
-		if dataLen < 2+payloadLen {
-			return 0, 0, 1
-		}
-		return 2, payloadLen, 0
-	}
-
-	// Parse frame header
-	fin := hdr0 & 0x80
-	opcode := hdr0 & 0x0F
-	masked := hdr1 & 0x80
-	plen7 := int(hdr1 & 0x7F)
-
-	// Skip fragmented frames immediately for maximum speed
-	if fin == 0 || opcode == 0 {
-		return 0, 0, 7 // Skip fragment - continue reading next frame
-	}
-
-	// Handle control frames
-	if opcode >= 8 {
-		switch opcode {
-		case 0x8: // CLOSE
-			return 0, 0, 2
-		case 0x9: // PING
-			return 0, 0, 3
-		case 0xA: // PONG
-			return 0, 0, 4
-		}
-	}
-
-	// Decode payload length
-	offset := 2
-	if plen7 < 126 {
-		payloadLen = plen7
-	} else if plen7 == 126 {
-		if dataLen < offset+2 {
-			return 0, 0, 1
-		}
-		payloadLen = int(binary.BigEndian.Uint16(data[offset:]))
-		offset += 2
-	} else {
-		if dataLen < offset+8 {
-			return 0, 0, 1
-		}
-		plen64 := binary.BigEndian.Uint64(data[offset:])
-		if plen64 > 2048 {
-			return 0, 0, 5
-		}
-		payloadLen = int(plen64)
-		offset += 8
-	}
-
-	// Handle masking
-	if masked != 0 {
-		if dataLen < offset+4+payloadLen {
-			return 0, 0, 1
-		}
-		maskKey := *(*uint32)(unsafe.Pointer(&data[offset]))
-		offset += 4
-		unmaskPayload(data[offset:offset+payloadLen], maskKey)
-	} else {
-		if dataLen < offset+payloadLen {
-			return 0, 0, 1
-		}
-	}
-
-	return offset, payloadLen, 0
-}
-
-// ───────────────────────────── WebSocket Handshake ─────────────────────────────
-
-// ReadHandshake reads HTTP WebSocket upgrade response until CRLF-CRLF terminator.
-//
-//go:nosplit
-//go:inline
-//go:registerparams
-func ReadHandshake(c net.Conn) ([]byte, error) {
-	n := 0
-	bufLen := len(staticData.hsBuf)
-
-	for n < bufLen {
-		m, err := c.Read(staticData.hsBuf[n:])
-		if err != nil {
-			debug.DropError("ReadHandshake", err)
-			return nil, err
-		}
-		n += m
-
-		// Search for CRLF-CRLF using 32-bit pattern matching
-		if n >= 4 {
-			searchEnd := n - 3
-			for i := 0; i < searchEnd; i++ {
-				if *(*uint32)(unsafe.Pointer(&staticData.hsBuf[i])) == hotData.crlfcrlfPattern {
-					return staticData.hsBuf[:n], nil
+		// Search for HTTP terminator sequence
+		if bytesRead >= 4 {
+			searchLimit := bytesRead - 3
+			for i := 0; i < searchLimit; i++ {
+				// Check for CRLF CRLF sequence
+				if *(*uint32)(unsafe.Pointer(&handshakeBuffer[i])) == 0x0A0D0A0D {
+					debug.DropMessage("WebSocket", "handshake successful")
+					return nil
 				}
 			}
 		}
 	}
 
-	return nil, errorData.readError
+	debug.DropError("handshake buffer overflow", nil)
+	return io.ErrUnexpectedEOF
 }
 
-// ───────────────────────────── Ultra-Fast Frame Processing Pipeline ─────────────────────────────
-
-// ReadFrame processes incoming WebSocket data optimized for DEX arbitrage speed.
-// Zero-allocation, zero-copy I/O with fragmented frame skipping for maximum performance.
+// IngestFrame reads and parses the next WebSocket frame with TRUE ZERO-COPY access
+// CRITICAL: Returned payload is ONLY valid until the next IngestFrame() call
 //
-//go:nosplit
 //go:inline
 //go:registerparams
-func ReadFrame(conn net.Conn) (*wsFrame, error) {
-	bufLen := 0 // Always start fresh for maximum cache efficiency
+func IngestFrame(conn net.Conn) (*Frame, error) {
+	ring.FrameCount++
 
 	for {
-		// Ensure minimum data for header
-		bufLen = ensureData(conn, bufLen, 2)
-		if bufLen < 0 {
-			return nil, errorData.readError
-		}
+		// Parse frame from current buffer contents with zero-copy
+		headerSize, payloadSize, resultCode := parseFrameHeaderZeroCopy()
 
-		// Calculate frame size from header
-		hdr1 := wsBuf[1]
-		requiredSize := 2
-		masked := hdr1&0x80 != 0
-		plen7 := int(hdr1 & 0x7F)
-
-		if plen7 < 126 {
-			requiredSize += plen7
-		} else if plen7 == 126 {
-			requiredSize += 2
-			if bufLen >= 4 {
-				payloadLen := int(binary.BigEndian.Uint16(wsBuf[2:4]))
-				requiredSize += payloadLen
-			} else {
-				bufLen = ensureData(conn, bufLen, 4)
-				if bufLen < 0 {
-					return nil, errorData.readError
-				}
-				payloadLen := int(binary.BigEndian.Uint16(wsBuf[2:4]))
-				requiredSize += payloadLen
+		switch resultCode {
+		case NeedMoreData:
+			// Compact buffer if read cursor is high - this invalidates previous payloads
+			if ring.ReadCursor > CompactionThreshold {
+				compactRingBuffer()
 			}
-		} else {
-			requiredSize += 8
-			if bufLen >= 10 {
-				plen64 := binary.BigEndian.Uint64(wsBuf[2:10])
-				if plen64 > 2048 {
-					return nil, errorData.oversizeError
-				}
-				requiredSize += int(plen64)
-			} else {
-				bufLen = ensureData(conn, bufLen, 10)
-				if bufLen < 0 {
-					return nil, errorData.readError
-				}
-				plen64 := binary.BigEndian.Uint64(wsBuf[2:10])
-				if plen64 > 2048 {
-					return nil, errorData.oversizeError
-				}
-				requiredSize += int(plen64)
+			// Ingest more network data directly into ring buffer
+			if !ingestNetworkData(conn) {
+				debug.DropError("data ingestion failed", nil)
+				return nil, io.ErrUnexpectedEOF
 			}
-		}
+			continue
 
-		if masked {
-			requiredSize += 4
-		}
+		case Success:
+			// Set up frame with DIRECT pointer to ring buffer - TRUE ZERO-COPY
+			payloadStart := ring.ReadCursor + headerSize
+			currentFrame.PayloadPtr = unsafe.Pointer(&ringBuffer[payloadStart])
+			currentFrame.Size = payloadSize
 
-		// Ensure complete frame
-		bufLen = ensureData(conn, bufLen, requiredSize)
-		if bufLen < 0 {
-			return nil, errorData.readError
-		}
+			// Advance read cursor past this frame
+			ring.ReadCursor += headerSize + payloadSize
 
-		// Process frame with ultra-fast skipping of fragments
-		payloadStart, payloadLen, errCode := processFrameDirect(wsBuf[:], bufLen)
+			// Trigger compaction if cursor is high (this will invalidate returned payload eventually)
+			if ring.ReadCursor > CompactionThreshold {
+				// Don't compact now - that would invalidate the payload we're about to return
+				// Compaction will happen on next IngestFrame() call
+			}
 
-		switch errCode {
-		case 0: // Success - return complete frame
-			hotData.currentFrame.PayloadPtr = unsafe.Pointer(&wsBuf[payloadStart])
-			hotData.currentFrame.Len = payloadLen
-			hotData.currentFrame.End = payloadStart + payloadLen
-			return &hotData.currentFrame, nil
+			return &currentFrame, nil
 
-		case 2: // CLOSE
+		case CloseFrame:
+			debug.DropMessage("WebSocket", "connection closed by peer")
 			return nil, io.EOF
 
-		case 3: // PING - respond and continue
-			if _, err := conn.Write(staticData.pongFrame[:]); err != nil {
-				return nil, errorData.pongError
+		case PingFrame:
+			// Respond to ping immediately
+			if _, err := conn.Write(protocolData.pongResponse[:]); err != nil {
+				debug.DropError("pong response failed", err)
+				return nil, err
 			}
-			bufLen = 0
+			ring.ReadCursor += 2 // Skip ping frame
 			continue
 
-		case 4: // PONG - ignore and continue
-			bufLen = 0
+		case PongFrame:
+			ring.ReadCursor += 2 // Skip pong frame
 			continue
 
-		case 7: // Fragment - skip and continue for maximum speed
-			bufLen = 0
+		case FragmentFrame:
+			// Skip entire fragment (header + payload) to maintain buffer integrity
+			totalFrameSize := headerSize + payloadSize
+			ring.ReadCursor += totalFrameSize
 			continue
 
-		default: // Parse error
-			return nil, errorData.parseError
+		case OversizeFrame:
+			debug.DropError("frame exceeds size limit", nil)
+			ring.ReadCursor += 2 // Skip frame header, let connection reset
+			continue
+
+		default:
+			debug.DropError("frame parse error", nil)
+			ring.ReadCursor += 1 // Advance by one byte to resync
+			continue
 		}
 	}
 }
 
-// ───────────────────────────── Public API ─────────────────────────────
-
-// GetUpgradeRequest returns pre-built HTTP WebSocket upgrade request.
+// GetUpgradeRequest returns pre-built HTTP upgrade request
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func GetUpgradeRequest() []byte {
-	return staticData.upgradeRequest[:staticData.upgradeLen]
+	return protocolData.upgradeRequest[:protocolData.upgradeSize]
 }
 
-// GetSubscribePacket returns pre-built WebSocket subscribe frame.
+// GetSubscribePacket returns pre-built subscribe frame
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func GetSubscribePacket() []byte {
-	return staticData.subscribePacket[:staticData.subscribeLen]
+	return protocolData.subscribePacket[:protocolData.subscribeSize]
 }
 
-// GetPayload returns frame payload as slice. Data is valid until next ReadFrame call.
+// ExtractPayload returns DIRECT zero-copy payload slice pointing to ring buffer
+// CRITICAL: Data is ONLY valid until next IngestFrame() call - process immediately
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func (f *wsFrame) GetPayload() []byte {
-	return unsafe.Slice((*byte)(f.PayloadPtr), f.Len)
+func (f *Frame) ExtractPayload() []byte {
+	if f.Size <= 0 {
+		return nil
+	}
+	return unsafe.Slice((*byte)(f.PayloadPtr), f.Size)
+}
+
+// GetProcessingStats returns current performance statistics
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func GetProcessingStats() (totalFrames uint64, bufferUtilization int) {
+	return ring.FrameCount, (ring.DataSize * 100) / RingBufSize
 }

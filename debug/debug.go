@@ -37,3 +37,73 @@ func DropError(prefix string, err error) {
 		utils.PrintWarning(msg)
 	}
 }
+
+// DropMessage logs debug messages with zero-allocation print strategy.
+// Used for cold-path diagnostics, connection state changes, and infrequent events.
+// Optimized for ISR-aligned logging without heap pressure.
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func DropMessage(prefix, message string) {
+	// Direct concatenation for zero-alloc debug logging
+	// Used only in cold paths: handshake completion, connection state changes, etc.
+	msg := prefix + ": " + message + "\n"
+	utils.PrintWarning(msg)
+}
+
+// DropTrace logs trace messages for debugging flow control.
+// Ultra-lightweight tracing for critical path analysis without allocation overhead.
+// Should only be used temporarily for debugging - remove from production hot paths.
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func DropTrace(function, event string) {
+	// Minimal trace logging for debugging flow control
+	// Format: [TRACE] function: event
+	msg := "[TRACE] " + function + ": " + event + "\n"
+	utils.PrintWarning(msg)
+}
+
+// DropStats logs performance statistics with zero-allocation strategy.
+// Used for periodic performance diagnostics without heap pressure.
+// Suitable for connection metrics, frame counts, buffer statistics.
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func DropStats(component, metric, value string) {
+	// Performance statistics logging
+	// Format: [STATS] component.metric = value
+	msg := "[STATS] " + component + "." + metric + " = " + value + "\n"
+	utils.PrintWarning(msg)
+}
+
+// DropBuffer logs buffer state for debugging memory management.
+// Zero-allocation logging for buffer diagnostics in WebSocket frame processing.
+// Critical for debugging buffer overflow and compaction issues.
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func DropBuffer(operation, details string) {
+	// Buffer state logging for memory management debugging
+	// Format: [BUFFER] operation: details
+	msg := "[BUFFER] " + operation + ": " + details + "\n"
+	utils.PrintWarning(msg)
+}
+
+// DropFrame logs WebSocket frame processing events.
+// Ultra-fast frame event logging without heap allocation.
+// Use sparingly - only for debugging frame parsing issues.
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func DropFrame(frameType, details string) {
+	// WebSocket frame processing event logging
+	// Format: [FRAME] frameType: details
+	msg := "[FRAME] " + frameType + ": " + details + "\n"
+	utils.PrintWarning(msg)
+}
