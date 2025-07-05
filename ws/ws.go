@@ -30,44 +30,80 @@ import (
 	"unsafe"
 )
 
-// ───────────────────────────── Cache-Aligned Hot Data ─────────────────────────────
+// ───────────────────────────── Cache-Aligned Data Structures ─────────────────────────────
 
-// Hot path data - packed into first cache line (64 bytes)
+// wsFrame - optimized for maximum cache efficiency
+// Hot fields first, ordered by access frequency, perfectly aligned to 32 bytes
+//
+//go:notinheap
+//go:align 32
+type wsFrame struct {
+	PayloadPtr unsafe.Pointer // 8 bytes - HOTTEST: accessed every frame read
+	Len        int            // 8 bytes - HOT: accessed every frame read
+	End        int            // 8 bytes - WARM: used for buffer management
+	_          uint64         // 8 bytes - padding to exactly 32 bytes
+}
+
+// Hot path data - perfectly packed into single 64-byte cache line
+// Fields ordered by access frequency (hot to cold)
 //
 //go:notinheap
 //go:align 64
 var hotData struct {
-	wsStart, wsLen int     // Buffer position (16 bytes)
-	currentFrame   wsFrame // Single reusable frame (48 bytes)
-	_              [0]byte // Ensure 64-byte alignment
+	// HOTTEST: Buffer management fields - accessed every frame operation
+	wsStart int // 8 bytes - buffer read position
+	wsLen   int // 8 bytes - available data length
+
+	// HOT: Frame data - accessed every successful frame read
+	currentFrame wsFrame // 32 bytes - single reusable frame
+
+	// WARM: Frequently used pattern for handshake termination
+	crlfcrlfPattern uint32 // 4 bytes - architecture-specific CRLF pattern
+
+	// Padding to exactly 64 bytes (8+8+32+4+12 = 64)
+	_ [12]byte
 }
 
 // WebSocket buffer - separate cache line to avoid false sharing
+// Large buffer gets its own cache line boundary
 //
 //go:notinheap
 //go:align 64
 var wsBuf [constants.MaxFrameSize]byte
 
-// Static data - cold path, separate cache lines
+// Static data - cold path data, optimized for space efficiency
+// Fields ordered by size (largest first) and access patterns
 //
 //go:notinheap
 //go:align 64
 var staticData struct {
-	upgradeRequest  [512]byte  // HTTP upgrade request
-	upgradeLen      int        // Actual length
-	subscribePacket [128]byte  // Subscribe frame
-	subscribeLen    int        // Actual length
-	pongFrame       [2]byte    // Pre-built pong response
-	keyBuf          [24]byte   // Base64 key buffer
-	payloadBuf      [256]byte  // JSON payload buffer
-	hsBuf           [4096]byte // Handshake buffer
+	// LARGEST arrays first for optimal packing
+	hsBuf           [4096]byte // Handshake buffer - largest, least frequently used
+	upgradeRequest  [512]byte  // HTTP upgrade request - used once at startup
+	payloadBuf      [256]byte  // JSON payload buffer - used once at startup
+	subscribePacket [128]byte  // Subscribe frame - used once after handshake
+	keyBuf          [24]byte   // Base64 key buffer - used once at startup
+	pongFrame       [2]byte    // Pre-built pong response - used on ping frames
+
+	// INTEGERS grouped together for cache efficiency
+	upgradeLen   int // 8 bytes - length of upgrade request
+	subscribeLen int // 8 bytes - length of subscribe packet
+
+	// Padding to align to 64-byte boundary
+	// Total: 4096+512+256+128+24+2+8+8 = 5034 bytes
+	// Padding needed: (5034 + 63) & ^63 - 5034 = 30 bytes
+	_ [30]byte
 }
 
-// Architecture-specific constants
-var (
-	crlfcrlfPattern uint32
-	criticalErr     = &wsError{msg: "critical error"}
-)
+// Error handling - separate from hot data to avoid cache pollution
+//
+//go:notinheap
+//go:align 32
+var errorData struct {
+	criticalErr *wsError // 8 bytes - error instance
+	// Padding to 32 bytes for clean cache line usage
+	_ [24]byte
+}
 
 // Error codes (no allocation)
 const (
@@ -80,7 +116,7 @@ const (
 
 //go:notinheap
 type wsError struct {
-	msg string
+	msg string // 16 bytes on 64-bit (8-byte pointer + 8-byte length)
 }
 
 //go:nosplit
@@ -88,26 +124,18 @@ type wsError struct {
 //go:registerparams
 func (e *wsError) Error() string { return e.msg }
 
-// wsFrame - optimized for cache line usage
-//
-//go:notinheap
-//go:align 8
-type wsFrame struct {
-	PayloadPtr unsafe.Pointer // 8 bytes
-	Len        int            // 8 bytes
-	End        int            // 8 bytes
-	_          [3]uint64      // Padding to 32 bytes (half cache line)
-}
-
 // ───────────────────────────── Initialization ─────────────────────────────
 
 //go:nosplit
 //go:noinline
 //go:registerparams
 func init() {
-	// Initialize CRLF-CRLF pattern
+	// Initialize CRLF-CRLF pattern and store in hot data
 	hsTerm := [4]byte{'\r', '\n', '\r', '\n'}
-	crlfcrlfPattern = *(*uint32)(unsafe.Pointer(&hsTerm[0]))
+	hotData.crlfcrlfPattern = *(*uint32)(unsafe.Pointer(&hsTerm[0]))
+
+	// Initialize error instance
+	errorData.criticalErr = &wsError{msg: "critical error"}
 
 	// Generate WebSocket key
 	var keyBytes [16]byte
@@ -167,6 +195,13 @@ func (f *wsFrame) GetPayload() []byte {
 	return unsafe.Slice((*byte)(f.PayloadPtr), f.Len)
 }
 
+//go:nosplit
+//go:inline
+//go:registerparams
+func ReclaimFrame(f *wsFrame) {
+	// No-op: buffer position already advanced
+}
+
 // ───────────────────────────── Handshake Processing ─────────────────────────────
 
 // ReadHandshake reads until HTTP upgrade response is complete
@@ -191,7 +226,7 @@ func ReadHandshake(c net.Conn) ([]byte, error) {
 			// Process 4 bytes at a time, most handshakes are < 1KB
 			searchEnd := n - 3
 			for i := 0; i < searchEnd; i++ {
-				if *(*uint32)(unsafe.Pointer(&staticData.hsBuf[i])) == crlfcrlfPattern {
+				if *(*uint32)(unsafe.Pointer(&staticData.hsBuf[i])) == hotData.crlfcrlfPattern {
 					return staticData.hsBuf[:n], nil
 				}
 			}
@@ -199,7 +234,7 @@ func ReadHandshake(c net.Conn) ([]byte, error) {
 	}
 
 	// Buffer overflow - unlikely path
-	return nil, criticalErr
+	return nil, errorData.criticalErr
 }
 
 // ───────────────────────────── Frame Processing ─────────────────────────────
@@ -218,7 +253,7 @@ func ReadFrame(conn net.Conn) (*wsFrame, error) {
 		if wsLen < 2 {
 			wsStart, wsLen = ensureRoom(conn, wsStart, wsLen, 2)
 			if wsStart < 0 {
-				return nil, criticalErr
+				return nil, errorData.criticalErr
 			}
 		}
 
@@ -244,7 +279,7 @@ func ReadFrame(conn net.Conn) (*wsFrame, error) {
 				hotData.wsStart = wsStart
 				hotData.wsLen = wsLen
 				if _, err := conn.Write(staticData.pongFrame[:]); err != nil {
-					return nil, criticalErr
+					return nil, errorData.criticalErr
 				}
 				continue
 			case 0xA: // PONG
@@ -266,18 +301,18 @@ func ReadFrame(conn net.Conn) (*wsFrame, error) {
 			if plen7 == 126 {
 				wsStart, wsLen = ensureRoom(conn, wsStart, wsLen, offset+2)
 				if wsStart < 0 {
-					return nil, criticalErr
+					return nil, errorData.criticalErr
 				}
 				plen = int(binary.BigEndian.Uint16(wsBuf[wsStart+offset:]))
 				offset += 2
 			} else {
 				wsStart, wsLen = ensureRoom(conn, wsStart, wsLen, offset+8)
 				if wsStart < 0 {
-					return nil, criticalErr
+					return nil, errorData.criticalErr
 				}
 				plen64 := binary.BigEndian.Uint64(wsBuf[wsStart+offset:])
 				if plen64 > constants.MaxFrameSize {
-					return nil, criticalErr
+					return nil, errorData.criticalErr
 				}
 				plen = int(plen64)
 				offset += 8
@@ -289,7 +324,7 @@ func ReadFrame(conn net.Conn) (*wsFrame, error) {
 		if masked != 0 {
 			wsStart, wsLen = ensureRoom(conn, wsStart, wsLen, offset+4)
 			if wsStart < 0 {
-				return nil, criticalErr
+				return nil, errorData.criticalErr
 			}
 			mkey = *(*uint32)(unsafe.Pointer(&wsBuf[wsStart+offset]))
 			offset += 4
@@ -299,7 +334,7 @@ func ReadFrame(conn net.Conn) (*wsFrame, error) {
 		totalNeed := offset + plen
 		wsStart, wsLen = ensureRoom(conn, wsStart, wsLen, totalNeed)
 		if wsStart < 0 {
-			return nil, criticalErr
+			return nil, errorData.criticalErr
 		}
 
 		payloadStart := wsStart + offset
@@ -312,7 +347,7 @@ func ReadFrame(conn net.Conn) (*wsFrame, error) {
 
 		// Reject fragmented frames
 		if fin == 0 {
-			return nil, criticalErr
+			return nil, errorData.criticalErr
 		}
 
 		// Update frame
