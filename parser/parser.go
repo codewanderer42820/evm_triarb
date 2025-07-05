@@ -13,7 +13,7 @@
 // ⚠️ Must not retain LogView after wsBuf rotation — pointer invalidation risk
 // ─────────────────────────────────────────────────────────────────────────────
 
-package main
+package parser
 
 import (
 	"fmt"
@@ -42,7 +42,7 @@ var (
 //go:nosplit
 //go:inline
 //go:registerparams
-func handleFrame(p []byte) {
+func HandleFrame(p []byte) {
 	// Early exit if the payload is too short to process
 	if len(p) < 117 {
 		return
