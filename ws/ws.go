@@ -122,7 +122,7 @@ var errorData struct {
 // ───────────────────────────── Initialization ─────────────────────────────
 
 //go:nosplit
-//go:noinline
+//go:inline
 //go:registerparams
 func init() {
 	// Initialize HTTP terminator pattern
@@ -369,6 +369,7 @@ func processFrameDirect(data []byte, dataLen int) (payloadStart, payloadLen int,
 // ReadHandshake reads HTTP WebSocket upgrade response until CRLF-CRLF terminator.
 //
 //go:nosplit
+//go:inline
 //go:registerparams
 func ReadHandshake(c net.Conn) ([]byte, error) {
 	n := 0
@@ -402,6 +403,7 @@ func ReadHandshake(c net.Conn) ([]byte, error) {
 // Zero-allocation, zero-copy I/O with fragmented frame skipping for maximum performance.
 //
 //go:nosplit
+//go:inline
 //go:registerparams
 func ReadFrame(conn net.Conn) (*wsFrame, error) {
 	bufLen := 0 // Always start fresh for maximum cache efficiency
