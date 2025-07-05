@@ -99,7 +99,7 @@ var wsBuf [2048]byte
 var staticData struct {
 	hsBuf           [1024]byte // HTTP handshake buffer
 	upgradeRequest  [256]byte  // Pre-built upgrade request
-	payloadBuf      [128]byte  // Temp buffer for payload construction (fine - only for our subscribe)
+	payloadBuf      [128]byte  // Temp buffer for payload construction
 	subscribePacket [96]byte   // Pre-built subscribe frame
 	keyBuf          [24]byte   // Base64 WebSocket key
 	pongFrame       [2]byte    // Pre-built pong response
