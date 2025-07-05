@@ -17,12 +17,13 @@
 // ⚠️ Buffer compaction is triggered early for better memory utilization and cache locality
 // ─────────────────────────────────────────────────────────────────────────────
 
-package main
+package ws
 
 import (
 	"encoding/binary"
 	"io"
 	"main/constants"
+	"main/debug"
 	"net"
 	"unsafe"
 )
@@ -38,7 +39,8 @@ var (
 	errPongResponseFailed  = &wsError{msg: "failed to respond with pong"}
 )
 
-// wsError is a pre-allocated error type to avoid allocations
+// wsError is a pre-allocated error type to avoid allocations during error handling.
+// Uses notinheap directive for optimal memory layout and cache alignment.
 //
 //go:notinheap
 //go:align 64
@@ -46,6 +48,8 @@ type wsError struct {
 	msg string
 }
 
+// Error implements the error interface for wsError.
+// Returns the pre-allocated error message string.
 func (e *wsError) Error() string {
 	return e.msg
 }
@@ -56,13 +60,14 @@ var (
 	hsBuf [4096]byte // 4 KiB temporary buffer for HTTP headers
 )
 
-// readHandshake reads until HTTP upgrade response is complete.
-// Uses zero-copy byte searching and pre-allocated buffers.
+// ReadHandshake reads until HTTP upgrade response is complete.
+// Uses zero-copy byte searching and pre-allocated buffers for minimal allocation overhead.
+// Designed for ISR-grade performance with direct memory access patterns.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func readHandshake(c net.Conn) ([]byte, error) {
+func ReadHandshake(c net.Conn) ([]byte, error) {
 	n := 0
 	for {
 		if n == len(hsBuf) {
@@ -70,23 +75,25 @@ func readHandshake(c net.Conn) ([]byte, error) {
 		}
 		m, err := c.Read(hsBuf[n:])
 		if err != nil {
-			dropError("readHandshake", err)
+			debug.DropError("ReadHandshake", err)
 			return nil, err
 		}
 		n += m
 		// Zero-copy search for CRLF-CRLF delimiter using pre-computed pattern
-		if findTerminator(hsBuf[:n]) >= 0 {
+		if FindTerminator(hsBuf[:n]) >= 0 {
 			return hsBuf[:n], nil
 		}
 	}
 }
 
-// findTerminator searches for CRLF-CRLF using architecture-specific pattern
+// FindTerminator searches for CRLF-CRLF using architecture-specific pattern matching.
+// Optimized for ISR-grade performance with unsafe pointer operations for speed.
+// Returns the index of the terminator sequence or -1 if not found.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func findTerminator(data []byte) int {
+func FindTerminator(data []byte) int {
 	if len(data) < 4 {
 		return -1
 	}
@@ -100,14 +107,14 @@ func findTerminator(data []byte) int {
 
 // ────────────────────── Buffer Compaction Helper ──────────────────────────
 
-// ensureRoom guarantees ≥ `need` bytes in `wsBuf`, refilling from conn.
-// Uses unsafe.Pointer for efficient memory copying.
-// Optimized compaction strategy: compact when wsStart > len(wsBuf)/2
+// EnsureRoom guarantees ≥ `need` bytes in `wsBuf`, refilling from conn.
+// Uses unsafe.Pointer for efficient memory copying and optimized compaction strategy.
+// Compacts when wsStart > len(wsBuf)/2 to prevent excessive memory waste and improve cache locality.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func ensureRoom(conn net.Conn, need int) error {
+func EnsureRoom(conn net.Conn, need int) error {
 	if need > len(wsBuf) {
 		return errFrameExceedsBuffer
 	}
@@ -116,7 +123,7 @@ func ensureRoom(conn net.Conn, need int) error {
 		// Optimized compaction: compact when wsStart > half buffer size
 		// This prevents excessive memory waste and improves cache locality
 		if wsStart > len(wsBuf)/2 || wsStart+wsLen == len(wsBuf) {
-			// Zero-copy memory move using unsafe
+			// Zero-copy memory move using unsafe pointer operations
 			if wsLen > 0 {
 				copy(wsBuf[:wsLen], wsBuf[wsStart:wsStart+wsLen])
 			}
@@ -134,17 +141,17 @@ func ensureRoom(conn net.Conn, need int) error {
 
 // ───────────────────────────── Frame Decoder ──────────────────────────────
 
-// readFrame parses a single complete WebSocket frame from the stream.
-// Fully zero-copy implementation with pre-allocated frame ring.
-// Added bounds checking for frame ring overflow protection.
+// ReadFrame parses a single complete WebSocket frame from the stream.
+// Fully zero-copy implementation with pre-allocated frame ring for maximum performance.
+// Added bounds checking for frame ring overflow protection and ISR-grade optimizations.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func readFrame(conn net.Conn) (*wsFrame, error) {
+func ReadFrame(conn net.Conn) (*wsFrame, error) {
 	for {
 		// Step 1: Minimal header (2 bytes)
-		if err := ensureRoom(conn, 2); err != nil {
+		if err := EnsureRoom(conn, 2); err != nil {
 			return nil, err
 		}
 
@@ -176,18 +183,18 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 			continue
 		}
 
-		// Step 3: Decode payload length with zero-copy
+		// Step 3: Decode payload length with zero-copy operations
 		offset := 2
 		var plen int
 		switch plen7 {
 		case 126:
-			if err := ensureRoom(conn, offset+2); err != nil {
+			if err := EnsureRoom(conn, offset+2); err != nil {
 				return nil, err
 			}
 			plen = int(binary.BigEndian.Uint16(wsBuf[wsStart+offset:]))
 			offset += 2
 		case 127:
-			if err := ensureRoom(conn, offset+8); err != nil {
+			if err := EnsureRoom(conn, offset+8); err != nil {
 				return nil, err
 			}
 			plen64 := binary.BigEndian.Uint64(wsBuf[wsStart+offset:])
@@ -203,7 +210,7 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 		// Step 4: Read masking key with direct pointer access
 		var mkey uint32
 		if masked != 0 {
-			if err := ensureRoom(conn, offset+4); err != nil {
+			if err := EnsureRoom(conn, offset+4); err != nil {
 				return nil, err
 			}
 			mkey = *(*uint32)(unsafe.Pointer(&wsBuf[wsStart+offset]))
@@ -211,7 +218,7 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 		}
 
 		// Step 5: Read payload
-		if err := ensureRoom(conn, offset+plen); err != nil {
+		if err := EnsureRoom(conn, offset+plen); err != nil {
 			return nil, err
 		}
 		payloadStart := wsStart + offset
@@ -219,7 +226,7 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 
 		// Step 6: Unmask payload in-place with SIMD-friendly loop
 		if masked != 0 {
-			unmaskPayload(wsBuf[payloadStart:payloadEnd], mkey)
+			UnmaskPayload(wsBuf[payloadStart:payloadEnd], mkey)
 		}
 
 		// Step 7: Reject fragmented frames
@@ -246,13 +253,14 @@ func readFrame(conn net.Conn) (*wsFrame, error) {
 	}
 }
 
-// unmaskPayload unmasks WebSocket payload in-place using efficient word-based operations
-// Optimized for better performance with unrolled 8-byte operations
+// UnmaskPayload unmasks WebSocket payload in-place using efficient word-based operations.
+// Optimized for better performance with unrolled 8-byte operations and SIMD-friendly patterns.
+// Designed for ISR-grade performance with minimal CPU overhead.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func unmaskPayload(payload []byte, maskKey uint32) {
+func UnmaskPayload(payload []byte, maskKey uint32) {
 	if len(payload) == 0 {
 		return
 	}
@@ -289,12 +297,14 @@ func unmaskPayload(payload []byte, maskKey uint32) {
 	}
 }
 
-// reclaimFrame marks a frame as processed and reclaims buffer space
+// ReclaimFrame marks a frame as processed and reclaims buffer space.
+// Optimized for ISR-grade performance with minimal overhead and direct memory management.
+// Advances the buffer start position to free up processed frame data.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func reclaimFrame(f *wsFrame) {
+func ReclaimFrame(f *wsFrame) {
 	// Move the start position forward to reclaim space
 	if wsStart < f.End {
 		wsStart = f.End

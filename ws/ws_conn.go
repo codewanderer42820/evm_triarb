@@ -17,7 +17,7 @@
 // ⚠️ SINGLE-THREADED ONLY — no concurrent access protection (not designed for multi-core environments)
 // ─────────────────────────────────────────────────────────────────────────────
 
-package main
+package ws
 
 import (
 	"crypto/rand"
@@ -57,7 +57,8 @@ var (
 )
 
 // wsFrame holds a parsed WebSocket payload (view into wsBuf).
-// `End` is used to reclaim space after processing.
+// `End` is used to reclaim space after processing for optimal memory management.
+// Designed for ISR-grade performance with cache-aligned structure layout.
 //
 //go:notinheap
 //go:align 64
@@ -71,7 +72,9 @@ type wsFrame struct {
 	_ [2]uint64 // Padding to maintain 64B alignment
 }
 
-// GetPayload returns payload as []byte without allocating slice header
+// GetPayload returns payload as []byte without allocating slice header.
+// Provides safe access to frame payload data using zero-copy semantics.
+// Designed for ISR-grade performance with minimal overhead.
 //
 //go:nosplit
 //go:inline
@@ -83,7 +86,9 @@ func (f *wsFrame) GetPayload() []byte {
 	return unsafe.Slice((*byte)(f.PayloadPtr), f.Len)
 }
 
-// GetPayloadUnsafe returns direct pointer access (most efficient)
+// GetPayloadUnsafe returns direct pointer access (most efficient).
+// Provides raw unsafe access for maximum performance in ISR-critical paths.
+// Use only when performance is critical and safety is guaranteed by caller.
 //
 //go:nosplit
 //go:inline
@@ -92,26 +97,31 @@ func (f *wsFrame) GetPayloadUnsafe() (unsafe.Pointer, int) {
 	return f.PayloadPtr, f.Len
 }
 
-// getUpgradeRequest returns the pre-built upgrade request without allocation
+// GetUpgradeRequest returns the pre-built upgrade request without allocation.
+// Provides access to the immutable HTTP upgrade handshake payload.
+// Designed for ISR-grade performance with zero-copy semantics.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func getUpgradeRequest() []byte {
+func GetUpgradeRequest() []byte {
 	return upgradeRequest[:upgradeLen]
 }
 
-// getSubscribePacket returns the pre-built subscribe packet without allocation
+// GetSubscribePacket returns the pre-built subscribe packet without allocation.
+// Provides access to the RFC 6455-compliant masked subscription frame.
+// Designed for ISR-grade performance with zero heap pressure.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func getSubscribePacket() []byte {
+func GetSubscribePacket() []byte {
 	return subscribePacket[:subscribeLen]
 }
 
 // init prebuilds the upgrade request and masked subscribe frame.
 // Ensures fully deterministic runtime state — no allocs during execution.
+// Initializes all shared buffers and immutable state for ISR-grade performance.
 //
 //go:nosplit
 //go:inline

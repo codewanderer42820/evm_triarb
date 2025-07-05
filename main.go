@@ -18,9 +18,11 @@ package main
 import (
 	"crypto/tls"
 	"main/constants"
+	"main/debug"
+	"main/ws"
 	"net"
 	"runtime"
-	"runtime/debug"
+	rtdebug "runtime/debug"
 	"syscall"
 )
 
@@ -36,7 +38,7 @@ var (
 func main() {
 	// Disable the automatic garbage collector and manage it manually for better performance.
 	// By setting the GC percentage to -1, we effectively disable the default GC behavior.
-	debug.SetGCPercent(-1)
+	rtdebug.SetGCPercent(-1)
 
 	// Lock the goroutine to a specific operating system thread. This ensures that the goroutine
 	// is always executed on the same OS thread, which helps to avoid latency introduced by thread migrations.
@@ -46,17 +48,17 @@ func main() {
 	for {
 		// Run the WebSocket publisher. If there's an error, log it and continue to the next iteration.
 		if err := runPublisher(); err != nil {
-			dropError("main loop error", err) // Log the error and continue on failure.
+			debug.DropError("main loop error", err) // Log the error and continue on failure.
 		}
 
 		// Read memory stats to monitor heap allocation and trigger garbage collection if needed.
 		runtime.ReadMemStats(&memstats)
 		if memstats.HeapAlloc > constants.HeapSoftLimit {
 			// Trigger garbage collection if heap allocation exceeds the soft memory limit.
-			debug.SetGCPercent(100)             // Set GC to run at 100% for manual garbage collection.
-			runtime.GC()                        // Force garbage collection.
-			debug.SetGCPercent(-1)              // Disable GC after manual collection.
-			dropError("[GC] heap trimmed", nil) // Log the GC activity.
+			rtdebug.SetGCPercent(100)                 // Set GC to run at 100% for manual garbage collection.
+			runtime.GC()                              // Force garbage collection.
+			rtdebug.SetGCPercent(-1)                  // Disable GC after manual collection.
+			debug.DropError("[GC] heap trimmed", nil) // Log the GC activity.
 		}
 
 		// If memory allocation exceeds the hard limit, panic to indicate a potential memory leak.
@@ -75,7 +77,7 @@ func runPublisher() error {
 	// This is the first step in setting up a WebSocket connection over TCP.
 	raw, err := net.Dial("tcp", constants.WsDialAddr)
 	if err != nil {
-		dropError("tcp dial", err)
+		debug.DropError("tcp dial", err)
 		return err
 	}
 
@@ -107,18 +109,18 @@ func runPublisher() error {
 
 	// Step 4: Perform WebSocket upgrade handshake to initiate the WebSocket connection.
 	// This sends a WebSocket upgrade request to the server and awaits a response.
-	if _, err := conn.Write(getUpgradeRequest()); err != nil {
-		dropError("ws upgrade write", err)
+	if _, err := conn.Write(ws.GetUpgradeRequest()); err != nil {
+		debug.DropError("ws upgrade write", err)
 		return err
 	}
 	// Read the WebSocket handshake response from the server.
-	if _, err := readHandshake(conn); err != nil {
-		dropError("ws handshake", err)
+	if _, err := ws.ReadHandshake(conn); err != nil {
+		debug.DropError("ws handshake", err)
 		return err
 	}
 	// Once the WebSocket connection is established, send a subscribe packet to the server.
-	if _, err := conn.Write(getSubscribePacket()); err != nil {
-		dropError("subscribe write", err)
+	if _, err := conn.Write(ws.GetSubscribePacket()); err != nil {
+		debug.DropError("subscribe write", err)
 		return err
 	}
 
@@ -126,9 +128,9 @@ func runPublisher() error {
 	// This loop will continuously read frames from the WebSocket connection, process them, and update the state.
 	for {
 		// Read a frame from the WebSocket connection.
-		f, err := readFrame(conn)
+		f, err := ws.ReadFrame(conn)
 		if err != nil {
-			dropError("read frame", err)
+			debug.DropError("read frame", err)
 			return err
 		}
 
@@ -137,7 +139,7 @@ func runPublisher() error {
 
 		// Reclaim the frame's buffer space immediately after processing.
 		// This prevents buffer compaction overhead and keeps memory usage optimal.
-		reclaimFrame(f)
+		ws.ReclaimFrame(f)
 	}
 }
 

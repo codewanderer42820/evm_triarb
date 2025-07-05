@@ -13,24 +13,25 @@
 // ⚠️ Never invoke in hot loops — use only in failure diagnostics.
 // ─────────────────────────────────────────────────────────────────────────────
 
-package main
+package debug
 
 import "main/utils"
 
-// dropError logs error messages with a custom alloc-free print strategy.
+// DropError logs error messages with a custom alloc-free print strategy.
 // It writes directly to stderr (file descriptor 2), bypassing any heap allocations.
+// This function is designed for ISR-aligned error logging without introducing heap pressure.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func dropError(prefix string, err error) {
+func DropError(prefix string, err error) {
 	if err != nil {
-		// Rare case: Print the error message with a custom alloc-free strategy.
+		// Error case: Print the error message with a custom alloc-free strategy.
 		// This avoids any heap allocation by directly concatenating and printing the error.
 		msg := prefix + ": " + err.Error() + "\n"
 		utils.PrintWarning(msg)
 	} else {
-		// Common case: Print just the prefix (for GC traces or tagged warnings).
+		// No error case: Print just the prefix (for GC traces or tagged warnings).
 		// This avoids unnecessary memory allocations for frequent paths.
 		msg := prefix + "\n"
 		utils.PrintWarning(msg)
