@@ -80,20 +80,20 @@ func ReadHandshake(c net.Conn) ([]byte, error) {
 		}
 		n += m
 		// Zero-copy search for CRLF-CRLF delimiter using pre-computed pattern
-		if FindTerminator(hsBuf[:n]) >= 0 {
+		if findTerminator(hsBuf[:n]) >= 0 {
 			return hsBuf[:n], nil
 		}
 	}
 }
 
-// FindTerminator searches for CRLF-CRLF using architecture-specific pattern matching.
+// findTerminator searches for CRLF-CRLF using architecture-specific pattern matching.
 // Optimized for ISR-grade performance with unsafe pointer operations for speed.
 // Returns the index of the terminator sequence or -1 if not found.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func FindTerminator(data []byte) int {
+func findTerminator(data []byte) int {
 	if len(data) < 4 {
 		return -1
 	}
@@ -107,14 +107,14 @@ func FindTerminator(data []byte) int {
 
 // ────────────────────── Buffer Compaction Helper ──────────────────────────
 
-// EnsureRoom guarantees ≥ `need` bytes in `wsBuf`, refilling from conn.
+// ensureRoom guarantees ≥ `need` bytes in `wsBuf`, refilling from conn.
 // Uses unsafe.Pointer for efficient memory copying and optimized compaction strategy.
 // Compacts when wsStart > len(wsBuf)/2 to prevent excessive memory waste and improve cache locality.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func EnsureRoom(conn net.Conn, need int) error {
+func ensureRoom(conn net.Conn, need int) error {
 	if need > len(wsBuf) {
 		return errFrameExceedsBuffer
 	}
@@ -151,7 +151,7 @@ func EnsureRoom(conn net.Conn, need int) error {
 func ReadFrame(conn net.Conn) (*wsFrame, error) {
 	for {
 		// Step 1: Minimal header (2 bytes)
-		if err := EnsureRoom(conn, 2); err != nil {
+		if err := ensureRoom(conn, 2); err != nil {
 			return nil, err
 		}
 
@@ -188,13 +188,13 @@ func ReadFrame(conn net.Conn) (*wsFrame, error) {
 		var plen int
 		switch plen7 {
 		case 126:
-			if err := EnsureRoom(conn, offset+2); err != nil {
+			if err := ensureRoom(conn, offset+2); err != nil {
 				return nil, err
 			}
 			plen = int(binary.BigEndian.Uint16(wsBuf[wsStart+offset:]))
 			offset += 2
 		case 127:
-			if err := EnsureRoom(conn, offset+8); err != nil {
+			if err := ensureRoom(conn, offset+8); err != nil {
 				return nil, err
 			}
 			plen64 := binary.BigEndian.Uint64(wsBuf[wsStart+offset:])
@@ -210,7 +210,7 @@ func ReadFrame(conn net.Conn) (*wsFrame, error) {
 		// Step 4: Read masking key with direct pointer access
 		var mkey uint32
 		if masked != 0 {
-			if err := EnsureRoom(conn, offset+4); err != nil {
+			if err := ensureRoom(conn, offset+4); err != nil {
 				return nil, err
 			}
 			mkey = *(*uint32)(unsafe.Pointer(&wsBuf[wsStart+offset]))
@@ -218,7 +218,7 @@ func ReadFrame(conn net.Conn) (*wsFrame, error) {
 		}
 
 		// Step 5: Read payload
-		if err := EnsureRoom(conn, offset+plen); err != nil {
+		if err := ensureRoom(conn, offset+plen); err != nil {
 			return nil, err
 		}
 		payloadStart := wsStart + offset
@@ -226,7 +226,7 @@ func ReadFrame(conn net.Conn) (*wsFrame, error) {
 
 		// Step 6: Unmask payload in-place with SIMD-friendly loop
 		if masked != 0 {
-			UnmaskPayload(wsBuf[payloadStart:payloadEnd], mkey)
+			unmaskPayload(wsBuf[payloadStart:payloadEnd], mkey)
 		}
 
 		// Step 7: Reject fragmented frames
@@ -253,14 +253,14 @@ func ReadFrame(conn net.Conn) (*wsFrame, error) {
 	}
 }
 
-// UnmaskPayload unmasks WebSocket payload in-place using efficient word-based operations.
+// unmaskPayload unmasks WebSocket payload in-place using efficient word-based operations.
 // Optimized for better performance with unrolled 8-byte operations and SIMD-friendly patterns.
 // Designed for ISR-grade performance with minimal CPU overhead.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
-func UnmaskPayload(payload []byte, maskKey uint32) {
+func unmaskPayload(payload []byte, maskKey uint32) {
 	if len(payload) == 0 {
 		return
 	}
