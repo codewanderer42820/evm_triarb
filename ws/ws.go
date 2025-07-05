@@ -96,15 +96,15 @@ var wsBuf [constants.MaxFrameSize]byte
 //go:notinheap
 //go:align 64
 var staticData struct {
-	hsBuf           [4096]byte // HTTP handshake buffer
-	upgradeRequest  [512]byte  // Pre-built upgrade request
-	payloadBuf      [256]byte  // Temp buffer for payload construction
-	subscribePacket [128]byte  // Pre-built subscribe frame
-	keyBuf          [24]byte   // Base64 WebSocket key
-	pongFrame       [2]byte    // Pre-built pong response
+	hsBuf           [1024]byte // HTTP handshake buffer (reduced from 4096)
+	upgradeRequest  [256]byte  // Pre-built upgrade request (reduced from 512)
+	payloadBuf      [128]byte  // Temp buffer for payload construction (reduced from 256)
+	subscribePacket [96]byte   // Pre-built subscribe frame (reduced from 128)
+	keyBuf          [24]byte   // Base64 WebSocket key (perfect size)
+	pongFrame       [2]byte    // Pre-built pong response (perfect size)
 	upgradeLen      int        // Upgrade request length
 	subscribeLen    int        // Subscribe packet length
-	_               [30]byte   // Padding
+	_               [22]byte   // Padding
 }
 
 // errorData contains error handling state.
