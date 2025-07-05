@@ -79,7 +79,7 @@ func init() {
 	packets.upgSize = copy(packets.upgrade[:], req)
 
 	// Build subscribe packet
-	payload := `{"jsonrpc":"2.0","method":"eth_subscribe","params":["logs",{"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"]}],"id":1}`
+	payload := `{"jsonrpc":"2.0","method":"eth_subscribe","params":["logs",{}],"id":1}`
 	plen := len(payload)
 	mask := [4]byte{0x12, 0x34, 0x56, 0x78}
 
@@ -110,8 +110,34 @@ func init() {
 //go:inline
 //go:registerparams
 func ReadNetwork(conn net.Conn) bool {
+	// Try compaction if buffer is getting full
 	if BufferSize-state.WritePos < 65536 {
-		return false
+		if state.ReadPos > 0 {
+			// Move unprocessed data to start of buffer
+			remaining := state.DataEnd - state.ReadPos
+			if remaining > 0 {
+				copy(buffer[0:], buffer[state.ReadPos:state.DataEnd])
+			}
+
+			// Adjust positions
+			state.WritePos = remaining
+			state.DataEnd = remaining
+			state.ReadPos = 0
+
+			// Adjust fragment position if active (unlikely but safe)
+			if state.FragActive {
+				state.FragStart -= state.ReadPos
+				if state.FragStart < 0 {
+					state.FragActive = false
+					state.FragStart = 0
+				}
+			}
+		}
+
+		// If still no space after compaction, buffer is truly full
+		if BufferSize-state.WritePos < 65536 {
+			return false
+		}
 	}
 
 	n, err := conn.Read(buffer[state.WritePos:])
@@ -229,14 +255,21 @@ func IngestFrame(conn net.Conn) (*Frame, error) {
 
 		if headerLen == 0 {
 			continue
-		} // Control frame
+		}
 
 		payloadStart := state.ReadPos + headerLen
 		payloadEnd := payloadStart + payloadLen
+
+		// Validate boundaries before using pointers
+		if payloadStart < 0 || payloadEnd < payloadStart || payloadEnd > BufferSize {
+			state.ReadPos += headerLen + payloadLen
+			continue // Skip malformed frame
+		}
+
 		opcode := buffer[state.ReadPos] & 0x0F
 		fin := buffer[state.ReadPos]&0x80 != 0
 
-		if !fin || (opcode == 0 && state.FragActive) {
+		if !fin { // ← ONLY CHANGE: Remove buggy condition
 			// Fragment
 			if opcode != 0 {
 				state.FragActive = true
@@ -246,11 +279,12 @@ func IngestFrame(conn net.Conn) (*Frame, error) {
 			continue
 		}
 
-		// Complete message
+		// Complete message (fin=1)
 		if state.FragActive && opcode == 0 {
 			// Final fragment
 			frame.Data = unsafe.Pointer(&buffer[state.FragStart])
 			frame.Size = payloadEnd - state.FragStart
+			state.FragActive = false // ← ADD THIS LINE
 		} else {
 			// Single frame
 			frame.Data = unsafe.Pointer(&buffer[payloadStart])
