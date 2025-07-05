@@ -933,7 +933,7 @@ func BenchmarkUnmasking(b *testing.B) {
 				for j := range payload {
 					payload[j] = byte(j % 256)
 				}
-				unmaskUltraFast(payload, maskKey)
+				unmaskPayload(payload, maskKey)
 			}
 		})
 	}
