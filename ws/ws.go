@@ -80,9 +80,10 @@ func (e *wsError) Code() int { return e.code }
 //go:notinheap
 //go:align 64
 var hotData struct {
-	currentFrame    wsFrame  // Reusable frame instance
-	crlfcrlfPattern uint32   // HTTP response terminator pattern
-	_               [52]byte // Padding
+	currentFrame    wsFrame // Reusable frame instance
+	crlfcrlfPattern uint32  // HTTP response terminator pattern
+	_               uint32
+	_               [24]byte // Padding
 }
 
 // wsBuf is the main buffer for all WebSocket operations.
