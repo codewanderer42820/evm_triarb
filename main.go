@@ -136,10 +136,6 @@ func runPublisher() error {
 
 		// Process the frame immediately to minimize delay.
 		handleFrame(f.GetPayload())
-
-		// Reclaim the frame's buffer space immediately after processing.
-		// This prevents buffer compaction overhead and keeps memory usage optimal.
-		ws.ReclaimFrame(f)
 	}
 }
 
