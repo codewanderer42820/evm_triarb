@@ -653,7 +653,219 @@ func TestMasking(t *testing.T) {
 	})
 }
 
-// ───────────────────────────── Benchmarks ─────────────────────────────
+// ───────────────────────────── Ultra-Fast Benchmarks ─────────────────────────────
+
+// BenchmarkUltraFrameProcessing - Direct frame processing benchmarks
+func BenchmarkUltraFrameProcessing(b *testing.B) {
+	b.Run("DirectSmallFrame", func(b *testing.B) {
+		// Create pre-built small frame data
+		payload := []byte("Hello, World!")
+		frameData := buildWebSocketFrame(1, payload, false) // Unmasked for fastest path
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			start, length, errCode := processFrameDirect(frameData, len(frameData))
+			if errCode != 0 || length != len(payload) {
+				b.Fatal("Frame processing failed")
+			}
+			// Prevent optimization elimination
+			_ = start
+		}
+	})
+
+	b.Run("DirectMediumFrame", func(b *testing.B) {
+		// Create pre-built medium frame data
+		payload := make([]byte, 1000)
+		for i := range payload {
+			payload[i] = byte(i % 256)
+		}
+		frameData := buildWebSocketFrame(2, payload, false) // Unmasked binary frame
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			start, length, errCode := processFrameDirect(frameData, len(frameData))
+			if errCode != 0 || length != len(payload) {
+				b.Fatal("Frame processing failed")
+			}
+			_ = start
+		}
+	})
+
+	b.Run("UltraFastPath", func(b *testing.B) {
+		// Ultra-optimized for the most common case: small unmasked text frame
+		frameData := []byte{0x81, 0x0D} // TEXT frame, 13 bytes
+		frameData = append(frameData, []byte("Hello, World!")...)
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		var result int
+		for i := 0; i < b.N; i++ {
+			// Inline the ultra-fast path from processFrameDirect
+			header := *(*uint16)(unsafe.Pointer(&frameData[0]))
+			hdr0 := byte(header)
+			hdr1 := byte(header >> 8)
+
+			// Ultra-fast path: small unmasked text frame
+			if hdr0 == 0x81 && hdr1 < 126 && hdr1&0x80 == 0 {
+				result = int(hdr1) // Payload length
+			}
+		}
+		// Prevent elimination
+		if result != 13 {
+			b.Fatal("Unexpected result")
+		}
+	})
+
+	b.Run("TheoreticalMinimum", func(b *testing.B) {
+		frameData := []byte{0x81, 0x0D} // TEXT frame, 13 bytes
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		var result int
+		for i := 0; i < b.N; i++ {
+			// Theoretical minimum: single memory access + arithmetic
+			if frameData[0] == 0x81 && frameData[1] < 126 {
+				result = int(frameData[1])
+			}
+		}
+		if result != 13 {
+			b.Fatal("Unexpected result")
+		}
+	})
+}
+
+// BenchmarkComparison - Compare different approaches
+func BenchmarkComparison(b *testing.B) {
+	b.Run("OriginalWithMock", func(b *testing.B) {
+		payload := []byte("Hello, World!")
+		frameData := buildWebSocketFrame(1, payload, false)
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			resetBuffers()
+			conn := newMockConn(frameData)
+			frame, err := ReadFrame(conn)
+			if err != nil {
+				b.Fatalf("ReadFrame failed: %v", err)
+			}
+			if frame.Len != len(payload) {
+				b.Fatal("Frame length mismatch")
+			}
+		}
+	})
+
+	b.Run("DirectProcessing", func(b *testing.B) {
+		payload := []byte("Hello, World!")
+		frameData := buildWebSocketFrame(1, payload, false)
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			start, length, errCode := processFrameDirect(frameData, len(frameData))
+			if errCode != 0 || length != len(payload) {
+				b.Fatal("Processing failed")
+			}
+			_ = start
+		}
+	})
+}
+
+// BenchmarkMemoryOperations - Memory access pattern analysis
+func BenchmarkMemoryOperations(b *testing.B) {
+	b.Run("SingleMemoryAccess", func(b *testing.B) {
+		data := []byte{0x81, 0x0D, 'H', 'e', 'l', 'l', 'o'}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		var result uint16
+		for i := 0; i < b.N; i++ {
+			result = *(*uint16)(unsafe.Pointer(&data[0]))
+		}
+		if result == 0 {
+			b.Fatal("Zero result")
+		}
+	})
+
+	b.Run("SequentialAccess", func(b *testing.B) {
+		data := []byte{0x81, 0x0D, 'H', 'e', 'l', 'l', 'o'}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			_ = data[0] // Header byte 1
+			_ = data[1] // Header byte 2
+			_ = data[2] // First payload byte
+		}
+	})
+}
+
+// BenchmarkRealWorldScenarios - Real-world usage patterns
+func BenchmarkRealWorldScenarios(b *testing.B) {
+	b.Run("HighFrequencyTrading", func(b *testing.B) {
+		// Typical HFT price update
+		marketData := []byte(`{"symbol":"BTCUSD","price":50000.00}`)
+		frameData := buildWebSocketFrame(1, marketData, false)
+
+		b.ResetTimer()
+		b.ReportAllocs()
+		b.SetBytes(int64(len(marketData)))
+
+		for i := 0; i < b.N; i++ {
+			start, length, errCode := processFrameDirect(frameData, len(frameData))
+			if errCode != 0 || length != len(marketData) {
+				b.Fatal("HFT frame processing failed")
+			}
+			_ = start
+		}
+	})
+
+	b.Run("Gaming", func(b *testing.B) {
+		// Typical gaming position update
+		positionData := []byte(`{"x":123.45,"y":678.90}`)
+		frameData := buildWebSocketFrame(1, positionData, false)
+
+		b.ResetTimer()
+		b.ReportAllocs()
+		b.SetBytes(int64(len(positionData)))
+
+		for i := 0; i < b.N; i++ {
+			start, length, errCode := processFrameDirect(frameData, len(frameData))
+			if errCode != 0 || length != len(positionData) {
+				b.Fatal("Gaming frame processing failed")
+			}
+			_ = start
+		}
+	})
+
+	b.Run("IoTSensor", func(b *testing.B) {
+		// Typical IoT sensor reading
+		sensorData := []byte(`{"temp":23.5}`)
+		frameData := buildWebSocketFrame(1, sensorData, false)
+
+		b.ResetTimer()
+		b.ReportAllocs()
+		b.SetBytes(int64(len(sensorData)))
+
+		for i := 0; i < b.N; i++ {
+			start, length, errCode := processFrameDirect(frameData, len(frameData))
+			if errCode != 0 || length != len(sensorData) {
+				b.Fatal("IoT frame processing failed")
+			}
+			_ = start
+		}
+	})
+}
 
 func BenchmarkReadFrame(b *testing.B) {
 	b.Run("SmallFrame", func(b *testing.B) {
@@ -721,7 +933,7 @@ func BenchmarkUnmasking(b *testing.B) {
 				for j := range payload {
 					payload[j] = byte(j % 256)
 				}
-				unmaskPayload(payload, maskKey)
+				unmaskUltraFast(payload, maskKey)
 			}
 		})
 	}
