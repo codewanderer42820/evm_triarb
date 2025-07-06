@@ -284,7 +284,6 @@ OPTIMIZATION FEATURES:
    - Sequential access patterns for large buffer
 
 3. COMPILE-TIME SAFETY:
-   - Buffer size validation at compile time
    - Pre-computed string lengths
    - Const propagation for better code generation
 
@@ -292,11 +291,6 @@ OPTIMIZATION FEATURES:
    - Cache-aligned structures for optimal access
    - Zero allocation during message processing
    - Pre-built protocol frames to avoid runtime construction
-
-5. CONCURRENCY SAFETY:
-   - Thread-safe design without locks
-   - Multiple goroutines can safely call SpinUntilCompleteMessage
-   - No shared mutable state between function calls
 
 PERFORMANCE CHARACTERISTICS:
 - Zero allocations during message processing
