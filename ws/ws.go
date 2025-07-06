@@ -167,33 +167,35 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 	var opcode uint8      // Current frame opcode
 
 	for {
+		headerBuf := processor.buffer[msgEnd:]
+
 		// Read frame header into cache-aligned buffer
-		_, err := conn.Read(processor.headerBuf[:2])
+		_, err := conn.Read(headerBuf[:2])
 		if err != nil {
 			return nil, err
 		}
 
 		// Extract frame information
-		opcode = processor.headerBuf[0] & 0x0F
-		payloadLen = uint64(processor.headerBuf[1] & 0x7F)
+		opcode = headerBuf[0] & 0x0F
+		payloadLen = uint64(headerBuf[1] & 0x7F)
 
 		// Handle extended payload length fields
 		switch payloadLen {
 		case 126:
-			_, err = conn.Read(processor.headerBuf[2:4])
+			_, err = conn.Read(headerBuf[2:4])
 			if err != nil {
 				return nil, err
 			}
-			payloadLen = uint64(processor.headerBuf[2])<<8 | uint64(processor.headerBuf[3])
+			payloadLen = uint64(headerBuf[2])<<8 | uint64(headerBuf[3])
 
 		case 127:
-			_, err = conn.Read(processor.headerBuf[2:10])
+			_, err = conn.Read(headerBuf[2:10])
 			if err != nil {
 				return nil, err
 			}
 
 			// Fast endian conversion using unsafe pointer operations
-			v := *(*uint64)(unsafe.Pointer(&processor.headerBuf[2]))
+			v := *(*uint64)(unsafe.Pointer(&headerBuf[2]))
 			payloadLen = ((v & 0xFF) << 56) | ((v & 0xFF00) << 40) | ((v & 0xFF0000) << 24) | ((v & 0xFF000000) << 8) |
 				((v & 0xFF00000000) >> 8) | ((v & 0xFF0000000000) >> 24) | ((v & 0xFF000000000000) >> 40) | ((v & 0xFF00000000000000) >> 56)
 
@@ -215,7 +217,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 					if toRead > 16 {
 						toRead = 16
 					}
-					bytesRead, err := conn.Read(processor.headerBuf[:toRead])
+					bytesRead, err := conn.Read(headerBuf[:toRead])
 					if err != nil {
 						return nil, err
 					}
@@ -229,6 +231,9 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		if uint64(msgEnd)+payloadLen > uint64(BufferSize) {
 			return nil, fmt.Errorf("message too large")
 		}
+
+		// Check FIN bit before we overwrite header data
+		isLastFrame := headerBuf[0]&0x80 != 0
 
 		// Read payload directly into cache-aligned main buffer
 		remaining := payloadLen
@@ -252,8 +257,8 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 			remaining -= uint64(bytesRead)
 		}
 
-		// Check FIN bit for message completion
-		if processor.headerBuf[0]&0x80 != 0 {
+		// Check if this was the final frame
+		if isLastFrame {
 			// Final safety check
 			if msgEnd > BufferSize {
 				return nil, fmt.Errorf("bounds violation")
