@@ -45,7 +45,7 @@ func DropError(prefix string, err error) {
 func DropMessage(prefix, message string) {
 	// Direct concatenation for zero-allocation logging
 	msg := prefix + ": " + message + "\n"
-	utils.PrintWarning(msg)
+	utils.PrintInfo(msg)
 }
 
 // ============================================================================
