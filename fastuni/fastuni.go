@@ -100,7 +100,6 @@ const fracMask uint64 = (1<<52 - 1) // Extracts 52-bit mantissa from double prec
 //   - Represents values in range [0, 2³²) with 2⁻⁹⁶ precision
 //
 //go:notinheap
-//go:align 64
 type Uint128 struct {
 	Hi uint64 // High-order 64 bits
 	Lo uint64 // Low-order 64 bits
