@@ -138,12 +138,12 @@ func Handshake(conn net.Conn) error {
 						buf[8] == ' ' && buf[9] == '1' && buf[10] == '0' && buf[11] == '1' {
 						return nil
 					}
-					return errUpgradeFailed // Reuse pre-allocated error
+					return errUpgradeFailed
 				}
 			}
 		}
 	}
-	return errHandshakeTimeout // Reuse pre-allocated error
+	return errHandshakeTimeout
 }
 
 // ============================================================================
@@ -211,7 +211,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 
 			// Safety check for oversized frames
 			if payloadLen > uint64(BufferSize) {
-				return nil, errFrameTooLarge // Reuse pre-allocated error
+				return nil, errFrameTooLarge
 			}
 		}
 
@@ -239,7 +239,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 
 		// Buffer overflow protection
 		if uint64(msgEnd)+payloadLen > uint64(BufferSize) {
-			return nil, errMessageTooLarge // Reuse pre-allocated error
+			return nil, errMessageTooLarge
 		}
 
 		// Check FIN bit before we overwrite header data
@@ -271,7 +271,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		if isLastFrame {
 			// Final safety check
 			if msgEnd > BufferSize {
-				return nil, errBoundsViolation // Reuse pre-allocated error
+				return nil, errBoundsViolation
 			}
 
 			// Return zero-copy slice of cache-aligned buffer
