@@ -27,8 +27,8 @@ var (
 //go:inline
 //go:registerparams
 func HandleFrame(p []byte) {
-	// Basic sanity check for subscription messages
-	if len(p) < 117 {
+	// Require minimum length for processing: JSON-RPC wrapper (117) + log field parsing (8)
+	if len(p) < 117+8 {
 		return
 	}
 
