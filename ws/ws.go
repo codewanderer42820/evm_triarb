@@ -33,11 +33,7 @@ const subscribeFrameLen = 8 + subscribePayloadLen
 //go:notinheap
 //go:align 64 // Align to cache line boundary for optimal performance
 type WebSocketProcessor struct {
-	// Cache line 1: Frequently accessed header processing buffer
-	headerBuf [16]byte // WebSocket frame headers (accessed every frame)
-	_         [48]byte // Padding to complete cache line
-
-	// Cache lines 2+: Main message buffer for sequential access
+	// Cache lines 1+: Main message buffer for sequential access
 	//go:align 16384 // Align to page boundary for optimal memory access
 	buffer [BufferSize]byte // 16MB main message buffer
 
