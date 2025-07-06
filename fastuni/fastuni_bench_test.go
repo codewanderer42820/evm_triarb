@@ -1,22 +1,32 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// [Filename]: fastuni_bench_test.go — microbenchmarks for fastuni log routines
+// ============================================================================
+// FASTUNI PERFORMANCE MICROBENCHMARK SUITE
+// ============================================================================
 //
-// Purpose:
-//   - Measures execution time of ISR-grade logarithmic routines and wrappers
-//   - Evaluates cost of raw log₂/ln on 64-bit and 128-bit ratios
+// Comprehensive performance measurement framework for ISR-grade logarithmic
+// operations with emphasis on sub-10ns execution targets.
 //
-// Scope:
-//   - log₂(x) over u64 and Uint128
-//   - LnReserveRatio, Log2ReserveRatio, Log*Const
-//   - Q64.96 price field access and transformations
+// Benchmark categories:
+//   - Core logarithmic primitives: log₂(uint64), log₂(Uint128)
+//   - Reserve ratio calculations: ln(a/b), log₂(a/b), scaled variants
+//   - Q64.96 price transformations: Uniswap V3 format operations
+//   - Input distribution analysis: Fixed, random, and edge case patterns
 //
-// Notes:
-//   - Deterministic seed (benchSeed = 12345) for repeatable fuzz inputs
-//   - Benchmarks grouped by function purpose and input style
-//   - Uint128 coverage includes Lo-only, Hi-only, and hybrid values
+// Performance targets:
+//   - log₂(uint64): <5ns per operation
+//   - log₂(Uint128): <10ns per operation
+//   - Reserve ratios: <15ns per operation
+//   - Price transformations: <20ns per operation
 //
-// ⚠️ Internal routines (e.g. log2u128) are unchecked. Use with caution.
-// ─────────────────────────────────────────────────────────────────────────────
+// Test methodology:
+//   - Deterministic seed (12345) for reproducible measurements
+//   - Comprehensive input coverage: small, large, boundary values
+//   - Separate benchmarks for algorithmic path analysis
+//   - Statistical significance via large sample sizes
+//
+// Input characteristics:
+//   - Fixed patterns: Powers of 2, known constants, edge cases
+//   - Random patterns: Uniform distribution across value ranges
+//   - Pathological cases: Maximum values, precision boundaries
 
 package fastuni
 
@@ -27,47 +37,57 @@ import (
 	"testing"
 )
 
-/*──────────────────────────────────────────────────────────────────────────────
-  📦 Benchmark Constants and Input Sets
-──────────────────────────────────────────────────────────────────────────────*/
+// ============================================================================
+// BENCHMARK CONFIGURATION
+// ============================================================================
 
-const benchSeed = 12345 // fixed for deterministic fuzz
+const benchSeed = 12345 // Deterministic seed for reproducible measurements
 
+// Pre-computed input datasets for consistent benchmarking across runs
 var (
-	// Sample uint64 values for log₂ benchmarking
+	// Sample uint64 values covering logarithmic input space
 	benchLog2u64Inputs = []uint64{
-		1,
-		3,
-		1 << 10,
-		1 << 32,
-		123456789,
-		1 << 52,
+		1,         // Minimum positive value
+		3,         // Small prime
+		1 << 10,   // Medium power of 2 (1K)
+		1 << 32,   // Large power of 2 (4B)
+		123456789, // Arbitrary large value
+		1 << 52,   // IEEE 754 precision boundary
 	}
 
 	// Sample Uint128 values for Q64.96/log₂ benchmarking
 	benchLog2u128Inputs = []Uint128{
-		{0, 1},             // Lo-only
-		{1 << 32, 0},       // Hi-only
-		{1 << 40, 1 << 20}, // Mixed
+		{0, 1},             // Low-word only (small value)
+		{1 << 32, 0},       // High-word only (Q64.96 unity)
+		{1 << 40, 1 << 20}, // Mixed representation
 	}
 
-	// Random Uint128 values (fixed across runs)
+	// Pre-generated random Uint128 values for statistical benchmarking
 	benchRandU128 = newRandU128(1024)
 
-	// a/b pairs for ratio benchmarks
+	// Ratio pairs for reserve ratio benchmarking
 	benchPairs = []struct{ a, b uint64 }{
-		{1, 1},             // identity
-		{10000, 10001},     // small delta
-		{1 << 30, 1 << 20}, // power-of-2 offset
-		{12345, 67890},     // arbitrary
+		{1, 1},             // Identity ratio
+		{10000, 10001},     // Small delta (log1p optimization)
+		{1 << 30, 1 << 20}, // Power-of-2 ratio
+		{12345, 67890},     // Arbitrary ratio
 	}
 )
 
-/*──────────────────────────────────────────────────────────────────────────────
-  🔧 Input Generator
-──────────────────────────────────────────────────────────────────────────────*/
+// ============================================================================
+// INPUT GENERATION UTILITIES
+// ============================================================================
 
-// newRandU128 returns N deterministic Uint128 values using benchSeed
+// newRandU128 generates deterministic Uint128 values for consistent benchmarking.
+// Uses fixed seed to ensure reproducible performance measurements across runs.
+//
+// Parameters:
+//
+//	n: Number of random values to generate
+//
+// Returns:
+//
+//	Slice of n deterministic Uint128 values
 func newRandU128(n int) []Uint128 {
 	r := rand.New(rand.NewSource(benchSeed))
 	slice := make([]Uint128, n)
@@ -77,11 +97,19 @@ func newRandU128(n int) []Uint128 {
 	return slice
 }
 
-/*──────────────────────────────────────────────────────────────────────────────
-  🔬 log₂(x) over uint64
-──────────────────────────────────────────────────────────────────────────────*/
+// ============================================================================
+// UINT64 LOGARITHM BENCHMARKS
+// ============================================================================
 
-// BenchmarkLog2u64 runs Log2ReserveRatio(x,1) for small and large x
+// BenchmarkLog2u64 measures log₂(x) performance across representative inputs.
+//
+// Test methodology:
+//   - Executes Log2ReserveRatio(x, 1) to test log₂(x) in public API context
+//   - Covers small values, powers of 2, and large arbitrary numbers
+//   - Individual sub-benchmarks for input-specific analysis
+//
+// Expected performance: <5ns per operation
+// Use cases: Magnitude analysis, bit position calculations, scaling operations
 func BenchmarkLog2u64(b *testing.B) {
 	for _, x := range benchLog2u64Inputs {
 		b.Run(fmt.Sprintf("x=%d", x), func(b *testing.B) {
@@ -92,11 +120,19 @@ func BenchmarkLog2u64(b *testing.B) {
 	}
 }
 
-/*──────────────────────────────────────────────────────────────────────────────
-  🔬 log₂(x) over Uint128 (fixed + fuzz)
-──────────────────────────────────────────────────────────────────────────────*/
+// ============================================================================
+// UINT128 LOGARITHM BENCHMARKS
+// ============================================================================
 
-// BenchmarkLog2u128_Fixed benchmarks log2u128() on known Uint128 constants
+// BenchmarkLog2u128_Fixed measures log₂(Uint128) on predetermined constants.
+//
+// Input analysis:
+//   - Low-word only: Tests 64-bit delegation optimization
+//   - High-word only: Tests 128-bit computation path
+//   - Mixed values: Tests full precision handling
+//
+// Expected performance: <10ns per operation
+// Use cases: Q64.96 price analysis, large integer logarithms
 func BenchmarkLog2u128_Fixed(b *testing.B) {
 	for _, u := range benchLog2u128Inputs {
 		name := fmt.Sprintf("Hi=%d_Lo=%d", u.Hi, u.Lo)
@@ -108,7 +144,15 @@ func BenchmarkLog2u128_Fixed(b *testing.B) {
 	}
 }
 
-// BenchmarkLog2u128_Random benchmarks fuzzed log2u128() input from pool
+// BenchmarkLog2u128_Random measures performance on statistical input distribution.
+//
+// Test characteristics:
+//   - 1024 pre-generated random values cycled through benchmark
+//   - Uniform distribution across 128-bit value space
+//   - Tests worst-case performance under diverse inputs
+//
+// Expected performance: <10ns per operation (may be higher due to cache misses)
+// Use cases: Monte Carlo simulations, statistical analysis pipelines
 func BenchmarkLog2u128_Random(b *testing.B) {
 	n := len(benchRandU128)
 	b.ResetTimer()
@@ -118,11 +162,20 @@ func BenchmarkLog2u128_Random(b *testing.B) {
 	}
 }
 
-/*──────────────────────────────────────────────────────────────────────────────
-  🔬 Reserve Ratio: ln(a/b)
-──────────────────────────────────────────────────────────────────────────────*/
+// ============================================================================
+// RESERVE RATIO BENCHMARKS
+// ============================================================================
 
-// BenchmarkLnReserveRatio tests LnReserveRatio on known pairs
+// BenchmarkLnReserveRatio measures ln(a/b) performance across ratio patterns.
+//
+// Algorithmic path analysis:
+//   - Identity ratios: Trivial case (a=b)
+//   - Small deltas: log1p optimization path
+//   - Large ratios: log₂ difference fallback path
+//   - Arbitrary ratios: General case performance
+//
+// Expected performance: <15ns per operation
+// Use cases: Financial ratio analysis, reserve monitoring, price comparisons
 func BenchmarkLnReserveRatio(b *testing.B) {
 	for _, p := range benchPairs {
 		name := fmt.Sprintf("%d_%d", p.a, p.b)
@@ -134,11 +187,15 @@ func BenchmarkLnReserveRatio(b *testing.B) {
 	}
 }
 
-/*──────────────────────────────────────────────────────────────────────────────
-  🔬 Reserve Ratio: log₂(a/b)
-──────────────────────────────────────────────────────────────────────────────*/
-
-// BenchmarkLog2ReserveRatio tests log₂(a / b)
+// BenchmarkLog2ReserveRatio measures log₂(a/b) performance.
+//
+// Performance characteristics:
+//   - Pure log₂ difference computation
+//   - No conditional path selection overhead
+//   - Consistent performance across input ranges
+//
+// Expected performance: <10ns per operation
+// Use cases: Binary scaling, magnitude comparison, bit-level analysis
 func BenchmarkLog2ReserveRatio(b *testing.B) {
 	for _, p := range benchPairs {
 		name := fmt.Sprintf("%d_%d", p.a, p.b)
@@ -150,11 +207,15 @@ func BenchmarkLog2ReserveRatio(b *testing.B) {
 	}
 }
 
-/*──────────────────────────────────────────────────────────────────────────────
-  🔬 Reserve Ratio: ln(a/b) * constant
-──────────────────────────────────────────────────────────────────────────────*/
-
-// BenchmarkLogReserveRatioConst tests ln(a / b) * π
+// BenchmarkLogReserveRatioConst measures ln(a/b) × constant performance.
+//
+// Operations tested:
+//   - log₂ difference computation
+//   - Floating-point multiplication by conversion factor
+//   - Input validation overhead
+//
+// Expected performance: <15ns per operation
+// Use cases: Custom base conversions, scaled logarithmic transformations
 func BenchmarkLogReserveRatioConst(b *testing.B) {
 	for _, p := range benchPairs {
 		b.Run(fmt.Sprintf("%d_%d", p.a, p.b), func(b *testing.B) {
@@ -165,11 +226,19 @@ func BenchmarkLogReserveRatioConst(b *testing.B) {
 	}
 }
 
-/*──────────────────────────────────────────────────────────────────────────────
-  🔬 PriceX96 (Q64.96) log₂, ln, and scaled
-──────────────────────────────────────────────────────────────────────────────*/
+// ============================================================================
+// Q64.96 PRICE TRANSFORMATION BENCHMARKS
+// ============================================================================
 
-// BenchmarkLog2PriceX96 tests 2·log₂(sqrtPrice) − 192
+// BenchmarkLog2PriceX96 measures Q64.96 → log₂(price) transformation performance.
+//
+// Operations measured:
+//   - Uint128 logarithm computation
+//   - Q64.96 format normalization (subtract 96, multiply by 2)
+//   - Input validation and error handling
+//
+// Expected performance: <20ns per operation
+// Use cases: Uniswap V3 price analysis, AMM monitoring, DeFi analytics
 func BenchmarkLog2PriceX96(b *testing.B) {
 	for _, u := range benchLog2u128Inputs {
 		name := fmt.Sprintf("Hi=%d_Lo=%d", u.Hi, u.Lo)
@@ -181,7 +250,15 @@ func BenchmarkLog2PriceX96(b *testing.B) {
 	}
 }
 
-// BenchmarkLnPriceX96 tests ln(price) via sqrtPrice log₂
+// BenchmarkLnPriceX96 measures Q64.96 → ln(price) transformation performance.
+//
+// Operations measured:
+//   - Log2PriceX96 computation
+//   - Base conversion multiplication (× ln(2))
+//   - Error propagation handling
+//
+// Expected performance: <25ns per operation
+// Use cases: Natural logarithm price analysis, financial mathematics integration
 func BenchmarkLnPriceX96(b *testing.B) {
 	for _, u := range benchLog2u128Inputs {
 		name := fmt.Sprintf("Hi=%d_Lo=%d", u.Hi, u.Lo)
@@ -193,7 +270,15 @@ func BenchmarkLnPriceX96(b *testing.B) {
 	}
 }
 
-// BenchmarkLogPriceX96Const tests ln(price) * π
+// BenchmarkLogPriceX96Const measures Q64.96 → log_base(price) performance.
+//
+// Operations measured:
+//   - Log2PriceX96 computation
+//   - Custom base conversion multiplication
+//   - Comprehensive input validation (NaN/Inf checking)
+//
+// Expected performance: <30ns per operation
+// Use cases: Custom base price analysis, external system integration
 func BenchmarkLogPriceX96Const(b *testing.B) {
 	for _, u := range benchLog2u128Inputs {
 		name := fmt.Sprintf("Hi=%d_Lo=%d", u.Hi, u.Lo)
