@@ -1,66 +1,112 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// [Filename]: types.go — ISR-safe view struct for decoded Ethereum logs
-//
-// Purpose:
-//   - Holds zero-copy references to fields extracted from WebSocket JSON frames
-//   - Serves as the transient intermediate for parsing → deduplication → emission
-//
-// Notes:
-//   - Never escapes the scope of `handleFrame()` — all slices point into wsBuf
-//   - Aligned and padded for cache efficiency, ABA safety, and prefetch locality
-//   - 64-byte aligned for clean per-slot allocation in any struct ring or queue
-//
-// ⚠️ Never store or reference LogView outside current tick — contents become invalid
-// ─────────────────────────────────────────────────────────────────────────────
-
 package types
 
-// LogView provides a flat, pointer-stable reference to a decoded Ethereum event.
-// All fields are directly sliced from wsBuf — no allocations occur.
+// ============================================================================
+// ETHEREUM LOG VIEW - ZERO-COPY REFERENCE STRUCTURE
+// ============================================================================
+
+// LogView provides a zero-copy reference to decoded Ethereum event data.
+// All fields reference slices directly from the WebSocket buffer without allocation.
+// Designed for high-throughput log processing with cache-optimal memory layout.
 //
-// The LogView struct is designed to be efficient for real-time log parsing and processing.
-// Each field is extracted directly from the WebSocket buffer, and it is kept immutable
-// and transient within the context of a single processing tick.
+// IMPORTANT: This struct contains transient references that become invalid
+// when the underlying WebSocket buffer is reused. Never store LogView
+// instances beyond the current processing frame.
 //
 //go:notinheap
 //go:align 64
 type LogView struct {
-	// ───────────── Hot fields: parsed early and matched for Sync() ─────────────
+	// ========================================================================
+	// HOT FIELDS - Frequently accessed during parsing and matching
+	// ========================================================================
 
-	// Addr holds the "address" field from the Ethereum log.
-	// It is a 20-byte hex string (0x-prefixed).
+	// Addr contains the contract address from the Ethereum log
+	// Format: 20-byte hex string with 0x prefix (e.g., "0x1234...abcd")
 	Addr []byte
 
-	// Data holds the "data" field from the Ethereum log.
-	// It is a hex string, typically 0x-prefixed.
+	// Data contains the event data payload from the Ethereum log
+	// Format: Variable-length hex string with 0x prefix
 	Data []byte
 
-	// Topics holds the "topics" field from the Ethereum log.
-	// This is a JSON array, represented as a slice of strings `["..."]`.
+	// Topics contains the indexed event parameters as JSON array
+	// Format: JSON array of hex strings (e.g., ["0xabc...", "0x123..."])
 	Topics []byte
 
-	// ───────────── Metadata fields: passed to deduper for identity ─────────────
+	// ========================================================================
+	// METADATA FIELDS - Block and transaction positioning information
+	// ========================================================================
 
-	// BlkNum holds the "blockNumber" field, parsed as a uint64.
-	// It is used to identify the block in which the log was generated.
+	// BlkNum contains the block number where this log was generated
+	// Format: Hex string representing uint64 block number
 	BlkNum []byte
 
-	// LogIdx holds the "logIndex" field, parsed as a uint32.
-	// This helps identify the position of the log within the block.
+	// LogIdx contains the position of this log within the block
+	// Format: Hex string representing uint32 log index
 	LogIdx []byte
 
-	// TxIndex holds the "transactionIndex" field, parsed as a uint32.
-	// This identifies the index of the transaction within the block.
+	// TxIndex contains the transaction index within the block
+	// Format: Hex string representing uint32 transaction index
 	TxIndex []byte
 
-	// ───────────── Cold fingerprinting fields for deduplication ────────────────
+	// ========================================================================
+	// FINGERPRINT FIELDS - Deduplication and identification data
+	// ========================================================================
 
-	// TagHi holds the upper 64 bits of the fingerprint derived from the first topic.
+	// TagHi holds the upper 64 bits of the content fingerprint
+	// Used for fast deduplication and routing decisions
 	TagHi uint64
 
-	// TagLo holds the lower 64 bits of the fingerprint, derived from the data if needed.
+	// TagLo holds the lower 64 bits of the content fingerprint
+	// Combined with TagHi forms a 128-bit unique identifier
 	TagLo uint64
 
-	// _ is used for padding to ensure proper alignment and prevent false sharing.
-	_ [4]uint64 // Explicit 32-byte padding for future-proofing and cache-line alignment
+	// ========================================================================
+	// PADDING - Cache alignment and future expansion
+	// ========================================================================
+
+	// Explicit padding ensures 64-byte alignment and prevents false sharing
+	// Reserves space for future fields without breaking cache line boundaries
+	_ [4]uint64
 }
+
+// ============================================================================
+// DESIGN NOTES
+// ============================================================================
+
+/*
+MEMORY LAYOUT OPTIMIZATION:
+
+1. CACHE LINE ALIGNMENT:
+   - Struct aligned to 64-byte boundaries for optimal cache performance
+   - Hot fields (Addr, Data, Topics) placed first for sequential access
+   - Metadata fields grouped together for batch processing
+   - Cold fields (fingerprints) placed last to minimize cache pollution
+
+2. ZERO-COPY DESIGN:
+   - All byte slices reference WebSocket buffer directly
+   - No memory allocations during log processing
+   - Transient lifetime prevents memory leaks
+   - Direct slice references enable high-speed parsing
+
+3. FALSE SHARING PREVENTION:
+   - 64-byte alignment ensures each LogView occupies dedicated cache lines
+   - Explicit padding prevents interference between adjacent structures
+   - Future-proof design allows field additions without performance degradation
+
+4. PROCESSING EFFICIENCY:
+   - Hot fields accessed first during common operations
+   - Metadata fields grouped for batch extraction
+   - Fingerprint fields optimized for fast comparison operations
+   - Memory layout matches typical access patterns
+
+USAGE PATTERNS:
+- Created during WebSocket frame parsing
+- Passed through deduplication pipeline
+- Used for event matching and filtering
+- Destroyed when frame processing completes
+
+PERFORMANCE CHARACTERISTICS:
+- Zero allocations per log processed
+- Cache-friendly sequential field access
+- Minimal memory footprint per instance
+- Optimized for high-throughput scenarios
+*/
