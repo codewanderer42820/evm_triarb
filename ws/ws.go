@@ -1,10 +1,10 @@
 package ws
 
 import (
-	"encoding/binary"
 	"fmt"
 	"main/constants"
 	"net"
+	"unsafe"
 )
 
 const BufferSize = 16777216 // 16MB
@@ -29,48 +29,51 @@ func init() {
 			"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
 			"Sec-WebSocket-Version: 13\r\n\r\n")
 
-	payload := `{"jsonrpc":"2.0","method":"eth_subscribe","params":["logs",{}],"id":1}`
-	payloadBytes := []byte(payload)
-	plen := len(payloadBytes)
-	mask := [4]byte{0x12, 0x34, 0x56, 0x78}
+	payload := []byte(`{"jsonrpc":"2.0","method":"eth_subscribe","params":["logs",{}],"id":1}`)
+	plen := len(payload)
 
-	frame := make([]byte, 0, 512)
-	frame = append(frame, 0x81) // FIN=1, TEXT frame
+	frame := make([]byte, 8+plen) // Header(4) + Mask(4) + Payload
+	frame[0] = 0x81               // FIN=1, TEXT frame
+	frame[1] = 0x80 | 126         // MASK=1, 16-bit length
+	frame[2] = byte(plen >> 8)
+	frame[3] = byte(plen)
+	frame[4] = 0x12 // mask bytes
+	frame[5] = 0x34
+	frame[6] = 0x56
+	frame[7] = 0x78
 
-	if plen > 125 {
-		frame = append(frame, 0x80|126) // MASK=1, indicates 16-bit length follows
-		frame = append(frame, byte(plen>>8), byte(plen))
-	} else {
-		frame = append(frame, 0x80|byte(plen)) // MASK=1, 7-bit length
-	}
-
-	frame = append(frame, mask[:]...)
-	for i, b := range payloadBytes {
-		frame = append(frame, b^mask[i&3])
+	// XOR mask payload
+	for i, b := range payload {
+		frame[8+i] = b ^ frame[4+(i&3)]
 	}
 	subscribeFrame = frame
 }
 
+//go:noinline
 func Handshake(conn net.Conn) error {
-	if _, err := conn.Write(upgradeRequest); err != nil {
+	_, err := conn.Write(upgradeRequest)
+	if err != nil {
 		return err
 	}
 
-	buf := make([]byte, 1024)
+	buf := make([]byte, 512)
 	total := 0
 
-	for total < 1000 {
+	for total < 500 {
 		n, err := conn.Read(buf[total:])
 		if err != nil {
 			return err
 		}
 		total += n
 
-		if total >= 4 {
-			for i := 0; i <= total-4; i++ {
-				if buf[i] == '\r' && buf[i+1] == '\n' &&
-					buf[i+2] == '\r' && buf[i+3] == '\n' {
-					if total >= 12 && string(buf[:12]) == "HTTP/1.1 101" {
+		if total >= 16 {
+			// Fast scan for \r\n\r\n using 32-bit reads
+			end := total - 3
+			for i := 0; i < end; i++ {
+				if *(*uint32)(unsafe.Pointer(&buf[i])) == 0x0A0D0A0D {
+					// Check "HTTP/1.1 101" - fastest possible validation
+					if *(*uint64)(unsafe.Pointer(&buf[0])) == 0x312E312F50545448 &&
+						buf[8] == ' ' && buf[9] == '1' && buf[10] == '0' && buf[11] == '1' {
 						return nil
 					}
 					return fmt.Errorf("upgrade failed")
@@ -81,40 +84,47 @@ func Handshake(conn net.Conn) error {
 	return fmt.Errorf("handshake timeout")
 }
 
+//go:noinline
 func SendSubscription(conn net.Conn) error {
 	_, err := conn.Write(subscribeFrame)
 	return err
 }
 
+//go:noinline
 func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 	msgEnd := 0
 
 	for {
-		// Read 16 bytes for header parsing
-		n, err := conn.Read(headerBuf[:])
+		// Read minimum header (2 bytes)
+		_, err := conn.Read(headerBuf[:2])
 		if err != nil {
 			return nil, err
 		}
 
-		// Parse header - hot path optimized
-		b1 := headerBuf[1]
-		payloadLen := int(b1 & 0x7F)
-		headerLen := 2
+		opcode := headerBuf[0] & 0x0F
+		payloadLen := uint64(headerBuf[1] & 0x7F)
 
-		if payloadLen > 125 {
-			if payloadLen == 126 {
-				headerLen = 4
-				payloadLen = int(binary.BigEndian.Uint16(headerBuf[2:4]))
-			} else { // payloadLen == 127
-				headerLen = 10
-				payloadLen = int(binary.BigEndian.Uint64(headerBuf[2:10]))
+		// Read extended length if needed
+		if payloadLen == 126 {
+			_, err = conn.Read(headerBuf[2:4])
+			if err != nil {
+				return nil, err
 			}
+			payloadLen = uint64(headerBuf[2])<<8 | uint64(headerBuf[3])
+		} else if payloadLen == 127 {
+			_, err = conn.Read(headerBuf[2:10])
+			if err != nil {
+				return nil, err
+			}
+			v := *(*uint64)(unsafe.Pointer(&headerBuf[2]))
+			payloadLen = ((v & 0xFF) << 56) | ((v & 0xFF00) << 40) | ((v & 0xFF0000) << 24) | ((v & 0xFF000000) << 8) |
+				((v & 0xFF00000000) >> 8) | ((v & 0xFF0000000000) >> 24) | ((v & 0xFF000000000000) >> 40) | ((v & 0xFF00000000000000) >> 56)
 		}
 
-		// Skip control frames (opcode >= 8)
-		if headerBuf[0]&0x0F >= 8 {
+		// Skip control frames
+		if opcode >= 8 {
 			if payloadLen > 0 {
-				// Read and discard control payload
+				// Discard payload - use larger chunks when possible
 				for remaining := payloadLen; remaining > 0; {
 					toRead := remaining
 					if toRead > 16 {
@@ -124,28 +134,29 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 					if err != nil {
 						return nil, err
 					}
-					remaining -= bytesRead
+					remaining -= uint64(bytesRead)
 				}
 			}
 			continue
 		}
 
-		// Copy payload from header buffer
-		payloadInHeader := n - headerLen
-		if payloadInHeader > 0 {
-			copy(buffer[msgEnd:], headerBuf[headerLen:headerLen+payloadInHeader])
-			msgEnd += payloadInHeader
-		}
-
-		// Read remaining payload
-		remaining := payloadLen - payloadInHeader
+		// Read payload directly
+		remaining := payloadLen
 		for remaining > 0 {
-			bytesRead, err := conn.Read(buffer[msgEnd : msgEnd+remaining])
+			toRead := remaining
+			if toRead > uint64(BufferSize-msgEnd) {
+				toRead = uint64(BufferSize - msgEnd)
+			}
+			if toRead > 65536 {
+				toRead = 65536 // 64KB chunks
+			}
+
+			bytesRead, err := conn.Read(buffer[msgEnd : msgEnd+int(toRead)])
 			if err != nil {
 				return nil, err
 			}
 			msgEnd += bytesRead
-			remaining -= bytesRead
+			remaining -= uint64(bytesRead)
 		}
 
 		// Check FIN bit
