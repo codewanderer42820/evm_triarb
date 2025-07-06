@@ -201,7 +201,8 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		payloadLen := uint64(headerBuf[1] & 0x7F) // Lower 7 bits = payload length
 
 		// Handle extended payload length fields
-		if payloadLen == 126 {
+		switch payloadLen {
+		case 126:
 			// 16-bit extended length (for payloads 126-65535 bytes)
 			_, err = conn.Read(headerBuf[2:4])
 			if err != nil {
@@ -210,7 +211,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 			// Reconstruct 16-bit big-endian length
 			payloadLen = uint64(headerBuf[2])<<8 | uint64(headerBuf[3])
 
-		} else if payloadLen == 127 {
+		case 127:
 			// 64-bit extended length (for payloads > 65535 bytes)
 			_, err = conn.Read(headerBuf[2:10])
 			if err != nil {
