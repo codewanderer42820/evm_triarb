@@ -138,8 +138,10 @@ type Ring struct {
 //   - size <= 0: Invalid capacity specification
 //   - Non-power-of-2: Required for efficient bit masking
 //
-//go:inline
+//go:norace
+//go:nocheckptr
 //go:nosplit
+//go:inline
 //go:registerparams
 func New(size int) *Ring {
 	if size <= 0 || size&(size-1) != 0 {
@@ -199,8 +201,10 @@ func New(size int) *Ring {
 //	true: Payload successfully enqueued
 //	false: Ring full, operation failed (external retry required)
 //
-//go:inline
+//go:norace
+//go:nocheckptr
 //go:nosplit
+//go:inline
 //go:registerparams
 func (r *Ring) Push(val *[24]byte) bool {
 	t := r.tail
@@ -262,8 +266,10 @@ func (r *Ring) Push(val *[24]byte) bool {
 //	Non-nil: Pointer to 24-byte payload (valid until next operation)
 //	nil: Ring empty, no data available
 //
-//go:inline
+//go:norace
+//go:nocheckptr
 //go:nosplit
+//go:inline
 //go:registerparams
 func (r *Ring) Pop() *[24]byte {
 	h := r.head
@@ -314,8 +320,10 @@ func (r *Ring) Pop() *[24]byte {
 //
 //	Pointer to 24-byte payload (guaranteed non-nil)
 //
-//go:inline
+//go:norace
+//go:nocheckptr
 //go:nosplit
+//go:inline
 //go:registerparams
 func (r *Ring) PopWait() *[24]byte {
 	for {
