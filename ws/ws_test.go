@@ -1314,28 +1314,6 @@ func BenchmarkEdgeCases(b *testing.B) {
 }
 
 // ============================================================================
-// CONCURRENCY STRESS TEST
-// ============================================================================
-
-func BenchmarkConcurrency(b *testing.B) {
-	payload := make([]byte, 10000)
-	rand.Read(payload)
-	frame := createFrame(0x1, payload, true)
-
-	b.RunParallel(func(pb *testing.PB) {
-		conn := newReusableConn(frame, 0)
-
-		for pb.Next() {
-			conn.reset()
-			_, err := SpinUntilCompleteMessage(conn)
-			if err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-}
-
-// ============================================================================
 // COMPARISON BENCHMARKS
 // ============================================================================
 
