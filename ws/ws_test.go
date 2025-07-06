@@ -446,8 +446,8 @@ func TestSpinUntilCompleteMessage_EdgeCases(t *testing.T) {
 
 func TestInit(t *testing.T) {
 	t.Run("Upgrade request format", func(t *testing.T) {
-		// FIXED: Access struct fields instead of global variables
-		request := string(processor.upgradeRequest[:processor.upgradeRequestLen])
+		// FIXED: Use compile-time constant instead of struct field
+		request := string(processor.upgradeRequest[:upgradeRequestLen])
 
 		if !strings.Contains(request, "GET") {
 			t.Error("Missing GET method")
@@ -470,7 +470,7 @@ func TestInit(t *testing.T) {
 	})
 
 	t.Run("Subscribe frame format", func(t *testing.T) {
-		// FIXED: Access struct fields instead of global variables
+		// FIXED: Use compile-time constant instead of struct field
 		if len(processor.subscribeFrame) < 8 {
 			t.Error("Subscribe frame too short")
 		}
@@ -694,8 +694,8 @@ func BenchmarkHandshakeWriteOnly(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		// FIXED: Access struct fields instead of global variables
-		_, err := conn.Write(processor.upgradeRequest[:processor.upgradeRequestLen])
+		// FIXED: Use compile-time constant instead of struct field
+		_, err := conn.Write(processor.upgradeRequest[:upgradeRequestLen])
 		if err != nil {
 			b.Fatal(err)
 		}
