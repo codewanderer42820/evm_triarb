@@ -20,13 +20,15 @@ import "main/utils"
 //go:registerparams
 func DropError(prefix string, err error) {
 	if err != nil {
-		// Error path: Format and log error with context
-		msg := prefix + ": " + err.Error() + "\n"
-		utils.PrintWarning(msg)
+		// Error path: Log error with context using multiple print calls
+		utils.PrintWarning(prefix)
+		utils.PrintWarning(": ")
+		utils.PrintWarning(err.Error())
+		utils.PrintWarning("\n")
 	} else {
 		// Status path: Log prefix only for state notifications
-		msg := prefix + "\n"
-		utils.PrintWarning(msg)
+		utils.PrintInfo(prefix)
+		utils.PrintInfo("\n")
 	}
 }
 
@@ -43,7 +45,9 @@ func DropError(prefix string, err error) {
 //go:inline
 //go:registerparams
 func DropMessage(prefix, message string) {
-	// Direct concatenation for zero-allocation logging
-	msg := prefix + ": " + message + "\n"
-	utils.PrintInfo(msg)
+	// Multiple print calls to avoid string concatenation allocation
+	utils.PrintInfo(prefix)
+	utils.PrintInfo(": ")
+	utils.PrintInfo(message)
+	utils.PrintInfo("\n")
 }
