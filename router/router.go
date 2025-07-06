@@ -45,6 +45,8 @@ var (
 	addr2pid [1 << 17]PairID  // 0 == empty
 )
 
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -58,6 +60,8 @@ func sliceToWordKey(b []byte) wordKey {
 	}}
 }
 
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -174,6 +178,8 @@ const (
 	scale   = maxTick / (2 * clamp) // 262 143 / 256 ≈ 1023.99609375
 )
 
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -379,6 +385,8 @@ func buildFanoutShards(cycles []PairTriplet) {
 	}
 }
 
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -389,6 +397,8 @@ func shuffleBindings(b []EdgeBinding) {
 	}
 }
 
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams

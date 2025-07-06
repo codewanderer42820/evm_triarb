@@ -86,6 +86,8 @@ type Hash struct {
 //
 // Performance: O(log n) with early termination
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -121,6 +123,8 @@ func nextPow2(n int) uint32 {
 //
 //	h := New(1000) // Creates ~2048-slot table for optimal performance
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -174,6 +178,8 @@ func New(capacity int) Hash {
 //   - For new keys: the inserted value
 //   - For existing keys: the previously stored value
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -248,6 +254,8 @@ func (h Hash) Put(key, val uint32) uint32 {
 //	value: Associated value if key exists, 0 if not found
 //	found: true if key exists in table, false otherwise
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams

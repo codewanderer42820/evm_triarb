@@ -145,6 +145,8 @@ type QuantumQueue struct {
 //
 // Returns: Ready-to-use QuantumQueue with full capacity available
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -187,6 +189,8 @@ func New() *QuantumQueue {
 //
 //	Exhaustion results in undefined behavior
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -209,6 +213,8 @@ func (q *QuantumQueue) Borrow() (Handle, error) {
 //   - Graceful error return on failure
 //   - Identical performance to Borrow() when capacity available
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -234,6 +240,8 @@ func (q *QuantumQueue) BorrowSafe() (Handle, error) {
 // Size returns the current number of entries in the queue.
 // O(1) operation via cached counter maintenance.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -244,6 +252,8 @@ func (q *QuantumQueue) Size() int {
 // Empty determines whether the queue contains any entries.
 // O(1) operation equivalent to Size() == 0 check.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -269,6 +279,8 @@ func (q *QuantumQueue) Empty() bool {
 //   - Hierarchical summary updates only when necessary
 //   - Single-pass bitmap manipulation
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -331,6 +343,8 @@ func (q *QuantumQueue) unlink(h Handle) {
 //   - Parallel bitmap updates across hierarchy levels
 //   - Single-pass summary bit manipulation
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -383,6 +397,8 @@ func (q *QuantumQueue) linkAtHead(h Handle, tick int64) {
 //   - O(1) for tick changes via unlink/relink operations
 //   - Zero allocations for all operation modes
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -419,6 +435,8 @@ func (q *QuantumQueue) Push(tick int64, h Handle, val *[48]byte) {
 //
 // ⚠️  FOOTGUN WARNING: Undefined behavior on empty queue
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -448,6 +466,8 @@ func (q *QuantumQueue) PeepMin() (Handle, int64, *[48]byte) {
 //   - Atomic unlink/relink for tick changes
 //   - Maintains LIFO ordering at destination tick
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -478,6 +498,8 @@ func (q *QuantumQueue) MoveTick(h Handle, newTick int64) {
 //   - Relies on caller correctness for handle validity
 //   - Zero validation for maximum throughput
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams

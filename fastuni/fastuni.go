@@ -128,6 +128,8 @@ type Uint128 struct {
 //
 // ⚠️  Precondition: |f| should be small for optimal accuracy
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -161,6 +163,8 @@ func ln1pf(f float64) float64 {
 //
 // ⚠️  Precondition: x > 0
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -207,6 +211,8 @@ func log2u64(x uint64) float64 {
 //
 // ⚠️  Precondition: u ≠ 0
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -252,6 +258,8 @@ func log2u128(u Uint128) float64 {
 // Error conditions:
 //   - Returns ErrZeroValue if either input is zero
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -284,6 +292,8 @@ func Log2ReserveRatio(a, b uint64) (float64, error) {
 //   - Reserve ratio monitoring in DeFi protocols
 //   - Logarithmic scaling with natural base preference
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -324,6 +334,8 @@ func LnReserveRatio(a, b uint64) (float64, error) {
 //   - ErrZeroValue: Either input is zero
 //   - ErrOutOfRange: Conversion factor is NaN or infinite
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -359,6 +371,8 @@ func LogReserveRatioConst(a, b uint64, conv float64) (float64, error) {
 //
 // Returns: log₂(price) as double precision float
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -381,6 +395,8 @@ func Log2PriceX96(s Uint128) (float64, error) {
 //   - Integration with mathematical libraries expecting base-e
 //   - Continuous compounding calculations
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -414,6 +430,8 @@ func LnPriceX96(s Uint128) (float64, error) {
 //   - ErrZeroValue: Input price is zero
 //   - ErrOutOfRange: Conversion factor is NaN or infinite
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams

@@ -97,6 +97,8 @@ type Deduper struct {
 //	Entries older than MaxReorg blocks are considered stale and replaced.
 //	This handles blockchain reorganizations and prevents indefinite cache pollution.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams

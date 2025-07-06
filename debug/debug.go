@@ -15,6 +15,8 @@ import "main/utils"
 // - GC event notifications and diagnostics
 // - Critical system state transitions
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -41,6 +43,8 @@ func DropError(prefix string, err error) {
 // - System resource state changes
 // - Diagnostic trace points in complex operations
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams

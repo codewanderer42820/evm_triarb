@@ -16,6 +16,8 @@ import (
 // B2s converts a byte slice to string without memory allocation.
 // WARNING: The input byte slice must not be modified after conversion.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -29,6 +31,8 @@ func B2s(b []byte) string {
 // Itoa converts an integer to string without heap allocation.
 // Optimized for non-negative integers using a fixed-size buffer.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -57,6 +61,8 @@ func Itoa(n int) string {
 // PrintWarning writes a warning message directly to stderr without allocation.
 // Bypasses fmt and log packages for zero-allocation error reporting.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -71,6 +77,8 @@ func PrintWarning(msg string) {
 // PrintInfo writes an informational message directly to stdout without allocation.
 // Bypasses fmt and log packages for zero-allocation status reporting.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -89,6 +97,8 @@ func PrintInfo(msg string) {
 // SkipToQuoteEarlyExit locates the next double-quote character in JSON data
 // using hop-based traversal for efficiency. Returns early if hop limit exceeded.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -112,6 +122,8 @@ func SkipToQuoteEarlyExit(p []byte, startIdx int, hopSize int, maxHops int) (int
 // SkipToClosingBracketEarlyExit locates the closing bracket in JSON arrays
 // using hop-based traversal. Returns early if hop limit exceeded.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -135,6 +147,8 @@ func SkipToClosingBracketEarlyExit(p []byte, startIdx int, hopSize int, maxHops 
 // SkipToQuote locates the next double-quote character in JSON data
 // using hop-based traversal for efficient string field parsing.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -150,6 +164,8 @@ func SkipToQuote(p []byte, startIdx int, hopSize int) int {
 // SkipToOpeningBracket locates the opening bracket in JSON arrays
 // for efficient array field parsing.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -165,6 +181,8 @@ func SkipToOpeningBracket(p []byte, startIdx int, hopSize int) int {
 // SkipToClosingBracket locates the closing bracket in JSON arrays
 // for efficient array field parsing.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -183,6 +201,8 @@ func SkipToClosingBracket(p []byte, startIdx int, hopSize int) int {
 
 // Load64 loads 8 bytes as uint64 from unaligned memory
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -192,6 +212,8 @@ func Load64(b []byte) uint64 {
 
 // Load128 loads 16 bytes as two uint64s from unaligned memory
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -202,6 +224,8 @@ func Load128(b []byte) (uint64, uint64) {
 
 // LoadBE64 parses 8 bytes as big-endian uint64
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -220,6 +244,8 @@ func LoadBE64(b []byte) uint64 {
 // ParseHexU64 parses hex string (with or without 0x prefix) to uint64
 // No error handling - assumes well-formed input
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -248,6 +274,8 @@ func ParseHexU64(b []byte) uint64 {
 // ParseHexN parses up to 16 hex characters to uint64
 // Optimized for fixed-length hex strings
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -270,6 +298,8 @@ func ParseHexN(b []byte) uint64 {
 // ParseHexU32 parses hex string to uint32
 // Wrapper around ParseHexN for 32-bit output
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -284,6 +314,8 @@ func ParseHexU32(b []byte) uint32 {
 // Mix64 applies Murmur3-style 64-bit hash finalization
 // Used for fast hash table operations and deduplication
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -299,6 +331,8 @@ func Mix64(x uint64) uint64 {
 // Hash17 reduces Ethereum address to 17-bit hash for bucketing
 // Optimized for address-based routing and deduplication
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams

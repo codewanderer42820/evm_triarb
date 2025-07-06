@@ -75,6 +75,8 @@ const HandshakeBufferSize = 512 // Handshake response buffer
 
 // init performs cache-optimized setup of pre-computed protocol frames
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -106,6 +108,8 @@ func init() {
 
 // Handshake performs WebSocket protocol upgrade handshake
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -152,6 +156,8 @@ func Handshake(conn net.Conn) error {
 
 // SendSubscription sends pre-constructed Ethereum log subscription frame
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -167,6 +173,8 @@ func SendSubscription(conn net.Conn) error {
 // SpinUntilCompleteMessage processes WebSocket frames until a complete message is received.
 // Hot variables are kept as local variables for optimal register allocation.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams

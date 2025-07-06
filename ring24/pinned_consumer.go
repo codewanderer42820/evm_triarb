@@ -115,6 +115,8 @@ const (
 //  3. Resource cleanup and done channel closure
 //  4. Goroutine termination
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams

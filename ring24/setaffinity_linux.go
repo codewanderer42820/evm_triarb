@@ -122,6 +122,8 @@ var cpuMasks = [...][1]uintptr{
 //
 //	No return value (silent failure on error)
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams

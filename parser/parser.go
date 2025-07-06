@@ -21,6 +21,8 @@ var (
 // HandleFrame processes JSON-RPC subscription messages containing Ethereum log data.
 // Optimized for UniswapV2 Sync() events with zero-allocation parsing.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -136,6 +138,8 @@ func HandleFrame(p []byte) {
 
 // generateFingerprint creates a unique identifier from available data fields
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -154,6 +158,8 @@ func generateFingerprint(v *types.LogView) {
 
 // emitLog outputs a deduplicated event using zero-copy string conversion
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
