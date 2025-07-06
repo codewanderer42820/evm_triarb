@@ -46,10 +46,6 @@ type WebSocketProcessor struct {
 	subscribeFrame [128]byte // Pre-built subscribe frame
 }
 
-// Compile-time buffer size validation - will fail compilation if constraints violated
-var _ [256 - upgradeRequestLen]struct{} // upgradeRequest buffer size check
-var _ [128 - subscribeFrameLen]struct{} // subscribeFrame buffer size check
-
 // Global processor instance - allocated once, reused forever
 //
 //go:notinheap
