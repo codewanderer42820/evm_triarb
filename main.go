@@ -116,9 +116,6 @@ func runDEXStream() error {
 
 		// Process DEX event with zero-copy payload
 		processDEXEvent(payload)
-
-		// Reset buffer for next message
-		ws.Reset()
 	}
 }
 

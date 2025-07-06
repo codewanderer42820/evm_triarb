@@ -154,7 +154,3 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		}
 	}
 }
-
-func Reset() {
-	// Nothing to reset - each call starts fresh
-}
