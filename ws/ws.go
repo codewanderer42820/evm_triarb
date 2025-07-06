@@ -59,9 +59,6 @@ type WebSocketProcessor struct {
 	// ========================================================================
 	upgradeRequest [256]byte // Pre-built upgrade request - COLD
 	subscribeFrame [128]byte // Pre-built subscribe frame - COLD
-
-	// Padding to optimal boundary
-	_ [48]byte // Complete cache line
 }
 
 // ============================================================================
