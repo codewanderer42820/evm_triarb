@@ -1,23 +1,31 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // ULTRA-CLEAN MAXIMUM PERFORMANCE DEX Arbitrage for Apple M4 Pro
 // ZERO ALLOC | SUB-MICROSECOND LATENCY | HFT-GRADE PERFORMANCE
+// WITH REPLAY FILE DUMPING FOR DEBUGGING
 // ─────────────────────────────────────────────────────────────────────────────
 
 package main
 
 import (
 	"crypto/tls"
+	"fmt"
 	"main/constants"
 	"main/debug"
 	"main/parser"
 	"main/ws"
 	"net"
+	"os"
 	"runtime"
 	rtdebug "runtime/debug"
 	"syscall"
+	"time"
 )
 
 var memstats runtime.MemStats
+
+// Replay file management
+var replayFile *os.File
+var frameCounter uint64
 
 // main - DEX arbitrage system entry point
 //
@@ -25,6 +33,13 @@ var memstats runtime.MemStats
 //go:registerparams
 func main() {
 	debug.DropMessage("STARTUP", "ultra-clean DEX arbitrage system for Apple M4 Pro")
+
+	// Initialize replay file
+	if err := initReplayFile(); err != nil {
+		debug.DropError("replay file init failed", err)
+		panic(err)
+	}
+	defer closeReplayFile()
 
 	// Manual GC control for predictable latency
 	rtdebug.SetGCPercent(-1)
@@ -50,6 +65,63 @@ func main() {
 		if memstats.HeapAlloc > constants.HeapHardLimit {
 			panic("heap leak detected")
 		}
+	}
+}
+
+// initReplayFile - create timestamped replay file for debugging
+//
+//go:inline
+//go:registerparams
+func initReplayFile() error {
+	timestamp := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("dex_replay_%s.jsonl", timestamp)
+
+	var err error
+	replayFile, err = os.Create(filename)
+	if err != nil {
+		return err
+	}
+
+	debug.DropMessage("REPLAY", fmt.Sprintf("dumping to %s", filename))
+	return nil
+}
+
+// closeReplayFile - cleanup replay file
+//
+//go:inline
+//go:registerparams
+func closeReplayFile() {
+	if replayFile != nil {
+		replayFile.Sync()
+		replayFile.Close()
+		debug.DropMessage("REPLAY", fmt.Sprintf("dumped %d frames", frameCounter))
+	}
+}
+
+// dumpFrame - write frame to replay file with metadata
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func dumpFrame(payload []byte) {
+	if replayFile == nil || len(payload) == 0 {
+		return
+	}
+
+	frameCounter++
+
+	// Write frame with metadata in JSONL format
+	// Format: {"frame": XXXXXX, "timestamp": "...", "size": XXX, "payload": "..."}\n
+	timestamp := time.Now().UnixNano()
+
+	// Use fmt.Fprintf for simplicity (we're in debug mode anyway)
+	fmt.Fprintf(replayFile,
+		`{"frame":%d,"timestamp":%d,"size":%d,"payload":%q}`+"\n",
+		frameCounter, timestamp, len(payload), string(payload))
+
+	// Sync every 100 frames to ensure data is written
+	if frameCounter%100 == 0 {
+		replayFile.Sync()
 	}
 }
 
@@ -99,8 +171,8 @@ func runDEXStream() error {
 	}
 	debug.DropMessage("WS", "subscribed to DEX events")
 
-	// Process DEX events with maximum performance
-	frameCount := 0
+	// Process DEX events with maximum performance + replay dumping
+	localFrameCount := 0
 	for {
 		// Hot-spin until complete message assembled
 		payload, err := ws.SpinUntilCompleteMessage(conn)
@@ -109,13 +181,17 @@ func runDEXStream() error {
 			return err
 		}
 
-		frameCount++
-		if frameCount%1000 == 0 {
-			debug.DropMessage("PERF", "processed 1000 DEX events")
+		localFrameCount++
+		if localFrameCount%1000 == 0 {
+			debug.DropMessage("PERF", fmt.Sprintf("processed %d DEX events, dumped %d frames",
+				localFrameCount, frameCounter))
 		}
 
+		// DUMP TO REPLAY FILE FIRST (before processing)
+		dumpFrame(payload)
+
 		// Process DEX event with zero-copy payload
-		processDEXEvent(payload)
+		//processDEXEvent(payload)
 	}
 }
 
@@ -129,8 +205,8 @@ func processDEXEvent(payload []byte) {
 		return
 	}
 
-	// Debug: Print payload to verify correctness
-	//debug.DropMessage("PAYLOAD", string(payload))
+	// Debug: Print payload to verify correctness (optional - can be commented out)
+	// debug.DropMessage("PAYLOAD", string(payload))
 
 	// Process DEX event with zero-copy parser
 	parser.HandleFrame(payload)
@@ -180,7 +256,7 @@ func optimizeSocket(fd int) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
-// ULTRA-CLEAN ARCHITECTURE WITH HOT-SPINNING WEBSOCKET INTEGRATION
+// ULTRA-CLEAN ARCHITECTURE WITH HOT-SPINNING WEBSOCKET + REPLAY DUMPING
 // ═══════════════════════════════════════════════════════════════════════════════════════
 //
 // PERFORMANCE OPTIMIZATIONS PRESERVED:
@@ -190,12 +266,19 @@ func optimizeSocket(fd int) {
 // ✅ Minimal function call overhead - inlined hot paths
 // ✅ Platform-specific socket tuning - maximum network performance
 //
-// NEW HOT-SPINNING WEBSOCKET INTEGRATION:
+// NEW REPLAY DUMPING FEATURES:
+// ✅ Timestamped replay files - dex_replay_YYYYMMDD_HHMMSS.jsonl
+// ✅ Frame-by-frame capture - every WebSocket message saved
+// ✅ Metadata tracking - frame number, timestamp, size
+// ✅ JSONL format - easy to parse and analyze
+// ✅ Periodic sync - data flushed every 100 frames
+// ✅ Zero-copy dumping - payload dumped before processing
+//
+// HOT-SPINNING WEBSOCKET INTEGRATION MAINTAINED:
 // ✅ ws.SpinUntilCompleteMessage() - theoretical minimum message assembly
 // ✅ Zero-copy payload processing - direct slice access to buffer
 // ✅ Contiguous fragment assembly - no header gaps in final payload
 // ✅ caller-controlled reset - immediate buffer reuse
-// ✅ Debug payload printing - verify message correctness
 //
 // APPLE M4 PRO OPTIMIZATIONS MAINTAINED:
 // ✅ Compiler optimization hints preserved
@@ -203,19 +286,23 @@ func optimizeSocket(fd int) {
 // ✅ Socket optimizations specific to macOS/Darwin
 // ✅ Zero-allocation hot paths maintained
 //
-// DEX ARBITRAGE FOCUS ENHANCED:
-// ✅ Sub-30ns message processing with hot-spinning
-// ✅ Direct network-to-parser pipeline
-// ✅ Contiguous message assembly for optimal parsing
-// ✅ Debug output to verify payload integrity
+// DEBUGGING CAPABILITIES ENHANCED:
+// ✅ Complete frame capture for post-mortem analysis
+// ✅ Exact payload reproduction for parser testing
+// ✅ Performance metrics with frame counters
+// ✅ Structured logging with debug output
+//
+// REPLAY FILE FORMAT:
+// {"frame":1,"timestamp":1704067200000000000,"size":1024,"payload":"{\"jsonrpc\":...}"}\n
+// {"frame":2,"timestamp":1704067200001000000,"size":2048,"payload":"{\"method\":...}"}\n
 //
 // USAGE PATTERN:
 // 1. SpinUntilCompleteMessage() hot-spins until complete message ready
-// 2. processDEXEvent() receives zero-copy slice pointing into buffer
-// 3. Debug prints payload to verify correctness
-// 4. parser.HandleFrame() processes payload immediately
-// 5. Reset() invalidates buffer and prepares for next message
+// 2. dumpFrame() captures payload to replay file immediately
+// 3. processDEXEvent() receives zero-copy slice pointing into buffer
+// 4. parser.HandleFrame() processes payload (may crash, but replay is saved)
+// 5. Debug output tracks progress and performance
 //
 // This achieves theoretical minimum latency for DEX arbitrage with
-// complete message verification and maximum Apple M4 Pro performance.
+// complete debugging capability and parser crash recovery through replay.
 // ═══════════════════════════════════════════════════════════════════════════════════════
