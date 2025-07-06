@@ -1,20 +1,38 @@
-// relax_stub.go — Fallback no-op for cpuRelax on non-x86 systems
+// ============================================================================
+
+// relax_stub.go - CPU Relaxation No-Op Implementation
+// ============================================================================
 //
-// This stub ensures builds on ARM, RISC-V, WASM, or TinyGo do not fail.
-// It provides a safe no-op drop-in for platforms lacking a real PAUSE instruction.
+// Cross-platform compatibility stub for CPU relaxation hints on systems
+// lacking dedicated pause/yield instructions.
 //
-// Use-case:
-//   - Safe to embed in spin loops
-//   - Does nothing by design on unsupported hardware
+// Supported platforms:
+//   - Non-x86 architectures: ARM, RISC-V, MIPS, PowerPC
+//   - WebAssembly targets: Browser and server-side WASM
+//   - Embedded systems: TinyGo and resource-constrained environments
+//   - Assembly-disabled builds: Configurations with noasm tag
 //
-// Compiler directives:
-//   - nosplit: ensures compatibility with ISR spin paths
-//   - inline: allows this no-op to be fully eliminated
-//
+// Compatibility strategy:
+//   - Maintains identical API for spin loop integration
+//   - Zero overhead: Complete compiler elimination via inlining
+//   - Safe integration: No-op behavior in existing spin loops
+//   - Architecture agnostic: Works on any target platform
+
 //go:build !amd64 || noasm
 
 package ring24
 
+// cpuRelax provides no-op CPU yield hint for unsupported architectures.
+// Maintains API compatibility for spin loops across all target platforms.
+//
+// Implementation characteristics:
+//   - Zero overhead: Completely eliminated by aggressive inlining
+//   - Loop safety: Safe to call in tight spin loops
+//   - Platform agnostic: Functions identically across architectures
+//   - Power neutral: No power management impact
+//
 //go:nosplit
 //go:inline
-func cpuRelax() {}
+func cpuRelax() {
+	// No-op implementation for architecture compatibility
+}

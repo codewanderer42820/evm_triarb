@@ -1,20 +1,25 @@
-// relax_amd64.s — Low-level implementation of cpuRelax for x86-64
+
+// ============================================================================
+
+// relax_amd64.s - x86-64 Assembly Implementation
+// ============================================================================
 //
-// Emits the PAUSE instruction for cooperative busy-wait loops.
+// Assembly language implementation of CPU relaxation for x86-64 architecture.
+// Provides hardware-level optimization for busy-wait scenarios.
 //
-//   - Reduces contention between hyperthreads
-//   - Lowers power usage while waiting
-//   - Helps performance in spin-heavy ISR systems
+// Instruction details:
+//   - PAUSE: x86-64 hint instruction for spin-wait optimization
+//   - Power reduction: Signals processor to reduce power consumption
+//   - SMT efficiency: Allows better resource sharing in hyperthreaded cores
+//   - Cache behavior: Reduces unnecessary cache line bouncing
 //
-// Called from Go via declaration in relax_amd64.go.
-// Must be marked NOSPLIT for stack safety.
-//
+// Assembly code:
 //go:build amd64 && !noasm
 
 #include "textflag.h"
 
-// cpuRelax emits PAUSE then returns.
-// Used as a tight low-latency yield hint.
+// cpuRelax emits PAUSE instruction for cooperative busy-wait loops.
+// Optimizes power consumption and SMT performance during active polling.
 TEXT ·cpuRelax(SB), NOSPLIT, $0
 	PAUSE
 	RET
