@@ -20,6 +20,7 @@ var memstats runtime.MemStats
 
 // main establishes stream connection and processes events with maximum performance.
 //
+//go:nosplit
 //go:inline
 //go:registerparams
 func main() {
@@ -54,6 +55,7 @@ func main() {
 
 // runStream establishes optimized connection and processes events.
 //
+//go:nosplit
 //go:inline
 //go:registerparams
 func runStream() error {
@@ -92,6 +94,7 @@ func runStream() error {
 
 // establishConnection creates optimized TCP+TLS connection.
 //
+//go:nosplit
 //go:inline
 //go:registerparams
 func establishConnection() (*tls.Conn, error) {
@@ -123,6 +126,7 @@ func establishConnection() (*tls.Conn, error) {
 
 // optimizeSocket applies platform-specific performance optimizations.
 //
+//go:nosplit
 //go:inline
 //go:registerparams
 func optimizeSocket(fd int) {
