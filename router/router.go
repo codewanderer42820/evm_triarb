@@ -175,9 +175,9 @@ var (
 )
 
 const (
-	clamp   = 128.0                 // domain −128 … +128
-	maxTick = 262_143               // 18-bit ceiling
-	scale   = maxTick / (2 * clamp) // 262 143 / 256 ≈ 1023.99609375
+	clamp   = 128.0                       // domain −128 … +128
+	maxTick = 262_143                     // 18-bit ceiling
+	scale   = (maxTick - 1) / (2 * clamp) // 262142 / 256 ≈ 1023.9921875
 )
 
 //go:norace
@@ -192,7 +192,7 @@ func log2ToTick(x float64) int64 {
 	case x >= clamp:
 		return maxTick
 	default:
-		// (x + 128) ∈ (0‥256).  Truncation floors to nearest lower tick.
+		// (x + 128) ∈ (0‥256). Scale ensures result ≤ 262142, avoiding overflow.
 		return int64((x + clamp) * scale)
 	}
 }
