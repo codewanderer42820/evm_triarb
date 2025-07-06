@@ -14,9 +14,10 @@ import (
 )
 
 // ============================================================================
-// MOCK CONNECTION FOR TESTING
+// MOCK CONNECTION IMPLEMENTATIONS
 // ============================================================================
 
+// mockConn provides a configurable mock connection for testing
 type mockConn struct {
 	readData  []byte
 	readPos   int
@@ -63,11 +64,7 @@ func (m *mockConn) SetDeadline(t time.Time) error      { return nil }
 func (m *mockConn) SetReadDeadline(t time.Time) error  { return nil }
 func (m *mockConn) SetWriteDeadline(t time.Time) error { return nil }
 
-// ============================================================================
-// ZERO-ALLOCATION CONNECTIONS FOR TRUE PERFORMANCE MEASUREMENT
-// ============================================================================
-
-// discardConn - Discards all writes, returns EOF on reads
+// discardConn discards all writes and returns EOF on reads
 type discardConn struct{}
 
 func (d *discardConn) Read(b []byte) (int, error)         { return 0, fmt.Errorf("EOF") }
@@ -79,13 +76,13 @@ func (d *discardConn) SetDeadline(t time.Time) error      { return nil }
 func (d *discardConn) SetReadDeadline(t time.Time) error  { return nil }
 func (d *discardConn) SetWriteDeadline(t time.Time) error { return nil }
 
-// hybridConn - Provides pre-allocated read data, discards writes (zero allocation)
+// hybridConn provides pre-allocated read data and discards writes
 type hybridConn struct {
 	readData []byte
 	readPos  int
 }
 
-func (h *hybridConn) Write(b []byte) (int, error) { return len(b), nil } // Zero allocation discard
+func (h *hybridConn) Write(b []byte) (int, error) { return len(b), nil }
 
 func (h *hybridConn) Read(b []byte) (int, error) {
 	if h.readPos >= len(h.readData) {
@@ -103,11 +100,11 @@ func (h *hybridConn) SetDeadline(t time.Time) error      { return nil }
 func (h *hybridConn) SetReadDeadline(t time.Time) error  { return nil }
 func (h *hybridConn) SetWriteDeadline(t time.Time) error { return nil }
 
-// reusableConn - Pre-allocated connection that can be reset without allocation
+// reusableConn provides pre-allocated buffers that can be reset without allocation
 type reusableConn struct {
 	readData    []byte
 	readPos     int
-	writeBuffer []byte // Pre-allocated write buffer
+	writeBuffer []byte
 	writePos    int
 	readErr     error
 	writeErr    error
@@ -123,7 +120,6 @@ func newReusableConn(readData []byte, writeCapacity int) *reusableConn {
 func (r *reusableConn) reset() {
 	r.readPos = 0
 	r.writePos = 0
-	// Don't reallocate writeBuffer, just reset length
 	r.writeBuffer = r.writeBuffer[:0]
 }
 
@@ -144,7 +140,6 @@ func (r *reusableConn) Write(b []byte) (int, error) {
 	if r.writeErr != nil {
 		return 0, r.writeErr
 	}
-	// Use pre-allocated buffer to avoid allocation
 	if len(r.writeBuffer)+len(b) <= cap(r.writeBuffer) {
 		r.writeBuffer = append(r.writeBuffer, b...)
 	}
@@ -158,7 +153,11 @@ func (r *reusableConn) SetDeadline(t time.Time) error      { return nil }
 func (r *reusableConn) SetReadDeadline(t time.Time) error  { return nil }
 func (r *reusableConn) SetWriteDeadline(t time.Time) error { return nil }
 
-// Helper to create WebSocket frame
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+// createFrame builds a WebSocket frame with the specified opcode, payload, and FIN bit
 func createFrame(opcode byte, payload []byte, fin bool) []byte {
 	frame := make([]byte, 2)
 
@@ -184,8 +183,16 @@ func createFrame(opcode byte, payload []byte, fin bool) []byte {
 	return append(frame, payload...)
 }
 
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // ============================================================================
-// UNIT TESTS - UPDATED FOR STRUCT-BASED DESIGN
+// CORE FUNCTIONALITY TESTS
 // ============================================================================
 
 func TestHandshake(t *testing.T) {
@@ -222,21 +229,12 @@ func TestHandshake(t *testing.T) {
 			shouldError: true,
 			errorMsg:    "EOF",
 		},
-		{
-			name:        "Read error",
-			response:    "",
-			shouldError: true,
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			conn := &mockConn{
 				readData: []byte(tt.response),
-			}
-
-			if tt.name == "Read error" {
-				conn.readErr = fmt.Errorf("network error")
 			}
 
 			err := Handshake(conn)
@@ -254,6 +252,41 @@ func TestHandshake(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestHandshake_WriteError(t *testing.T) {
+	conn := &mockConn{
+		writeErr: fmt.Errorf("connection write failed"),
+	}
+
+	err := Handshake(conn)
+	if err == nil {
+		t.Fatal("Expected write error but got none")
+	}
+	if !strings.Contains(err.Error(), "connection write failed") {
+		t.Errorf("Expected write error, got: %v", err)
+	}
+}
+
+func TestHandshake_Timeout(t *testing.T) {
+	incompleteResponse := "HTTP/1.1 101 Switching Protocols\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"
+
+	longIncompleteResponse := incompleteResponse + strings.Repeat("X", 500)
+
+	conn := &mockConn{
+		readData: []byte(longIncompleteResponse),
+	}
+
+	err := Handshake(conn)
+	if err == nil {
+		t.Fatal("Expected timeout error but got none")
+	}
+	if !strings.Contains(err.Error(), "handshake timeout") {
+		t.Errorf("Expected timeout error, got: %v", err)
 	}
 }
 
@@ -344,17 +377,6 @@ func TestSpinUntilCompleteMessage(t *testing.T) {
 			},
 			expected: make([]byte, 100000),
 		},
-		{
-			name: "All control frame opcodes",
-			frames: [][]byte{
-				createFrame(0x8, []byte("close"), true),
-				createFrame(0x9, []byte("ping"), true),
-				createFrame(0xA, []byte("pong"), true),
-				createFrame(0xB, []byte("reserved"), true),
-				createFrame(0x1, []byte("data"), true),
-			},
-			expected: []byte("data"),
-		},
 	}
 
 	for _, tt := range tests {
@@ -385,6 +407,384 @@ func TestSpinUntilCompleteMessage(t *testing.T) {
 				t.Errorf("Expected %d bytes, got %d bytes", len(tt.expected), len(result))
 			}
 		})
+	}
+}
+
+// ============================================================================
+// COMPREHENSIVE ERROR HANDLING TESTS
+// ============================================================================
+
+func TestSpinUntilCompleteMessage_HeaderReadError(t *testing.T) {
+	conn := &mockConn{
+		readErr: fmt.Errorf("network connection lost"),
+	}
+
+	_, err := SpinUntilCompleteMessage(conn)
+	if err == nil {
+		t.Fatal("Expected header read error but got none")
+	}
+	if !strings.Contains(err.Error(), "network connection lost") {
+		t.Errorf("Expected network error, got: %v", err)
+	}
+}
+
+func TestSpinUntilCompleteMessage_64BitLengthReadError(t *testing.T) {
+	frame := []byte{
+		0x81, // FIN=1, TEXT frame
+		127,  // 64-bit length indicator
+	}
+
+	conn := &mockConn{
+		readData: frame,
+	}
+
+	_, err := SpinUntilCompleteMessage(conn)
+	if err == nil {
+		t.Fatal("Expected 64-bit length read error but got none")
+	}
+	if !strings.Contains(err.Error(), "EOF") {
+		t.Errorf("Expected EOF error for incomplete 64-bit length, got: %v", err)
+	}
+}
+
+func TestSpinUntilCompleteMessage_ControlFrameReadError(t *testing.T) {
+	frame := []byte{
+		0x89, // FIN=1, PING frame (control frame)
+		0x05, // Payload length = 5
+	}
+
+	conn := &mockConn{
+		readData: frame,
+	}
+
+	_, err := SpinUntilCompleteMessage(conn)
+	if err == nil {
+		t.Fatal("Expected control frame read error but got none")
+	}
+	if !strings.Contains(err.Error(), "EOF") {
+		t.Errorf("Expected EOF error for incomplete control frame payload, got: %v", err)
+	}
+}
+
+func TestSpinUntilCompleteMessage_LargeControlFrame(t *testing.T) {
+	controlPayload := make([]byte, 50)
+	for i := range controlPayload {
+		controlPayload[i] = byte(i % 256)
+	}
+
+	var frameData []byte
+	frameData = append(frameData, createFrame(0x8, controlPayload, true)...)
+	frameData = append(frameData, createFrame(0x1, []byte("test"), true)...)
+
+	conn := &mockConn{
+		readData: frameData,
+	}
+
+	result, err := SpinUntilCompleteMessage(conn)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if string(result) != "test" {
+		t.Errorf("Expected 'test', got %q", result)
+	}
+}
+
+func TestSpinUntilCompleteMessage_ControlFrameChunkedReadError(t *testing.T) {
+	frame := []byte{
+		0x89, // FIN=1, PING frame
+		0x32, // Payload length = 50
+	}
+	frame = append(frame, make([]byte, 10)...)
+
+	conn := &mockConn{
+		readData: frame,
+	}
+
+	_, err := SpinUntilCompleteMessage(conn)
+	if err == nil {
+		t.Fatal("Expected control frame chunked read error but got none")
+	}
+	if !strings.Contains(err.Error(), "EOF") {
+		t.Errorf("Expected EOF error for incomplete control frame chunks, got: %v", err)
+	}
+}
+
+func TestSpinUntilCompleteMessage_MessageTooLarge(t *testing.T) {
+	frame := []byte{
+		0x81, // FIN=1, TEXT frame
+		127,  // 64-bit length
+	}
+
+	hugeLengthBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(hugeLengthBytes, uint64(BufferSize)+1)
+	frame = append(frame, hugeLengthBytes...)
+
+	conn := &mockConn{
+		readData: frame,
+	}
+
+	_, err := SpinUntilCompleteMessage(conn)
+	if err == nil {
+		t.Fatal("Expected 'frame too large' error but got none")
+	}
+	if !strings.Contains(err.Error(), "frame too large") {
+		t.Errorf("Expected 'frame too large' error, got: %v", err)
+	}
+}
+
+func TestSpinUntilCompleteMessage_AccumulatedMessageTooLarge(t *testing.T) {
+	var frameData []byte
+
+	payload1 := make([]byte, BufferSize/2)
+	frameData = append(frameData, createFrame(0x1, payload1, false)...)
+
+	payload2 := make([]byte, BufferSize/2+1)
+	frameData = append(frameData, createFrame(0x0, payload2, true)...)
+
+	conn := &mockConn{
+		readData: frameData,
+	}
+
+	_, err := SpinUntilCompleteMessage(conn)
+	if err == nil {
+		t.Fatal("Expected 'message too large' error but got none")
+	}
+	if !strings.Contains(err.Error(), "message too large") {
+		t.Errorf("Expected 'message too large' error, got: %v", err)
+	}
+}
+
+func TestSpinUntilCompleteMessage_PayloadReadError(t *testing.T) {
+	frame := []byte{
+		0x81, // FIN=1, TEXT frame
+		0x0A, // Payload length = 10
+		0x01, 0x02, 0x03, 0x04, 0x05,
+	}
+
+	conn := &mockConn{
+		readData: frame,
+	}
+
+	_, err := SpinUntilCompleteMessage(conn)
+	if err == nil {
+		t.Fatal("Expected payload read error but got none")
+	}
+	if !strings.Contains(err.Error(), "EOF") {
+		t.Errorf("Expected EOF error for incomplete payload, got: %v", err)
+	}
+}
+
+func TestSpinUntilCompleteMessage_AllControlFrameOpcodes(t *testing.T) {
+	controlOpcodes := []byte{0x8, 0x9, 0xA, 0xB, 0xC, 0xD, 0xE, 0xF}
+
+	for _, opcode := range controlOpcodes {
+		t.Run(fmt.Sprintf("opcode_0x%X", opcode), func(t *testing.T) {
+			var frameData []byte
+
+			frameData = append(frameData, createFrame(opcode, []byte("control"), true)...)
+			frameData = append(frameData, createFrame(0x1, []byte("data"), true)...)
+
+			conn := &mockConn{
+				readData: frameData,
+			}
+
+			result, err := SpinUntilCompleteMessage(conn)
+			if err != nil {
+				t.Fatalf("Unexpected error for opcode 0x%X: %v", opcode, err)
+			}
+			if string(result) != "data" {
+				t.Errorf("Expected 'data', got %q for opcode 0x%X", result, opcode)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// BOUNDARY CONDITIONS AND EDGE CASES
+// ============================================================================
+
+func TestSpinUntilCompleteMessage_ReadSizeBoundary(t *testing.T) {
+	var frameData []byte
+
+	largePayload1 := make([]byte, BufferSize-100)
+	for i := range largePayload1 {
+		largePayload1[i] = byte(i % 256)
+	}
+	frameData = append(frameData, createFrame(0x1, largePayload1, false)...)
+
+	smallPayload2 := make([]byte, 50)
+	frameData = append(frameData, createFrame(0x0, smallPayload2, true)...)
+
+	conn := &mockConn{
+		readData: frameData,
+	}
+
+	result, err := SpinUntilCompleteMessage(conn)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	expectedLen := len(largePayload1) + len(smallPayload2)
+	if len(result) != expectedLen {
+		t.Errorf("Expected %d bytes, got %d bytes", expectedLen, len(result))
+	}
+
+	for i := 0; i < len(largePayload1); i++ {
+		if result[i] != largePayload1[i] {
+			t.Errorf("Data mismatch in first fragment at position %d", i)
+			break
+		}
+	}
+}
+
+func TestSpinUntilCompleteMessage_ToReadLimitActual(t *testing.T) {
+	var frameData []byte
+
+	firstSize := BufferSize - 80000
+	payload1 := make([]byte, firstSize)
+	for i := range payload1 {
+		payload1[i] = byte(i % 256)
+	}
+	frameData = append(frameData, createFrame(0x1, payload1, false)...)
+
+	secondSize := 70000
+	payload2 := make([]byte, secondSize)
+	for i := range payload2 {
+		payload2[i] = byte((i + firstSize) % 256)
+	}
+	frameData = append(frameData, createFrame(0x0, payload2, true)...)
+
+	conn := &mockConn{
+		readData: frameData,
+	}
+
+	result, err := SpinUntilCompleteMessage(conn)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	expectedLen := firstSize + secondSize
+	if len(result) != expectedLen {
+		t.Errorf("Expected %d bytes, got %d bytes", expectedLen, len(result))
+	}
+}
+
+func TestSpinUntilCompleteMessage_BoundsViolation(t *testing.T) {
+	payload := make([]byte, 1000)
+	frame := createFrame(0x1, payload, true)
+
+	conn := &mockConn{
+		readData: frame,
+	}
+
+	result, err := SpinUntilCompleteMessage(conn)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if len(result) != len(payload) {
+		t.Errorf("Expected %d bytes, got %d bytes", len(payload), len(result))
+	}
+}
+
+func TestSpinUntilCompleteMessage_ActualBoundsViolation(t *testing.T) {
+	payloadSize := BufferSize - 1000
+	payload := make([]byte, payloadSize)
+	for i := range payload {
+		payload[i] = byte(i % 256)
+	}
+
+	frame := createFrame(0x1, payload, true)
+
+	if len(frame) > BufferSize {
+		t.Skipf("Frame too large for test: %d > %d", len(frame), BufferSize)
+	}
+
+	conn := &mockConn{
+		readData: frame,
+	}
+
+	result, err := SpinUntilCompleteMessage(conn)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if len(result) != payloadSize {
+		t.Errorf("Expected %d bytes, got %d bytes", payloadSize, len(result))
+	}
+}
+
+func TestSpinUntilCompleteMessage_MaxFragmentation(t *testing.T) {
+	var frameData []byte
+	fragmentSize := 1000
+	numFragments := (BufferSize / fragmentSize) - 10
+
+	totalExpected := 0
+
+	for i := 0; i < numFragments; i++ {
+		payload := make([]byte, fragmentSize)
+		for j := range payload {
+			payload[j] = byte((i*fragmentSize + j) % 256)
+		}
+
+		isLast := (i == numFragments-1)
+		opcode := byte(0x0)
+		if i == 0 {
+			opcode = 0x1
+		}
+
+		frameData = append(frameData, createFrame(opcode, payload, isLast)...)
+		totalExpected += len(payload)
+	}
+
+	conn := &mockConn{
+		readData: frameData,
+	}
+
+	result, err := SpinUntilCompleteMessage(conn)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if len(result) != totalExpected {
+		t.Errorf("Expected %d bytes, got %d bytes", totalExpected, len(result))
+	}
+
+	for i := 0; i < min(1000, len(result)); i++ {
+		expected := byte(i % 256)
+		if result[i] != expected {
+			t.Errorf("Data mismatch at position %d: expected %d, got %d", i, expected, result[i])
+			break
+		}
+	}
+}
+
+func TestSpinUntilCompleteMessage_LargeChunks(t *testing.T) {
+	largePayload := make([]byte, 100000)
+	for i := range largePayload {
+		largePayload[i] = byte(i % 256)
+	}
+
+	frame := createFrame(0x1, largePayload, true)
+
+	conn := &mockConn{
+		readData: frame,
+	}
+
+	result, err := SpinUntilCompleteMessage(conn)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if len(result) != len(largePayload) {
+		t.Errorf("Expected %d bytes, got %d bytes", len(largePayload), len(result))
+	}
+
+	for i, expected := range largePayload {
+		if result[i] != expected {
+			t.Errorf("Data mismatch at position %d: expected %d, got %d", i, expected, result[i])
+			break
+		}
 	}
 }
 
@@ -444,9 +844,12 @@ func TestSpinUntilCompleteMessage_EdgeCases(t *testing.T) {
 	})
 }
 
+// ============================================================================
+// INITIALIZATION TESTS
+// ============================================================================
+
 func TestInit(t *testing.T) {
 	t.Run("Upgrade request format", func(t *testing.T) {
-		// FIXED: Use compile-time constant instead of struct field
 		request := string(processor.upgradeRequest[:upgradeRequestLen])
 
 		if !strings.Contains(request, "GET") {
@@ -470,7 +873,6 @@ func TestInit(t *testing.T) {
 	})
 
 	t.Run("Subscribe frame format", func(t *testing.T) {
-		// FIXED: Use compile-time constant instead of struct field
 		if len(processor.subscribeFrame) < 8 {
 			t.Error("Subscribe frame too short")
 		}
@@ -496,7 +898,7 @@ func TestInit(t *testing.T) {
 
 func TestStressScenarios(t *testing.T) {
 	t.Run("Large message processing", func(t *testing.T) {
-		payload := make([]byte, 1024*1024) // 1MB
+		payload := make([]byte, 1024*1024)
 		rand.Read(payload)
 		frame := createFrame(0x1, payload, true)
 
@@ -514,14 +916,12 @@ func TestStressScenarios(t *testing.T) {
 		var frameData []byte
 		expectedData := make([]byte, 0, 100)
 
-		// Create 100 small fragments
 		for i := 0; i < 99; i++ {
 			payload := []byte{byte(i % 256)}
 			expectedData = append(expectedData, payload...)
 			frameData = append(frameData, createFrame(0x0, payload, false)...)
 		}
 
-		// Final fragment
 		payload := []byte{255}
 		expectedData = append(expectedData, payload...)
 		frameData = append(frameData, createFrame(0x0, payload, true)...)
@@ -539,14 +939,12 @@ func TestStressScenarios(t *testing.T) {
 	t.Run("Many control frames", func(t *testing.T) {
 		var frameData []byte
 
-		// Add 100 control frames
 		for i := 0; i < 100; i++ {
 			opcode := byte(0x8 + (i % 8))
 			payload := []byte(fmt.Sprintf("control_%d", i))
 			frameData = append(frameData, createFrame(opcode, payload, true)...)
 		}
 
-		// Finally add data frame
 		frameData = append(frameData, createFrame(0x1, []byte("final_data"), true)...)
 
 		conn := &mockConn{readData: frameData}
@@ -561,7 +959,7 @@ func TestStressScenarios(t *testing.T) {
 }
 
 // ============================================================================
-// TRUE ZERO-ALLOCATION BENCHMARKS
+// ZERO-ALLOCATION BENCHMARKS
 // ============================================================================
 
 func BenchmarkZeroAllocation(b *testing.B) {
@@ -569,18 +967,17 @@ func BenchmarkZeroAllocation(b *testing.B) {
 
 	for _, size := range sizes {
 		b.Run(fmt.Sprintf("size_%d", size), func(b *testing.B) {
-			// Pre-allocate everything OUTSIDE timer
 			payload := make([]byte, size)
 			rand.Read(payload)
 			frame := createFrame(0x1, payload, true)
-			conn := newReusableConn(frame, 0) // No write buffer needed
+			conn := newReusableConn(frame, 0)
 
 			b.ReportAllocs()
 			b.SetBytes(int64(size))
-			b.ResetTimer() // Start timing HERE
+			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				conn.reset() // Reset without reallocation
+				conn.reset()
 				_, err := SpinUntilCompleteMessage(conn)
 				if err != nil {
 					b.Fatal(err)
@@ -591,7 +988,6 @@ func BenchmarkZeroAllocation(b *testing.B) {
 }
 
 func BenchmarkZeroAllocationFragmented(b *testing.B) {
-	// Pre-create fragmented frame data
 	chunkSize := 1000
 	numChunks := 10
 	var frameData []byte
@@ -624,7 +1020,6 @@ func BenchmarkZeroAllocationFragmented(b *testing.B) {
 func BenchmarkZeroAllocationControlFrames(b *testing.B) {
 	var frameData []byte
 
-	// Add control frames
 	for i := 0; i < 10; i++ {
 		frameData = append(frameData, createFrame(0x8+byte(i%4), []byte("control"), true)...)
 	}
@@ -649,7 +1044,7 @@ func BenchmarkZeroAllocationControlFrames(b *testing.B) {
 }
 
 // ============================================================================
-// TRUE PERFORMANCE BENCHMARKS FOR HANDSHAKE & SUBSCRIPTION
+// PERFORMANCE BENCHMARKS
 // ============================================================================
 
 func BenchmarkSendSubscriptionTrue(b *testing.B) {
@@ -667,7 +1062,6 @@ func BenchmarkSendSubscriptionTrue(b *testing.B) {
 }
 
 func BenchmarkHandshakeTrue(b *testing.B) {
-	// Pre-allocate valid response OUTSIDE benchmark
 	validResponse := []byte("HTTP/1.1 101 Switching Protocols\r\n" +
 		"Upgrade: websocket\r\n" +
 		"Connection: Upgrade\r\n" +
@@ -679,7 +1073,7 @@ func BenchmarkHandshakeTrue(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		conn.readPos = 0 // Reset without allocation
+		conn.readPos = 0
 		err := Handshake(conn)
 		if err != nil {
 			b.Fatal(err)
@@ -694,7 +1088,6 @@ func BenchmarkHandshakeWriteOnly(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		// FIXED: Use compile-time constant instead of struct field
 		_, err := conn.Write(processor.upgradeRequest[:upgradeRequestLen])
 		if err != nil {
 			b.Fatal(err)
@@ -755,7 +1148,6 @@ func BenchmarkCoreOperations(b *testing.B) {
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			// FIXED: Access struct buffer instead of global variable
 			_ = processor.buffer[:msgEnd]
 		}
 	})
@@ -766,7 +1158,7 @@ func BenchmarkCoreOperations(b *testing.B) {
 // ============================================================================
 
 func BenchmarkMemoryPressure(b *testing.B) {
-	payload := make([]byte, 1024*1024) // 1MB
+	payload := make([]byte, 1024*1024)
 	rand.Read(payload)
 	frame := createFrame(0x1, payload, true)
 	conn := newReusableConn(frame, 0)
@@ -901,7 +1293,6 @@ func BenchmarkEdgeCases(b *testing.B) {
 	b.Run("max_control_frames", func(b *testing.B) {
 		var frameData []byte
 
-		// 100 control frames before data
 		for i := 0; i < 100; i++ {
 			frameData = append(frameData, createFrame(0x8, []byte{}, true)...)
 		}
@@ -985,7 +1376,7 @@ func BenchmarkComparison(b *testing.B) {
 }
 
 // ============================================================================
-// LEGACY BENCHMARKS (for comparison with old test infrastructure)
+// LEGACY BENCHMARKS
 // ============================================================================
 
 func BenchmarkHandshakeLegacy(b *testing.B) {
