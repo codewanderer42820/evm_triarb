@@ -280,7 +280,6 @@ OPTIMIZATION FEATURES:
 
 2. CACHE OPTIMIZATION:
    - struct alignment to cache line boundaries
-   - Hot data (headerBuf) in first cache line
    - Sequential access patterns for large buffer
 
 3. COMPILE-TIME SAFETY:
