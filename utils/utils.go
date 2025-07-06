@@ -7,7 +7,6 @@ import (
 
 // ============================================================================
 // HIGH-PERFORMANCE UTILITY FUNCTIONS
-// Zero-allocation utilities for JSON parsing, hex conversion, and hashing
 // ============================================================================
 
 // ============================================================================
@@ -51,6 +50,10 @@ func Itoa(n int) string {
 	return string(buf[i:])
 }
 
+// ============================================================================
+// ZERO-ALLOCATION OUTPUT FUNCTIONS
+// ============================================================================
+
 // PrintWarning writes a warning message directly to stderr without allocation.
 // Bypasses fmt and log packages for zero-allocation error reporting.
 //
@@ -63,6 +66,20 @@ func PrintWarning(msg string) {
 
 	// Write directly to stderr (file descriptor 2)
 	_, _ = syscall.Write(2, msgBytes)
+}
+
+// PrintInfo writes an informational message directly to stdout without allocation.
+// Bypasses fmt and log packages for zero-allocation status reporting.
+//
+//go:nosplit
+//go:inline
+//go:registerparams
+func PrintInfo(msg string) {
+	// Convert string to byte slice without allocation
+	msgBytes := *(*[]byte)(unsafe.Pointer(&msg))
+
+	// Write directly to stdout (file descriptor 1)
+	_, _ = syscall.Write(1, msgBytes)
 }
 
 // ============================================================================
@@ -330,4 +347,5 @@ USAGE PATTERNS:
 - Ethereum address processing and routing
 - Fast hash computation for deduplication
 - Zero-copy string operations
+- Direct system output without runtime overhead
 */
