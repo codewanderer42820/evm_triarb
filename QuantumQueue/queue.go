@@ -122,11 +122,11 @@ type QuantumQueue struct {
 	groups  [GroupCount]groupBlock // Hierarchical bitmap summaries
 
 	// Hot path metadata
-	summary  uint64   // Global summary (active groups bitmask)
-	size     int      // Current number of active entries
-	freeHead Handle   // Freelist head pointer
-	_        [4]byte  // Alignment padding
-	_        [40]byte // Cache line isolation padding
+	summary  uint64    // Global summary (active groups bitmask)
+	size     int       // Current number of active entries
+	freeHead Handle    // Freelist head pointer
+	_        uint32    // Alignment padding
+	_        [5]uint64 // Cache line isolation padding
 }
 
 // ============================================================================
