@@ -351,7 +351,7 @@ func TestSpinUntilCompleteMessage_EdgeCases(t *testing.T) {
 
 func TestInit(t *testing.T) {
 	t.Run("Upgrade request format", func(t *testing.T) {
-		request := string(upgradeRequest)
+		request := string(upgradeRequest[:upgradeRequestLen])
 
 		if !strings.Contains(request, "GET") {
 			t.Error("Missing GET method")
