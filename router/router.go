@@ -201,9 +201,6 @@ func log2ToTick(x float64) int64 {
 
 func InitExecutors(cycles []PairTriplet) {
 	n := runtime.NumCPU() - 1
-	if n < 4 {
-		n = 4
-	}
 	if n > 64 {
 		n = 64
 	}
