@@ -185,7 +185,7 @@ func createFrame(opcode byte, payload []byte, fin bool) []byte {
 }
 
 // ============================================================================
-// UNIT TESTS - 100% BRANCH COVERAGE
+// UNIT TESTS - UPDATED FOR STRUCT-BASED DESIGN
 // ============================================================================
 
 func TestHandshake(t *testing.T) {
@@ -446,7 +446,8 @@ func TestSpinUntilCompleteMessage_EdgeCases(t *testing.T) {
 
 func TestInit(t *testing.T) {
 	t.Run("Upgrade request format", func(t *testing.T) {
-		request := string(upgradeRequest[:upgradeRequestLen])
+		// FIXED: Access struct fields instead of global variables
+		request := string(processor.upgradeRequest[:processor.upgradeRequestLen])
 
 		if !strings.Contains(request, "GET") {
 			t.Error("Missing GET method")
@@ -469,19 +470,20 @@ func TestInit(t *testing.T) {
 	})
 
 	t.Run("Subscribe frame format", func(t *testing.T) {
-		if len(subscribeFrame) < 8 {
+		// FIXED: Access struct fields instead of global variables
+		if len(processor.subscribeFrame) < 8 {
 			t.Error("Subscribe frame too short")
 		}
 
-		if subscribeFrame[0] != 0x81 {
+		if processor.subscribeFrame[0] != 0x81 {
 			t.Error("Wrong opcode, expected TEXT frame with FIN=1")
 		}
-		if subscribeFrame[1] != (0x80 | 126) {
+		if processor.subscribeFrame[1] != (0x80 | 126) {
 			t.Error("Wrong mask bit or length indicator")
 		}
 
 		expectedLen := len(`{"jsonrpc":"2.0","method":"eth_subscribe","params":["logs",{}],"id":1}`)
-		actualLen := int(subscribeFrame[2])<<8 | int(subscribeFrame[3])
+		actualLen := int(processor.subscribeFrame[2])<<8 | int(processor.subscribeFrame[3])
 		if actualLen != expectedLen {
 			t.Errorf("Wrong payload length: expected %d, got %d", expectedLen, actualLen)
 		}
@@ -692,7 +694,8 @@ func BenchmarkHandshakeWriteOnly(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		_, err := conn.Write(upgradeRequest[:upgradeRequestLen])
+		// FIXED: Access struct fields instead of global variables
+		_, err := conn.Write(processor.upgradeRequest[:processor.upgradeRequestLen])
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -752,7 +755,8 @@ func BenchmarkCoreOperations(b *testing.B) {
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			_ = buffer[:msgEnd]
+			// FIXED: Access struct buffer instead of global variable
+			_ = processor.buffer[:msgEnd]
 		}
 	})
 }
