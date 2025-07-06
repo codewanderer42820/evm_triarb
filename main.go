@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"main/constants"
 	"main/debug"
+	"main/parser"
 	"main/ws"
 	"net"
 	"runtime"
@@ -129,10 +130,10 @@ func processDEXEvent(payload []byte) {
 	}
 
 	// Debug: Print payload to verify correctness
-	debug.DropMessage("PAYLOAD", string(payload))
+	//debug.DropMessage("PAYLOAD", string(payload))
 
 	// Process DEX event with zero-copy parser
-	//parser.HandleFrame(payload)
+	parser.HandleFrame(payload)
 }
 
 // optimizeSocket - platform-specific socket optimizations
