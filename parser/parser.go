@@ -109,14 +109,9 @@ func HandleFrame(p []byte) {
 		}
 	}
 
-	// Validate required fields
-	if len(v.LogIdx) == 0 || len(v.Addr) == 0 || len(v.BlkNum) == 0 || len(v.Topics) == 0 {
+	// Unified validation following LogView field sequence
+	if len(v.Addr) == 0 || len(v.Data) == 0 || len(v.Topics) == 0 || len(v.BlkNum) == 0 || len(v.LogIdx) == 0 {
 		utils.PrintWarning("Warning: Skipping event with missing required fields\n")
-		return
-	}
-
-	if len(v.Data) == 0 {
-		utils.PrintWarning("Warning: Skipping event with corrupted/oversized data field\n")
 		return
 	}
 
