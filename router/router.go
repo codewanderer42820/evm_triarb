@@ -115,7 +115,8 @@ type PairTriplet [3]PairID
 type CycleState struct { // 64 B
 	Ticks [3]float64 // 24 B  ← hottest: used in every scoring op
 	Pairs [3]PairID  // 12 B
-	_     [28]byte   // pad → 64 B
+	_     uint32
+	_     [3]uint64 // pad → 64 B
 } // fills exactly one line
 
 // Always accessed via pointer → keep pointer first for early-deref
@@ -125,14 +126,14 @@ type FanoutEntry struct { // 32 B
 	Handle  quantumqueue.Handle        //  4 B
 	EdgeIdx uint16                     //  2 B
 	_       uint16                     //  2 B pad → 24
-	_       [8]byte                    //     pad → 32 B
+	_       uint64                     //     pad → 32 B
 }
 
 // PairShard is cold; but slice header first lets len/cap live in same line
 type PairShard struct { // 32 B
 	Bins []EdgeBinding // 24 B  ← slice header (ptr,len,cap)
 	Pair PairID        //  4 B
-	_    [4]byte       //  4 B pad → 32 B
+	_    uint32        //  4 B pad → 32 B
 }
 
 //go:notinheap
@@ -140,11 +141,11 @@ type TickUpdate struct { // 24 B (ring slot)
 	FwdTick float64 //  8 B  ← fast path
 	RevTick float64 //  8 B
 	Pair    PairID  //  4 B
-	_       [4]byte //  4 B pad → 24 B
+	_       uint32  //  4 B pad → 24 B
 }
 
 // EdgeBinding only ever scanned in batch — keep array first for stride walk
-type EdgeBinding struct { // 32 B
+type EdgeBinding struct { // 16 B
 	Pairs   [3]PairID // 12 B
 	EdgeIdx uint16    //  2 B
 	_       uint16    //  2 B → 16
@@ -156,7 +157,8 @@ type CoreExecutor struct {
 	Heaps     []*quantumqueue.QuantumQueue // 24 B
 	Fanouts   [][]FanoutEntry              // 24 B  (offset 24 → 47)
 	IsReverse bool                         //  1 B  (offset 48)
-	_         [15]byte                     // pad → 64 B
+	_         [7]byte                      // pad → 64 B
+	_         uint64                       // pad → 64 B
 
 	// ── second line: 64-byte local index header (pointers & mask) ──
 	LocalIdx localidx.Hash // 64 B  (offset 64 → 127)
