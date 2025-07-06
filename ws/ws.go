@@ -112,14 +112,6 @@ func init() {
 	for i := 0; i < subscribePayloadLen; i++ {
 		processor.subscribeFrame[8+i] = subscribePayload[i] ^ processor.subscribeFrame[4+(i&3)]
 	}
-
-	// These are now compile-time guaranteed to be safe, but we can add runtime verification for extra safety
-	if upgradeRequestLen > len(processor.upgradeRequest) {
-		panic("IMPOSSIBLE: compile-time check failed") // Should never happen
-	}
-	if subscribeFrameLen > len(processor.subscribeFrame) {
-		panic("IMPOSSIBLE: compile-time check failed") // Should never happen
-	}
 }
 
 // ============================================================================
