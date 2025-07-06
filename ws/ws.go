@@ -1,7 +1,7 @@
 package ws
 
 import (
-	"fmt"
+	"errors"
 	"main/constants"
 	"net"
 	"unsafe"
@@ -25,6 +25,20 @@ const subscribePayload = `{"jsonrpc":"2.0","method":"eth_subscribe","params":["l
 const upgradeRequestLen = len(upgradeRequestTemplate)
 const subscribePayloadLen = len(subscribePayload)
 const subscribeFrameLen = 8 + subscribePayloadLen
+
+// ============================================================================
+// PRE-ALLOCATED GLOBAL ERRORS
+// ============================================================================
+
+// Global error instances - allocated once at startup, reused forever
+// These prevent heap allocations during hot path error handling
+var (
+	errUpgradeFailed    = errors.New("upgrade failed")
+	errHandshakeTimeout = errors.New("handshake timeout")
+	errFrameTooLarge    = errors.New("frame too large")
+	errMessageTooLarge  = errors.New("message too large")
+	errBoundsViolation  = errors.New("bounds violation")
+)
 
 // WebSocketProcessor represents a high-performance WebSocket message processor.
 // The memory layout is optimized for cache performance with frequently accessed
@@ -124,12 +138,12 @@ func Handshake(conn net.Conn) error {
 						buf[8] == ' ' && buf[9] == '1' && buf[10] == '0' && buf[11] == '1' {
 						return nil
 					}
-					return fmt.Errorf("upgrade failed")
+					return errUpgradeFailed // Reuse pre-allocated error
 				}
 			}
 		}
 	}
-	return fmt.Errorf("handshake timeout")
+	return errHandshakeTimeout // Reuse pre-allocated error
 }
 
 // ============================================================================
@@ -197,7 +211,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 
 			// Safety check for oversized frames
 			if payloadLen > uint64(BufferSize) {
-				return nil, fmt.Errorf("frame too large")
+				return nil, errFrameTooLarge // Reuse pre-allocated error
 			}
 		}
 
@@ -225,7 +239,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 
 		// Buffer overflow protection
 		if uint64(msgEnd)+payloadLen > uint64(BufferSize) {
-			return nil, fmt.Errorf("message too large")
+			return nil, errMessageTooLarge // Reuse pre-allocated error
 		}
 
 		// Check FIN bit before we overwrite header data
@@ -257,7 +271,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		if isLastFrame {
 			// Final safety check
 			if msgEnd > BufferSize {
-				return nil, fmt.Errorf("bounds violation")
+				return nil, errBoundsViolation // Reuse pre-allocated error
 			}
 
 			// Return zero-copy slice of cache-aligned buffer
