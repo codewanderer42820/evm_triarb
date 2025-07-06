@@ -265,36 +265,3 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		}
 	}
 }
-
-// ============================================================================
-// DESIGN NOTES
-// ============================================================================
-
-/*
-OPTIMIZATION FEATURES:
-
-1. REGISTER ALLOCATION:
-   - Hot variables (msgEnd, payloadLen, opcode) are function-local
-   - Enables compiler to allocate them to CPU registers
-   - Reduces memory access for critical loop variables
-
-2. CACHE OPTIMIZATION:
-   - struct alignment to cache line boundaries
-   - Sequential access patterns for large buffer
-
-3. COMPILE-TIME SAFETY:
-   - Pre-computed string lengths
-   - Const propagation for better code generation
-
-4. MEMORY LAYOUT:
-   - Cache-aligned structures for optimal access
-   - Zero allocation during message processing
-   - Pre-built protocol frames to avoid runtime construction
-
-PERFORMANCE CHARACTERISTICS:
-- Zero allocations during message processing
-- Cache-optimized memory access patterns
-- Register allocation for hot path variables
-- Optimized unsafe pointer operations for speed
-- Minimal branching in critical paths
-*/

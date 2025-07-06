@@ -166,37 +166,3 @@ func emitLog(v *types.LogView) {
 	fmt.Println("  topics    =", utils.B2s(v.Topics))
 	fmt.Println("  txIndex   =", utils.B2s(v.TxIndex))
 }
-
-// ============================================================================
-// DESIGN NOTES
-// ============================================================================
-
-/*
-OPTIMIZATION FEATURES:
-
-1. ZERO-ALLOCATION PARSING:
-   - Direct slice references into JSON buffer
-   - No string allocations during field extraction
-   - Unsafe pointer operations for speed
-
-2. EARLY EXIT CONDITIONS:
-   - Sync() signature validation prevents wrong event processing
-   - Size limits on data/topics fields avoid expensive parsing
-   - Fast validation of required fields
-
-3. CACHE-FRIENDLY DESIGN:
-   - 8-byte aligned field detection
-   - Sequential scanning pattern
-   - Minimal branching in hot paths
-
-4. DEDUPLICATION STRATEGY:
-   - Multi-level fingerprinting (128-bit -> 64-bit -> fallback)
-   - Block tracking for sliding window management
-   - Fast hash generation from available data
-
-PERFORMANCE CHARACTERISTICS:
-- Zero allocations during message processing
-- Sub-microsecond parsing for typical events
-- Scales linearly with JSON-RPC throughput
-- Memory usage bounded by buffer size
-*/

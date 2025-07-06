@@ -47,22 +47,3 @@ func DropMessage(prefix, message string) {
 	msg := prefix + ": " + message + "\n"
 	utils.PrintInfo(msg)
 }
-
-// ============================================================================
-// DESIGN NOTES
-// ============================================================================
-
-/*
-ZERO-ALLOCATION LOGGING ARCHITECTURE:
-
-- No heap allocations during error or debug logging
-- Direct string concatenation bypasses fmt package overhead
-- ISR-safe operation with nosplit directive
-- Direct stderr output bypasses runtime buffering
-
-USAGE GUIDELINES:
-- Reserved for error conditions and diagnostic events
-- Never use in hot loops or high-frequency operations
-- Ideal for connection failures, resource exhaustion, system errors
-- Suitable for protocol state transitions and handshake events
-*/

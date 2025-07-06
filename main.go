@@ -158,25 +158,3 @@ func optimizeSocket(fd int) {
 		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 0x0004, 1) // SO_EXCLUSIVEADDRUSE
 	}
 }
-
-// ============================================================================
-// DESIGN NOTES
-// ============================================================================
-
-/*
-HIGH-PERFORMANCE ARCHITECTURE:
-
-CORE OPTIMIZATIONS:
-- Manual GC control for predictable latency
-- OS thread pinning for dedicated processing
-- Zero-copy message processing via direct buffer access
-- Platform-specific socket optimizations
-- Aggressive function inlining in hot paths
-
-PROCESSING FLOW:
-1. SpinUntilCompleteMessage() - hot-spin until message ready
-2. parser.HandleFrame() - immediate zero-copy processing
-
-This achieves theoretical minimum latency for high-frequency streaming
-with maximum throughput and minimal overhead.
-*/
