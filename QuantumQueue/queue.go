@@ -43,7 +43,7 @@ const (
 	GroupCount  = 64                                 // Top-level summary groups
 	LaneCount   = 64                                 // Lanes per group
 	BucketCount = GroupCount * LaneCount * LaneCount // Total tick resolution: 262,144
-	CapItems    = 52428                              // Maximum concurrent queue entries
+	CapItems    = 1 << 16                            // Maximum concurrent queue entries
 )
 
 // Handle represents an opaque arena index for queue entries.

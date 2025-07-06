@@ -41,8 +41,8 @@ type wordKey struct{ w [5]uint64 }
 
 // Two fixed arrays (≈ 20 MiB + 2 MiB) for instant lookup.
 var (
-	pairKey  [1 << 18]wordKey // 131 072 cache-lines (stride-64)
-	addr2pid [1 << 18]PairID  // 0 == empty
+	pairKey  [1 << 20]wordKey // 131 072 cache-lines (stride-64)
+	addr2pid [1 << 20]PairID  // 0 == empty
 )
 
 //go:norace
@@ -72,7 +72,7 @@ func (a wordKey) equal(b wordKey) bool { return a.w == b.w }
 func RegisterPair(addr40 []byte, pid PairID) {
 	k := sliceToWordKey(addr40)
 	idx := utils.Hash17(addr40) // 17-bit hash
-	mask := uint32((1 << 18) - 1)
+	mask := uint32((1 << 20) - 1)
 	for {
 		if addr2pid[idx] == 0 {
 			pairKey[idx] = k
@@ -92,7 +92,7 @@ func RegisterPair(addr40 []byte, pid PairID) {
 func lookupPairID(addr40 []byte) PairID {
 	k := sliceToWordKey(addr40)
 	idx := utils.Hash17(addr40)
-	mask := uint32((1 << 18) - 1)
+	mask := uint32((1 << 20) - 1)
 	for {
 		pid := addr2pid[idx]
 		if pid == 0 {
@@ -169,9 +169,9 @@ type CoreExecutor struct {
 var (
 	executors      [64]*CoreExecutor
 	rings          [64]*ring24.Ring
-	pair2cores     [1 << 18]uint64
+	pair2cores     [1 << 20]uint64
 	shardBucket    map[PairID][]PairShard
-	splitThreshold = 52428
+	splitThreshold = 1 << 16
 )
 
 const (
