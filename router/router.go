@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"unsafe"
 
+	"main/control"
 	"main/fastuni"
 	"main/localidx"
 	"main/quantumqueue"
@@ -252,7 +253,8 @@ func shardWorker(coreID, half int, in <-chan PairShard) {
 		attachShard(ex, &sh, &cycleBuf)
 	}
 
-	ring24.PinnedConsumer(coreID, rings[coreID], new(uint32), new(uint32),
+	stop, hot := control.Flags()
+	ring24.PinnedConsumer(coreID, rings[coreID], stop, hot,
 		func(p *[24]byte) { handleTick(ex, (*TickUpdate)(unsafe.Pointer(p))) },
 		make(chan struct{}))
 }
