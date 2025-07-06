@@ -213,7 +213,7 @@ func InitExecutors(cycles []PairTriplet) {
 
 	chs := make([]chan PairShard, n)
 	for i := range chs {
-		chs[i] = make(chan PairShard, 8192)
+		chs[i] = make(chan PairShard, 1<<10)
 		go shardWorker(i, half, chs[i])
 	}
 
