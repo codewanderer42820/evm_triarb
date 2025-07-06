@@ -277,7 +277,7 @@ func attachShard(ex *CoreExecutor, sh *PairShard, buf *[]CycleState) {
 		*buf = append(*buf, CycleState{Pairs: eb.Pairs})
 		cs := &(*buf)[len(*buf)-1]
 		h, _ := hq.BorrowSafe()
-		hq.Push(4095, h, (*[48]byte)(unsafe.Pointer(cs)))
+		hq.Push(262_143, h, (*[48]byte)(unsafe.Pointer(cs)))
 		for _, edge := range [...]uint16{(eb.EdgeIdx + 1) % 3, (eb.EdgeIdx + 2) % 3} {
 			ex.Fanouts[lid] = append(ex.Fanouts[lid],
 				FanoutEntry{State: cs, Queue: hq, Handle: h, EdgeIdx: edge})
