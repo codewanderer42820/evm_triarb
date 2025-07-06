@@ -54,7 +54,7 @@ type dedupeEntry struct {
 // - Memory overhead: 32 bytes per entry * 2^RingBits entries
 //
 //go:notinheap
-//go:align 64 // Align to cache line boundary
+//go:align 64
 type Deduper struct {
 	// Main cache array - power-of-2 sized for efficient indexing
 	entries [1 << constants.RingBits]dedupeEntry
