@@ -9,29 +9,34 @@ import (
 	"testing"
 )
 
-// TestDeduper_Basic tests basic deduplication functionality
+// ============================================================================
+// CORE FUNCTIONALITY TESTS
+// ============================================================================
+
+// TestDeduper_Basic validates fundamental deduplication behavior.
+// Tests the most basic insert-then-check-duplicate scenario.
 func TestDeduper_Basic(t *testing.T) {
 	d := Deduper{}
 
-	// Test first insertion - should return true (new)
+	// Test first insertion - should return true (new entry)
 	result := d.Check(1000, 5, 2, 0x1234567890abcdef, 0xfedcba0987654321, 1000)
 	if !result {
-		t.Error("First insertion should return true")
+		t.Error("First insertion should return true (new entry)")
 	}
 
-	// Test duplicate - should return false
+	// Test exact duplicate - should return false (duplicate detected)
 	result = d.Check(1000, 5, 2, 0x1234567890abcdef, 0xfedcba0987654321, 1000)
 	if result {
-		t.Errorf("Duplicate should return false, but got true")
+		t.Error("Exact duplicate should return false (duplicate detected)")
 	}
 }
 
-// TestDeduper_BasicCorrectness proves the deduplicator logic is 100% correct
-// This test avoids hash collisions by using well-spaced entries
+// TestDeduper_BasicCorrectness proves the deduplicator logic is mathematically correct.
+// Uses well-spaced entries to avoid hash collisions and test pure logic.
 func TestDeduper_BasicCorrectness(t *testing.T) {
 	d := Deduper{}
 
-	// Use entries that are guaranteed not to hash to the same slot
+	// Use entries guaranteed not to hash to the same cache slot
 	// by spacing them far apart in the hash space
 	testCases := []struct {
 		name         string
@@ -45,15 +50,15 @@ func TestDeduper_BasicCorrectness(t *testing.T) {
 		{"Entry5", 5000, 5, 5, 0x9999999999999999, 0xAAAAAAAAAAAAAAAA},
 	}
 
-	// ──── PHASE 1: All entries should be accepted as new ────
+	// ──── PHASE 1: Initial insertions should all be accepted ────
 	for i, tc := range testCases {
 		result := d.Check(tc.blk, tc.tx, tc.log, tc.tagHi, tc.tagLo, tc.blk)
 		if !result {
-			t.Errorf("Test case %d (%s) should be accepted as new", i, tc.name)
+			t.Errorf("Test case %d (%s) should be accepted as new entry", i, tc.name)
 		}
 	}
 
-	// ──── PHASE 2: All entries should be rejected as duplicates ────
+	// ──── PHASE 2: Exact duplicates should all be rejected ────
 	for i, tc := range testCases {
 		result := d.Check(tc.blk, tc.tx, tc.log, tc.tagHi, tc.tagLo, tc.blk)
 		if result {
@@ -63,44 +68,44 @@ func TestDeduper_BasicCorrectness(t *testing.T) {
 
 	// ──── PHASE 3: Different coordinates should be accepted ────
 	for i, tc := range testCases {
-		// Different block
+		// Different block number
 		result := d.Check(tc.blk+1, tc.tx, tc.log, tc.tagHi, tc.tagLo, tc.blk)
 		if !result {
 			t.Errorf("Test case %d with different block should be accepted", i)
 		}
 
-		// Different tx
+		// Different transaction index
 		result = d.Check(tc.blk, tc.tx+1, tc.log, tc.tagHi, tc.tagLo, tc.blk)
 		if !result {
 			t.Errorf("Test case %d with different tx should be accepted", i)
 		}
 
-		// Different log
+		// Different log index
 		result = d.Check(tc.blk, tc.tx, tc.log+1, tc.tagHi, tc.tagLo, tc.blk)
 		if !result {
 			t.Errorf("Test case %d with different log should be accepted", i)
 		}
 
-		// Different topicHi
+		// Different topic high bits
 		result = d.Check(tc.blk, tc.tx, tc.log, tc.tagHi+1, tc.tagLo, tc.blk)
 		if !result {
 			t.Errorf("Test case %d with different topicHi should be accepted", i)
 		}
 
-		// Different topicLo
+		// Different topic low bits
 		result = d.Check(tc.blk, tc.tx, tc.log, tc.tagHi, tc.tagLo+1, tc.blk)
 		if !result {
 			t.Errorf("Test case %d with different topicLo should be accepted", i)
 		}
 	}
 
-	// ──── PHASE 4: Staleness should work correctly ────
+	// ──── PHASE 4: Staleness threshold verification ────
 	tc := testCases[0]
 
 	// Insert entry at block 1000
 	d.Check(tc.blk, tc.tx, tc.log, tc.tagHi, tc.tagLo, 1000)
 
-	// Should be duplicate at block 1000 + MaxReorg
+	// Should still be duplicate within MaxReorg threshold
 	result := d.Check(tc.blk, tc.tx, tc.log, tc.tagHi, tc.tagLo, 1000+constants.MaxReorg)
 	if result {
 		t.Error("Entry should still be duplicate within MaxReorg threshold")
@@ -112,145 +117,36 @@ func TestDeduper_BasicCorrectness(t *testing.T) {
 		t.Error("Entry should be accepted as new beyond MaxReorg threshold")
 	}
 
-	t.Log("✅ Deduplicator logic is 100% correct")
-	t.Log("✅ The issue with TestDeduper_LargeDataset is hash collisions, not logic bugs")
+	t.Log("✅ Deduplicator logic is mathematically correct")
+	t.Log("✅ Any failures in large dataset tests are due to expected hash collisions")
 }
 
-// TestDeduper_DifferentFingerprints tests logs with same coordinates but different fingerprints
+// ============================================================================
+// FINGERPRINT AND COORDINATE TESTS
+// ============================================================================
+
+// TestDeduper_DifferentFingerprints validates that logs with identical coordinates
+// but different topic fingerprints are correctly distinguished.
 func TestDeduper_DifferentFingerprints(t *testing.T) {
 	d := Deduper{}
 
-	// Same block/tx/log but different fingerprint - should both be accepted
+	// Same block/tx/log coordinates but different topic fingerprints
+	// This represents different events at the same location
 	result1 := d.Check(1000, 5, 2, 0x1111111111111111, 0x2222222222222222, 1000)
 	result2 := d.Check(1000, 5, 2, 0x3333333333333333, 0x4444444444444444, 1000)
 
 	if !result1 || !result2 {
-		t.Error("Different fingerprints should both be accepted")
+		t.Error("Different topic fingerprints should both be accepted as distinct entries")
 	}
 }
 
-// TestDeduper_ReorgHandling tests reorganization scenarios
-func TestDeduper_ReorgHandling(t *testing.T) {
-	d := Deduper{}
-
-	// Insert log at block 1000
-	d.Check(1000, 5, 2, 0x1234567890abcdef, 0xfedcba0987654321, 1000)
-
-	// Advance beyond reorg threshold
-	latestBlk := uint32(1000 + constants.MaxReorg + 1)
-
-	// Same log should now be accepted due to staleness
-	result := d.Check(1000, 5, 2, 0x1234567890abcdef, 0xfedcba0987654321, latestBlk)
-	if !result {
-		t.Error("Stale log should be accepted after reorg threshold")
-	}
-}
-
-// TestDeduper_EdgeCaseReorg tests edge case where we're exactly at reorg threshold
-func TestDeduper_EdgeCaseReorg(t *testing.T) {
-	d := Deduper{}
-
-	// Insert log at block 1000
-	d.Check(1000, 5, 2, 0x1234567890abcdef, 0xfedcba0987654321, 1000)
-
-	// Advance to exactly reorg threshold (should still be duplicate)
-	latestBlk := uint32(1000 + constants.MaxReorg)
-	result := d.Check(1000, 5, 2, 0x1234567890abcdef, 0xfedcba0987654321, latestBlk)
-	if result {
-		t.Error("Log at exactly reorg threshold should still be duplicate")
-	}
-
-	// One block beyond threshold (should be accepted)
-	latestBlk = uint32(1000 + constants.MaxReorg + 1)
-	result = d.Check(1000, 5, 2, 0x1234567890abcdef, 0xfedcba0987654321, latestBlk)
-	if !result {
-		t.Error("Log beyond reorg threshold should be accepted")
-	}
-}
-
-// TestDeduper_MaxValues tests extreme EVM values
-func TestDeduper_MaxValues(t *testing.T) {
-	d := Deduper{}
-
-	// Test with maximum possible values
-	maxBlk := uint32(0xFFFFFFFF) // 2^32 - 1
-	maxTx := uint32(0xFFFF)      // 2^16 - 1
-	maxLog := uint32(0xFFFF)     // 2^16 - 1
-	maxTagHi := uint64(0xFFFFFFFFFFFFFFFF)
-	maxTagLo := uint64(0xFFFFFFFFFFFFFFFF)
-
-	result := d.Check(maxBlk, maxTx, maxLog, maxTagHi, maxTagLo, maxBlk)
-	if !result {
-		t.Error("Max values should be accepted")
-	}
-
-	// Test duplicate with max values
-	result = d.Check(maxBlk, maxTx, maxLog, maxTagHi, maxTagLo, maxBlk)
-	if result {
-		t.Error("Duplicate with max values should be rejected")
-	}
-}
-
-// TestDeduper_ZeroValues tests zero values
-func TestDeduper_ZeroValues(t *testing.T) {
-	d := Deduper{}
-
-	result := d.Check(0, 0, 0, 0, 0, 0)
-	if !result {
-		t.Error("Zero values should be accepted")
-	}
-
-	result = d.Check(0, 0, 0, 0, 0, 0)
-	if result {
-		t.Error("Duplicate zero values should be rejected")
-	}
-}
-
-// TestDeduper_HashCollisions tests potential hash collisions
-func TestDeduper_HashCollisions(t *testing.T) {
-	d := Deduper{}
-
-	// Generate keys that might hash to same slot
-	keys := make([]uint64, 100)
-	for i := range keys {
-		keys[i] = uint64(i) << 32 // Different blocks, same tx/log
-	}
-
-	// Insert all keys
-	for _, key := range keys {
-		blk := uint32(key >> 32)
-		result := d.Check(blk, 0, 0, uint64(blk), uint64(blk), blk)
-		if !result {
-			t.Errorf("Key %d should be accepted", key)
-		}
-	}
-}
-
-// TestDeduper_ConcurrentSlots tests multiple slots usage
-func TestDeduper_ConcurrentSlots(t *testing.T) {
-	d := Deduper{}
-
-	// Fill multiple slots with different data
-	for i := 0; i < 1000; i++ {
-		blk := uint32(i + 1000)
-		tx := uint32(i % 65536)
-		log := uint32(i % 65536)
-		tagHi := uint64(i) << 32
-		tagLo := uint64(i)
-
-		result := d.Check(blk, tx, log, tagHi, tagLo, blk)
-		if !result {
-			t.Errorf("Slot %d should be accepted", i)
-		}
-	}
-}
-
-// TestDeduper_PartialMatches tests partial matching scenarios
+// TestDeduper_PartialMatches ensures partial coordinate matches don't trigger false positives.
+// Critical for ensuring logs from related transactions are properly distinguished.
 func TestDeduper_PartialMatches(t *testing.T) {
 	baseBlk, baseTx, baseLog := uint32(1000), uint32(5), uint32(2)
 	baseTagHi, baseTagLo := uint64(0x1234567890abcdef), uint64(0xfedcba0987654321)
 
-	// Test different combinations that should NOT match
+	// Test combinations that should NOT be considered duplicates
 	testCases := []struct {
 		name   string
 		blk    uint32
@@ -270,13 +166,13 @@ func TestDeduper_PartialMatches(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Create fresh deduplicator for each test case to avoid interference
+			// Create fresh deduplicator for each test to avoid interference
 			d := Deduper{}
 
-			// Insert base log
+			// Insert base entry
 			d.Check(baseBlk, baseTx, baseLog, baseTagHi, baseTagLo, baseBlk)
 
-			// Test the specific case
+			// Test the specific variation
 			result := d.Check(tc.blk, tc.tx, tc.log, tc.tagHi, tc.tagLo, baseBlk)
 			if result != tc.should {
 				t.Errorf("Test %s: expected %v, got %v", tc.name, tc.should, result)
@@ -285,7 +181,125 @@ func TestDeduper_PartialMatches(t *testing.T) {
 	}
 }
 
-// TestDeduper_BitPatterns tests specific bit patterns that might cause issues
+// ============================================================================
+// REORGANIZATION HANDLING TESTS
+// ============================================================================
+
+// TestDeduper_ReorgHandling validates blockchain reorganization scenarios.
+// Ensures stale entries are properly evicted when chains reorganize.
+func TestDeduper_ReorgHandling(t *testing.T) {
+	d := Deduper{}
+
+	// Insert log at block 1000
+	d.Check(1000, 5, 2, 0x1234567890abcdef, 0xfedcba0987654321, 1000)
+
+	// Advance chain beyond reorganization threshold
+	latestBlk := uint32(1000 + constants.MaxReorg + 1)
+
+	// Same log should now be accepted due to staleness eviction
+	result := d.Check(1000, 5, 2, 0x1234567890abcdef, 0xfedcba0987654321, latestBlk)
+	if !result {
+		t.Error("Stale log should be accepted after exceeding reorg threshold")
+	}
+}
+
+// TestDeduper_EdgeCaseReorg tests the exact boundary of the reorganization threshold.
+// Critical for ensuring precise staleness behavior.
+func TestDeduper_EdgeCaseReorg(t *testing.T) {
+	d := Deduper{}
+
+	// Insert log at block 1000
+	d.Check(1000, 5, 2, 0x1234567890abcdef, 0xfedcba0987654321, 1000)
+
+	// Test exactly at reorg threshold (should still be duplicate)
+	latestBlk := uint32(1000 + constants.MaxReorg)
+	result := d.Check(1000, 5, 2, 0x1234567890abcdef, 0xfedcba0987654321, latestBlk)
+	if result {
+		t.Error("Log at exactly reorg threshold should still be considered duplicate")
+	}
+
+	// Test one block beyond threshold (should be accepted)
+	latestBlk = uint32(1000 + constants.MaxReorg + 1)
+	result = d.Check(1000, 5, 2, 0x1234567890abcdef, 0xfedcba0987654321, latestBlk)
+	if !result {
+		t.Error("Log beyond reorg threshold should be accepted as new")
+	}
+}
+
+// TestDeduper_ReorgScenarios tests comprehensive reorganization scenarios.
+// Simulates realistic blockchain reorg situations.
+func TestDeduper_ReorgScenarios(t *testing.T) {
+	d := Deduper{}
+
+	baseBlock := uint32(1000)
+
+	// Insert logs representing the original chain
+	for i := 0; i < 10; i++ {
+		blk := baseBlock + uint32(i)
+		d.Check(blk, 0, uint32(i), uint64(i), uint64(i+1000), blk)
+	}
+
+	// Simulate deep reorganization: same blocks but different content
+	latestBlock := baseBlock + uint32(constants.MaxReorg) + 10
+
+	for i := 0; i < 10; i++ {
+		blk := baseBlock + uint32(i)
+		// Different topic fingerprint representing new chain content
+		result := d.Check(blk, 0, uint32(i), uint64(i+1000), uint64(i+2000), latestBlock)
+		if !result {
+			t.Errorf("Reorganized log should be accepted: block=%d, index=%d", blk, i)
+		}
+	}
+}
+
+// ============================================================================
+// EDGE CASE AND BOUNDARY TESTS
+// ============================================================================
+
+// TestDeduper_MaxValues tests extreme EVM coordinate values.
+// Ensures the system works correctly with maximum possible values.
+func TestDeduper_MaxValues(t *testing.T) {
+	d := Deduper{}
+
+	// Test with maximum possible EVM values
+	maxBlk := uint32(0xFFFFFFFF)           // Maximum block number
+	maxTx := uint32(0xFFFF)                // Maximum transaction index
+	maxLog := uint32(0xFFFF)               // Maximum log index
+	maxTagHi := uint64(0xFFFFFFFFFFFFFFFF) // Maximum topic high bits
+	maxTagLo := uint64(0xFFFFFFFFFFFFFFFF) // Maximum topic low bits
+
+	result := d.Check(maxBlk, maxTx, maxLog, maxTagHi, maxTagLo, maxBlk)
+	if !result {
+		t.Error("Maximum values should be accepted")
+	}
+
+	// Test duplicate detection with maximum values
+	result = d.Check(maxBlk, maxTx, maxLog, maxTagHi, maxTagLo, maxBlk)
+	if result {
+		t.Error("Duplicate with maximum values should be rejected")
+	}
+}
+
+// TestDeduper_ZeroValues validates zero value handling.
+// Ensures genesis block and early transactions work correctly.
+func TestDeduper_ZeroValues(t *testing.T) {
+	d := Deduper{}
+
+	// Test with all zero values (genesis scenarios)
+	result := d.Check(0, 0, 0, 0, 0, 0)
+	if !result {
+		t.Error("Zero values should be accepted")
+	}
+
+	// Test duplicate detection with zero values
+	result = d.Check(0, 0, 0, 0, 0, 0)
+	if result {
+		t.Error("Duplicate zero values should be rejected")
+	}
+}
+
+// TestDeduper_BitPatterns tests specific bit patterns that might cause issues.
+// Validates behavior with various bit manipulation edge cases.
 func TestDeduper_BitPatterns(t *testing.T) {
 	d := Deduper{}
 
@@ -299,19 +313,21 @@ func TestDeduper_BitPatterns(t *testing.T) {
 	}{
 		{"All ones", 0xFFFFFFFF, 0xFFFF, 0xFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF},
 		{"All zeros", 0, 0, 0, 0, 0},
-		{"Alternating", 0xAAAAAAAA, 0xAAAA, 0xAAAA, 0xAAAAAAAAAAAAAAAA, 0xAAAAAAAAAAAAAAAA},
+		{"Alternating bits", 0xAAAAAAAA, 0xAAAA, 0xAAAA, 0xAAAAAAAAAAAAAAAA, 0xAAAAAAAAAAAAAAAA},
 		{"Checkerboard", 0x55555555, 0x5555, 0x5555, 0x5555555555555555, 0x5555555555555555},
 		{"Powers of 2", 0x80000000, 0x8000, 0x8000, 0x8000000000000000, 0x8000000000000000},
+		{"Sequential", 0x01234567, 0x0123, 0x4567, 0x0123456789ABCDEF, 0xFEDCBA9876543210},
 	}
 
 	for _, p := range patterns {
 		t.Run(p.name, func(t *testing.T) {
+			// Test first insertion
 			result := d.Check(p.blk, p.tx, p.log, p.tagHi, p.tagLo, p.blk)
 			if !result {
-				t.Errorf("Pattern %s should be accepted", p.name)
+				t.Errorf("Pattern %s should be accepted on first insertion", p.name)
 			}
 
-			// Test duplicate
+			// Test duplicate detection
 			result = d.Check(p.blk, p.tx, p.log, p.tagHi, p.tagLo, p.blk)
 			if result {
 				t.Errorf("Duplicate pattern %s should be rejected", p.name)
@@ -320,165 +336,8 @@ func TestDeduper_BitPatterns(t *testing.T) {
 	}
 }
 
-// TestDeduper_LargeDataset tests realistic EVM workload with proper expectations
-func TestDeduper_LargeDataset(t *testing.T) {
-	d := Deduper{}
-
-	// Use realistic test size
-	const totalLogs = 20000
-
-	logEntries := make([]struct {
-		blk, tx, log uint32
-		tagHi, tagLo uint64
-	}, totalLogs)
-
-	// Generate realistic EVM-like data with SHA256-based entropy for excellent distribution
-	for i := 0; i < totalLogs; i++ {
-		// Use SHA256 to generate well-distributed but deterministic data
-		seed := make([]byte, 8)
-		binary.LittleEndian.PutUint64(seed, uint64(i))
-		hash := sha256.Sum256(seed)
-
-		// Extract realistic EVM coordinates with excellent distribution
-		block := (binary.LittleEndian.Uint32(hash[0:4]) % 1000) + 1000 // Blocks 1000-1999
-		txIndex := binary.LittleEndian.Uint32(hash[4:8]) % 5000        // Tx 0-4999
-		logInTx := binary.LittleEndian.Uint32(hash[8:12]) % 32         // Log 0-31 per tx
-		tagHi := binary.LittleEndian.Uint64(hash[12:20])               // High entropy topics
-		tagLo := binary.LittleEndian.Uint64(hash[20:28])               // High entropy topics
-
-		logEntries[i] = struct {
-			blk, tx, log uint32
-			tagHi, tagLo uint64
-		}{
-			blk:   block,
-			tx:    txIndex,
-			log:   logInTx,
-			tagHi: tagHi,
-			tagLo: tagLo,
-		}
-	}
-
-	// Insert all logs - should all be accepted as new
-	for _, entry := range logEntries {
-		result := d.Check(entry.blk, entry.tx, entry.log, entry.tagHi, entry.tagLo, entry.blk)
-		if !result {
-			t.Error("Entry should be accepted as new")
-		}
-	}
-
-	// Test duplicates - some will fail due to hash collisions (this is expected and correct!)
-	duplicatesFailed := 0
-	for _, entry := range logEntries {
-		result := d.Check(entry.blk, entry.tx, entry.log, entry.tagHi, entry.tagLo, entry.blk)
-		if result {
-			duplicatesFailed++
-		}
-	}
-
-	failureRate := float64(duplicatesFailed) / float64(totalLogs) * 100
-
-	// Calculate theoretical collision rate for direct-mapped cache
-	cacheSize := 1 << constants.RingBits
-	expectedCollisionRate := float64(totalLogs) / float64(cacheSize) * 100
-
-	t.Logf("=== REALISTIC CACHE PERFORMANCE ===")
-	t.Logf("Cache size: %d slots", cacheSize)
-	t.Logf("Test entries: %d", totalLogs)
-	t.Logf("Cache utilization: %.1f%%", float64(totalLogs)/float64(cacheSize)*100)
-	t.Logf("Duplicate detection failures: %d out of %d (%.1f%%)", duplicatesFailed, totalLogs, failureRate)
-	t.Logf("Expected failure rate (due to collisions): ~%.1f%%", expectedCollisionRate)
-
-	// REALISTIC expectation: failure rate should be in the ballpark of collision rate
-	// Allow 3x the theoretical rate to account for hash clustering and other factors
-	maxAcceptableFailureRate := expectedCollisionRate * 3
-
-	if failureRate > maxAcceptableFailureRate {
-		t.Errorf("Failure rate %.1f%% too high (expected ≤%.1f%% for direct-mapped cache)",
-			failureRate, maxAcceptableFailureRate)
-	}
-
-	// Verify deduplicator is working correctly on non-colliding entries
-	// Test with widely spaced entries that won't collide
-	testEntries := []struct {
-		blk, tx, log uint32
-		tagHi, tagLo uint64
-	}{
-		{10000, 1, 1, 0x1111111111111111, 0x2222222222222222},
-		{20000, 2, 2, 0x3333333333333333, 0x4444444444444444},
-		{30000, 3, 3, 0x5555555555555555, 0x6666666666666666},
-	}
-
-	// These should definitely not collide and should work perfectly
-	for i, entry := range testEntries {
-		// First check - should be accepted
-		result := d.Check(entry.blk, entry.tx, entry.log, entry.tagHi, entry.tagLo, entry.blk)
-		if !result {
-			t.Errorf("Non-colliding entry %d should be accepted as new", i)
-		}
-
-		// Second check - should be rejected as duplicate
-		result = d.Check(entry.blk, entry.tx, entry.log, entry.tagHi, entry.tagLo, entry.blk)
-		if result {
-			t.Errorf("Non-colliding entry %d should be rejected as duplicate", i)
-		}
-	}
-
-	t.Logf("✅ Deduplicator working correctly within cache collision limitations")
-	t.Logf("✅ Failure rate %.1f%% is acceptable for direct-mapped cache with %.1f%% load",
-		failureRate, float64(totalLogs)/float64(cacheSize)*100)
-}
-
-// TestDeduper_RingBufferWrap tests ring buffer wraparound behavior
-func TestDeduper_RingBufferWrap(t *testing.T) {
-	d := Deduper{}
-
-	// Fill more than ring buffer capacity
-	bufferSize := 1 << constants.RingBits
-	numEntries := bufferSize + 1000
-
-	entries := make([]struct {
-		blk, tx, log uint32
-		tagHi, tagLo uint64
-	}, numEntries)
-
-	// Generate unique entries
-	for i := 0; i < numEntries; i++ {
-		entries[i] = struct {
-			blk, tx, log uint32
-			tagHi, tagLo uint64
-		}{
-			blk:   uint32(i + 1000),
-			tx:    uint32(i % 65536),
-			log:   uint32(i % 65536),
-			tagHi: uint64(i),
-			tagLo: uint64(i + 1000000),
-		}
-	}
-
-	// Insert all entries
-	for i, entry := range entries {
-		result := d.Check(entry.blk, entry.tx, entry.log, entry.tagHi, entry.tagLo, entry.blk)
-		if !result {
-			t.Errorf("Entry %d should be accepted", i)
-		}
-	}
-}
-
-// TestDeduper_TimestampProgression tests with advancing timestamps
-func TestDeduper_TimestampProgression(t *testing.T) {
-	d := Deduper{}
-
-	// Insert logs with advancing timestamps
-	for i := 0; i < 1000; i++ {
-		blk := uint32(1000 + i)
-		result := d.Check(blk, 0, uint32(i), uint64(i), uint64(i), blk)
-		if !result {
-			t.Errorf("Advancing timestamp %d should be accepted", i)
-		}
-	}
-}
-
-// TestDeduper_ExtremeBitFlips tests single bit differences in coordinates
+// TestDeduper_ExtremeBitFlips tests single-bit differences in coordinates.
+// Validates that minimal coordinate changes are properly detected.
 func TestDeduper_ExtremeBitFlips(t *testing.T) {
 	d := Deduper{}
 
@@ -496,182 +355,401 @@ func TestDeduper_ExtremeBitFlips(t *testing.T) {
 	// Insert base entry
 	d.Check(base.blk, base.tx, base.log, base.tagHi, base.tagLo, base.blk)
 
-	// Test single bit flips in block number (realistic - different blocks)
+	// Test single bit flips in block number (different blocks in chain)
 	for bit := 0; bit < 32; bit++ {
 		flippedBlk := base.blk ^ (1 << bit)
-		// Use consistent topics for same transaction type (realistic)
 		result := d.Check(flippedBlk, base.tx, base.log, base.tagHi, base.tagLo, flippedBlk)
 		if !result {
 			t.Errorf("Single bit flip in block at position %d should be accepted", bit)
 		}
 	}
 
-	// Test single bit flips in tx index (realistic - different transactions in same block)
+	// Test single bit flips in transaction index (different transactions)
 	for bit := 0; bit < 16; bit++ {
 		flippedTx := base.tx ^ (1 << bit)
-		// Different tx might have slightly different topics (realistic)
-		modifiedTagLo := base.tagLo ^ uint64(flippedTx) // Realistic topic variation
+		// Modify topic to represent different transaction content
+		modifiedTagLo := base.tagLo ^ uint64(flippedTx)
 		result := d.Check(base.blk, flippedTx, base.log, base.tagHi, modifiedTagLo, base.blk)
 		if !result {
 			t.Errorf("Single bit flip in tx at position %d should be accepted", bit)
 		}
 	}
 
-	// Test single bit flips in log index (realistic - different logs in same transaction)
+	// Test single bit flips in log index (different logs in transaction)
 	for bit := 0; bit < 16; bit++ {
 		flippedLog := base.log ^ (1 << bit)
-		// Different logs in same tx have different topics (realistic)
-		modifiedTagHi := base.tagHi ^ uint64(flippedLog<<16) // Realistic topic variation
+		// Modify topic to represent different log content
+		modifiedTagHi := base.tagHi ^ uint64(flippedLog<<16)
 		result := d.Check(base.blk, base.tx, flippedLog, modifiedTagHi, base.tagLo, base.blk)
 		if !result {
 			t.Errorf("Single bit flip in log at position %d should be accepted", bit)
 		}
 	}
 
-	// Test that exact duplicate is still rejected
+	// Verify exact duplicate is still properly rejected
 	result := d.Check(base.blk, base.tx, base.log, base.tagHi, base.tagLo, base.blk)
 	if result {
-		t.Error("Exact duplicate should still be rejected")
+		t.Error("Exact duplicate should still be rejected after bit flip tests")
 	}
 }
 
-// TestDeduper_MemoryLayout tests memory layout assumptions
-func TestDeduper_MemoryLayout(t *testing.T) {
+// ============================================================================
+// COLLISION AND HASH TESTS
+// ============================================================================
+
+// TestDeduper_HashCollisions tests hash collision scenarios.
+// Validates behavior when different entries hash to the same cache slot.
+func TestDeduper_HashCollisions(t *testing.T) {
 	d := Deduper{}
 
-	// Verify the deduper was properly initialized
-	if len(d.entries) != (1 << constants.RingBits) {
-		t.Errorf("Buffer size mismatch: expected %d, got %d", 1<<constants.RingBits, len(d.entries))
-	}
-
-	// Test that slots are properly zero-initialized
-	for i := range d.entries {
-		entry := &d.entries[i]
-		if entry.block != 0 || entry.seenAt != 0 {
-			t.Errorf("Entry %d not properly zero-initialized", i)
-		}
-	}
-}
-
-// TestDeduper_CryptoRandomness tests with cryptographically random data
-func TestDeduper_CryptoRandomness(t *testing.T) {
-	d := Deduper{}
-
-	// Generate cryptographically random test data
-	const numTests = 1000
-	for i := 0; i < numTests; i++ {
-		var buf [32]byte
-		if _, err := rand.Read(buf[:]); err != nil {
-			t.Fatal("Failed to generate random data")
-		}
-
-		blk := binary.BigEndian.Uint32(buf[0:4])
-		tx := binary.BigEndian.Uint32(buf[4:8]) & 0xFFFF
-		log := binary.BigEndian.Uint32(buf[8:12]) & 0xFFFF
-		tagHi := binary.BigEndian.Uint64(buf[12:20])
-		tagLo := binary.BigEndian.Uint64(buf[20:28])
+	// Generate entries that might hash to similar slots
+	// Use patterns that stress the hash function
+	for i := 0; i < 100; i++ {
+		blk := uint32(i << 16) // Spacing to encourage hash collisions
+		tx := uint32(i % 256)
+		log := uint32(i % 16)
+		tagHi := uint64(i) << 32
+		tagLo := uint64(i) ^ 0xAAAAAAAAAAAAAAAA
 
 		result := d.Check(blk, tx, log, tagHi, tagLo, blk)
 		if !result {
-			t.Errorf("Random entry %d should be accepted", i)
-		}
-
-		// Test immediate duplicate
-		result = d.Check(blk, tx, log, tagHi, tagLo, blk)
-		if result {
-			t.Errorf("Duplicate random entry %d should be rejected", i)
+			t.Errorf("Hash collision test entry %d should be accepted", i)
 		}
 	}
 }
 
-// TestDeduper_HighFrequencyChain tests high-frequency chain scenarios
-func TestDeduper_HighFrequencyChain(t *testing.T) {
-	d := Deduper{}
-
-	// Simulate Solana-like high frequency (400ms blocks with many transactions)
-	const blocksPerSecond = 2.5 // ~400ms blocks
-	const txPerBlock = 1000
-	const logsPerTx = 5
-
-	blockNum := uint32(1000000) // Start at high block number
-
-	// Simulate 10 seconds of high-frequency activity
-	for block := 0; block < 25; block++ {
-		currentBlock := blockNum + uint32(block)
-
-		for tx := 0; tx < txPerBlock; tx++ {
-			for log := 0; log < logsPerTx; log++ {
-				// Generate realistic log data
-				tagHi := uint64(currentBlock)<<32 | uint64(tx)
-				tagLo := uint64(log)<<32 | uint64(block)
-
-				result := d.Check(currentBlock, uint32(tx), uint32(log), tagHi, tagLo, currentBlock)
-				if !result {
-					t.Errorf("High-frequency log should be accepted: block=%d, tx=%d, log=%d", currentBlock, tx, log)
-				}
-			}
-		}
-	}
-}
-
-// TestDeduper_ReorgScenarios tests various reorganization scenarios
-func TestDeduper_ReorgScenarios(t *testing.T) {
-	d := Deduper{}
-
-	// Test deep reorg scenario
-	baseBlock := uint32(1000)
-
-	// Insert logs in the original chain
-	for i := 0; i < 10; i++ {
-		blk := baseBlock + uint32(i)
-		d.Check(blk, 0, uint32(i), uint64(i), uint64(i+1000), blk)
-	}
-
-	// Simulate reorg: same blocks but different content
-	latestBlock := baseBlock + uint32(constants.MaxReorg) + 10
-
-	for i := 0; i < 10; i++ {
-		blk := baseBlock + uint32(i)
-		// Different fingerprint for same block/tx/log
-		result := d.Check(blk, 0, uint32(i), uint64(i+1000), uint64(i+2000), latestBlock)
-		if !result {
-			t.Errorf("Reorg'd log should be accepted: block=%d, index=%d", blk, i)
-		}
-	}
-}
-
-// TestDeduper_SlotOverwriting tests slot overwriting behavior
+// TestDeduper_SlotOverwriting tests direct-mapped cache slot overwriting.
+// Validates that hash collisions properly evict old entries.
 func TestDeduper_SlotOverwriting(t *testing.T) {
 	d := Deduper{}
 
-	// Create entries that will hash to the same slot
-	// This tests the hash collision handling
+	// Create entries that will hash to the same cache slot
 	baseKey := uint64(1000)<<32 | uint64(5)<<16 | uint64(2)
 
 	// Insert first entry
 	d.Check(1000, 5, 2, 0x1111111111111111, 0x2222222222222222, 1000)
 
-	// Find a key that hashes to the same slot
+	// Find another key that hashes to the same slot
 	mask := uint64((1 << constants.RingBits) - 1)
 	targetSlot := utils.Mix64(baseKey) & mask
 
-	// Try to find another key that hashes to the same slot
+	// Search for a colliding key
 	for i := uint64(1); i < 10000; i++ {
-		testKey := baseKey + (i << 32) // Different block
+		testKey := baseKey + (i << 32) // Different block number
 		if utils.Mix64(testKey)&mask == targetSlot {
-			// Found collision - this will overwrite the first entry
+			// Found collision - this will evict the first entry
 			blk := uint32(testKey >> 32)
 			result := d.Check(blk, 5, 2, 0x3333333333333333, 0x4444444444444444, blk)
 			if !result {
-				t.Error("Colliding entry should be accepted")
+				t.Error("Colliding entry should be accepted (cache eviction)")
 			}
 
-			// Original entry should now be accepted again (was overwritten)
+			// Original entry should now be accepted again (was evicted)
 			result = d.Check(1000, 5, 2, 0x1111111111111111, 0x2222222222222222, 1000)
 			if !result {
-				t.Error("Original entry should be accepted after collision")
+				t.Error("Original entry should be accepted after cache eviction")
 			}
-			break
+			return
 		}
 	}
+
+	t.Skip("Could not find hash collision within search limit")
+}
+
+// ============================================================================
+// LARGE DATASET AND REALISTIC WORKLOAD TESTS
+// ============================================================================
+
+// TestDeduper_LargeDataset tests realistic EVM workloads with proper collision expectations.
+// Validates performance with large datasets while accounting for direct-mapped cache limitations.
+func TestDeduper_LargeDataset(t *testing.T) {
+	d := Deduper{}
+
+	// Use realistic test size for EVM log processing
+	const totalLogs = 20000
+
+	logEntries := make([]struct {
+		blk, tx, log uint32
+		tagHi, tagLo uint64
+	}, totalLogs)
+
+	// Generate realistic EVM-like data with SHA256 for excellent distribution
+	for i := 0; i < totalLogs; i++ {
+		// Use SHA256 to generate well-distributed but deterministic data
+		seed := make([]byte, 8)
+		binary.LittleEndian.PutUint64(seed, uint64(i))
+		hash := sha256.Sum256(seed)
+
+		// Extract realistic EVM coordinates with excellent hash distribution
+		block := (binary.LittleEndian.Uint32(hash[0:4]) % 1000) + 1000 // Blocks 1000-1999
+		txIndex := binary.LittleEndian.Uint32(hash[4:8]) % 5000        // Transactions 0-4999
+		logInTx := binary.LittleEndian.Uint32(hash[8:12]) % 32         // Logs 0-31 per tx
+		tagHi := binary.LittleEndian.Uint64(hash[12:20])               // High entropy topics
+		tagLo := binary.LittleEndian.Uint64(hash[20:28])               // High entropy topics
+
+		logEntries[i] = struct {
+			blk, tx, log uint32
+			tagHi, tagLo uint64
+		}{
+			blk:   block,
+			tx:    txIndex,
+			log:   logInTx,
+			tagHi: tagHi,
+			tagLo: tagLo,
+		}
+	}
+
+	// ──── PHASE 1: Insert all logs (should all be accepted as new) ────
+	for _, entry := range logEntries {
+		result := d.Check(entry.blk, entry.tx, entry.log, entry.tagHi, entry.tagLo, entry.blk)
+		if !result {
+			t.Error("New entry should be accepted during initial insertion")
+		}
+	}
+
+	// ──── PHASE 2: Test duplicates (some will fail due to hash collisions) ────
+	duplicatesFailed := 0
+	for _, entry := range logEntries {
+		result := d.Check(entry.blk, entry.tx, entry.log, entry.tagHi, entry.tagLo, entry.blk)
+		if result {
+			duplicatesFailed++ // Failed to detect duplicate (collision occurred)
+		}
+	}
+
+	// ──── PHASE 3: Analyze and validate collision rates ────
+	cacheSize := 1 << constants.RingBits
+	failureRate := float64(duplicatesFailed) / float64(totalLogs) * 100
+	expectedCollisionRate := float64(totalLogs) / float64(cacheSize) * 100
+
+	t.Logf("=== REALISTIC DIRECT-MAPPED CACHE PERFORMANCE ===")
+	t.Logf("Cache size: %d slots", cacheSize)
+	t.Logf("Test entries: %d", totalLogs)
+	t.Logf("Cache utilization: %.1f%%", float64(totalLogs)/float64(cacheSize)*100)
+	t.Logf("Duplicate detection failures: %d out of %d (%.1f%%)", duplicatesFailed, totalLogs, failureRate)
+	t.Logf("Expected collision rate: ~%.1f%%", expectedCollisionRate)
+
+	// Validate failure rate is within acceptable bounds for direct-mapped cache
+	// Allow 3x theoretical rate to account for hash clustering effects
+	maxAcceptableFailureRate := expectedCollisionRate * 3
+
+	if failureRate > maxAcceptableFailureRate {
+		t.Errorf("Collision rate %.1f%% too high (expected ≤%.1f%% for direct-mapped cache)",
+			failureRate, maxAcceptableFailureRate)
+	}
+
+	// ──── PHASE 4: Verify deduplicator works on non-colliding entries ────
+	testEntries := []struct {
+		blk, tx, log uint32
+		tagHi, tagLo uint64
+	}{
+		{10000, 1, 1, 0x1111111111111111, 0x2222222222222222},
+		{20000, 2, 2, 0x3333333333333333, 0x4444444444444444},
+		{30000, 3, 3, 0x5555555555555555, 0x6666666666666666},
+	}
+
+	// These should definitely not collide and work perfectly
+	for i, entry := range testEntries {
+		// First check - should be accepted as new
+		result := d.Check(entry.blk, entry.tx, entry.log, entry.tagHi, entry.tagLo, entry.blk)
+		if !result {
+			t.Errorf("Non-colliding entry %d should be accepted as new", i)
+		}
+
+		// Second check - should be rejected as duplicate
+		result = d.Check(entry.blk, entry.tx, entry.log, entry.tagHi, entry.tagLo, entry.blk)
+		if result {
+			t.Errorf("Non-colliding entry %d should be rejected as duplicate", i)
+		}
+	}
+
+	t.Logf("✅ Deduplicator working correctly within direct-mapped cache limitations")
+	t.Logf("✅ Collision rate %.1f%% is acceptable for %.1f%% cache utilization",
+		failureRate, float64(totalLogs)/float64(cacheSize)*100)
+}
+
+// ============================================================================
+// HIGH-FREQUENCY BLOCKCHAIN TESTS
+// ============================================================================
+
+// TestDeduper_HighFrequencyChain tests performance with high-frequency blockchain scenarios.
+// Simulates chains like Solana with rapid block production and high transaction volume.
+func TestDeduper_HighFrequencyChain(t *testing.T) {
+	d := Deduper{}
+
+	// Simulate Solana-like high frequency blockchain
+	const blocksPerSecond = 2.5 // ~400ms block time
+	const txPerBlock = 1000     // High transaction volume
+	const logsPerTx = 5         // Multiple logs per transaction
+
+	blockNum := uint32(1000000) // Start at realistic block height
+
+	// Simulate 10 seconds of high-frequency blockchain activity
+	for block := 0; block < 25; block++ {
+		currentBlock := blockNum + uint32(block)
+
+		for tx := 0; tx < txPerBlock; tx++ {
+			for log := 0; log < logsPerTx; log++ {
+				// Generate realistic log fingerprints
+				tagHi := uint64(currentBlock)<<32 | uint64(tx)
+				tagLo := uint64(log)<<32 | uint64(block)
+
+				result := d.Check(currentBlock, uint32(tx), uint32(log), tagHi, tagLo, currentBlock)
+				if !result {
+					t.Errorf("High-frequency log should be accepted: block=%d, tx=%d, log=%d",
+						currentBlock, tx, log)
+				}
+			}
+		}
+	}
+
+	t.Logf("✅ Successfully processed high-frequency blockchain simulation")
+}
+
+// ============================================================================
+// CRYPTOGRAPHIC RANDOMNESS TESTS
+// ============================================================================
+
+// TestDeduper_CryptoRandomness tests with cryptographically random data.
+// Validates behavior with maximum entropy input data.
+func TestDeduper_CryptoRandomness(t *testing.T) {
+	d := Deduper{}
+
+	// Generate cryptographically random test cases
+	const numTests = 1000
+	for i := 0; i < numTests; i++ {
+		var buf [32]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			t.Fatal("Failed to generate cryptographic random data")
+		}
+
+		// Extract coordinates from random bytes
+		blk := binary.BigEndian.Uint32(buf[0:4])
+		tx := binary.BigEndian.Uint32(buf[4:8]) & 0xFFFF   // Limit to realistic range
+		log := binary.BigEndian.Uint32(buf[8:12]) & 0xFFFF // Limit to realistic range
+		tagHi := binary.BigEndian.Uint64(buf[12:20])
+		tagLo := binary.BigEndian.Uint64(buf[20:28])
+
+		// Test first insertion
+		result := d.Check(blk, tx, log, tagHi, tagLo, blk)
+		if !result {
+			t.Errorf("Random entry %d should be accepted as new", i)
+		}
+
+		// Test immediate duplicate detection
+		result = d.Check(blk, tx, log, tagHi, tagLo, blk)
+		if result {
+			t.Errorf("Duplicate random entry %d should be rejected", i)
+		}
+	}
+
+	t.Logf("✅ Successfully processed %d cryptographically random entries", numTests)
+}
+
+// ============================================================================
+// MEMORY AND STRUCTURE TESTS
+// ============================================================================
+
+// TestDeduper_MemoryLayout validates memory layout assumptions and initialization.
+// Ensures the deduplicator structure is properly configured.
+func TestDeduper_MemoryLayout(t *testing.T) {
+	d := Deduper{}
+
+	// Verify cache array was properly sized
+	expectedSize := 1 << constants.RingBits
+	if len(d.entries) != expectedSize {
+		t.Errorf("Cache size mismatch: expected %d entries, got %d", expectedSize, len(d.entries))
+	}
+
+	// Verify entries are properly zero-initialized
+	for i := range d.entries {
+		entry := &d.entries[i]
+		if entry.block != 0 || entry.tx != 0 || entry.log != 0 ||
+			entry.seenAt != 0 || entry.topicHi != 0 || entry.topicLo != 0 {
+			t.Errorf("Entry %d not properly zero-initialized", i)
+		}
+	}
+
+	t.Logf("✅ Memory layout correct: %d entries, properly zero-initialized", expectedSize)
+}
+
+// TestDeduper_RingBufferWrap tests behavior when cache capacity is exceeded.
+// Validates wraparound and eviction behavior in direct-mapped cache.
+func TestDeduper_RingBufferWrap(t *testing.T) {
+	d := Deduper{}
+
+	// Fill beyond cache capacity to test wraparound
+	bufferSize := 1 << constants.RingBits
+	numEntries := bufferSize + 1000
+
+	entries := make([]struct {
+		blk, tx, log uint32
+		tagHi, tagLo uint64
+	}, numEntries)
+
+	// Generate unique, well-distributed entries
+	for i := 0; i < numEntries; i++ {
+		entries[i] = struct {
+			blk, tx, log uint32
+			tagHi, tagLo uint64
+		}{
+			blk:   uint32(i + 1000),
+			tx:    uint32(i % 65536),
+			log:   uint32(i % 65536),
+			tagHi: uint64(i),
+			tagLo: uint64(i + 1000000),
+		}
+	}
+
+	// Insert all entries (some will evict earlier entries)
+	for i, entry := range entries {
+		result := d.Check(entry.blk, entry.tx, entry.log, entry.tagHi, entry.tagLo, entry.blk)
+		if !result {
+			t.Errorf("Entry %d should be accepted during wraparound test", i)
+		}
+	}
+
+	t.Logf("✅ Successfully handled cache wraparound with %d entries", numEntries)
+}
+
+// ============================================================================
+// PERFORMANCE VALIDATION TESTS
+// ============================================================================
+
+// TestDeduper_ConcurrentSlots validates multiple cache slots are utilized properly.
+// Ensures good cache distribution and slot utilization.
+func TestDeduper_ConcurrentSlots(t *testing.T) {
+	d := Deduper{}
+
+	// Fill multiple cache slots with diverse data
+	for i := 0; i < 1000; i++ {
+		blk := uint32(i + 1000)
+		tx := uint32(i % 65536)
+		log := uint32(i % 65536)
+		tagHi := uint64(i) << 32
+		tagLo := uint64(i)
+
+		result := d.Check(blk, tx, log, tagHi, tagLo, blk)
+		if !result {
+			t.Errorf("Concurrent slot entry %d should be accepted", i)
+		}
+	}
+
+	t.Logf("✅ Successfully utilized multiple cache slots")
+}
+
+// TestDeduper_TimestampProgression tests with advancing block timestamps.
+// Validates behavior with realistic blockchain timestamp progression.
+func TestDeduper_TimestampProgression(t *testing.T) {
+	d := Deduper{}
+
+	// Insert logs with steadily advancing timestamps
+	for i := 0; i < 1000; i++ {
+		blk := uint32(1000 + i)
+		result := d.Check(blk, 0, uint32(i), uint64(i), uint64(i), blk)
+		if !result {
+			t.Errorf("Advancing timestamp entry %d should be accepted", i)
+		}
+	}
+
+	t.Logf("✅ Successfully processed advancing timestamp sequence")
 }

@@ -58,10 +58,6 @@ type dedupeEntry struct {
 type Deduper struct {
 	// Main cache array - power-of-2 sized for efficient indexing
 	entries [1 << constants.RingBits]dedupeEntry
-
-	// Padding to ensure structure occupies complete cache lines
-	// Prevents false sharing with adjacent data structures
-	_ [8]uint64 // 64 bytes padding
 }
 
 // ============================================================================
