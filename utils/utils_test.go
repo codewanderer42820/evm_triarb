@@ -199,6 +199,40 @@ func TestItoa_EdgeCases(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// OUTPUT FUNCTION TESTS
+// ============================================================================
+
+func TestPrintInfo(t *testing.T) {
+	// Note: This test doesn't capture stdout output but verifies the function doesn't panic
+	testCases := []string{
+		"",
+		"Info: test message",
+		"Very long info message that should still work without allocation issues",
+		"Message with unicode: 测试信息消息",
+		strings.Repeat("Long message ", 100),
+	}
+
+	for _, msg := range testCases {
+		t.Run(fmt.Sprintf("message_len_%d", len(msg)), func(t *testing.T) {
+			// Should not panic
+			PrintInfo(msg)
+		})
+	}
+}
+
+func TestPrintInfo_ZeroAllocation(t *testing.T) {
+	msg := "Test info message"
+
+	allocsBefore := testing.AllocsPerRun(100, func() {
+		PrintInfo(msg)
+	})
+
+	if allocsBefore > 0 {
+		t.Errorf("PrintInfo() allocated memory: %f allocs/op", allocsBefore)
+	}
+}
+
 func TestPrintWarning(t *testing.T) {
 	// Note: This test doesn't capture stderr output but verifies the function doesn't panic
 	testCases := []string{
@@ -1278,6 +1312,28 @@ func BenchmarkItoa(b *testing.B) {
 	}
 }
 
+func BenchmarkOutputFunctions(b *testing.B) {
+	message := "Test message for benchmarking output functions"
+
+	b.Run("PrintWarning", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			PrintWarning(message)
+		}
+	})
+
+	b.Run("PrintInfo", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			PrintInfo(message)
+		}
+	})
+}
+
 func BenchmarkJSONParsing(b *testing.B) {
 	sizes := []int{1000, 10000, 100000}
 	hopSizes := []int{1, 4, 16}
@@ -1451,6 +1507,8 @@ func BenchmarkMemoryPressure(b *testing.B) {
 		_ = Load64(data)
 		_ = ParseHexU64(data[:16])
 		_ = Mix64(uint64(i))
+		PrintInfo("test")
+		PrintWarning("test")
 	}
 
 	b.StopTimer()
@@ -1484,6 +1542,8 @@ func BenchmarkConcurrency(b *testing.B) {
 			_ = ParseHexU64(hexData)
 			_ = Mix64(uint64(12345))
 			_ = Hash17(hexData)
+			PrintInfo("concurrent test")
+			PrintWarning("concurrent test")
 		}
 	})
 }
@@ -1499,6 +1559,8 @@ func TestEdgeCaseSafety(t *testing.T) {
 		_ = Hash17(nil)
 		_ = ParseHexU64(nil)
 		_ = ParseHexN(nil)
+		PrintInfo("")
+		PrintWarning("")
 	})
 
 	t.Run("Boundary conditions", func(t *testing.T) {
@@ -1520,6 +1582,11 @@ func TestEdgeCaseSafety(t *testing.T) {
 		_ = B2s(largeData)
 		_ = SkipToQuote(largeData, 0, 1000)
 		_ = Hash17(largeData)
+
+		// Test large message output
+		largeMessage := string(largeData[:1000]) // Reasonable size for testing
+		PrintInfo(largeMessage)
+		PrintWarning(largeMessage)
 	})
 
 	t.Run("Invalid UTF-8 in B2s", func(t *testing.T) {
@@ -1530,6 +1597,10 @@ func TestEdgeCaseSafety(t *testing.T) {
 		if len(result) != len(invalidUTF8) {
 			t.Error("B2s should preserve byte length even with invalid UTF-8")
 		}
+
+		// Test printing invalid UTF-8
+		PrintInfo(result)
+		PrintWarning(result)
 	})
 }
 
