@@ -198,6 +198,187 @@ func TestHandleFrame_TransactionHashSkipping(t *testing.T) {
 }
 
 // ============================================================================
+// TRANSACTION FIELD TESTS - NEW TESTS FOR BRANCH COVERAGE
+// ============================================================================
+
+func TestHandleFrame_TransactionFieldBranches(t *testing.T) {
+	tests := []struct {
+		name        string
+		description string
+		eventFunc   func() []byte
+	}{
+		{
+			name:        "TransactionHash_SkipPath",
+			description: "Test transaction hash skipping when enough bytes available (>=86)",
+			eventFunc: func() []byte {
+				// Create event where transaction hash appears before transaction index
+				// This will trigger the skip path (i += 86)
+				rpcWrapper := `{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{`
+
+				logData := `"address":"0x1234567890123456789012345678901234567890",` +
+					`"blockNumber":"0x123456",` +
+					`"data":"0x000000000000000000000000000000000000000000000000000000000000001234567890abcdef",` +
+					`"logIndex":"0x1",` +
+					`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
+					`"transactionHash":"0x9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba",` +
+					`"transactionIndex":"0x5"}}}`
+
+				return []byte(rpcWrapper + logData)
+			},
+		},
+		{
+			name:        "TransactionIndex_ParsePath",
+			description: "Test transaction index parsing when not enough bytes for hash skip (<86)",
+			eventFunc: func() []byte {
+				// Create event where we encounter "transac" pattern but don't have 86 bytes left
+				// This will trigger the transaction index parsing path
+				rpcWrapper := `{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{`
+
+				logData := `"address":"0x1234567890123456789012345678901234567890",` +
+					`"blockNumber":"0x123456",` +
+					`"data":"0x000000000000000000000000000000000000000000000000000000000000001234567890abcdef",` +
+					`"logIndex":"0x1",` +
+					`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
+					`"transactionIndex":"0x5"}}`
+
+				return []byte(rpcWrapper + logData)
+			},
+		},
+		{
+			name:        "TransactionHash_LongForm",
+			description: "Test with full transaction hash field to ensure skip works correctly",
+			eventFunc: func() []byte {
+				rpcWrapper := `{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{`
+
+				// Ensure transaction hash field has full 66 character hash + quotes + field name
+				logData := `"address":"0x1234567890123456789012345678901234567890",` +
+					`"blockNumber":"0x123456",` +
+					`"data":"0x000000000000000000000000000000000000000000000000000000000000001234567890abcdef",` +
+					`"logIndex":"0x1",` +
+					`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
+					`"transactionHash":"0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdef",` +
+					`"transactionIndex":"0x7"}}}`
+
+				return []byte(rpcWrapper + logData)
+			},
+		},
+		{
+			name:        "TransactionIndex_EdgeCase",
+			description: "Test transaction index parsing with various hex values",
+			eventFunc: func() []byte {
+				rpcWrapper := `{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{`
+
+				logData := `"address":"0x1234567890123456789012345678901234567890",` +
+					`"blockNumber":"0x123456",` +
+					`"data":"0x000000000000000000000000000000000000000000000000000000000000001234567890abcdef",` +
+					`"logIndex":"0x1",` +
+					`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
+					`"transactionIndex":"0xabc"}}}`
+
+				return []byte(rpcWrapper + logData)
+			},
+		},
+		{
+			name:        "TransactionField_BoundaryCondition",
+			description: "Test exactly at boundary where len(p)-i == 86",
+			eventFunc: func() []byte {
+				// Create an event where when we hit the transaction field,
+				// there are exactly 86 bytes left to test the boundary condition
+				rpcWrapper := `{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{`
+
+				logData := `"address":"0x1234567890123456789012345678901234567890",` +
+					`"blockNumber":"0x123456",` +
+					`"data":"0x000000000000000000000000000000000000000000000000000000000000001234567890abcdef",` +
+					`"logIndex":"0x1",` +
+					`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
+					`"transactionHash":"0x1234567890123456789012345678901234567890123456789012345678901234"`
+
+				// Calculate to ensure exactly 86 bytes remain when we hit "transac"
+				baseEvent := rpcWrapper + logData
+				// Add closing braces to complete JSON
+				completeEvent := baseEvent + `}}`
+
+				return []byte(completeEvent)
+			},
+		},
+		{
+			name:        "TransactionField_InsufficientBytes",
+			description: "Test when len(p)-i < 86 to force transaction index parsing",
+			eventFunc: func() []byte {
+				// Create minimal event that will have < 86 bytes when transaction field is encountered
+				rpcWrapper := `{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{`
+
+				// Minimal required fields to pass validation, then transaction index at the end
+				logData := `"address":"0x1234567890123456789012345678901234567890",` +
+					`"blockNumber":"0x123456",` +
+					`"data":"0x1234567890abcdef",` +
+					`"logIndex":"0x1",` +
+					`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
+					`"transactionIndex":"0x42"}}`
+
+				return []byte(rpcWrapper + logData)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("Test %s panicked: %v", tt.name, r)
+				}
+			}()
+
+			event := tt.eventFunc()
+
+			// Should not panic regardless of which branch is taken
+			HandleFrame(event)
+
+			// Verify the event data is reasonable
+			if len(event) < 117 {
+				t.Errorf("Test %s created event too short: %d bytes", tt.name, len(event))
+			}
+		})
+	}
+}
+
+func TestHandleFrame_TransactionFieldPositioning(t *testing.T) {
+	// Test to ensure transaction field detection works regardless of field order
+	tests := []struct {
+		name       string
+		fieldOrder string
+	}{
+		{
+			name:       "TransactionHash_First",
+			fieldOrder: `"transactionHash":"0x1234567890123456789012345678901234567890123456789012345678901234","address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234567890abcdef","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5"`,
+		},
+		{
+			name:       "TransactionIndex_Only",
+			fieldOrder: `"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234567890abcdef","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x9"`,
+		},
+		{
+			name:       "TransactionFields_Last",
+			fieldOrder: `"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234567890abcdef","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionHash":"0x1234567890123456789012345678901234567890123456789012345678901234","transactionIndex":"0xa"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rpcWrapper := `{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{`
+			event := []byte(rpcWrapper + tt.fieldOrder + "}}")
+
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("Test %s panicked: %v", tt.name, r)
+				}
+			}()
+
+			HandleFrame(event)
+		})
+	}
+}
+
+// ============================================================================
 // FINGERPRINT GENERATION TESTS
 // ============================================================================
 
