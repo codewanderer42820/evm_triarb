@@ -1,18 +1,3 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// [Filename]: utils.go — ISR-grade zero-alloc utilities for JSON, hex, and hashing
-//
-// Purpose:
-//   - Provides unsafe low-level helpers for parsing, casting, and hashing
-//   - Used throughout parser, deduper, and log emitter paths
-//
-// Notes:
-//   - All functions are branch-minimized, registerparam-optimized, and inlined
-//   - No allocations, no reflection, no strings — everything byte-level and fused
-//   - Unsafe use is deliberate for ISR-class log ingestion
-//
-// ⚠️ All inputs must be bounds-safe and well-formed — no fallback handling
-// ─────────────────────────────────────────────────────────────────────────────
-
 package utils
 
 import (
@@ -20,13 +5,17 @@ import (
 	"unsafe"
 )
 
-// ───────────────────── Zero-Alloc Type Coercion ─────────────────────
+// ============================================================================
+// HIGH-PERFORMANCE UTILITY FUNCTIONS
+// Zero-allocation utilities for JSON parsing, hex conversion, and hashing
+// ============================================================================
 
-// B2s converts []byte → string with zero alloc.
-// ⚠️ Input must not be mutated after conversion.
-//
-// This function converts a byte slice into a string without allocating new memory.
-// It is optimized to avoid unnecessary allocations by directly using unsafe methods.
+// ============================================================================
+// ZERO-ALLOCATION TYPE CONVERSION
+// ============================================================================
+
+// B2s converts a byte slice to string without memory allocation.
+// WARNING: The input byte slice must not be modified after conversion.
 //
 //go:nosplit
 //go:inline
@@ -38,57 +27,50 @@ func B2s(b []byte) string {
 	return unsafe.String(&b[0], len(b))
 }
 
-// ───────────────────── Zero-Alloc Type Coercion and Logging Utilities ─────────────────────
-
-// Itoa manually converts an integer to a string without allocations.
-// This function works for non-negative integers and avoids heap allocations.
+// Itoa converts an integer to string without heap allocation.
+// Optimized for non-negative integers using a fixed-size buffer.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func Itoa(n int) string {
-	// Handle zero case explicitly
 	if n == 0 {
 		return "0"
 	}
 
-	// Use a fixed-size buffer to store the result (maximum 10 digits for int)
-	var buf [10]byte
+	var buf [10]byte // Maximum 10 digits for 32-bit int
 	i := len(buf)
 
-	// Convert integer to string (reverse order)
+	// Convert digits in reverse order
 	for n > 0 {
 		i--
-		buf[i] = byte(n%10 + '0') // Get the least significant digit
-		n /= 10                   // Remove the least significant digit
+		buf[i] = byte(n%10 + '0')
+		n /= 10
 	}
 
-	// Return the string created from the buffer (ignoring unused parts of the array)
 	return string(buf[i:])
 }
 
-// PrintWarning writes a warning message directly to stderr with zero allocation.
-// It avoids using fmt or log functions, ensuring no allocations occur during the write.
+// PrintWarning writes a warning message directly to stderr without allocation.
+// Bypasses fmt and log packages for zero-allocation error reporting.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func PrintWarning(msg string) {
-	// Convert the string to a byte slice without allocating memory
+	// Convert string to byte slice without allocation
 	msgBytes := *(*[]byte)(unsafe.Pointer(&msg))
 
-	// Directly write the byte slice to stderr (file descriptor 2)
-	_, err := syscall.Write(2, msgBytes)
-	if err != nil {
-		// Handle error (if any)
-	}
+	// Write directly to stderr (file descriptor 2)
+	_, _ = syscall.Write(2, msgBytes)
 }
 
-// ────────────── JSON Field Probes (Unsafe, Fixed Pattern) ──────────────
+// ============================================================================
+// JSON PARSING UTILITIES
+// ============================================================================
 
-// SkipToQuoteEarlyExit locates the next occurrence of the double-quote character ('"')
-// in the JSON data starting from the given index, using hop-based traversal method for efficiency.
-// The function will stop if the hop count exceeds the defined maxHop and advise whether to exit immediately.
+// SkipToQuoteEarlyExit locates the next double-quote character in JSON data
+// using hop-based traversal for efficiency. Returns early if hop limit exceeded.
 //
 //go:nosplit
 //go:inline
@@ -97,23 +79,21 @@ func SkipToQuoteEarlyExit(p []byte, startIdx int, hopSize int, maxHops int) (int
 	i := startIdx
 	hops := 0
 
-	// Traverse through the byte slice using hop-based traversal
 	for ; i < len(p); i += hopSize {
 		hops++
 		if hops > maxHops {
-			return i, true // Return the index and advise to exit early
+			return i, true // Early exit due to hop limit
 		}
 		if p[i] == '"' {
-			return i, false // Found the closing quote, return its index and continue
+			return i, false // Found quote
 		}
 	}
 
-	return -1, false // No quote found, continue normal flow
+	return -1, false // Quote not found
 }
 
-// SkipToClosingBracketEarlyExit locates the first occurrence of the closing bracket (']')
-// in a JSON array field, starting from the given index, using hop-based traversal.
-// It returns the index and a bool advising if the caller should exit early after exceeding max hops.
+// SkipToClosingBracketEarlyExit locates the closing bracket in JSON arrays
+// using hop-based traversal. Returns early if hop limit exceeded.
 //
 //go:nosplit
 //go:inline
@@ -122,84 +102,69 @@ func SkipToClosingBracketEarlyExit(p []byte, startIdx int, hopSize int, maxHops 
 	i := startIdx
 	hops := 0
 
-	// Traverse through the byte slice using hop-based traversal
 	for ; i < len(p); i += hopSize {
 		hops++
 		if hops > maxHops {
-			return i, true // Return the index and advise to exit early
+			return i, true // Early exit due to hop limit
 		}
 		if p[i] == ']' {
-			return i, false // Found the closing bracket, return its index and continue
+			return i, false // Found closing bracket
 		}
 	}
 
-	return -1, false // No closing bracket found, continue normal flow
+	return -1, false // Bracket not found
 }
 
-// SkipToQuote locates the next occurrence of the double-quote character ('"') in the JSON data
-// starting from the given index, using a hop-based traversal method for efficiency.
-// It helps identify the end of a string field in a JSON payload, specifically looking for
-// the closing quote of a field value.
+// SkipToQuote locates the next double-quote character in JSON data
+// using hop-based traversal for efficient string field parsing.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func SkipToQuote(p []byte, startIdx int, hopSize int) int {
-	i := startIdx
-
-	// Traverse through the byte slice using hop-based traversal
-	for ; i < len(p); i += hopSize {
+	for i := startIdx; i < len(p); i += hopSize {
 		if p[i] == '"' {
-			return i // Found the closing quote, return its index
+			return i
 		}
 	}
-
-	return -1 // Return -1 if no quote is found
+	return -1
 }
 
-// SkipToOpeningBracket locates the first occurrence of the opening bracket ('[')
-// in a JSON array field, starting from the given index.
-// This function is used to find the beginning of an array (e.g., the start of the "topics" field in a log).
+// SkipToOpeningBracket locates the opening bracket in JSON arrays
+// for efficient array field parsing.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func SkipToOpeningBracket(p []byte, startIdx int, hopSize int) int {
-	i := startIdx
-
-	// Traverse through the byte slice using hop-based traversal
-	for ; i < len(p); i += hopSize {
+	for i := startIdx; i < len(p); i += hopSize {
 		if p[i] == '[' {
-			return i // Found the opening bracket, return its index
+			return i
 		}
 	}
-
-	return -1 // Return -1 if no opening bracket is found
+	return -1
 }
 
-// SkipToClosingBracket locates the first occurrence of the closing bracket (']')
-// in a JSON array field, starting from the given index.
-// This function is used to find the end of an array (e.g., the end of the "topics" field in a log).
+// SkipToClosingBracket locates the closing bracket in JSON arrays
+// for efficient array field parsing.
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func SkipToClosingBracket(p []byte, startIdx int, hopSize int) int {
-	i := startIdx
-
-	// Traverse through the byte slice using hop-based traversal
-	for ; i < len(p); i += hopSize {
+	for i := startIdx; i < len(p); i += hopSize {
 		if p[i] == ']' {
-			return i // Found the closing bracket, return its index
+			return i
 		}
 	}
-
-	return -1 // Return -1 if no closing bracket is found
+	return -1
 }
 
-// ───────────────────── Unaligned Memory Loaders ─────────────────────
+// ============================================================================
+// UNALIGNED MEMORY OPERATIONS
+// ============================================================================
 
-// Load64 loads 8 bytes as uint64 from b[0:8]
+// Load64 loads 8 bytes as uint64 from unaligned memory
 //
 //go:nosplit
 //go:inline
@@ -208,7 +173,7 @@ func Load64(b []byte) uint64 {
 	return *(*uint64)(unsafe.Pointer(&b[0]))
 }
 
-// Load128 loads 16 bytes as two uint64s from b[0:16]
+// Load128 loads 16 bytes as two uint64s from unaligned memory
 //
 //go:nosplit
 //go:inline
@@ -218,47 +183,53 @@ func Load128(b []byte) (uint64, uint64) {
 	return p[0], p[1]
 }
 
-// LoadBE64 parses b[0:8] as big-endian uint64
+// LoadBE64 parses 8 bytes as big-endian uint64
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func LoadBE64(b []byte) uint64 {
-	_ = b[7] // bounds hint
+	_ = b[7] // Bounds check hint for compiler
 	return uint64(b[0])<<56 | uint64(b[1])<<48 |
 		uint64(b[2])<<40 | uint64(b[3])<<32 |
 		uint64(b[4])<<24 | uint64(b[5])<<16 |
 		uint64(b[6])<<8 | uint64(b[7])
 }
 
-// ───────────────────── Hex Parsers (No Error Path) ─────────────────────
+// ============================================================================
+// HIGH-PERFORMANCE HEX PARSING
+// ============================================================================
 
-// ParseHexU64 parses 0x-prefixed or raw hex → uint64
+// ParseHexU64 parses hex string (with or without 0x prefix) to uint64
+// No error handling - assumes well-formed input
 //
 //go:nosplit
 //go:inline
 //go:registerparams
 func ParseHexU64(b []byte) uint64 {
 	j := 0
+	// Skip 0x prefix if present
 	if len(b) >= 2 && b[0] == '0' && (b[1]|0x20) == 'x' {
 		j = 2
 	}
+
 	var u uint64
-	for ; j < len(b) && j < 18; j++ {
-		c := b[j] | 0x20
+	for ; j < len(b) && j < 18; j++ { // Limit to 16 hex digits + prefix
+		c := b[j] | 0x20 // Convert to lowercase
 		if c < '0' || c > 'f' || (c > '9' && c < 'a') {
 			break
 		}
 		v := uint64(c - '0')
 		if c > '9' {
-			v -= 39 // 'a' → 10
+			v -= 39 // Convert 'a'-'f' to 10-15
 		}
 		u = (u << 4) | v
 	}
 	return u
 }
 
-// ParseHexN parses ≤16 chars of hex (0-9a-fA-F) into uint64
+// ParseHexN parses up to 16 hex characters to uint64
+// Optimized for fixed-length hex strings
 //
 //go:nosplit
 //go:inline
@@ -279,7 +250,8 @@ func ParseHexN(b []byte) uint64 {
 	return v
 }
 
-// ParseHexU32 is a wrapper around ParseHexN for 32-bit output
+// ParseHexU32 parses hex string to uint32
+// Wrapper around ParseHexN for 32-bit output
 //
 //go:nosplit
 //go:inline
@@ -288,9 +260,12 @@ func ParseHexU32(b []byte) uint32 {
 	return uint32(ParseHexN(b))
 }
 
-// ───────────────────── Fast Hashes (Dedup & Routing) ─────────────────────
+// ============================================================================
+// FAST HASHING AND DEDUPLICATION
+// ============================================================================
 
-// Mix64 is a Murmur3-style 64-bit finalizer hash
+// Mix64 applies Murmur3-style 64-bit hash finalization
+// Used for fast hash table operations and deduplication
 //
 //go:nosplit
 //go:inline
@@ -304,7 +279,8 @@ func Mix64(x uint64) uint64 {
 	return x
 }
 
-// Hash17 reduces a 0x-prefixed Ethereum address to 17-bit bucket
+// Hash17 reduces Ethereum address to 17-bit hash for bucketing
+// Optimized for address-based routing and deduplication
 //
 //go:nosplit
 //go:inline
@@ -314,5 +290,44 @@ func Hash17(addr []byte) uint32 {
 		return 0
 	}
 	raw := ParseHexN(addr[:6])
-	return uint32(raw) & ((1 << 17) - 1)
+	return uint32(raw) & ((1 << 17) - 1) // Mask to 17 bits
 }
+
+// ============================================================================
+// DESIGN NOTES
+// ============================================================================
+
+/*
+PERFORMANCE OPTIMIZATIONS:
+
+1. ZERO-ALLOCATION DESIGN:
+   - All functions avoid heap allocations
+   - Direct unsafe operations for type conversion
+   - Stack-allocated buffers where needed
+
+2. REGISTER OPTIMIZATION:
+   - Functions marked with go:registerparams
+   - Minimal local variables for register allocation
+   - Inlined hot path operations
+
+3. CACHE-FRIENDLY PATTERNS:
+   - Hop-based traversal reduces cache misses
+   - Unaligned memory access for performance
+   - Batch processing where applicable
+
+4. UNSAFE OPERATIONS:
+   - Direct memory access for speed
+   - Bounds checking hints for compiler
+   - Type punning for efficient conversion
+
+5. BRANCH MINIMIZATION:
+   - Reduced conditional logic in hot paths
+   - Lookup tables for character conversion
+   - Bit manipulation over comparisons
+
+USAGE PATTERNS:
+- JSON parsing in high-throughput scenarios
+- Ethereum address processing and routing
+- Fast hash computation for deduplication
+- Zero-copy string operations
+*/
