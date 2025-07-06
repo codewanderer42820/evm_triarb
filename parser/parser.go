@@ -1,8 +1,8 @@
 package parser
 
 import (
-	"fmt"
 	"main/constants"
+	"main/debug"
 	"main/dedupe"
 	"main/types"
 	"main/utils"
@@ -158,11 +158,11 @@ func generateFingerprint(v *types.LogView) {
 //go:inline
 //go:registerparams
 func emitLog(v *types.LogView) {
-	fmt.Println("[EVENT]")
-	fmt.Println("  address   =", utils.B2s(v.Addr))
-	fmt.Println("  block     =", utils.B2s(v.BlkNum))
-	fmt.Println("  data      =", utils.B2s(v.Data))
-	fmt.Println("  logIndex  =", utils.B2s(v.LogIdx))
-	fmt.Println("  topics    =", utils.B2s(v.Topics))
-	fmt.Println("  txIndex   =", utils.B2s(v.TxIndex))
+	debug.DropMessage("[EVENT]", "")
+	debug.DropMessage("  address", utils.B2s(v.Addr))
+	debug.DropMessage("  block", utils.B2s(v.BlkNum))
+	debug.DropMessage("  data", utils.B2s(v.Data))
+	debug.DropMessage("  logIndex", utils.B2s(v.LogIdx))
+	debug.DropMessage("  topics", utils.B2s(v.Topics))
+	debug.DropMessage("  txIndex", utils.B2s(v.TxIndex))
 }
