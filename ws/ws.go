@@ -30,6 +30,7 @@ const subscribeFrameLen = 8 + subscribePayloadLen
 // The memory layout is optimized for cache performance with frequently accessed
 // fields placed in the first cache line.
 //
+//go:notinheap
 //go:align 64 // Align to cache line boundary for optimal performance
 type WebSocketProcessor struct {
 	// Cache line 1: Frequently accessed header processing buffer
@@ -51,6 +52,7 @@ var _ [128 - subscribeFrameLen]struct{} // subscribeFrame buffer size check
 
 // Global processor instance - allocated once, reused forever
 //
+//go:notinheap
 //go:align 64
 var processor WebSocketProcessor
 
@@ -69,6 +71,7 @@ const HandshakeBufferSize = 512 // Handshake response buffer
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func init() {
 	// Copy pre-computed upgrade request
 	copy(processor.upgradeRequest[:], upgradeRequestTemplate)
@@ -99,6 +102,7 @@ func init() {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func Handshake(conn net.Conn) error {
 	// Send pre-constructed upgrade request
 	_, err := conn.Write(processor.upgradeRequest[:upgradeRequestLen])
@@ -144,6 +148,7 @@ func Handshake(conn net.Conn) error {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func SendSubscription(conn net.Conn) error {
 	_, err := conn.Write(processor.subscribeFrame[:subscribeFrameLen])
 	return err
@@ -158,6 +163,7 @@ func SendSubscription(conn net.Conn) error {
 //
 //go:nosplit
 //go:inline
+//go:registerparams
 func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 	// Hot variables in function scope for register allocation
 	msgEnd := 0           // Current position in main buffer
