@@ -52,7 +52,7 @@ func HandleFrame(p []byte) {
 
 		case constants.KeyBlockNumber:
 			start := i + utils.SkipToQuote(p[i:], 14, 1) + 1
-			end := start + utils.SkipToQuote(p[start:], 0, 1)
+			end := start + utils.SkipToQuote(p[start:], 8, 1)
 			v.BlkNum = p[start:end]
 			i = end + 1
 
@@ -71,7 +71,7 @@ func HandleFrame(p []byte) {
 
 		case constants.KeyLogIndex:
 			start := i + utils.SkipToQuote(p[i:], 11, 1) + 1
-			end := start + utils.SkipToQuote(p[start:], 0, 1)
+			end := start + utils.SkipToQuote(p[start:], 3, 1)
 			v.LogIdx = p[start:end]
 			i = end + 1
 
@@ -103,7 +103,7 @@ func HandleFrame(p []byte) {
 			}
 			// Parse transaction index
 			start := i + utils.SkipToQuote(p[i:], 19, 1) + 1
-			end := start + utils.SkipToQuote(p[start:], 0, 1)
+			end := start + utils.SkipToQuote(p[start:], 3, 1)
 			v.TxIndex = p[start:end]
 			i = end + 1
 		}
