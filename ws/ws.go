@@ -7,7 +7,8 @@ import (
 	"unsafe"
 )
 
-const BufferSize = 16777216 // 16MB
+const BufferSize = 16777216     // 16MB
+const HandshakeBufferSize = 512 // Handshake response buffer size
 
 //go:notinheap
 //go:align 16384
@@ -17,46 +18,53 @@ var buffer [BufferSize]byte
 //go:align 16
 var headerBuf [16]byte
 
-var upgradeRequest []byte
-var subscribeFrame []byte
+//go:notinheap
+var upgradeRequest [256]byte
+var upgradeRequestLen int
+
+//go:notinheap
+var subscribeFrame [128]byte
+var subscribeFrameLen int
 
 func init() {
-	upgradeRequest = []byte(
-		"GET " + constants.WsPath + " HTTP/1.1\r\n" +
-			"Host: " + constants.WsHost + "\r\n" +
-			"Upgrade: websocket\r\n" +
-			"Connection: Upgrade\r\n" +
-			"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
-			"Sec-WebSocket-Version: 13\r\n\r\n")
+	// Build upgrade request directly into fixed buffer
+	req := "GET " + constants.WsPath + " HTTP/1.1\r\n" +
+		"Host: " + constants.WsHost + "\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+		"Sec-WebSocket-Version: 13\r\n\r\n"
+	upgradeRequestLen = copy(upgradeRequest[:], req)
 
-	payload := []byte(`{"jsonrpc":"2.0","method":"eth_subscribe","params":["logs",{}],"id":1}`)
+	// Build subscribe frame directly into fixed buffer
+	payload := `{"jsonrpc":"2.0","method":"eth_subscribe","params":["logs",{}],"id":1}`
 	plen := len(payload)
 
-	frame := make([]byte, 8+plen) // Header(4) + Mask(4) + Payload
-	frame[0] = 0x81               // FIN=1, TEXT frame
-	frame[1] = 0x80 | 126         // MASK=1, 16-bit length
-	frame[2] = byte(plen >> 8)
-	frame[3] = byte(plen)
-	frame[4] = 0x12 // mask bytes
-	frame[5] = 0x34
-	frame[6] = 0x56
-	frame[7] = 0x78
+	subscribeFrame[0] = 0x81       // FIN=1, TEXT frame
+	subscribeFrame[1] = 0x80 | 126 // MASK=1, 16-bit length
+	subscribeFrame[2] = byte(plen >> 8)
+	subscribeFrame[3] = byte(plen)
+	subscribeFrame[4] = 0x12 // mask bytes
+	subscribeFrame[5] = 0x34
+	subscribeFrame[6] = 0x56
+	subscribeFrame[7] = 0x78
 
-	// XOR mask payload
-	for i, b := range payload {
-		frame[8+i] = b ^ frame[4+(i&3)]
+	// XOR mask payload directly into buffer
+	for i := 0; i < plen; i++ {
+		subscribeFrame[8+i] = payload[i] ^ subscribeFrame[4+(i&3)]
 	}
-	subscribeFrame = frame
+	subscribeFrameLen = 8 + plen
 }
 
 //go:noinline
 func Handshake(conn net.Conn) error {
-	_, err := conn.Write(upgradeRequest)
+	_, err := conn.Write(upgradeRequest[:upgradeRequestLen])
 	if err != nil {
 		return err
 	}
 
-	buf := make([]byte, 512)
+	// Stack-allocated buffer - no heap allocation
+	var buf [HandshakeBufferSize]byte
 	total := 0
 
 	for total < 500 {
@@ -86,7 +94,7 @@ func Handshake(conn net.Conn) error {
 
 //go:noinline
 func SendSubscription(conn net.Conn) error {
-	_, err := conn.Write(subscribeFrame)
+	_, err := conn.Write(subscribeFrame[:subscribeFrameLen])
 	return err
 }
 
