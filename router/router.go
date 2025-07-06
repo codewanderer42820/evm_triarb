@@ -247,7 +247,7 @@ func shardWorker(coreID, half int, in <-chan PairShard) {
 	executors[coreID] = ex
 	rings[coreID] = ring24.New(1 << 16)
 
-	cycleBuf := make([]CycleState, 0, 8192)
+	cycleBuf := make([]CycleState, 0)
 	for sh := range in {
 		attachShard(ex, &sh, &cycleBuf)
 	}
