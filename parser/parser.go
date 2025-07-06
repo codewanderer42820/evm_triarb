@@ -110,7 +110,7 @@ func HandleFrame(p []byte) {
 	}
 
 	// Unified validation following LogView field sequence
-	if len(v.Addr) == 0 || len(v.Data) == 0 || len(v.Topics) == 0 || len(v.BlkNum) == 0 || len(v.LogIdx) == 0 {
+	if len(v.Addr) == 0 || len(v.Data) == 0 || len(v.BlkNum) == 0 || len(v.LogIdx) == 0 {
 		utils.PrintWarning("Warning: Skipping event with missing required fields\n")
 		return
 	}
