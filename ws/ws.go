@@ -57,6 +57,9 @@ var subscribeFrameLen int
 // INITIALIZATION - CONSTRUCT PROTOCOL FRAMES
 // ============================================================================
 
+//go:nosplit
+//go:inline
+//go:registerparams
 func init() {
 	// Build HTTP upgrade request for WebSocket handshake.
 	// This follows RFC 6455 specification for WebSocket upgrade.
@@ -112,7 +115,9 @@ func init() {
 // - Unsafe pointer operations for fastest HTTP status validation
 // - 32-bit scanning for \r\n\r\n delimiter
 //
-//go:noinline
+//go:nosplit
+//go:inline
+//go:registerparams
 func Handshake(conn net.Conn) error {
 	// Send pre-constructed upgrade request
 	_, err := conn.Write(upgradeRequest[:upgradeRequestLen])
@@ -159,7 +164,9 @@ func Handshake(conn net.Conn) error {
 // SendSubscription transmits pre-built WebSocket subscription frame.
 // Zero allocation - frame is pre-constructed during init().
 //
-//go:noinline
+//go:nosplit
+//go:inline
+//go:registerparams
 func SendSubscription(conn net.Conn) error {
 	_, err := conn.Write(subscribeFrame[:subscribeFrameLen])
 	return err
@@ -185,7 +192,9 @@ func SendSubscription(conn net.Conn) error {
 // - Control frame skipping (opcodes 8-15)
 // - Extended length field support (16-bit and 64-bit)
 //
-//go:noinline
+//go:nosplit
+//go:inline
+//go:registerparams
 func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 	msgEnd := 0 // Tracks current position in global buffer
 
