@@ -241,9 +241,11 @@ func InitExecutors(cycles []PairTriplet) {
 func shardWorker(coreID, half int, in <-chan PairShard) {
 	runtime.LockOSThread()
 
+	done := make(chan struct{})
 	ex := &CoreExecutor{
 		LocalIdx:  localidx.New(1 << 16),
 		IsReverse: coreID >= half,
+		Done:      done,
 	}
 	executors[coreID] = ex
 	rings[coreID] = ring24.New(1 << 16)
@@ -256,7 +258,7 @@ func shardWorker(coreID, half int, in <-chan PairShard) {
 	stop, hot := control.Flags()
 	ring24.PinnedConsumer(coreID, rings[coreID], stop, hot,
 		func(p *[24]byte) { handleTick(ex, (*TickUpdate)(unsafe.Pointer(p))) },
-		make(chan struct{}))
+		done)
 }
 
 /*──────────────────── attachShard (fan-in construction) ─────────────────────*/
