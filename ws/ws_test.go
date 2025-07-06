@@ -63,6 +63,101 @@ func (m *mockConn) SetDeadline(t time.Time) error      { return nil }
 func (m *mockConn) SetReadDeadline(t time.Time) error  { return nil }
 func (m *mockConn) SetWriteDeadline(t time.Time) error { return nil }
 
+// ============================================================================
+// ZERO-ALLOCATION CONNECTIONS FOR TRUE PERFORMANCE MEASUREMENT
+// ============================================================================
+
+// discardConn - Discards all writes, returns EOF on reads
+type discardConn struct{}
+
+func (d *discardConn) Read(b []byte) (int, error)         { return 0, fmt.Errorf("EOF") }
+func (d *discardConn) Write(b []byte) (int, error)        { return len(b), nil }
+func (d *discardConn) Close() error                       { return nil }
+func (d *discardConn) LocalAddr() net.Addr                { return nil }
+func (d *discardConn) RemoteAddr() net.Addr               { return nil }
+func (d *discardConn) SetDeadline(t time.Time) error      { return nil }
+func (d *discardConn) SetReadDeadline(t time.Time) error  { return nil }
+func (d *discardConn) SetWriteDeadline(t time.Time) error { return nil }
+
+// hybridConn - Provides pre-allocated read data, discards writes (zero allocation)
+type hybridConn struct {
+	readData []byte
+	readPos  int
+}
+
+func (h *hybridConn) Write(b []byte) (int, error) { return len(b), nil } // Zero allocation discard
+
+func (h *hybridConn) Read(b []byte) (int, error) {
+	if h.readPos >= len(h.readData) {
+		return 0, fmt.Errorf("EOF")
+	}
+	n := copy(b, h.readData[h.readPos:])
+	h.readPos += n
+	return n, nil
+}
+
+func (h *hybridConn) Close() error                       { return nil }
+func (h *hybridConn) LocalAddr() net.Addr                { return nil }
+func (h *hybridConn) RemoteAddr() net.Addr               { return nil }
+func (h *hybridConn) SetDeadline(t time.Time) error      { return nil }
+func (h *hybridConn) SetReadDeadline(t time.Time) error  { return nil }
+func (h *hybridConn) SetWriteDeadline(t time.Time) error { return nil }
+
+// reusableConn - Pre-allocated connection that can be reset without allocation
+type reusableConn struct {
+	readData    []byte
+	readPos     int
+	writeBuffer []byte // Pre-allocated write buffer
+	writePos    int
+	readErr     error
+	writeErr    error
+}
+
+func newReusableConn(readData []byte, writeCapacity int) *reusableConn {
+	return &reusableConn{
+		readData:    readData,
+		writeBuffer: make([]byte, 0, writeCapacity),
+	}
+}
+
+func (r *reusableConn) reset() {
+	r.readPos = 0
+	r.writePos = 0
+	// Don't reallocate writeBuffer, just reset length
+	r.writeBuffer = r.writeBuffer[:0]
+}
+
+func (r *reusableConn) Read(b []byte) (int, error) {
+	if r.readErr != nil {
+		return 0, r.readErr
+	}
+	if r.readPos >= len(r.readData) {
+		return 0, fmt.Errorf("EOF")
+	}
+
+	n := copy(b, r.readData[r.readPos:])
+	r.readPos += n
+	return n, nil
+}
+
+func (r *reusableConn) Write(b []byte) (int, error) {
+	if r.writeErr != nil {
+		return 0, r.writeErr
+	}
+	// Use pre-allocated buffer to avoid allocation
+	if len(r.writeBuffer)+len(b) <= cap(r.writeBuffer) {
+		r.writeBuffer = append(r.writeBuffer, b...)
+	}
+	return len(b), nil
+}
+
+func (r *reusableConn) Close() error                       { return nil }
+func (r *reusableConn) LocalAddr() net.Addr                { return nil }
+func (r *reusableConn) RemoteAddr() net.Addr               { return nil }
+func (r *reusableConn) SetDeadline(t time.Time) error      { return nil }
+func (r *reusableConn) SetReadDeadline(t time.Time) error  { return nil }
+func (r *reusableConn) SetWriteDeadline(t time.Time) error { return nil }
+
 // Helper to create WebSocket frame
 func createFrame(opcode byte, payload []byte, fin bool) []byte {
 	frame := make([]byte, 2)
@@ -464,7 +559,7 @@ func TestStressScenarios(t *testing.T) {
 }
 
 // ============================================================================
-// ZERO-ALLOCATION BENCHMARKS
+// TRUE ZERO-ALLOCATION BENCHMARKS
 // ============================================================================
 
 func BenchmarkZeroAllocation(b *testing.B) {
@@ -476,14 +571,14 @@ func BenchmarkZeroAllocation(b *testing.B) {
 			payload := make([]byte, size)
 			rand.Read(payload)
 			frame := createFrame(0x1, payload, true)
-			conn := &mockConn{readData: frame}
+			conn := newReusableConn(frame, 0) // No write buffer needed
 
 			b.ReportAllocs()
 			b.SetBytes(int64(size))
 			b.ResetTimer() // Start timing HERE
 
 			for i := 0; i < b.N; i++ {
-				conn.readPos = 0 // Reset, don't reallocate
+				conn.reset() // Reset without reallocation
 				_, err := SpinUntilCompleteMessage(conn)
 				if err != nil {
 					b.Fatal(err)
@@ -509,14 +604,14 @@ func BenchmarkZeroAllocationFragmented(b *testing.B) {
 	rand.Read(payload)
 	frameData = append(frameData, createFrame(0x0, payload, true)...)
 
-	conn := &mockConn{readData: frameData}
+	conn := newReusableConn(frameData, 0)
 
 	b.ReportAllocs()
 	b.SetBytes(int64(chunkSize * numChunks))
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		conn.readPos = 0
+		conn.reset()
 		_, err := SpinUntilCompleteMessage(conn)
 		if err != nil {
 			b.Fatal(err)
@@ -536,15 +631,68 @@ func BenchmarkZeroAllocationControlFrames(b *testing.B) {
 	rand.Read(payload)
 	frameData = append(frameData, createFrame(0x1, payload, true)...)
 
-	conn := &mockConn{readData: frameData}
+	conn := newReusableConn(frameData, 0)
 
 	b.ReportAllocs()
 	b.SetBytes(1000)
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		conn.readPos = 0
+		conn.reset()
 		_, err := SpinUntilCompleteMessage(conn)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// ============================================================================
+// TRUE PERFORMANCE BENCHMARKS FOR HANDSHAKE & SUBSCRIPTION
+// ============================================================================
+
+func BenchmarkSendSubscriptionTrue(b *testing.B) {
+	conn := &discardConn{}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		err := SendSubscription(conn)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkHandshakeTrue(b *testing.B) {
+	// Pre-allocate valid response OUTSIDE benchmark
+	validResponse := []byte("HTTP/1.1 101 Switching Protocols\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n")
+
+	conn := &hybridConn{readData: validResponse}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		conn.readPos = 0 // Reset without allocation
+		err := Handshake(conn)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkHandshakeWriteOnly(b *testing.B) {
+	conn := &discardConn{}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		_, err := conn.Write(upgradeRequest[:upgradeRequestLen])
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -617,7 +765,7 @@ func BenchmarkMemoryPressure(b *testing.B) {
 	payload := make([]byte, 1024*1024) // 1MB
 	rand.Read(payload)
 	frame := createFrame(0x1, payload, true)
-	conn := &mockConn{readData: frame}
+	conn := newReusableConn(frame, 0)
 
 	runtime.GC()
 
@@ -629,7 +777,7 @@ func BenchmarkMemoryPressure(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		conn.readPos = 0
+		conn.reset()
 		_, err := SpinUntilCompleteMessage(conn)
 		if err != nil {
 			b.Fatal(err)
@@ -664,13 +812,13 @@ func BenchmarkLatencyAnalysis(b *testing.B) {
 			payload := make([]byte, size)
 			rand.Read(payload)
 			frame := createFrame(0x1, payload, true)
-			conn := &mockConn{readData: frame}
+			conn := newReusableConn(frame, 0)
 
 			times := make([]time.Duration, b.N)
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				conn.readPos = 0
+				conn.reset()
 
 				start := time.Now()
 				_, err := SpinUntilCompleteMessage(conn)
@@ -715,13 +863,13 @@ func BenchmarkEdgeCases(b *testing.B) {
 	b.Run("boundary_126", func(b *testing.B) {
 		payload := make([]byte, 126)
 		frame := createFrame(0x1, payload, true)
-		conn := &mockConn{readData: frame}
+		conn := newReusableConn(frame, 0)
 
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			conn.readPos = 0
+			conn.reset()
 			_, err := SpinUntilCompleteMessage(conn)
 			if err != nil {
 				b.Fatal(err)
@@ -732,13 +880,13 @@ func BenchmarkEdgeCases(b *testing.B) {
 	b.Run("boundary_65536", func(b *testing.B) {
 		payload := make([]byte, 65536)
 		frame := createFrame(0x1, payload, true)
-		conn := &mockConn{readData: frame}
+		conn := newReusableConn(frame, 0)
 
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			conn.readPos = 0
+			conn.reset()
 			_, err := SpinUntilCompleteMessage(conn)
 			if err != nil {
 				b.Fatal(err)
@@ -755,13 +903,13 @@ func BenchmarkEdgeCases(b *testing.B) {
 		}
 		frameData = append(frameData, createFrame(0x1, []byte("data"), true)...)
 
-		conn := &mockConn{readData: frameData}
+		conn := newReusableConn(frameData, 0)
 
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			conn.readPos = 0
+			conn.reset()
 			_, err := SpinUntilCompleteMessage(conn)
 			if err != nil {
 				b.Fatal(err)
@@ -780,10 +928,10 @@ func BenchmarkConcurrency(b *testing.B) {
 	frame := createFrame(0x1, payload, true)
 
 	b.RunParallel(func(pb *testing.PB) {
-		conn := &mockConn{readData: frame}
+		conn := newReusableConn(frame, 0)
 
 		for pb.Next() {
-			conn.readPos = 0
+			conn.reset()
 			_, err := SpinUntilCompleteMessage(conn)
 			if err != nil {
 				b.Fatal(err)
@@ -816,14 +964,14 @@ func BenchmarkComparison(b *testing.B) {
 		payload := make([]byte, size)
 		rand.Read(payload)
 		frame := createFrame(0x1, payload, true)
-		conn := &mockConn{readData: frame}
+		conn := newReusableConn(frame, 0)
 
 		b.ReportAllocs()
 		b.SetBytes(int64(size))
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			conn.readPos = 0
+			conn.reset()
 			_, err := SpinUntilCompleteMessage(conn)
 			if err != nil {
 				b.Fatal(err)
@@ -833,10 +981,10 @@ func BenchmarkComparison(b *testing.B) {
 }
 
 // ============================================================================
-// HANDSHAKE & SUBSCRIPTION BENCHMARKS
+// LEGACY BENCHMARKS (for comparison with old test infrastructure)
 // ============================================================================
 
-func BenchmarkHandshake(b *testing.B) {
+func BenchmarkHandshakeLegacy(b *testing.B) {
 	validResponse := "HTTP/1.1 101 Switching Protocols\r\n" +
 		"Upgrade: websocket\r\n" +
 		"Connection: Upgrade\r\n" +
@@ -856,7 +1004,7 @@ func BenchmarkHandshake(b *testing.B) {
 	}
 }
 
-func BenchmarkSendSubscription(b *testing.B) {
+func BenchmarkSendSubscriptionLegacy(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 
