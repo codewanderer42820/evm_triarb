@@ -42,8 +42,11 @@ package ring24
 //
 //	cpu: Target CPU index (ignored on unsupported platforms)
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
 func setAffinity(cpu int) {
 	// No-op implementation for platform compatibility
 }

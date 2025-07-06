@@ -35,7 +35,10 @@ package ring24
 //   - //go:nosplit: Safe for use in stack-sensitive contexts
 //   - //go:inline: Aggressive inlining for call elimination
 //
+//go:norace
+//go:nocheckptr
 //go:noescape
 //go:nosplit
 //go:inline
+//go:registerparams
 func cpuRelax()

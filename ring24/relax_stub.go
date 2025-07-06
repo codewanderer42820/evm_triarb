@@ -31,8 +31,11 @@ package ring24
 //   - Platform agnostic: Functions identically across architectures
 //   - Power neutral: No power management impact
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
 func cpuRelax() {
 	// No-op implementation for architecture compatibility
 }
