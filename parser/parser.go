@@ -9,17 +9,12 @@ import (
 	"unsafe"
 )
 
-// ============================================================================
-// ETHEREUM LOG PARSER - HIGH-PERFORMANCE JSON PROCESSING
-// ============================================================================
-
 var (
 	dedup     dedupe.Deduper
 	latestBlk uint32
 )
 
-// HandleFrame processes JSON-RPC subscription messages containing Ethereum log data.
-// Optimized for UniswapV2 Sync() events with zero-allocation parsing.
+// HandleFrame processes JSON-RPC Ethereum logs with zero-allocation parsing
 //
 //go:norace
 //go:nocheckptr
@@ -27,32 +22,34 @@ var (
 //go:inline
 //go:registerparams
 func HandleFrame(p []byte) {
-	// Require minimum length for processing: JSON-RPC wrapper (117) + log field parsing (8)
+	// Minimum size check: RPC wrapper + field detection
 	if len(p) < 117+8 {
 		return
 	}
 
-	// Skip JSON-RPC wrapper (117 bytes)
+	// Skip JSON-RPC wrapper
 	p = p[117:]
 
 	var v types.LogView
 	end := len(p) - 8
 
-	// Main scanning loop with 8-byte aligned field detection
+	// Main parsing loop with 8-byte field detection
 	for i := 0; i <= end; i++ {
 		tag := *(*[8]byte)(unsafe.Pointer(&p[i]))
 
 		switch tag {
 		case constants.KeyAddress:
+			// Extract contract address
 			start := i + utils.SkipToQuote(p[i:], 10, 1) + 1
 			end := start + utils.SkipToQuote(p[start:], 0, 42)
 			v.Addr = p[start:end]
 			i = end + 1
 
 		case constants.KeyBlockHash:
-			i += 80 // Skip entire field
+			i += 80 // Skip unused field
 
 		case constants.KeyBlockNumber:
+			// Extract block number
 			start := i + utils.SkipToQuote(p[i:], 14, 1) + 1
 			end := start + utils.SkipToQuote(p[start:], 8, 1)
 			v.BlkNum = p[start:end]
@@ -62,25 +59,28 @@ func HandleFrame(p []byte) {
 			i += 29 // Skip Infura-specific field
 
 		case constants.KeyData:
+			// Extract event data
 			start := i + utils.SkipToQuote(p[i:], 7, 1) + 1
 			if end, exit := utils.SkipToQuoteEarlyExit(p[start+2:], 0, 64, 3); !exit {
 				end += start + 2
 				v.Data = p[start:end]
 				i = end + 1
 			} else {
-				return // Data field too large
+				return // Data too large
 			}
 
 		case constants.KeyLogIndex:
+			// Extract log index
 			start := i + utils.SkipToQuote(p[i:], 11, 1) + 1
 			end := start + utils.SkipToQuote(p[start:], 3, 1)
 			v.LogIdx = p[start:end]
 			i = end + 1
 
 		case constants.KeyRemoved:
-			i += 14 // Skip boolean field
+			i += 14 // Skip boolean
 
 		case constants.KeyTopics:
+			// Extract topics array
 			start := i + utils.SkipToOpeningBracket(p[i:], 9, 1) + 1
 			if end, exit := utils.SkipToClosingBracketEarlyExit(p[start-1:], 0, 69, 2); !exit {
 				end += start - 1
@@ -89,21 +89,21 @@ func HandleFrame(p []byte) {
 				}
 				v.Topics = p[start:end]
 
-				// Early Sync() event validation
+				// Validate Sync event signature
 				if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != constants.SigSyncPrefix {
 					return
 				}
 				i = end + 1
 			} else {
-				return // Topics array too large
+				return // Topics too large
 			}
 
 		case constants.KeyTransaction:
 			if len(p)-i >= 86 {
-				i += 86 // Skip transaction hash
+				i += 86 // Skip tx hash
 				continue
 			}
-			// Parse transaction index
+			// Parse tx index
 			start := i + utils.SkipToQuote(p[i:], 19, 1) + 1
 			end := start + utils.SkipToQuote(p[start:], 3, 1)
 			v.TxIndex = p[start:end]
@@ -111,32 +111,33 @@ func HandleFrame(p []byte) {
 		}
 	}
 
-	// Modified validation - check required fields in struct order (Addr, Data, BlkNum, LogIdx, TxIndex)
-	// Topics is optional and can be empty
-	if len(v.Addr) == 0 || len(v.Data) == 0 || len(v.BlkNum) == 0 || len(v.LogIdx) == 0 || len(v.TxIndex) == 0 {
+	// Validate required fields
+	if len(v.Addr) == 0 || len(v.Data) == 0 || len(v.BlkNum) == 0 ||
+		len(v.LogIdx) == 0 || len(v.TxIndex) == 0 {
 		utils.PrintWarning("Warning: Skipping event with missing required fields\n")
 		return
 	}
 
-	// Generate fingerprint for deduplication
+	// Generate deduplication fingerprint
 	generateFingerprint(&v)
 
-	// Parse numeric fields
+	// Parse numeric values
 	blk32 := uint32(utils.ParseHexU64(v.BlkNum))
 	tx32 := utils.ParseHexU32(v.TxIndex)
 	log32 := utils.ParseHexU32(v.LogIdx)
 
+	// Track latest block
 	if blk32 > latestBlk {
 		latestBlk = blk32
 	}
 
-	// Check for duplicates and emit if unique
+	// Check duplicates and emit
 	if dedup.Check(blk32, tx32, log32, v.TagHi, v.TagLo, latestBlk) {
 		emitLog(&v)
 	}
 }
 
-// generateFingerprint creates a unique identifier from available data fields
+// generateFingerprint creates unique identifier from log data
 //
 //go:norace
 //go:nocheckptr
@@ -156,7 +157,7 @@ func generateFingerprint(v *types.LogView) {
 	}
 }
 
-// emitLog outputs a deduplicated event using zero-copy string conversion
+// emitLog outputs deduplicated event
 //
 //go:norace
 //go:nocheckptr
