@@ -2183,18 +2183,49 @@ func BenchmarkWorstCasePerformance(b *testing.B) {
 			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
 			fanoutTables:       make([][]FanoutEntry, 1),
 			pairToQueueIndex:   localidx.New(16),
-			cycleStates:        make([]ArbitrageCycleState, 100),
+			cycleStates:        make([]ArbitrageCycleState, constants.DefaultRingSize), // Use system limit
 		}
 
 		executor.priorityQueues[0] = *quantumqueue64.New()
 		executor.pairToQueueIndex.Put(123, 0)
 
-		// Maximum realistic fanout
-		fanoutSize := 50
+		// REALISTIC TEST: Use actual system capacity
+		// This represents the max fanout a single queue can handle
+		fanoutSize := constants.DefaultRingSize // 65,536 - the actual limit!
 		executor.fanoutTables[0] = make([]FanoutEntry, fanoutSize)
 
+		b.Logf("Setting up %d fanout entries (quantum queue capacity limit)...", fanoutSize)
+
 		for i := 0; i < fanoutSize; i++ {
-			handle, _ := executor.priorityQueues[0].BorrowSafe()
+			// Initialize cycle state
+			executor.cycleStates[i] = ArbitrageCycleState{
+				tickValues: [3]float64{
+					0.001 + float64(i%1000)*0.000001,
+					0.002 + float64(i%1000)*0.000001,
+					0.003 + float64(i%1000)*0.000001,
+				},
+				pairIDs: [3]PairID{
+					PairID(i * 3),
+					PairID(i*3 + 1),
+					PairID(i*3 + 2),
+				},
+			}
+
+			// Borrow handle and push to queue
+			handle, err := executor.priorityQueues[0].BorrowSafe()
+			if err != nil {
+				b.Fatalf("Failed to borrow handle at index %d: %v", i, err)
+			}
+
+			initialPriority := quantizeTickToInt64(
+				executor.cycleStates[i].tickValues[0] +
+					executor.cycleStates[i].tickValues[1] +
+					executor.cycleStates[i].tickValues[2],
+			)
+
+			// Push to queue (no return value to check)
+			executor.priorityQueues[0].Push(initialPriority, handle, uint64(i))
+
 			executor.fanoutTables[0][i] = FanoutEntry{
 				queueHandle:     handle,
 				edgeIndex:       uint16(i % 3),
@@ -2202,15 +2233,17 @@ func BenchmarkWorstCasePerformance(b *testing.B) {
 				queue:           &executor.priorityQueues[0],
 			}
 
-			executor.cycleStates[i] = ArbitrageCycleState{
-				tickValues: [3]float64{0.0, 0.0, 0.0},
-				pairIDs:    [3]PairID{PairID(i * 3), PairID(i*3 + 1), PairID(i*3 + 2)},
+			if i%10000 == 0 {
+				b.Logf("Initialized %d/%d cycles", i, fanoutSize)
 			}
 		}
 
+		b.Logf("Setup complete. Queue size: %d (at capacity)", fanoutSize)
+
 		update := &TickUpdate{
 			pairID:      PairID(123),
-			forwardTick: 1.0,
+			forwardTick: -0.001,
+			reverseTick: 0.001,
 		}
 
 		b.ResetTimer()
@@ -2219,5 +2252,77 @@ func BenchmarkWorstCasePerformance(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			processTickUpdate(executor, update)
 		}
+
+		b.StopTimer()
+		b.Logf("Processed %d updates with %d fanout each", b.N, fanoutSize)
+	})
+
+	// Test what happens when we need MORE than queue capacity
+	b.Run("MultiQueueFanout", func(b *testing.B) {
+		// For 100k fanout, we'd need multiple queues
+		targetFanout := 100000
+		queueCapacity := constants.DefaultRingSize
+		requiredQueues := (targetFanout + queueCapacity - 1) / queueCapacity // Ceiling division
+
+		b.Logf("For %d fanout, need %d queues (%d capacity each)",
+			targetFanout, requiredQueues, queueCapacity)
+
+		executor := &ArbitrageCoreExecutor{
+			isReverseDirection: false,
+			priorityQueues:     make([]quantumqueue64.QuantumQueue64, requiredQueues),
+			fanoutTables:       make([][]FanoutEntry, requiredQueues),
+			pairToQueueIndex:   localidx.New(16),
+			cycleStates:        make([]ArbitrageCycleState, targetFanout),
+		}
+
+		// Initialize multiple queues
+		for q := 0; q < requiredQueues; q++ {
+			executor.priorityQueues[q] = *quantumqueue64.New()
+			executor.fanoutTables[q] = []FanoutEntry{}
+		}
+
+		// Distribute cycles across queues
+		for i := 0; i < targetFanout; i++ {
+			queueIndex := i / queueCapacity // Which queue for this cycle
+
+			executor.cycleStates[i] = ArbitrageCycleState{
+				tickValues: [3]float64{0.001, 0.002, 0.003},
+				pairIDs:    [3]PairID{PairID(i * 3), PairID(i*3 + 1), PairID(i*3 + 2)},
+			}
+
+			handle, _ := executor.priorityQueues[queueIndex].BorrowSafe()
+			priority := quantizeTickToInt64(0.006)
+			executor.priorityQueues[queueIndex].Push(priority, handle, uint64(i))
+
+			executor.fanoutTables[queueIndex] = append(executor.fanoutTables[queueIndex],
+				FanoutEntry{
+					queueHandle:     handle,
+					edgeIndex:       uint16(i % 3),
+					cycleStateIndex: CycleStateIndex(i),
+					queue:           &executor.priorityQueues[queueIndex],
+				})
+
+			if i%20000 == 0 {
+				b.Logf("Distributed %d/%d cycles across %d queues", i, targetFanout, requiredQueues)
+			}
+		}
+
+		executor.pairToQueueIndex.Put(123, 0) // Point to first queue for testing
+
+		update := &TickUpdate{
+			pairID:      PairID(123),
+			forwardTick: -0.001,
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			// Only process first queue for benchmark
+			processTickUpdate(executor, update)
+		}
+
+		b.StopTimer()
+		b.Logf("Multi-queue setup: %d total cycles, %d queues", targetFanout, requiredQueues)
 	})
 }
