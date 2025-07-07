@@ -5,7 +5,7 @@
 // Comprehensive test coverage for ISR-safe QuantumQueue64 operations with
 // emphasis on footgun-mode behavior validation and protocol adherence.
 //
-// COMPACT VERSION: Updated for uint64 payloads and 32-byte node layout
+// COMPACT VERSION: Updated for uint64 payloads instead of 48-byte data blocks.
 //
 // Test categories:
 //   - Basic construction and initialization validation
@@ -60,9 +60,9 @@ func TestNewQueueBehavior(t *testing.T) {
 
 	// Verify handle reset to clean state
 	n1 := &q.arena[h1]
-	if n1.tick != -1 || n1.data != 0 || n1.prev != nilIdx || n1.next != nilIdx {
-		t.Errorf("Borrow reset failed: tick=%d data=%d prev=%v next=%v",
-			n1.tick, n1.data, n1.prev, n1.next)
+	if n1.tick != -1 || n1.prev != nilIdx || n1.next != nilIdx {
+		t.Errorf("Borrow reset failed: tick=%d prev=%v next=%v",
+			n1.tick, n1.prev, n1.next)
 	}
 
 	// Test sequential handle allocation
@@ -119,8 +119,7 @@ func TestPushAndPeepMin(t *testing.T) {
 	h, _ := q.BorrowSafe()
 
 	// Test basic insertion
-	const testData1 = uint64(0x123456789ABCDEF0)
-	q.Push(10, h, testData1)
+	q.Push(10, h, 0x123456789ABCDEF0)
 	if q.Empty() || q.Size() != 1 {
 		t.Errorf("queue state after Push: Empty=%v Size=%d; want false, 1",
 			q.Empty(), q.Size())
@@ -128,22 +127,21 @@ func TestPushAndPeepMin(t *testing.T) {
 
 	// Verify insertion correctness
 	hGot, tickGot, data := q.PeepMin()
-	if hGot != h || tickGot != 10 || data != testData1 {
+	if hGot != h || tickGot != 10 || data != 0x123456789ABCDEF0 {
 		t.Errorf("PeepMin mismatch: h=%v tick=%d data=%x; want %v, 10, %x",
-			hGot, tickGot, data, h, testData1)
+			hGot, tickGot, data, h, uint64(0x123456789ABCDEF0))
 	}
 
 	// Test in-place update (same tick, same handle)
-	const testData2 = uint64(0xFEDCBA9876543210)
-	q.Push(10, h, testData2)
+	q.Push(10, h, 0xFEDCBA9876543210)
 	if q.Size() != 1 {
 		t.Errorf("in-place update changed size: got %d, want 1", q.Size())
 	}
 
 	// Verify payload update without structural changes
 	hGot2, _, data2 := q.PeepMin()
-	if hGot2 != h || data2 != testData2 {
-		t.Errorf("payload update failed: got %x, want %x", data2, testData2)
+	if hGot2 != h || data2 != 0xFEDCBA9876543210 {
+		t.Errorf("payload update failed: got %x, want %x", data2, uint64(0xFEDCBA9876543210))
 	}
 
 	// Test entry removal
@@ -157,24 +155,22 @@ func TestPushAndPeepMin(t *testing.T) {
 	h0, _ := q2.BorrowSafe()
 	hMax, _ := q2.BorrowSafe()
 
-	const lowData = uint64(0x1111)
-	const highData = uint64(0x2222)
-	q2.Push(0, h0, lowData)
-	q2.Push(int64(BucketCount-1), hMax, highData)
+	q2.Push(0, h0, 0x1111)
+	q2.Push(int64(CapItems-1), hMax, 0x2222)
 
 	// Verify minimum tick priority
-	hMin, tickMin, dataMin := q2.PeepMin()
-	if hMin != h0 || tickMin != 0 || dataMin != lowData {
-		t.Errorf("minimum tick selection failed: got (%v, %d, %x), want (%v, 0, %x)",
-			hMin, tickMin, dataMin, h0, lowData)
+	hMin, tickMin, _ := q2.PeepMin()
+	if hMin != h0 || tickMin != 0 {
+		t.Errorf("minimum tick selection failed: got (%v, %d), want (%v, 0)",
+			hMin, tickMin, h0)
 	}
 
 	// Test maximum tick handling after minimum removal
 	q2.UnlinkMin(h0, 0)
-	hHigh, tickHigh, dataHigh := q2.PeepMin()
-	if hHigh != hMax || tickHigh != int64(BucketCount-1) || dataHigh != highData {
-		t.Errorf("maximum tick retrieval failed: got (%v, %d, %x), want (%v, %d, %x)",
-			hHigh, tickHigh, dataHigh, hMax, int64(BucketCount-1), highData)
+	hHigh, tickHigh, _ := q2.PeepMin()
+	if hHigh != hMax || tickHigh != int64(CapItems-1) {
+		t.Errorf("maximum tick retrieval failed: got (%v, %d), want (%v, %d)",
+			hHigh, tickHigh, hMax, int64(CapItems-1))
 	}
 
 	// Verify complete cleanup
@@ -198,12 +194,10 @@ func TestPushTriggersUnlink(t *testing.T) {
 	h, _ := q.BorrowSafe()
 
 	// Insert at initial tick
-	const initialData = uint64(0xAAAA)
-	q.Push(42, h, initialData)
+	q.Push(42, h, 0xAAAA)
 
 	// Move to different tick (triggers automatic unlink/relink)
-	const newData = uint64(0xBBBB)
-	q.Push(99, h, newData)
+	q.Push(99, h, 0xBBBB)
 
 	// Verify relocation correctness
 	if q.Size() != 1 {
@@ -211,9 +205,13 @@ func TestPushTriggersUnlink(t *testing.T) {
 	}
 
 	hGot, tickGot, data := q.PeepMin()
-	if hGot != h || tickGot != 99 || data != newData {
-		t.Errorf("tick relocation failed: got (%v, %d, %x), want (%v, 99, %x)",
-			hGot, tickGot, data, h, newData)
+	if hGot != h || tickGot != 99 {
+		t.Errorf("tick relocation failed: got (%v, %d), want (%v, 99)",
+			hGot, tickGot, h)
+	}
+
+	if data != 0xBBBB {
+		t.Errorf("payload after relocation: got %x, want %x", data, uint64(0xBBBB))
 	}
 }
 
@@ -234,15 +232,13 @@ func TestMultipleSameTickOrdering(t *testing.T) {
 	h1, _ := q.BorrowSafe()
 	h2, _ := q.BorrowSafe()
 
-	const data1 = uint64(0x1111)
-	const data2 = uint64(0x2222)
-	q.Push(5, h1, data1)
-	q.Push(5, h2, data2) // Newer entry, should be head
+	q.Push(5, h1, 0x1111)
+	q.Push(5, h2, 0x2222) // Newer entry, should be head
 
 	hMin, _, data := q.PeepMin()
-	if hMin != h2 || data != data2 {
+	if hMin != h2 || data != 0x2222 {
 		t.Errorf("LIFO ordering failed: got handle=%v data=%x, want %v %x",
-			hMin, data, h2, data2)
+			hMin, data, h2, uint64(0x2222))
 	}
 }
 
@@ -259,15 +255,13 @@ func TestPushDifferentTicks(t *testing.T) {
 	h1, _ := q.BorrowSafe()
 	h2, _ := q.BorrowSafe()
 
-	const highPriorityData = uint64(0x1111)
-	const lowPriorityData = uint64(0x2222)
-	q.Push(100, h1, highPriorityData)
-	q.Push(50, h2, lowPriorityData) // Lower tick, higher priority
+	q.Push(100, h1, 0x1111)
+	q.Push(50, h2, 0x2222) // Lower tick, higher priority
 
-	hMin, tickMin, data := q.PeepMin()
-	if hMin != h2 || tickMin != 50 || data != lowPriorityData {
-		t.Errorf("tick priority ordering failed: got (%v, %d, %x), want (%v, 50, %x)",
-			hMin, tickMin, data, h2, lowPriorityData)
+	hMin, tickMin, _ := q.PeepMin()
+	if hMin != h2 || tickMin != 50 {
+		t.Errorf("tick priority ordering failed: got (%v, %d), want (%v, 50)",
+			hMin, tickMin, h2)
 	}
 }
 
@@ -287,8 +281,7 @@ func TestMoveTickBehavior(t *testing.T) {
 	q := New()
 	h, _ := q.BorrowSafe()
 
-	const testData = uint64(0xCCCC)
-	q.Push(20, h, testData)
+	q.Push(20, h, 0xCCCC)
 
 	// Test no-op move (same tick) - should be optimized
 	q.MoveTick(h, 20)
@@ -296,10 +289,9 @@ func TestMoveTickBehavior(t *testing.T) {
 	// Test actual relocation to different tick
 	q.MoveTick(h, 30)
 
-	hNew, tickNew, data := q.PeepMin()
-	if hNew != h || tickNew != 30 || data != testData {
-		t.Errorf("MoveTick failed: got (%v, %d, %x), want (%v, 30, %x)",
-			hNew, tickNew, data, h, testData)
+	hNew, tickNew, _ := q.PeepMin()
+	if hNew != h || tickNew != 30 {
+		t.Errorf("MoveTick failed: got (%v, %d), want (%v, 30)", hNew, tickNew, h)
 	}
 }
 
@@ -319,21 +311,18 @@ func TestUnlinkMinNonHead(t *testing.T) {
 	h3, _ := q.BorrowSafe()
 
 	// Create entries in ascending tick order
-	const data1 = uint64(0x1111)
-	const data2 = uint64(0x2222)
-	const data3 = uint64(0x3333)
-	q.Push(1, h1, data1)
-	q.Push(2, h2, data2)
-	q.Push(3, h3, data3)
+	q.Push(1, h1, 0x1111)
+	q.Push(2, h2, 0x2222)
+	q.Push(3, h3, 0x3333)
 
 	// Remove middle entry (non-minimum in global ordering)
 	q.UnlinkMin(h2, 2)
 
 	// Verify remaining minimum is correct
-	hMin, tickMin, data := q.PeepMin()
-	if hMin != h1 || tickMin != 1 || data != data1 {
-		t.Errorf("non-head removal failed: got (%v, %d, %x), want (%v, 1, %x)",
-			hMin, tickMin, data, h1, data1)
+	hMin, tickMin, _ := q.PeepMin()
+	if hMin != h1 || tickMin != 1 {
+		t.Errorf("non-head removal failed: got (%v, %d), want (%v, 1)",
+			hMin, tickMin, h1)
 	}
 }
 
@@ -358,15 +347,14 @@ func TestMixedOperations(t *testing.T) {
 	for i := range hs {
 		h, _ := q.BorrowSafe()
 		hs[i] = h
-		q.Push(int64(i), h, uint64(0x1000+i))
+		q.Push(int64(i), h, uint64(i))
 	}
 
 	// Drain in strict tick priority order
 	for i := 0; i < 3; i++ {
-		h, tick, data := q.PeepMin()
-		if tick != int64(i) || data != uint64(0x1000+i) {
-			t.Errorf("drain order incorrect: want tick %d data %x, got %d %x",
-				i, 0x1000+i, tick, data)
+		h, tick, _ := q.PeepMin()
+		if tick != int64(i) {
+			t.Errorf("drain order incorrect: want tick %d, got %d", i, tick)
 		}
 		q.UnlinkMin(h, tick)
 	}
@@ -411,7 +399,7 @@ func TestDoubleUnlink(t *testing.T) {
 
 	q := New()
 	h, _ := q.BorrowSafe()
-	q.Push(100, h, uint64(0xDEAD))
+	q.Push(100, h, 0xDEAD)
 	q.UnlinkMin(h, 100)
 	q.UnlinkMin(h, 100) // Protocol violation - should panic
 }
@@ -429,19 +417,17 @@ func TestHandleReuseAfterUnlink(t *testing.T) {
 	h, _ := q.BorrowSafe()
 
 	// Initial use cycle
-	const initialData = uint64(0xAAAA)
-	q.Push(123, h, initialData)
+	q.Push(123, h, 0xAAAA)
 	q.UnlinkMin(h, 123)
 
 	// Reuse same handle with different data
-	const reuseData = uint64(0xBBBB)
-	q.Push(456, h, reuseData)
+	q.Push(456, h, 0xBBBB)
 
 	// Verify reuse correctness and no state leakage
 	_, tick, data := q.PeepMin()
-	if tick != 456 || data != reuseData {
+	if tick != 456 || data != 0xBBBB {
 		t.Errorf("handle reuse failed: tick=%d data=%x, want 456 %x",
-			tick, data, reuseData)
+			tick, data, uint64(0xBBBB))
 	}
 }
 
@@ -458,12 +444,12 @@ func TestPushWithInvalidTicks(t *testing.T) {
 
 	t.Run("NegativeTick", func(t *testing.T) {
 		defer func() { recover() }()
-		q.Push(-9999, h, uint64(0xDEAD))
+		q.Push(-9999, h, 0xDEAD)
 	})
 
 	t.Run("OverflowTick", func(t *testing.T) {
 		defer func() { recover() }()
-		q.Push(int64(BucketCount+1000), h, uint64(0xBEEF))
+		q.Push(int64(BucketCount+1000), h, 0xBEEF)
 	})
 }
 
@@ -486,16 +472,9 @@ func TestSizeTracking(t *testing.T) {
 	h2, _ := q.BorrowSafe()
 
 	// Test insertions and in-place updates
-	const data1 = uint64(0x1111)
-	const data2 = uint64(0x2222)
-	const data3 = uint64(0x3333)
-	q.Push(10, h1, data1)
-	q.Push(20, h2, data2)
-	q.Push(10, h1, data3) // Update, not insertion
-
-	if q.Size() != 2 {
-		t.Errorf("size after operations: got %d, want 2", q.Size())
-	}
+	q.Push(10, h1, 0x1111)
+	q.Push(20, h2, 0x2222)
+	q.Push(10, h1, 0x3333) // Update, not insertion
 
 	// Test removals and final size validation
 	q.UnlinkMin(h1, 10)

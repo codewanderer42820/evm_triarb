@@ -5,7 +5,7 @@
 // Comprehensive performance measurement suite for QuantumQueue64 core operations.
 // Validates sub-8ns operation latency under realistic ISR workload patterns.
 //
-// COMPACT VERSION: Updated for uint64 payloads and 32-byte node layout
+// COMPACT VERSION: Updated for uint64 payloads and 32-byte node layout.
 //
 // Benchmark methodology:
 //   - All benchmarks use pre-filled arenas (CapItems) for stress realism
@@ -20,10 +20,10 @@
 //   - Arena exhaustion: Full capacity stress testing
 //
 // Expected results (improved from QuantumQueue):
-//   - Push operations: 1-6ns depending on cache locality (improved)
-//   - PeepMin operations: 2-5ns via bitmap hierarchy traversal (improved)
-//   - UnlinkMin operations: 3-8ns depending on summary updates (improved)
-//   - MoveTick operations: 5-12ns for unlink/relink cycles (improved)
+//   - Push operations: 1-6ns depending on cache locality (improved from 2-8ns)
+//   - PeepMin operations: 2-5ns via bitmap hierarchy traversal (improved from 3-6ns)
+//   - UnlinkMin operations: 3-8ns depending on summary updates (improved from 4-10ns)
+//   - MoveTick operations: 5-12ns for unlink/relink cycles (improved from 6-15ns)
 
 package quantumqueue64
 
@@ -351,70 +351,5 @@ func BenchmarkMoveTick(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		h := handles[i%benchSize]
 		q.MoveTick(h, int64((i+1)%benchSize))
-	}
-}
-
-// ============================================================================
-// CACHE EFFICIENCY BENCHMARKS
-// ============================================================================
-
-// BenchmarkCacheLineUtilization measures cache efficiency improvements.
-// Tests sequential access patterns that benefit from 32-byte node layout.
-//
-// Cache optimization validation:
-//   - Sequential handle processing
-//   - 2 nodes per cache line utilization
-//   - Spatial locality benefits
-//   - Expected significant improvement over QuantumQueue
-func BenchmarkCacheLineUtilization(b *testing.B) {
-	q := New()
-	handles := make([]Handle, 1000) // Enough for meaningful cache effects
-
-	// Initialize with sequential handles
-	for i := range handles {
-		h, _ := q.BorrowSafe()
-		handles[i] = h
-		q.Push(int64(i), h, uint64(i))
-	}
-
-	b.ResetTimer()
-
-	// Sequential processing to test cache line efficiency
-	for i := 0; i < b.N; i++ {
-		for j := 0; j < len(handles); j += 2 { // Process pairs (same cache line)
-			q.Push(int64(j), handles[j], uint64(i))
-			if j+1 < len(handles) {
-				q.Push(int64(j+1), handles[j+1], uint64(i))
-			}
-		}
-	}
-}
-
-// BenchmarkMemoryBandwidth measures memory access efficiency.
-// Compares memory bandwidth utilization vs theoretical QuantumQueue.
-//
-// Memory efficiency validation:
-//   - 32-byte vs 64-byte node access patterns
-//   - Reduced memory bandwidth requirements
-//   - Cache miss penalty reduction
-func BenchmarkMemoryBandwidth(b *testing.B) {
-	q := New()
-	handles := make([]Handle, benchSize)
-
-	// Fill arena completely
-	for i := range handles {
-		h, _ := q.BorrowSafe()
-		handles[i] = h
-		q.Push(int64(i), h, uint64(i))
-	}
-
-	b.ResetTimer()
-
-	// Access pattern that stresses memory bandwidth
-	for i := 0; i < b.N; i++ {
-		// Random access to force cache misses
-		idx := (i * 7919) % len(handles) // Prime number for pseudo-random distribution
-		h := handles[idx]
-		q.Push(int64(idx), h, uint64(i))
 	}
 }
