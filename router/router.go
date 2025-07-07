@@ -58,7 +58,7 @@ import (
 )
 
 // ============================================================================
-// MATHEMATICAL CONSTANTS
+// FUNDAMENTAL CONSTANTS
 // ============================================================================
 
 const (
@@ -66,26 +66,21 @@ const (
 	tickClampingBound = 128.0                                            // domain: -128 … +128
 	maxQuantizedTick  = 262_143                                          // 18-bit ceiling (2^18 - 1)
 	quantizationScale = (maxQuantizedTick - 1) / (2 * tickClampingBound) // ~1023.99
-)
 
-// ============================================================================
-// CONFIGURATION CONSTANTS
-// ============================================================================
-
-const (
 	// Ethereum address hex string boundaries within LogView.Addr
 	addressHexStart = 3  // v.Addr[3:43] == 40-byte ASCII hex
 	addressHexEnd   = 43 // exclusive
 
+	// Hash table configuration - Direct address indexing optimized
+	addressTableCapacity = 1 << 20                  // 1M entries for production use
+	addressTableMask     = addressTableCapacity - 1 // For bit masking (power of 2)
+
 	// Shard splitting threshold - maximum cycles per shard for cache optimization
 	maxCyclesPerShard = 1 << 16
-
-	// Hash table configuration - Direct address indexing optimized
-	addressTableCapacity = 1 << 20 // 1M entries for production use
 )
 
 // ============================================================================
-// CORE ARBITRAGE DATA STRUCTURES
+// CORE TYPE DEFINITIONS
 // ============================================================================
 
 // PairID represents a unique identifier for a trading pair (e.g., WETH/USDC)
@@ -101,11 +96,13 @@ type CycleStateIndex uint64
 
 // AddressKey represents five unaligned 8-byte words (40 bytes total) for
 // zero-copy address comparison using SIMD-friendly word operations
-type AddressKey struct{ words [5]uint64 }
-
-// ============================================================================
-// CACHE-ALIGNED DATA STRUCTURES
-// ============================================================================
+// Padded to 64 bytes for cache line alignment and optimal memory access
+//
+//go:align 64
+type AddressKey struct {
+	words [5]uint64 // 40 B ← Ethereum address as 5 x 8-byte words
+	_     [3]uint64 // 24 B ← padding to reach exactly 64 bytes
+} // Total: exactly one 64-byte cache line
 
 // ============================================================================
 // CORE MESSAGE TYPES
@@ -228,17 +225,14 @@ var (
 	pairShardBuckets map[PairID][]PairShardBucket
 )
 
-// Direct address indexing tables - no hash functions needed!
-// Ethereum addresses are already uniformly distributed keccak256 hashes
+// Direct address indexing tables - Ethereum addresses are already uniformly distributed keccak256 hashes
 var (
 	pairAddressKeys [addressTableCapacity]AddressKey // Address keys for comparison
 	addressToPairID [addressTableCapacity]PairID     // PairID values (0 = empty)
 )
 
-const addressTableMask = addressTableCapacity - 1 // For bit masking (power of 2)
-
 // ============================================================================
-// TICK QUANTIZATION (PROFIT SCORING)
+// UTILITY FUNCTIONS (FOUNDATIONAL)
 // ============================================================================
 
 // quantizeTickToInt64 converts floating-point tick values to integer priorities
@@ -260,8 +254,30 @@ func quantizeTickToInt64(tickValue float64) int64 {
 	}
 }
 
+// secureRandomInt generates cryptographically secure random integers for
+// shuffle operations with optimal performance characteristics
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func secureRandomInt(upperBound int) int {
+	var randomBytes [8]byte
+	_, _ = rand.Read(randomBytes[:])
+	randomValue := binary.LittleEndian.Uint64(randomBytes[:])
+
+	// Power-of-2 optimization for modular arithmetic
+	if upperBound&(upperBound-1) == 0 {
+		return int(randomValue & uint64(upperBound-1))
+	}
+
+	// Unbiased modular reduction using multiplication method
+	high64, _ := bits.Mul64(randomValue, uint64(upperBound))
+	return int(high64)
+}
+
 // ============================================================================
-// DIRECT ETHEREUM ADDRESS INDEXING
+// ETHEREUM ADDRESS INDEXING (CORE INFRASTRUCTURE)
 // ============================================================================
 
 // directAddressToIndex64 extracts table index directly from Ethereum address
@@ -412,8 +428,19 @@ func lookupPairIDByAddress(address40Bytes []byte) PairID {
 	}
 }
 
+// RegisterPairToCore manually assigns a trading pair to specific core for
+// custom load balancing and affinity optimization
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func RegisterPairToCore(pairID PairID, coreID uint8) {
+	pairToCoreAssignment[pairID] |= 1 << coreID
+}
+
 // ============================================================================
-// ARBITRAGE OPPORTUNITY EMISSION
+// ARBITRAGE OPPORTUNITY DETECTION (BUSINESS LOGIC)
 // ============================================================================
 
 // emitArbitrageOpportunity logs detected profitable arbitrage opportunities
@@ -425,12 +452,25 @@ func lookupPairIDByAddress(address40Bytes []byte) PairID {
 //go:registerparams
 func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
 	debug.DropMessage("[ARBITRAGE_OPPORTUNITY]", "")
-	debug.DropMessage("  pairIDs", utils.B2s((*[12]byte)(unsafe.Pointer(&cycle.pairIDs))[:]))
-	debug.DropMessage("  tick0", utils.B2s([]byte(fmt.Sprintf("%.6f", cycle.tickValues[0]))))
-	debug.DropMessage("  tick1", utils.B2s([]byte(fmt.Sprintf("%.6f", cycle.tickValues[1]))))
-	debug.DropMessage("  tick2", utils.B2s([]byte(fmt.Sprintf("%.6f", cycle.tickValues[2]))))
-	debug.DropMessage("  newTick", utils.B2s([]byte(fmt.Sprintf("%.6f", newTick))))
-	debug.DropMessage("  totalProfit", utils.B2s([]byte(fmt.Sprintf("%.6f", newTick+cycle.tickValues[0]+cycle.tickValues[1]+cycle.tickValues[2]))))
+
+	// Use zero-allocation integer conversion for PairIDs
+	debug.DropMessage("  pair0", utils.Itoa(int(cycle.pairIDs[0])))
+	debug.DropMessage("  pair1", utils.Itoa(int(cycle.pairIDs[1])))
+	debug.DropMessage("  pair2", utils.Itoa(int(cycle.pairIDs[2])))
+
+	// For float values, we need to use fmt.Sprintf as utils doesn't have float conversion
+	// But we can convert the result to avoid allocation in debug.DropMessage
+	tick0Str := fmt.Sprintf("%.6f", cycle.tickValues[0])
+	tick1Str := fmt.Sprintf("%.6f", cycle.tickValues[1])
+	tick2Str := fmt.Sprintf("%.6f", cycle.tickValues[2])
+	newTickStr := fmt.Sprintf("%.6f", newTick)
+	totalProfitStr := fmt.Sprintf("%.6f", newTick+cycle.tickValues[0]+cycle.tickValues[1]+cycle.tickValues[2])
+
+	debug.DropMessage("  tick0", tick0Str)
+	debug.DropMessage("  tick1", tick1Str)
+	debug.DropMessage("  tick2", tick2Str)
+	debug.DropMessage("  newTick", newTickStr)
+	debug.DropMessage("  totalProfit", totalProfitStr)
 }
 
 // ============================================================================
@@ -527,8 +567,105 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 }
 
 // ============================================================================
-// SHARD ATTACHMENT (FAN-IN CONSTRUCTION)
+// TICK UPDATE DISPATCH (ENTRY POINT)
 // ============================================================================
+
+// DispatchTickUpdate processes incoming transaction log and dispatches tick
+// updates to all cores responsible for the affected trading pair
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func DispatchTickUpdate(logView *types.LogView) {
+	// Resolve Ethereum address to internal pair ID using direct indexing
+	// Leverages uniform distribution of keccak256-derived addresses
+	pairID := lookupPairIDByAddress(logView.Addr[addressHexStart:addressHexEnd])
+	if pairID == 0 {
+		return // Unknown pair - ignore
+	}
+
+	// Extract reserve values from transaction log data
+	reserve0 := utils.LoadBE64(logView.Data[24:])
+	reserve1 := utils.LoadBE64(logView.Data[56:])
+
+	// Calculate log2 reserve ratio for price tick
+	tickValue, _ := fastuni.Log2ReserveRatio(reserve0, reserve1)
+
+	// Prepare tick update message (exactly 24 bytes for ring buffer)
+	var messageBuffer [24]byte
+	tickUpdate := (*TickUpdate)(unsafe.Pointer(&messageBuffer))
+	tickUpdate.pairID = pairID
+	tickUpdate.forwardTick = tickValue
+	tickUpdate.reverseTick = -tickValue // Inverse for reverse direction
+
+	// Dispatch to all assigned cores using bit manipulation
+	coreAssignments := pairToCoreAssignment[pairID]
+	for coreAssignments != 0 {
+		coreID := bits.TrailingZeros64(uint64(coreAssignments))
+		coreRings[coreID].Push(&messageBuffer)
+		coreAssignments &^= 1 << coreID // Clear processed bit
+	}
+}
+
+// ============================================================================
+// SHARD CONSTRUCTION AND DISTRIBUTION (INITIALIZATION)
+// ============================================================================
+
+// shuffleEdgeBindings performs Fisher-Yates shuffle for optimal load distribution
+// across cores with cryptographically secure randomness
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func shuffleEdgeBindings(bindings []ArbitrageEdgeBinding) {
+	for i := len(bindings) - 1; i > 0; i-- {
+		j := secureRandomInt(i + 1)
+		bindings[i], bindings[j] = bindings[j], bindings[i]
+	}
+}
+
+// buildFanoutShardBuckets constructs optimally-sized shard buckets for
+// load balancing arbitrage cycles across cores with cache-friendly grouping
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
+	pairShardBuckets = make(map[PairID][]PairShardBucket)
+	temporaryBindings := make(map[PairID][]ArbitrageEdgeBinding, len(cycles)*3)
+
+	// Group cycles by their constituent pairs
+	for _, triplet := range cycles {
+		temporaryBindings[triplet[0]] = append(temporaryBindings[triplet[0]],
+			ArbitrageEdgeBinding{cyclePairs: triplet, edgeIndex: 0})
+		temporaryBindings[triplet[1]] = append(temporaryBindings[triplet[1]],
+			ArbitrageEdgeBinding{cyclePairs: triplet, edgeIndex: 1})
+		temporaryBindings[triplet[2]] = append(temporaryBindings[triplet[2]],
+			ArbitrageEdgeBinding{cyclePairs: triplet, edgeIndex: 2})
+	}
+
+	// Create optimally-sized shards with cache-friendly random distribution
+	for pairID, bindings := range temporaryBindings {
+		shuffleEdgeBindings(bindings) // Randomize for load balancing
+
+		// Split into cache-optimized shards
+		for offset := 0; offset < len(bindings); offset += maxCyclesPerShard {
+			endOffset := offset + maxCyclesPerShard
+			if endOffset > len(bindings) {
+				endOffset = len(bindings)
+			}
+
+			pairShardBuckets[pairID] = append(pairShardBuckets[pairID],
+				PairShardBucket{
+					pairID:       pairID,
+					edgeBindings: bindings[offset:endOffset],
+				})
+		}
+	}
+}
 
 // attachShardToExecutor integrates a shard of arbitrage cycles into the core
 // executor's queue and fanout systems with optimal memory layout
@@ -558,7 +695,8 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 		})
 		cycleIndex := CycleStateIndex(len(executor.cycleStates) - 1)
 
-		// Allocate queue handle and insert with maximum priority (most profitable)
+		// Allocate queue handle and insert with minimum priority (initialization state)
+		// Use maximum quantized value (262_143) for lowest priority until real ticks arrive
 		queueHandle, _ := queue.BorrowSafe()
 		queue.Push(262_143, queueHandle, uint64(cycleIndex))
 
@@ -580,7 +718,7 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 }
 
 // ============================================================================
-// EXECUTOR INITIALIZATION AND BOOTSTRAP
+// SYSTEM INITIALIZATION (TOP-LEVEL ORCHESTRATION)
 // ============================================================================
 
 // launchShardWorker initializes a single core executor and processes assigned shards
@@ -677,139 +815,5 @@ func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 	// Close channels to signal completion
 	for _, channel := range shardChannels {
 		close(channel)
-	}
-}
-
-// ============================================================================
-// FANOUT SHARD CONSTRUCTION (COLD PATH)
-// ============================================================================
-
-// buildFanoutShardBuckets constructs optimally-sized shard buckets for
-// load balancing arbitrage cycles across cores with cache-friendly grouping
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
-	pairShardBuckets = make(map[PairID][]PairShardBucket)
-	temporaryBindings := make(map[PairID][]ArbitrageEdgeBinding, len(cycles)*3)
-
-	// Group cycles by their constituent pairs
-	for _, triplet := range cycles {
-		temporaryBindings[triplet[0]] = append(temporaryBindings[triplet[0]],
-			ArbitrageEdgeBinding{cyclePairs: triplet, edgeIndex: 0})
-		temporaryBindings[triplet[1]] = append(temporaryBindings[triplet[1]],
-			ArbitrageEdgeBinding{cyclePairs: triplet, edgeIndex: 1})
-		temporaryBindings[triplet[2]] = append(temporaryBindings[triplet[2]],
-			ArbitrageEdgeBinding{cyclePairs: triplet, edgeIndex: 2})
-	}
-
-	// Create optimally-sized shards with cache-friendly random distribution
-	for pairID, bindings := range temporaryBindings {
-		shuffleEdgeBindings(bindings) // Randomize for load balancing
-
-		// Split into cache-optimized shards
-		for offset := 0; offset < len(bindings); offset += maxCyclesPerShard {
-			endOffset := offset + maxCyclesPerShard
-			if endOffset > len(bindings) {
-				endOffset = len(bindings)
-			}
-
-			pairShardBuckets[pairID] = append(pairShardBuckets[pairID],
-				PairShardBucket{
-					pairID:       pairID,
-					edgeBindings: bindings[offset:endOffset],
-				})
-		}
-	}
-}
-
-// shuffleEdgeBindings performs Fisher-Yates shuffle for optimal load distribution
-// across cores with cryptographically secure randomness
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func shuffleEdgeBindings(bindings []ArbitrageEdgeBinding) {
-	for i := len(bindings) - 1; i > 0; i-- {
-		j := secureRandomInt(i + 1)
-		bindings[i], bindings[j] = bindings[j], bindings[i]
-	}
-}
-
-// secureRandomInt generates cryptographically secure random integers for
-// shuffle operations with optimal performance characteristics
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func secureRandomInt(upperBound int) int {
-	var randomBytes [8]byte
-	_, _ = rand.Read(randomBytes[:])
-	randomValue := binary.LittleEndian.Uint64(randomBytes[:])
-
-	// Power-of-2 optimization for modular arithmetic
-	if upperBound&(upperBound-1) == 0 {
-		return int(randomValue & uint64(upperBound-1))
-	}
-
-	// Unbiased modular reduction using multiplication method
-	high64, _ := bits.Mul64(randomValue, uint64(upperBound))
-	return int(high64)
-}
-
-// ============================================================================
-// TICK UPDATE DISPATCH (ENTRY FROM PARSER)
-// ============================================================================
-
-// RegisterPairToCore manually assigns a trading pair to specific core for
-// custom load balancing and affinity optimization
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func RegisterPairToCore(pairID PairID, coreID uint8) {
-	pairToCoreAssignment[pairID] |= 1 << coreID
-}
-
-// DispatchTickUpdate processes incoming transaction log and dispatches tick
-// updates to all cores responsible for the affected trading pair
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func DispatchTickUpdate(logView *types.LogView) {
-	// Resolve Ethereum address to internal pair ID using direct indexing
-	// Leverages uniform distribution of keccak256-derived addresses
-	pairID := lookupPairIDByAddress(logView.Addr[addressHexStart:addressHexEnd])
-	if pairID == 0 {
-		return // Unknown pair - ignore
-	}
-
-	// Extract reserve values from transaction log data
-	reserve0 := utils.LoadBE64(logView.Data[24:])
-	reserve1 := utils.LoadBE64(logView.Data[56:])
-
-	// Calculate log2 reserve ratio for price tick
-	tickValue, _ := fastuni.Log2ReserveRatio(reserve0, reserve1)
-
-	// Prepare tick update message (exactly 24 bytes for ring buffer)
-	var messageBuffer [24]byte
-	tickUpdate := (*TickUpdate)(unsafe.Pointer(&messageBuffer))
-	tickUpdate.pairID = pairID
-	tickUpdate.forwardTick = tickValue
-	tickUpdate.reverseTick = -tickValue // Inverse for reverse direction
-
-	// Dispatch to all assigned cores using bit manipulation
-	coreAssignments := pairToCoreAssignment[pairID]
-	for coreAssignments != 0 {
-		coreID := bits.TrailingZeros64(uint64(coreAssignments))
-		coreRings[coreID].Push(&messageBuffer)
-		coreAssignments &^= 1 << coreID // Clear processed bit
 	}
 }
