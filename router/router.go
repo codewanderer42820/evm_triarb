@@ -226,7 +226,6 @@ const addressTableMask = addressTableCapacity - 1 // For bit masking (power of 2
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func quantizeTickToInt64(tickValue float64) int64 {
@@ -250,7 +249,6 @@ func quantizeTickToInt64(tickValue float64) int64 {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func bytesToAddressKey(addressBytes []byte) AddressKey {
@@ -268,7 +266,6 @@ func bytesToAddressKey(addressBytes []byte) AddressKey {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (a AddressKey) isEqual(b AddressKey) bool {
@@ -280,7 +277,6 @@ func (a AddressKey) isEqual(b AddressKey) bool {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func RegisterPairAddress(address40Bytes []byte, pairID PairID) {
@@ -335,7 +331,6 @@ func RegisterPairAddress(address40Bytes []byte, pairID PairID) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func lookupPairIDByAddress(address40Bytes []byte) PairID {
@@ -386,7 +381,6 @@ func lookupPairIDByAddress(address40Bytes []byte) PairID {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
@@ -501,7 +495,6 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBucket) {
@@ -697,7 +690,6 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func shuffleEdgeBindings(bindings []ArbitrageEdgeBinding) {
@@ -712,7 +704,6 @@ func shuffleEdgeBindings(bindings []ArbitrageEdgeBinding) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func secureRandomInt(upperBound int) int {
@@ -739,7 +730,6 @@ func secureRandomInt(upperBound int) int {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func RegisterPairToCore(pairID PairID, coreID uint8) {
@@ -751,7 +741,6 @@ func RegisterPairToCore(pairID PairID, coreID uint8) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func DispatchTickUpdate(logView *types.LogView) {
