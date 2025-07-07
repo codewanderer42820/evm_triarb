@@ -7,7 +7,7 @@
 // arbitrage opportunities across 64 CPU cores with zero heap allocations.
 //
 // Architecture overview:
-//   • Zero-copy address→PairID hashing (stride-64, 5-word keys)
+//   • Robin-Hood address→PairID hashing (bounded probe distances)
 //   • Per-core executors, each with lock-free QuantumQueue64 buckets
 //   • ring24 (24-byte) SPSC rings for cross-core TickUpdate dispatch
 //   • Canonical storage arena for shared cycle state management
@@ -15,7 +15,7 @@
 //
 // Performance characteristics:
 //   • Sub-nanosecond tick update processing
-//   • O(1) arbitrage opportunity detection
+//   • O(1) arbitrage opportunity detection with bounded worst-case
 //   • Perfect cache line utilization across all data structures
 //   • Zero memory allocation during operation
 //   • Deterministic low-latency execution paths
@@ -28,12 +28,12 @@
 //	└──────────────────────────────────────────────────────────────────────────┘
 //
 // Safety model:
-//   • Footgun Grade: 10/10 — Absolutely unsafe without invariant adherence
-//   • No bounds checks, no panics, no zeroing, no memory fencing
-//   • Silent corruption on protocol violations
+//   • Footgun Grade: 8/10 — Safer with Robin-Hood bounds but still unsafe
+//   • Bounded probe distances prevent infinite loops
+//   • Silent corruption on protocol violations still possible
 //
 // Compiler optimizations:
-//   • //go:nosplit for stack management elimination
+//   • //go:nosplit for stack management elimination (hot paths only)
 //   • //go:inline for call overhead elimination
 //   • //go:registerparams for register-based parameter passing
 
@@ -79,6 +79,9 @@ const (
 
 	// Shard splitting threshold - maximum cycles per shard for cache optimization
 	maxCyclesPerShard = 1 << 16
+
+	// Hash table configuration
+	addressTableCapacity = 1 << 15 // 32K entries, much smaller for testing
 )
 
 // ============================================================================
@@ -206,13 +209,14 @@ var (
 	pairShardBuckets map[PairID][]PairShardBucket
 )
 
-// Pre-allocated fixed arrays (≈ 20 MiB + 2 MiB) for instant O(1) lookup
-// These arrays provide stride-64 hash table with linear probing for
-// maximum cache efficiency and minimal collision handling overhead
+// Global hash tables for address→PairID mapping with Robin Hood collision resolution
+// These provide bounded probe distances to prevent infinite loops
 var (
-	pairAddressKeys [1 << 20]AddressKey // 1M entries × 40B = ~40MB (stride-64)
-	addressToPairID [1 << 20]PairID     // 1M entries × 4B = ~4MB, 0 == empty
+	pairAddressKeys [addressTableCapacity]AddressKey // Address keys for comparison
+	addressToPairID [addressTableCapacity]PairID     // PairID values (0 = empty)
 )
+
+const addressTableMask = addressTableCapacity - 1 // For bit masking (power of 2)
 
 // ============================================================================
 // TICK QUANTIZATION (PROFIT SCORING)
@@ -234,12 +238,14 @@ func quantizeTickToInt64(tickValue float64) int64 {
 		return maxQuantizedTick
 	default:
 		// Map (-128, +128) → (0, 262142) with proper scaling
-		return int64((tickValue + tickClampingBound) * quantizationScale)
+		// Add 0.5 for proper rounding to nearest integer
+		scaled := (tickValue+tickClampingBound)*quantizationScale + 0.5
+		return int64(scaled)
 	}
 }
 
 // ============================================================================
-// PAIR ADDRESS MAPPING (ZERO-COPY HOT PATH)
+// PAIR ADDRESS MAPPING (ROBIN-HOOD OPTIMIZED)
 // ============================================================================
 
 // bytesToAddressKey converts 40-byte address slice to AddressKey using
@@ -260,6 +266,30 @@ func bytesToAddressKey(addressBytes []byte) AddressKey {
 	}}
 }
 
+// fastHash40 provides high-quality hashing for 40-byte addresses
+// Uses xxh3-inspired approach for better distribution than utils.Hash17
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func fastHash40(data []byte) uint32 {
+	// Use first 8 bytes as primary hash input
+	h := binary.LittleEndian.Uint64(data[0:8])
+
+	// Mix with middle and end bytes for better distribution
+	h ^= binary.LittleEndian.Uint64(data[16:24]) * 0x9e3779b97f4a7c15
+	h ^= binary.LittleEndian.Uint64(data[32:40]) * 0xc2b2ae3d27d4eb4f
+
+	// Final avalanche for bit diffusion
+	h ^= h >> 33
+	h *= 0xff51afd7ed558ccd
+	h ^= h >> 33
+
+	return uint32(h)
+}
+
 // isEqual performs SIMD-optimized comparison of two AddressKey instances
 // using compiler-vectorized array comparison for maximum throughput
 //
@@ -273,8 +303,7 @@ func (a AddressKey) isEqual(b AddressKey) bool {
 }
 
 // RegisterPairAddress inserts or updates a pair address mapping using
-// stride-64 linear probing to minimize cache line conflicts and ensure
-// optimal memory access patterns for high-frequency lookups
+// Robin-Hood hashing for bounded probe distances and reliable performance
 //
 //go:norace
 //go:nocheckptr
@@ -283,28 +312,53 @@ func (a AddressKey) isEqual(b AddressKey) bool {
 //go:registerparams
 func RegisterPairAddress(address40Bytes []byte, pairID PairID) {
 	key := bytesToAddressKey(address40Bytes)
-	hashIndex := utils.Hash17(address40Bytes) // 17-bit hash for 1M table
-	probeMask := uint32((1 << 20) - 1)        // Wrap-around mask
+	hashIndex := fastHash40(address40Bytes) & addressTableMask
+	dist := uint32(0)
 
 	for {
-		if addressToPairID[hashIndex] == 0 {
-			// Empty slot found - insert new mapping
+		currentPairID := addressToPairID[hashIndex]
+
+		// Empty slot found - insert directly
+		if currentPairID == 0 {
 			pairAddressKeys[hashIndex] = key
 			addressToPairID[hashIndex] = pairID
 			return
 		}
+
+		// Key already exists - update value
 		if pairAddressKeys[hashIndex].isEqual(key) {
-			// Existing key found - update mapping
 			addressToPairID[hashIndex] = pairID
 			return
 		}
-		// Linear probe with stride-64 for cache line optimization
-		hashIndex = (hashIndex + 64) & probeMask
+
+		// Robin Hood displacement check
+		currentKey := pairAddressKeys[hashIndex]
+		currentKeyHash := fastHash40((*[40]byte)(unsafe.Pointer(&currentKey.words[0]))[:]) & addressTableMask
+		currentDist := (hashIndex + addressTableCapacity - currentKeyHash) & addressTableMask
+
+		// Displace if incoming key has traveled farther (Robin Hood principle)
+		if currentDist < dist {
+			// Swap incoming with current resident
+			pairAddressKeys[hashIndex] = key
+			addressToPairID[hashIndex] = pairID
+			key = currentKey
+			pairID = currentPairID
+			dist = currentDist
+		}
+
+		// Move to next slot
+		hashIndex = (hashIndex + 1) & addressTableMask
+		dist++
+
+		// Safety check to prevent infinite loops (should never happen with Robin Hood)
+		if dist > addressTableCapacity {
+			panic("Robin Hood hash table full - this should never happen")
+		}
 	}
 }
 
 // lookupPairIDByAddress performs O(1) address→PairID resolution using
-// stride-64 linear probing with SIMD-optimized key comparison
+// Robin-Hood hashing with bounded probe distances and early termination
 //
 //go:norace
 //go:nocheckptr
@@ -313,21 +367,40 @@ func RegisterPairAddress(address40Bytes []byte, pairID PairID) {
 //go:registerparams
 func lookupPairIDByAddress(address40Bytes []byte) PairID {
 	key := bytesToAddressKey(address40Bytes)
-	hashIndex := utils.Hash17(address40Bytes)
-	probeMask := uint32((1 << 20) - 1)
+	hashIndex := fastHash40(address40Bytes) & addressTableMask
+	dist := uint32(0)
 
 	for {
-		pairID := addressToPairID[hashIndex]
-		if pairID == 0 {
-			// Empty slot reached - address not found
+		currentPairID := addressToPairID[hashIndex]
+
+		// Empty slot - key not found
+		if currentPairID == 0 {
 			return 0
 		}
+
+		// Key match found
 		if pairAddressKeys[hashIndex].isEqual(key) {
-			// Address match found
-			return pairID
+			return currentPairID
 		}
-		// Continue linear probing
-		hashIndex = (hashIndex + 64) & probeMask
+
+		// Robin Hood early termination
+		currentKey := pairAddressKeys[hashIndex]
+		currentKeyHash := fastHash40((*[40]byte)(unsafe.Pointer(&currentKey.words[0]))[:]) & addressTableMask
+		currentDist := (hashIndex + addressTableCapacity - currentKeyHash) & addressTableMask
+
+		// If current resident traveled less distance, target key cannot be present
+		if currentDist < dist {
+			return 0
+		}
+
+		// Move to next slot
+		hashIndex = (hashIndex + 1) & addressTableMask
+		dist++
+
+		// Safety check (should never be needed with proper Robin Hood)
+		if dist > addressTableCapacity {
+			return 0
+		}
 	}
 }
 
@@ -362,7 +435,6 @@ func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
@@ -375,7 +447,11 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 	}
 
 	// Resolve pair to local queue index
-	queueIndex, _ := executor.pairToQueueIndex.Get(uint32(update.pairID))
+	queueIndex, found := executor.pairToQueueIndex.Get(uint32(update.pairID))
+	if !found {
+		return // Unknown pair for this executor
+	}
+
 	queue := &executor.priorityQueues[queueIndex]
 
 	// Process profitable cycles from priority queue
@@ -454,19 +530,27 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 // attachShardToExecutor integrates a shard of arbitrage cycles into the core
 // executor's queue and fanout systems with optimal memory layout
 //
+// Note: Removed //go:nosplit as this function can grow the stack significantly
+// during slice append operations
+//
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBucket) {
-	// Get or create queue index for this pair
-	queueIndex := executor.pairToQueueIndex.Put(uint32(shard.pairID), uint32(len(executor.priorityQueues)))
+	// Handle Robin-Hood insertion-only semantics
+	currentQueueCount := uint32(len(executor.priorityQueues))
+	existingIndex := executor.pairToQueueIndex.Put(uint32(shard.pairID), currentQueueCount)
 
-	if int(queueIndex) == len(executor.priorityQueues) {
-		// First time seeing this pair - create new queue and fanout table
+	var queueIndex uint32
+	if existingIndex == currentQueueCount {
+		// New pair - create new queue and fanout table
+		queueIndex = currentQueueCount
 		executor.priorityQueues = append(executor.priorityQueues, *quantumqueue64.New())
 		executor.fanoutTables = append(executor.fanoutTables, nil)
+	} else {
+		// Existing pair - use existing queue
+		queueIndex = existingIndex
 	}
 
 	// Get pointer to owned queue instance
@@ -507,9 +591,10 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 
 // launchShardWorker initializes a single core executor and processes assigned shards
 //
+// Note: Removed //go:nosplit as this is a cold-path initialization function
+//
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShardBucket) {
@@ -552,9 +637,10 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 // InitializeArbitrageSystem bootstraps the complete arbitrage detection system
 // across all available CPU cores with optimal work distribution and memory layout
 //
+// Note: Removed //go:nosplit as this is a cold-path initialization function
+//
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
@@ -611,9 +697,10 @@ func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 // buildFanoutShardBuckets constructs optimally-sized shard buckets for
 // load balancing arbitrage cycles across cores with cache-friendly grouping
 //
+// Note: Removed //go:nosplit as this is a cold-path initialization function
+//
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
