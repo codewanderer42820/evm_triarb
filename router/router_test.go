@@ -28,6 +28,7 @@ import (
 	"time"
 	"unsafe"
 
+	"main/constants"
 	"main/control"
 	"main/fastuni"
 	"main/localidx"
@@ -242,8 +243,8 @@ func TestDirectAddressIndexing(t *testing.T) {
 			addr := generateMockAddress(uint64(i))
 			index := directAddressToIndex64(addr[:])
 
-			if index >= addressTableCapacity {
-				t.Errorf("Index %d exceeds table capacity %d", index, addressTableCapacity)
+			if index >= constants.AddressTableCapacity {
+				t.Errorf("Index %d exceeds table capacity %d", index, constants.AddressTableCapacity)
 			}
 		}
 	})
@@ -337,11 +338,11 @@ func TestTickQuantization(t *testing.T) {
 		name  string
 	}{
 		{-200.0, "Underflow boundary"},
-		{-128.0, "Lower bound"},
+		{-constants.TickClampingBound, "Lower bound"},
 		{-64.0, "Negative value"},
 		{0.0, "Zero value"},
 		{64.0, "Positive value"},
-		{128.0, "Upper bound"},
+		{constants.TickClampingBound, "Upper bound"},
 		{200.0, "Overflow boundary"},
 	}
 
@@ -350,8 +351,8 @@ func TestTickQuantization(t *testing.T) {
 			result := quantizeTickToInt64(tc.input)
 
 			// Verify result is within valid quantization range
-			if result < 0 || result > maxQuantizedTick {
-				t.Errorf("Quantization result %d outside valid range [0, %d]", result, maxQuantizedTick)
+			if result < 0 || result > constants.MaxQuantizedTick {
+				t.Errorf("Quantization result %d outside valid range [0, %d]", result, constants.MaxQuantizedTick)
 			}
 		})
 	}
