@@ -3,6 +3,7 @@
 // • Zero-copy address→PairID hashing (stride-64, 5-word keys)
 // • Per-core executors, each with lock-free *QuantumQueue* buckets
 // • ring24 (56-byte) SPSC rings for cross-core TickUpdate dispatch
+// • Canonical storage arena for shared cycle state management
 // • Zero heap allocations in every hot path
 // -----------------------------------------------------------------------------
 //
@@ -111,6 +112,9 @@ func lookupPairID(addr40 []byte) PairID {
 type PairID uint32
 type PairTriplet [3]PairID
 
+// CycleStateRef is an index into the canonical storage arena
+type CycleStateRef uint32
+
 //go:align 64
 //go:notinheap
 type CycleState struct { // 64 B
@@ -120,14 +124,23 @@ type CycleState struct { // 64 B
 	_     [3]uint64 // pad → 64 B
 } // fills exactly one line
 
-// Always accessed via pointer → keep pointer first for early-deref
+// CycleStateArena provides canonical storage for all cycle states
+// Single source of truth that both fanouts and queues reference
+//
+//go:align 64
+//go:notinheap
+type CycleStateArena struct {
+	states []CycleState // Contiguous storage for cache locality
+}
+
+// FanoutEntry now references canonical storage via index
 type FanoutEntry struct { // 32 B
-	State   *CycleState                //  8 B  ← first cache miss pays for State prefetch
-	Queue   *quantumqueue.QuantumQueue //  8 B
-	Handle  quantumqueue.Handle        //  4 B
-	EdgeIdx uint16                     //  2 B
-	_       uint16                     //  2 B pad → 24
-	_       uint64                     //     pad → 32 B
+	StateRef CycleStateRef              //  4 B  ← index into canonical arena
+	Queue    *quantumqueue.QuantumQueue //  8 B
+	Handle   quantumqueue.Handle        //  4 B
+	EdgeIdx  uint16                     //  2 B
+	_        uint16                     //  2 B pad
+	_        [3]uint32                  // 12 B pad → 32 B
 }
 
 // PairShard is cold; but slice header first lets len/cap live in same line
@@ -163,7 +176,11 @@ type CoreExecutor struct {
 
 	// ── second line: 64-byte local index header (pointers & mask) ──
 	LocalIdx localidx.Hash // 64 B  (offset 64 → 127)
-} // total size = 128 B
+
+	// ── third line: canonical storage arena ──
+	Arena *CycleStateArena // 8 B pointer to shared storage
+	_     [7]uint64        // 56 B pad → 64 B
+} // total size = 192 B (3 cache lines)
 
 /*──────────────────────────── Global state ──────────────────────────────────*/
 
@@ -242,17 +259,23 @@ func shardWorker(coreID, half int, in <-chan PairShard) {
 	runtime.LockOSThread()
 
 	done := make(chan struct{})
+
+	// Create canonical storage arena for this core
+	arena := &CycleStateArena{
+		states: make([]CycleState, 0), // Will grow as needed
+	}
+
 	ex := &CoreExecutor{
 		LocalIdx:  localidx.New(1 << 16),
 		IsReverse: coreID >= half,
 		Done:      done,
+		Arena:     arena,
 	}
 	executors[coreID] = ex
 	rings[coreID] = ring24.New(1 << 16)
 
-	cycleBuf := make([]CycleState, 0)
 	for sh := range in {
-		attachShard(ex, &sh, &cycleBuf)
+		attachShard(ex, &sh)
 	}
 
 	stop, hot := control.Flags()
@@ -265,7 +288,7 @@ func shardWorker(coreID, half int, in <-chan PairShard) {
 
 //go:nosplit
 //go:inline
-func attachShard(ex *CoreExecutor, sh *PairShard, buf *[]CycleState) {
+func attachShard(ex *CoreExecutor, sh *PairShard) {
 	lid := ex.LocalIdx.Put(uint32(sh.Pair), uint32(len(ex.Heaps)))
 	if int(lid) == len(ex.Heaps) { // first time we see pair on this core
 		ex.Heaps = append(ex.Heaps, quantumqueue.New()) // returns *QuantumQueue
@@ -274,13 +297,18 @@ func attachShard(ex *CoreExecutor, sh *PairShard, buf *[]CycleState) {
 	hq := ex.Heaps[lid] // already a pointer
 
 	for _, eb := range sh.Bins {
-		*buf = append(*buf, CycleState{Pairs: eb.Pairs})
-		cs := &(*buf)[len(*buf)-1]
+		// Add cycle state to canonical arena
+		ex.Arena.states = append(ex.Arena.states, CycleState{Pairs: eb.Pairs})
+		stateRef := CycleStateRef(len(ex.Arena.states) - 1)
+
+		// Store reference in queue, not the actual state
 		h, _ := hq.BorrowSafe()
-		hq.Push(262_143, h, (*[48]byte)(unsafe.Pointer(cs)))
+		hq.Push(262_143, h, (*[48]byte)(unsafe.Pointer(&stateRef)))
+
+		// Fanouts reference the same canonical storage
 		for _, edge := range [...]uint16{(eb.EdgeIdx + 1) % 3, (eb.EdgeIdx + 2) % 3} {
 			ex.Fanouts[lid] = append(ex.Fanouts[lid],
-				FanoutEntry{State: cs, Queue: hq, Handle: h, EdgeIdx: edge})
+				FanoutEntry{StateRef: stateRef, Queue: hq, Handle: h, EdgeIdx: edge})
 		}
 	}
 }
@@ -298,41 +326,46 @@ func handleTick(ex *CoreExecutor, upd *TickUpdate) {
 	fans := ex.Fanouts[lid]
 
 	type rec struct {
-		h    quantumqueue.Handle
-		cs   *CycleState
-		prof bool
+		h        quantumqueue.Handle
+		stateRef CycleStateRef
+		prof     bool
 	}
 	var stash [128]rec
 	n := 0
 
+	// Pop cycles and check profitability
 	for {
 		h, _, ptr := hq.PopMin()
 		if ptr == nil {
 			break
 		}
-		cs := (*CycleState)(unsafe.Pointer(ptr))
+		stateRef := *(*CycleStateRef)(unsafe.Pointer(ptr))
+		cs := &ex.Arena.states[stateRef]
 		prof := (tick + cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2]) < 0
-		stash[n] = rec{h, cs, prof}
+		stash[n] = rec{h, stateRef, prof}
 		n++
 		if !prof || n == len(stash) {
 			break
 		}
 	}
 
+	// Repush cycles with updated priorities
 	for i := 0; i < n; i++ {
 		r := stash[i]
+		cs := &ex.Arena.states[r.stateRef]
 		key := int64(4095)
 		if !r.prof {
-			key = log2ToTick(r.cs.Ticks[0] + r.cs.Ticks[1] + r.cs.Ticks[2])
+			key = log2ToTick(cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2])
 		}
-		hq.Push(key, r.h, (*[48]byte)(unsafe.Pointer(r.cs)))
+		hq.Push(key, r.h, (*[48]byte)(unsafe.Pointer(&r.stateRef)))
 	}
 
+	// Update fanouts - they all point to canonical storage
 	for _, f := range fans {
-		cs := f.State
+		cs := &ex.Arena.states[f.StateRef]
 		cs.Ticks[f.EdgeIdx] = tick
 		key := log2ToTick(cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2])
-		f.Queue.Update(key, f.Handle, (*[48]byte)(unsafe.Pointer(cs)))
+		f.Queue.Update(key, f.Handle, (*[48]byte)(unsafe.Pointer(&f.StateRef)))
 	}
 }
 
@@ -356,6 +389,8 @@ func DispatchUpdate(v *types.LogView) {
 	var msg [24]byte
 	upd := (*TickUpdate)(unsafe.Pointer(&msg))
 	upd.Pair, upd.FwdTick, upd.RevTick = pid, tick, -tick
+
+	control.SignalActivity() // Signal global hot flag
 
 	for m := pair2cores[pid]; m != 0; {
 		core := bits.TrailingZeros64(uint64(m))
