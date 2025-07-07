@@ -136,11 +136,13 @@ type CycleStateArena struct {
 // FanoutEntry now references canonical storage via index
 type FanoutEntry struct { // 32 B
 	StateRef CycleStateRef              //  4 B  ← index into canonical arena
+	_        uint32                     //  4 B pad (offset 4-7)
 	Queue    *quantumqueue.QuantumQueue //  8 B
 	Handle   quantumqueue.Handle        //  4 B
+	_        uint32                     //  4 B pad (offset 4-7)
 	EdgeIdx  uint16                     //  2 B
 	_        uint16                     //  2 B pad
-	_        [3]uint32                  // 12 B pad → 32 B
+	_        uint32                     // 8 B pad → 32 B
 }
 
 // PairShard is cold; but slice header first lets len/cap live in same line
