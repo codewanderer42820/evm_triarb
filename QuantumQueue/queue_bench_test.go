@@ -235,7 +235,7 @@ func BenchmarkUnlinkMin_StableBucket(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		q.UnlinkMin(h, 2048)
+		q.UnlinkMin(h)
 		q.Push(2048, h, val)
 	}
 }
@@ -260,7 +260,7 @@ func BenchmarkUnlinkMin_DenseBucket(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		h := hs[i%3]
-		q.UnlinkMin(h, 1234)
+		q.UnlinkMin(h)
 		q.Push(1234, h, val)
 	}
 }
@@ -282,7 +282,7 @@ func BenchmarkUnlinkMin_BitmapCollapse(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		tick := int64(i % BucketCount)
 		q.Push(tick, h, val)
-		q.UnlinkMin(h, tick)
+		q.UnlinkMin(h)
 	}
 }
 
@@ -309,7 +309,7 @@ func BenchmarkUnlinkMin_ScatterCollapse(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		tick := ticks[i]
 		q.Push(tick, h, val)
-		q.UnlinkMin(h, tick)
+		q.UnlinkMin(h)
 	}
 }
 
@@ -330,7 +330,7 @@ func BenchmarkUnlinkMin_ReinsertAfterCollapse(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		q.Push(tick, h, val)
-		q.UnlinkMin(h, tick)
+		q.UnlinkMin(h)
 	}
 }
 

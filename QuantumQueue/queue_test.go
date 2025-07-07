@@ -167,7 +167,7 @@ func TestPushAndPeepMin(t *testing.T) {
 	}
 
 	// Test entry removal
-	q.UnlinkMin(h, 10)
+	q.UnlinkMin(h)
 	if !q.Empty() || q.Size() != 0 {
 		t.Error("queue not empty after UnlinkMin")
 	}
@@ -188,7 +188,7 @@ func TestPushAndPeepMin(t *testing.T) {
 	}
 
 	// Test maximum tick handling after minimum removal
-	q2.UnlinkMin(h0, 0)
+	q2.UnlinkMin(h0)
 	hHigh, tickHigh, _ := q2.PeepMin()
 	if hHigh != hMax || tickHigh != int64(CapItems-1) {
 		t.Errorf("maximum tick retrieval failed: got (%v, %d), want (%v, %d)",
@@ -196,7 +196,7 @@ func TestPushAndPeepMin(t *testing.T) {
 	}
 
 	// Verify complete cleanup
-	q2.UnlinkMin(hMax, tickHigh)
+	q2.UnlinkMin(hMax)
 	if !q2.Empty() {
 		t.Error("queue not empty after removing all entries")
 	}
@@ -338,7 +338,7 @@ func TestUnlinkMinNonHead(t *testing.T) {
 	q.Push(3, h3, arr48([]byte("h3")))
 
 	// Remove middle entry (non-minimum in global ordering)
-	q.UnlinkMin(h2, 2)
+	q.UnlinkMin(h2)
 
 	// Verify remaining minimum is correct
 	hMin, tickMin, _ := q.PeepMin()
@@ -378,7 +378,7 @@ func TestMixedOperations(t *testing.T) {
 		if tick != int64(i) {
 			t.Errorf("drain order incorrect: want tick %d, got %d", i, tick)
 		}
-		q.UnlinkMin(h, tick)
+		q.UnlinkMin(h)
 	}
 
 	// Verify complete emptiness
@@ -422,8 +422,8 @@ func TestDoubleUnlink(t *testing.T) {
 	q := New()
 	h, _ := q.BorrowSafe()
 	q.Push(100, h, arr48([]byte("foo")))
-	q.UnlinkMin(h, 100)
-	q.UnlinkMin(h, 100) // Protocol violation - should panic
+	q.UnlinkMin(h)
+	q.UnlinkMin(h) // Protocol violation - should panic
 }
 
 // TestHandleReuseAfterUnlink validates safe handle recycling patterns.
@@ -440,7 +440,7 @@ func TestHandleReuseAfterUnlink(t *testing.T) {
 
 	// Initial use cycle
 	q.Push(123, h, arr48([]byte("x")))
-	q.UnlinkMin(h, 123)
+	q.UnlinkMin(h)
 
 	// Reuse same handle with different data
 	q.Push(456, h, arr48([]byte("y")))
@@ -499,8 +499,8 @@ func TestSizeTracking(t *testing.T) {
 	q.Push(10, h1, arr48([]byte("c"))) // Update, not insertion
 
 	// Test removals and final size validation
-	q.UnlinkMin(h1, 10)
-	q.UnlinkMin(h2, 20)
+	q.UnlinkMin(h1)
+	q.UnlinkMin(h2)
 
 	if q.Size() != 0 {
 		t.Errorf("size tracking failed: got %d, want 0", q.Size())
@@ -528,8 +528,8 @@ func TestFreelistCycle(t *testing.T) {
 	}
 
 	// Return all handles to freelist
-	for i, h := range handles {
-		q.UnlinkMin(h, int64(i))
+	for _, h := range handles {
+		q.UnlinkMin(h)
 	}
 
 	// Verify complete freelist recovery

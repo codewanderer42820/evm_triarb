@@ -218,7 +218,7 @@ func TestQueueStressRandomOperations(t *testing.T) {
 			}
 
 			// Complete removal and handle lifecycle update
-			q.UnlinkMin(h, tickGot)
+			q.UnlinkMin(h)
 			delete(live, h)
 			free = append(free, h)
 		}
@@ -239,7 +239,7 @@ func TestQueueStressRandomOperations(t *testing.T) {
 		}
 
 		// Complete removal and cleanup
-		q.UnlinkMin(h, tickGot)
+		q.UnlinkMin(h)
 		delete(live, h)
 		free = append(free, h)
 	}
