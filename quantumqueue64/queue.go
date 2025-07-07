@@ -6,7 +6,7 @@
 // with zero heap allocation, zero atomics, and zero memory fences.
 //
 // COMPACT VERSION: Optimized for uint64 payloads instead of 48-byte data blocks.
-// Reduces memory footprint by 75% compared to QuantumQueue while maintaining
+// Reduces memory footprint by 50% compared to QuantumQueue while maintaining
 // identical performance characteristics and API semantics.
 //
 // Architecture overview:
@@ -14,14 +14,14 @@
 //   - Each tick ∈ [0, 262143] indexes into a unique bucket
 //   - Each bucket maintains a per-tick LIFO doubly-linked list
 //   - Fixed arena with deterministic memory layout
-//   - Compact 16-byte nodes vs 64-byte nodes in QuantumQueue
+//   - Compact 32-byte nodes vs 64-byte nodes in QuantumQueue
 //
 // Performance characteristics:
 //   - O(1) insertion, deletion, and minimum extraction
 //   - Sub-8ns operation latency on modern hardware (improved from sub-10ns)
 //   - Zero dynamic allocation during operation
 //   - Cache-aligned data structures for optimal memory access
-//   - 4x better cache efficiency due to compact node layout
+//   - 2x better cache efficiency due to compact node layout
 //
 // Memory efficiency improvements over QuantumQueue:
 //   - Node size: 32 bytes vs 64 bytes (50% reduction)
@@ -229,7 +229,7 @@ func (q *QuantumQueue64) Borrow() (Handle, error) {
 
 	// Reset node to clean state
 	n := &q.arena[h]
-	n.tick, n.data, n.prev, n.next = -1, 0, nilIdx, nilIdx
+	n.tick, n.prev, n.next = -1, nilIdx, nilIdx
 
 	return h, nil
 }
@@ -257,7 +257,7 @@ func (q *QuantumQueue64) BorrowSafe() (Handle, error) {
 
 	// Reset node to clean state
 	n := &q.arena[h]
-	n.tick, n.data, n.prev, n.next = -1, 0, nilIdx, nilIdx
+	n.tick, n.prev, n.next = -1, nilIdx, nilIdx
 
 	return h, nil
 }
@@ -297,8 +297,6 @@ func (q *QuantumQueue64) Empty() bool {
 // unlink removes an entry from its current bucket and updates all summaries.
 // Performs complete cleanup including bitmap summary maintenance and freelist return.
 //
-// COMPACT VERSION: Optimal cache efficiency with 2 nodes per 64B cache line
-//
 // Algorithm steps:
 //  1. Remove entry from doubly-linked bucket chain
 //  2. Update bitmap summaries if bucket becomes empty
@@ -309,7 +307,6 @@ func (q *QuantumQueue64) Empty() bool {
 //   - Prefetch next node for improved memory access patterns
 //   - Hierarchical summary updates only when necessary
 //   - Single-pass bitmap manipulation
-//   - Perfect cache line utilization with 32-byte nodes
 //
 //go:norace
 //go:nocheckptr
@@ -321,7 +318,6 @@ func (q *QuantumQueue64) unlink(h Handle) {
 	b := idx32(n.tick)
 
 	// Prefetch next node for memory access optimization
-	// COMPACT BENEFIT: 2 nodes per cache line increases hit probability
 	if n.next != nilIdx {
 		_ = *(*node)(unsafe.Pointer(uintptr(unsafe.Pointer(&q.arena[0])) +
 			uintptr(n.next)*unsafe.Sizeof(node{})))
@@ -359,15 +355,12 @@ func (q *QuantumQueue64) unlink(h Handle) {
 	n.next = q.freeHead
 	n.prev = nilIdx
 	n.tick = -1
-	n.data = 0 // Clear compact payload
 	q.freeHead = h
 	q.size--
 }
 
 // linkAtHead inserts an entry at the head of its tick bucket.
 // Maintains LIFO ordering within each tick and updates all bitmap summaries.
-//
-// COMPACT VERSION: Enhanced cache performance with perfect cache line control
 //
 // Algorithm steps:
 //  1. Insert at head of bucket's doubly-linked chain
@@ -378,7 +371,6 @@ func (q *QuantumQueue64) unlink(h Handle) {
 //   - Prefetch existing head for improved memory patterns
 //   - Parallel bitmap updates across hierarchy levels
 //   - Single-pass summary bit manipulation
-//   - Optimal spatial locality with 32-byte aligned nodes
 //
 //go:norace
 //go:nocheckptr
@@ -390,7 +382,6 @@ func (q *QuantumQueue64) linkAtHead(h Handle, tick int64) {
 	b := idx32(uint64(tick))
 
 	// Prefetch existing bucket head for memory optimization
-	// COMPACT BENEFIT: Paired nodes likely share same cache line
 	if q.buckets[b] != nilIdx {
 		_ = *(*node)(unsafe.Pointer(uintptr(unsafe.Pointer(&q.arena[0])) +
 			uintptr(q.buckets[b])*unsafe.Sizeof(node{})))
@@ -425,8 +416,6 @@ func (q *QuantumQueue64) linkAtHead(h Handle, tick int64) {
 // Push inserts or updates an entry at the specified tick with given uint64 payload.
 // Handles both new insertions and in-place updates for existing entries.
 //
-// COMPACT VERSION: Simplified API with uint64 instead of [48]byte pointer
-//
 // Operation modes:
 //   - Same tick update: Only payload modified, no structural changes
 //   - Tick change: Entry unlinked from old position and relinked at new tick
@@ -436,7 +425,6 @@ func (q *QuantumQueue64) linkAtHead(h Handle, tick int64) {
 //   - O(1) for same-tick updates (hot path optimization)
 //   - O(1) for tick changes via unlink/relink operations
 //   - Zero allocations for all operation modes
-//   - Improved cache efficiency due to compact payload
 //
 //go:norace
 //go:nocheckptr
@@ -463,8 +451,6 @@ func (q *QuantumQueue64) Push(tick int64, h Handle, val uint64) {
 // PeepMin returns the minimum entry without removing it from the queue.
 // Uses hierarchical bitmap traversal for guaranteed O(1) minimum finding.
 //
-// COMPACT VERSION: Returns uint64 directly instead of byte array pointer
-//
 // Algorithm steps:
 //  1. Find first set bit in global summary (minimum group)
 //  2. Find first set bit in group's l1Summary (minimum lane)
@@ -475,7 +461,6 @@ func (q *QuantumQueue64) Push(tick int64, h Handle, val uint64) {
 //   - CLZ (Count Leading Zeros) for O(1) bit scanning
 //   - Prefetch minimum entry for improved memory access
 //   - Direct bucket indexing without iteration
-//   - Enhanced cache hit rate due to perfect cache line control
 //
 // ⚠️  FOOTGUN WARNING: Undefined behavior on empty queue
 //
@@ -496,7 +481,6 @@ func (q *QuantumQueue64) PeepMin() (Handle, int64, uint64) {
 	h := q.buckets[b]
 
 	// Prefetch minimum entry for memory access optimization
-	// COMPACT BENEFIT: High probability of cache hit with 32-byte nodes
 	_ = *(*node)(unsafe.Pointer(uintptr(unsafe.Pointer(&q.arena[0])) +
 		uintptr(h)*unsafe.Sizeof(node{})))
 
