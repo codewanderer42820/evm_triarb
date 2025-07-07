@@ -1,30 +1,8 @@
-// router_test.go — Comprehensive test suite for triangular arbitrage router
-// ============================================================================
-// TRIANGULAR ARBITRAGE ROUTER TEST SUITE
-// ============================================================================
-//
-// Complete testing framework for high-performance arbitrage detection system
-// with comprehensive coverage and realistic workload simulation.
-//
-// Test coverage includes:
-//   • Unit tests for core components with edge case validation
-//   • Integration tests for complete system workflows
-//   • Performance benchmarks with nanosecond-scale validation
-//   • Memory allocation and cache efficiency verification
-//   • Concurrent safety and data integrity testing
-//   • Robin Hood hash table collision resolution validation
-//   • Complete tick dispatch pipeline testing
-//   • System initialization and graceful shutdown verification
-//
-// Performance validation:
-//   • Nanosecond-scale operation timing verification
-//   • Zero-allocation hot path enforcement
-//   • Concurrent throughput under sustained load
-//   • Memory layout and cache alignment validation
-
+// router_test.go — High-performance triangular arbitrage router test suite
 package router
 
 import (
+	"fmt"
 	"math"
 	"math/bits"
 	"runtime"
@@ -44,29 +22,18 @@ import (
 	"main/utils"
 )
 
-// ============================================================================
-// TEST CONFIGURATION AND CONSTANTS
-// ============================================================================
-
+// Test configuration
 const (
-	// Test scale parameters - calibrated for comprehensive testing without timeouts
-	testTrianglePairCount = 5  // Reduced scale for unit test efficiency
-	testTickUpdatesCount  = 20 // Moderate tick update volume for validation
-	testCoreCount         = 4  // Constrained core count for test environment
-
-	// Performance validation thresholds - conservative for reliable CI/CD
-	maxMemoryAllocBytes    = 50000 // 50KB allocation limit for efficiency tests
-	minThroughputOpsPerSec = 100   // Conservative throughput requirement
+	testTrianglePairCount  = 5
+	testTickUpdatesCount   = 20
+	testCoreCount          = 4
+	maxMemoryAllocBytes    = 50000
+	minThroughputOpsPerSec = 100
 )
 
-// ============================================================================
-// MOCK DATA STRUCTURES AND GENERATORS
-// ============================================================================
-
-// MockEthereumAddress represents a 40-character hexadecimal Ethereum address for testing
+// Mock types
 type MockEthereumAddress [40]byte
 
-// MockTickUpdate represents a price update event for testing dispatch pipeline
 type MockTickUpdate struct {
 	pairID       PairID
 	reserve0     uint64
@@ -75,14 +42,19 @@ type MockTickUpdate struct {
 	timestamp    int64
 }
 
-// MockArbitrageSetup contains complete test data for arbitrage cycle testing
 type MockArbitrageSetup struct {
 	trianglePairs   []ArbitrageTriplet
 	addressMappings map[PairID][40]byte
 	tickUpdateQueue []MockTickUpdate
 }
 
-// generateMockAddress creates deterministic Ethereum-style addresses for testing
+// generateMockAddress creates deterministic test addresses
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func generateMockAddress(seed uint64) MockEthereumAddress {
 	var addr MockEthereumAddress
 	for i := 0; i < 20; i++ {
@@ -93,7 +65,13 @@ func generateMockAddress(seed uint64) MockEthereumAddress {
 	return addr
 }
 
-// generateArbitrageTriangle creates a triangular arbitrage cycle with sequential PairIDs
+// generateArbitrageTriangle creates test triangle
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func generateArbitrageTriangle(baseID uint32) ArbitrageTriplet {
 	return ArbitrageTriplet{
 		PairID(baseID),
@@ -102,7 +80,12 @@ func generateArbitrageTriangle(baseID uint32) ArbitrageTriplet {
 	}
 }
 
-// createMockArbitrageSetup generates comprehensive test data for arbitrage system testing
+// createMockArbitrageSetup generates complete test data
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func createMockArbitrageSetup() *MockArbitrageSetup {
 	setup := &MockArbitrageSetup{
 		trianglePairs:   make([]ArbitrageTriplet, 0, testTrianglePairCount),
@@ -110,13 +93,13 @@ func createMockArbitrageSetup() *MockArbitrageSetup {
 		tickUpdateQueue: make([]MockTickUpdate, 0, testTickUpdatesCount),
 	}
 
-	// Generate triangular arbitrage cycles with corresponding address mappings
+	// Generate triangles
 	for i := 0; i < testTrianglePairCount; i++ {
 		baseID := uint32(i * 3)
 		triangle := generateArbitrageTriangle(baseID)
 		setup.trianglePairs = append(setup.trianglePairs, triangle)
 
-		// Create deterministic address mappings for each pair in the triangle
+		// Address mappings
 		for j, pairID := range triangle {
 			seed := uint64(baseID + uint32(j))
 			addr := generateMockAddress(seed)
@@ -124,7 +107,7 @@ func createMockArbitrageSetup() *MockArbitrageSetup {
 		}
 	}
 
-	// Generate realistic tick update sequences
+	// Generate tick updates
 	for i := 0; i < testTickUpdatesCount; i++ {
 		pairIdx := i % (testTrianglePairCount * 3)
 		pairID := PairID(pairIdx)
@@ -146,16 +129,12 @@ func createMockArbitrageSetup() *MockArbitrageSetup {
 	return setup
 }
 
-// ============================================================================
-// UNIT TESTS - CORE COMPONENT VALIDATION
-// ============================================================================
-
-// TestAddressKeyOperations validates fundamental address key operations
+// TestAddressKeyOperations validates address key functionality
 func TestAddressKeyOperations(t *testing.T) {
 	t.Run("KeyGeneration", func(t *testing.T) {
 		addr1 := generateMockAddress(12345)
-		addr2 := generateMockAddress(12345) // Same seed must produce identical address
-		addr3 := generateMockAddress(54321) // Different seed must produce different address
+		addr2 := generateMockAddress(12345)
+		addr3 := generateMockAddress(54321)
 
 		key1 := bytesToAddressKey(addr1[:])
 		key2 := bytesToAddressKey(addr2[:])
@@ -174,40 +153,54 @@ func TestAddressKeyOperations(t *testing.T) {
 		addr := generateMockAddress(99999)
 		key := bytesToAddressKey(addr[:])
 
-		// Validate reflexivity property
+		// Validate reflexivity
 		if !key.isEqual(key) {
-			t.Error("Key must equal itself (reflexivity property)")
+			t.Error("Key must equal itself")
 		}
 
-		// Validate inequality after modification
-		modifiedKey := key
-		modifiedKey.words[2] ^= 1
-
-		if key.isEqual(modifiedKey) {
-			t.Error("Modified key must not equal original")
-		}
-	})
-
-	t.Run("DeterministicGeneration", func(t *testing.T) {
-		addr1 := generateMockAddress(12345)
-		addr2 := generateMockAddress(12345)
-
-		if addr1 != addr2 {
-			t.Error("Address generation must be deterministic for identical seed")
+		// Validate word-level modification detection
+		for i := 0; i < 5; i++ {
+			modifiedKey := key
+			modifiedKey.words[i] ^= 1
+			if key.isEqual(modifiedKey) {
+				t.Errorf("Modified word %d must be detected", i)
+			}
 		}
 	})
 
-	t.Run("AddressKeyStructureSize", func(t *testing.T) {
+	t.Run("BoundaryAddresses", func(t *testing.T) {
+		// All zeros
+		var zeroAddr [40]byte
+		zeroKey := bytesToAddressKey(zeroAddr[:])
+
+		// All ones
+		var maxAddr [40]byte
+		for i := range maxAddr {
+			maxAddr[i] = 0xFF
+		}
+		maxKey := bytesToAddressKey(maxAddr[:])
+
+		if zeroKey.isEqual(maxKey) {
+			t.Error("Zero and max addresses must differ")
+		}
+	})
+
+	t.Run("AddressKeySize", func(t *testing.T) {
 		var key AddressKey
 		size := unsafe.Sizeof(key)
 
 		if size != 64 {
-			t.Errorf("AddressKey size is %d bytes, expected 64 bytes for cache line alignment", size)
+			t.Errorf("AddressKey size is %d bytes, expected 64 bytes", size)
+		}
+
+		// Verify alignment
+		if uintptr(unsafe.Pointer(&key))%64 != 0 {
+			t.Error("AddressKey must be 64-byte aligned")
 		}
 	})
 }
 
-// TestDirectAddressIndexing validates the direct Ethereum address indexing system
+// TestDirectAddressIndexing validates address indexing
 func TestDirectAddressIndexing(t *testing.T) {
 	t.Run("IndexConsistency", func(t *testing.T) {
 		addr := generateMockAddress(12345)
@@ -221,7 +214,7 @@ func TestDirectAddressIndexing(t *testing.T) {
 	})
 
 	t.Run("IndexDistribution", func(t *testing.T) {
-		const testCount = 1000
+		const testCount = 10000
 		indices := make(map[uint32]int)
 
 		for i := 0; i < testCount; i++ {
@@ -230,33 +223,51 @@ func TestDirectAddressIndexing(t *testing.T) {
 			indices[index]++
 		}
 
-		// Verify reasonable distribution (no single index should dominate)
+		// Calculate distribution metrics
 		maxCollisions := 0
+		totalBuckets := len(indices)
 		for _, count := range indices {
 			if count > maxCollisions {
 				maxCollisions = count
 			}
 		}
 
-		// With proper distribution, maximum collisions should be relatively low
-		if maxCollisions > testCount/10 {
-			t.Errorf("Poor address index distribution: max collisions %d (expected < %d)", maxCollisions, testCount/10)
+		loadFactor := float64(testCount) / float64(totalBuckets)
+		if loadFactor > 3.0 {
+			t.Errorf("Poor load factor: %.2f", loadFactor)
+		}
+
+		if maxCollisions > testCount/100 {
+			t.Errorf("Excessive collisions: %d", maxCollisions)
 		}
 	})
 
 	t.Run("IndexBounds", func(t *testing.T) {
-		for i := 0; i < 100; i++ {
+		for i := 0; i < 1000; i++ {
 			addr := generateMockAddress(uint64(i))
 			index := directAddressToIndex64(addr[:])
 
 			if index >= constants.AddressTableCapacity {
-				t.Errorf("Index %d exceeds table capacity %d", index, constants.AddressTableCapacity)
+				t.Errorf("Index %d exceeds capacity", index)
 			}
+		}
+	})
+
+	t.Run("IndexMasking", func(t *testing.T) {
+		// Verify proper masking
+		var addr [40]byte
+		for i := range addr {
+			addr[i] = 0xFF
+		}
+
+		index := directAddressToIndex64(addr[:])
+		if index >= constants.AddressTableCapacity {
+			t.Error("Masking failed for max address")
 		}
 	})
 }
 
-// TestRobinHoodHashTable validates the Robin Hood hash table implementation
+// TestRobinHoodHashTable validates hash table operations
 func TestRobinHoodHashTable(t *testing.T) {
 	t.Run("BasicOperations", func(t *testing.T) {
 		addr := generateMockAddress(42)
@@ -270,7 +281,21 @@ func TestRobinHoodHashTable(t *testing.T) {
 		}
 	})
 
-	t.Run("NotFoundHandling", func(t *testing.T) {
+	t.Run("UpdateExisting", func(t *testing.T) {
+		addr := generateMockAddress(12345)
+		originalPairID := PairID(1000)
+		updatedPairID := PairID(2000)
+
+		RegisterPairAddress(addr[:], originalPairID)
+		RegisterPairAddress(addr[:], updatedPairID)
+
+		found := lookupPairIDByAddress(addr[:])
+		if found != updatedPairID {
+			t.Errorf("Expected updated ID %d, got %d", updatedPairID, found)
+		}
+	})
+
+	t.Run("NotFound", func(t *testing.T) {
 		unknownAddr := generateMockAddress(999999)
 		foundID := lookupPairIDByAddress(unknownAddr[:])
 
@@ -280,104 +305,160 @@ func TestRobinHoodHashTable(t *testing.T) {
 	})
 
 	t.Run("CollisionResolution", func(t *testing.T) {
-		const testCount = 100
+		const testCount = 1000
 		pairs := make(map[PairID][40]byte)
 
-		// Insert multiple addresses that may produce hash collisions
+		// Create addresses likely to collide
 		for i := 0; i < testCount; i++ {
-			addr := generateMockAddress(uint64(i + 50000))
+			addr := generateMockAddress(uint64(i * 65536))
 			pairID := PairID(i + 10000)
 			pairs[pairID] = addr
 
 			RegisterPairAddress(addr[:], pairID)
 		}
 
-		// Verify all entries can be retrieved correctly
+		// Verify all entries
 		for pairID, addr := range pairs {
 			found := lookupPairIDByAddress(addr[:])
 			if found != pairID {
-				t.Errorf("Collision resolution failed: pair %d not found", pairID)
+				t.Errorf("Lost pair %d in collision", pairID)
 			}
 		}
 	})
 
-	t.Run("UpdateExistingEntry", func(t *testing.T) {
-		addr := generateMockAddress(12345)
-		originalPairID := PairID(1000)
-		updatedPairID := PairID(2000)
+	t.Run("RobinHoodInvariant", func(t *testing.T) {
+		// Verify displacement ordering
+		const probeCount = 100
+		startIdx := uint32(1000)
 
-		// Insert original mapping
-		RegisterPairAddress(addr[:], originalPairID)
+		// Check distance invariant
+		for i := uint32(0); i < probeCount; i++ {
+			idx := (startIdx + i) & constants.AddressTableMask
+			if addressToPairID[idx] == 0 {
+				continue
+			}
 
-		// Update with new PairID
-		RegisterPairAddress(addr[:], updatedPairID)
+			key := pairAddressKeys[idx]
+			keyIdx := directAddressToIndex64((*[40]byte)(unsafe.Pointer(&key.words[0]))[:])
+			dist := (idx + constants.AddressTableCapacity - keyIdx) & constants.AddressTableMask
 
-		// Verify update took effect
-		found := lookupPairIDByAddress(addr[:])
-		if found != updatedPairID {
-			t.Errorf("Expected updated pair ID %d, got %d", updatedPairID, found)
+			// Check next entry
+			nextIdx := (idx + 1) & constants.AddressTableMask
+			if addressToPairID[nextIdx] != 0 {
+				nextKey := pairAddressKeys[nextIdx]
+				nextKeyIdx := directAddressToIndex64((*[40]byte)(unsafe.Pointer(&nextKey.words[0]))[:])
+				nextDist := (nextIdx + constants.AddressTableCapacity - nextKeyIdx) & constants.AddressTableMask
+
+				if nextDist > dist+1 {
+					t.Error("Robin Hood invariant violated")
+				}
+			}
 		}
 	})
 
-	t.Run("CompleteIntegrity", func(t *testing.T) {
-		setup := createMockArbitrageSetup()
+	t.Run("HighLoadFactor", func(t *testing.T) {
+		// Test near-full table
+		const fillRatio = 0.75
+		fillCount := int(float64(constants.AddressTableCapacity) * fillRatio)
 
-		// Register all address mappings
-		for pairID, addr := range setup.addressMappings {
-			RegisterPairAddress(addr[:], pairID)
+		for i := 0; i < fillCount; i++ {
+			addr := generateMockAddress(uint64(i + 1000000))
+			RegisterPairAddress(addr[:], PairID(i+100000))
 		}
 
-		// Verify all lookups succeed
-		for pairID, addr := range setup.addressMappings {
-			foundID := lookupPairIDByAddress(addr[:])
-			if foundID != pairID {
-				t.Errorf("Integrity check failed: expected %d, got %d", pairID, foundID)
+		// Verify lookups still work
+		testSamples := 100
+		for i := 0; i < testSamples; i++ {
+			idx := i * (fillCount / testSamples)
+			addr := generateMockAddress(uint64(idx + 1000000))
+			found := lookupPairIDByAddress(addr[:])
+			if found != PairID(idx+100000) {
+				t.Error("Lookup failed at high load")
 			}
 		}
 	})
 }
 
-// TestTickQuantization validates floating-point to integer quantization
+// TestTickQuantization validates tick conversion
 func TestTickQuantization(t *testing.T) {
 	testCases := []struct {
-		input float64
-		name  string
+		input    float64
+		name     string
+		checkMin bool
+		checkMax bool
 	}{
-		{-200.0, "Underflow boundary"},
-		{-constants.TickClampingBound, "Lower bound"},
-		{-64.0, "Negative value"},
-		{0.0, "Zero value"},
-		{64.0, "Positive value"},
-		{constants.TickClampingBound, "Upper bound"},
-		{200.0, "Overflow boundary"},
+		{-1000.0, "ExtremeUnderflow", true, false},
+		{-200.0, "Underflow", true, false},
+		{-constants.TickClampingBound, "LowerBound", true, false},
+		{-100.0, "Negative", false, false},
+		{0.0, "Zero", false, false},
+		{100.0, "Positive", false, false},
+		{constants.TickClampingBound, "UpperBound", false, true},
+		{200.0, "Overflow", false, true},
+		{1000.0, "ExtremeOverflow", false, true},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			result := quantizeTickToInt64(tc.input)
 
-			// Verify result falls within valid quantization range
 			if result < 0 || result > constants.MaxQuantizedTick {
-				t.Errorf("Quantization result %d outside valid range [0, %d]", result, constants.MaxQuantizedTick)
+				t.Errorf("Result %d outside valid range", result)
+			}
+
+			if tc.checkMin && result != 0 {
+				t.Errorf("Expected clamped to 0, got %d", result)
+			}
+
+			if tc.checkMax && result != constants.MaxQuantizedTick {
+				t.Errorf("Expected clamped to max, got %d", result)
 			}
 		})
 	}
 
 	t.Run("Monotonicity", func(t *testing.T) {
-		// Verify quantization maintains order for values within bounds
-		val1 := quantizeTickToInt64(-50.0)
-		val2 := quantizeTickToInt64(0.0)
-		val3 := quantizeTickToInt64(50.0)
+		prev := quantizeTickToInt64(-constants.TickClampingBound)
+		for tick := -constants.TickClampingBound + 1; tick < constants.TickClampingBound; tick += 0.1 {
+			curr := quantizeTickToInt64(tick)
+			if curr < prev {
+				t.Errorf("Non-monotonic at %f", tick)
+			}
+			prev = curr
+		}
+	})
 
-		if val1 >= val2 || val2 >= val3 {
-			t.Error("Quantization must maintain monotonicity")
+	t.Run("Precision", func(t *testing.T) {
+		// Test quantization precision
+		tick1 := 50.0
+		tick2 := 50.0 + 1.0/constants.QuantizationScale
+
+		q1 := quantizeTickToInt64(tick1)
+		q2 := quantizeTickToInt64(tick2)
+
+		if q2-q1 != 1 {
+			t.Error("Quantization precision incorrect")
+		}
+	})
+
+	t.Run("SpecialValues", func(t *testing.T) {
+		specialValues := []float64{
+			math.NaN(),
+			math.Inf(1),
+			math.Inf(-1),
+		}
+
+		for _, val := range specialValues {
+			result := quantizeTickToInt64(val)
+			if result < 0 || result > constants.MaxQuantizedTick {
+				t.Errorf("Special value %v produced invalid result %d", val, result)
+			}
 		}
 	})
 }
 
-// TestCoreAssignment validates pair-to-core assignment functionality
+// TestCoreAssignment validates pair-to-core mapping
 func TestCoreAssignment(t *testing.T) {
-	t.Run("SingleCoreAssignment", func(t *testing.T) {
+	t.Run("SingleCore", func(t *testing.T) {
 		pairID := PairID(12345)
 		coreID := uint8(3)
 
@@ -387,13 +468,13 @@ func TestCoreAssignment(t *testing.T) {
 		expectedBit := uint64(1) << coreID
 
 		if assignment&expectedBit == 0 {
-			t.Errorf("Core assignment failed: pair %d not assigned to core %d", pairID, coreID)
+			t.Errorf("Pair %d not assigned to core %d", pairID, coreID)
 		}
 	})
 
-	t.Run("MultipleCoreAssignment", func(t *testing.T) {
+	t.Run("MultipleCore", func(t *testing.T) {
 		pairID := PairID(54321)
-		cores := []uint8{0, 2, 5, 7}
+		cores := []uint8{0, 2, 5, 7, 15, 31, 63}
 
 		for _, coreID := range cores {
 			RegisterPairToCore(pairID, coreID)
@@ -404,20 +485,34 @@ func TestCoreAssignment(t *testing.T) {
 		for _, coreID := range cores {
 			expectedBit := uint64(1) << coreID
 			if assignment&expectedBit == 0 {
-				t.Errorf("Multi-core assignment failed: pair %d not assigned to core %d", pairID, coreID)
+				t.Errorf("Pair %d not assigned to core %d", pairID, coreID)
 			}
 		}
 	})
 
-	t.Run("BitManipulationCorrectness", func(t *testing.T) {
+	t.Run("AllCores", func(t *testing.T) {
 		pairID := PairID(99999)
-		cores := []uint8{1, 3, 5}
+
+		// Assign to all 64 possible cores
+		for core := uint8(0); core < 64; core++ {
+			RegisterPairToCore(pairID, core)
+		}
+
+		assignment := pairToCoreAssignment[pairID]
+		if assignment != ^uint64(0) {
+			t.Error("All cores assignment failed")
+		}
+	})
+
+	t.Run("BitManipulation", func(t *testing.T) {
+		pairID := PairID(88888)
+		cores := []uint8{1, 3, 5, 7, 11, 13}
 
 		for _, coreID := range cores {
 			RegisterPairToCore(pairID, coreID)
 		}
 
-		// Verify bit manipulation loop matches assigned cores
+		// Verify bit extraction
 		assignment := pairToCoreAssignment[pairID]
 		foundCores := make([]uint8, 0)
 
@@ -431,18 +526,30 @@ func TestCoreAssignment(t *testing.T) {
 			t.Errorf("Expected %d cores, found %d", len(cores), len(foundCores))
 		}
 	})
+
+	t.Run("IdempotentAssignment", func(t *testing.T) {
+		pairID := PairID(77777)
+		coreID := uint8(7)
+
+		// Multiple assignments should be idempotent
+		for i := 0; i < 10; i++ {
+			RegisterPairToCore(pairID, coreID)
+		}
+
+		assignment := pairToCoreAssignment[pairID]
+		popCount := bits.OnesCount64(assignment)
+
+		if popCount != 1 {
+			t.Error("Multiple assignments created duplicates")
+		}
+	})
 }
 
-// ============================================================================
-// CRITICAL PATH COVERAGE TESTS
-// ============================================================================
-
-// TestCriticalExecutionPaths validates the most performance-critical code paths
+// TestCriticalExecutionPaths validates hot paths
 func TestCriticalExecutionPaths(t *testing.T) {
-	t.Run("ReverseDirectionProcessing", func(t *testing.T) {
-		// Validate reverse direction tick processing branch with properly initialized executor
+	t.Run("ReverseDirection", func(t *testing.T) {
 		executor := &ArbitrageCoreExecutor{
-			isReverseDirection: true, // Triggers reverse tick selection
+			isReverseDirection: true,
 			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
 			fanoutTables:       make([][]FanoutEntry, 1),
 			pairToQueueIndex:   localidx.New(16),
@@ -450,31 +557,33 @@ func TestCriticalExecutionPaths(t *testing.T) {
 		}
 
 		executor.priorityQueues[0] = *quantumqueue64.New()
-		executor.fanoutTables[0] = nil
 		executor.pairToQueueIndex.Put(123, 0)
 
-		// Create and populate cycle state (realistic initialization)
 		executor.cycleStates[0] = ArbitrageCycleState{
 			tickValues: [3]float64{0.0, 0.0, 0.0},
 			pairIDs:    [3]PairID{123, 124, 125},
 		}
 
-		// Populate queue with cycle (matches production initialization)
 		handle, _ := executor.priorityQueues[0].BorrowSafe()
 		executor.priorityQueues[0].Push(constants.MaxInitializationPriority, handle, 0)
 
 		update := &TickUpdate{
 			pairID:      PairID(123),
 			forwardTick: 1.0,
-			reverseTick: -2.0, // This value should be selected for reverse direction
+			reverseTick: -2.0,
 		}
 
-		// Execute critical path - now with populated queue
 		processTickUpdate(executor, update)
+
+		// Verify reverse tick was used
+		cycle := &executor.cycleStates[0]
+		totalTick := cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
+		if totalTick != -2.0 {
+			t.Errorf("Reverse tick not applied: %f", totalTick)
+		}
 	})
 
-	t.Run("ProfitableArbitrageDetection", func(t *testing.T) {
-		// Validate profitable arbitrage cycle detection and emission with realistic setup
+	t.Run("ArbitrageDetection", func(t *testing.T) {
 		executor := &ArbitrageCoreExecutor{
 			isReverseDirection: false,
 			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
@@ -484,58 +593,62 @@ func TestCriticalExecutionPaths(t *testing.T) {
 		}
 
 		executor.priorityQueues[0] = *quantumqueue64.New()
-		executor.fanoutTables[0] = nil
 		executor.pairToQueueIndex.Put(123, 0)
 
-		// Create cycle with negative total (profitable) - realistic scenario
 		executor.cycleStates[0] = ArbitrageCycleState{
-			tickValues: [3]float64{-0.5, -0.3, -0.1}, // Total: -0.9
+			tickValues: [3]float64{-0.5, -0.3, -0.1},
 			pairIDs:    [3]PairID{100, 101, 102},
 		}
 
-		// Populate queue with cycle (essential for realistic test)
 		handle, _ := executor.priorityQueues[0].BorrowSafe()
-		executor.priorityQueues[0].Push(0, handle, 0) // Use profitable priority
+		executor.priorityQueues[0].Push(0, handle, 0)
 
 		update := &TickUpdate{
 			pairID:      PairID(123),
-			forwardTick: -0.2, // Total becomes -1.1 (profitable)
+			forwardTick: -0.2,
 		}
 
-		// Should trigger arbitrage opportunity emission
 		processTickUpdate(executor, update)
 	})
 
-	t.Run("FanoutTablePropagation", func(t *testing.T) {
-		// Validate fanout table update propagation mechanism with realistic setup
+	t.Run("FanoutPropagation", func(t *testing.T) {
 		executor := &ArbitrageCoreExecutor{
-			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
-			fanoutTables:       make([][]FanoutEntry, 1),
+			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 2),
+			fanoutTables:       make([][]FanoutEntry, 2),
 			isReverseDirection: false,
 			pairToQueueIndex:   localidx.New(16),
-			cycleStates:        make([]ArbitrageCycleState, 1),
+			cycleStates:        make([]ArbitrageCycleState, 3),
 		}
 
 		executor.priorityQueues[0] = *quantumqueue64.New()
+		executor.priorityQueues[1] = *quantumqueue64.New()
 		executor.pairToQueueIndex.Put(123, 0)
+		executor.pairToQueueIndex.Put(124, 1)
 
-		// Initialize cycle state properly
-		executor.cycleStates[0] = ArbitrageCycleState{
-			tickValues: [3]float64{0.0, 0.0, 0.0},
-			pairIDs:    [3]PairID{100, 101, 102},
+		// Setup multiple cycles
+		for i := 0; i < 3; i++ {
+			executor.cycleStates[i] = ArbitrageCycleState{
+				tickValues: [3]float64{0.0, 0.0, 0.0},
+				pairIDs:    [3]PairID{PairID(100 + i*3), PairID(101 + i*3), PairID(102 + i*3)},
+			}
 		}
 
-		// Populate queue with cycle (matches production behavior)
-		handle, _ := executor.priorityQueues[0].BorrowSafe()
-		executor.priorityQueues[0].Push(constants.MaxInitializationPriority, handle, 0)
+		// Setup fanout entries
+		handle0, _ := executor.priorityQueues[0].BorrowSafe()
+		handle1, _ := executor.priorityQueues[1].BorrowSafe()
 
-		// Setup fanout entry to update tick at index 1
 		executor.fanoutTables[0] = []FanoutEntry{
 			{
-				queueHandle:     handle,
+				queueHandle:     handle0,
 				edgeIndex:       1,
-				cycleStateIndex: CycleStateIndex(0),
+				cycleStateIndex: 0,
 				queue:           &executor.priorityQueues[0],
+			},
+			{
+				queueHandle:     handle1,
+				edgeIndex:       2,
+				cycleStateIndex: 1,
+				queue:           &executor.priorityQueues[1],
 			},
 		}
 
@@ -546,21 +659,52 @@ func TestCriticalExecutionPaths(t *testing.T) {
 
 		processTickUpdate(executor, update)
 
-		// Verify fanout propagation updated the correct tick value
+		// Verify propagation
 		if executor.cycleStates[0].tickValues[1] != 1.5 {
-			t.Errorf("Fanout propagation failed: expected 1.5, got %f", executor.cycleStates[0].tickValues[1])
+			t.Error("Fanout to cycle 0 failed")
 		}
+		if executor.cycleStates[1].tickValues[2] != 1.5 {
+			t.Error("Fanout to cycle 1 failed")
+		}
+	})
+
+	t.Run("QueueReordering", func(t *testing.T) {
+		executor := &ArbitrageCoreExecutor{
+			isReverseDirection: false,
+			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
+			fanoutTables:       make([][]FanoutEntry, 1),
+			pairToQueueIndex:   localidx.New(16),
+			cycleStates:        make([]ArbitrageCycleState, 5),
+		}
+
+		executor.priorityQueues[0] = *quantumqueue64.New()
+		executor.pairToQueueIndex.Put(123, 0)
+
+		// Insert multiple cycles with different priorities
+		for i := 0; i < 5; i++ {
+			executor.cycleStates[i] = ArbitrageCycleState{
+				tickValues: [3]float64{float64(i), 0.0, 0.0},
+				pairIDs:    [3]PairID{PairID(100 + i), PairID(200 + i), PairID(300 + i)},
+			}
+
+			handle, _ := executor.priorityQueues[0].BorrowSafe()
+			priority := quantizeTickToInt64(float64(i))
+			executor.priorityQueues[0].Push(priority, handle, uint64(i))
+		}
+
+		// Process update that triggers reordering
+		update := &TickUpdate{
+			pairID:      PairID(123),
+			forwardTick: -10.0, // Makes some cycles profitable
+		}
+
+		processTickUpdate(executor, update)
 	})
 }
 
-// ============================================================================
-// DISPATCH PIPELINE INTEGRATION TESTS
-// ============================================================================
-
-// TestDispatchPipeline validates the complete tick update dispatch system
+// TestDispatchPipeline validates dispatch system
 func TestDispatchPipeline(t *testing.T) {
-	t.Run("CompleteDispatchExecution", func(t *testing.T) {
-		// Validate end-to-end DispatchTickUpdate execution pipeline
+	t.Run("CompleteDispatch", func(t *testing.T) {
 		addr := generateMockAddress(555)
 		pairID := PairID(555)
 
@@ -568,7 +712,6 @@ func TestDispatchPipeline(t *testing.T) {
 		RegisterPairToCore(pairID, 0)
 		RegisterPairToCore(pairID, 1)
 
-		// Initialize required ring buffers for dispatch validation
 		if coreRings[0] == nil {
 			coreRings[0] = ring24.New(16)
 		}
@@ -576,29 +719,25 @@ func TestDispatchPipeline(t *testing.T) {
 			coreRings[1] = ring24.New(16)
 		}
 
-		// Construct realistic LogView structure
 		logView := &types.LogView{
 			Addr: make([]byte, 64),
 			Data: make([]byte, 128),
 		}
 
-		// Format address with proper LogView layout (0x prefix + 40 hex characters)
 		logView.Addr[0] = '0'
 		logView.Addr[1] = 'x'
 		copy(logView.Addr[2:42], addr[:])
 
-		// Encode reserve values in LogView data format
 		reserve0, reserve1 := uint64(1000), uint64(500)
 		for i := 0; i < 8; i++ {
 			logView.Data[24+i] = byte(reserve0 >> (8 * (7 - i)))
 			logView.Data[56+i] = byte(reserve1 >> (8 * (7 - i)))
 		}
 
-		// Execute complete dispatch pipeline
 		DispatchTickUpdate(logView)
 	})
 
-	t.Run("UnknownAddressGracefulHandling", func(t *testing.T) {
+	t.Run("UnknownAddress", func(t *testing.T) {
 		unknownAddr := generateMockAddress(999999)
 
 		logView := &types.LogView{
@@ -610,11 +749,11 @@ func TestDispatchPipeline(t *testing.T) {
 		logView.Addr[1] = 'x'
 		copy(logView.Addr[2:42], unknownAddr[:])
 
-		// Must handle unknown address gracefully without panic
+		// Must handle gracefully
 		DispatchTickUpdate(logView)
 	})
 
-	t.Run("EdgeCaseReserveValues", func(t *testing.T) {
+	t.Run("EdgeCaseReserves", func(t *testing.T) {
 		addr := generateMockAddress(777)
 		pairID := PairID(777)
 		RegisterPairAddress(addr[:], pairID)
@@ -623,11 +762,13 @@ func TestDispatchPipeline(t *testing.T) {
 			reserve0, reserve1 uint64
 			name               string
 		}{
-			{1, 1, "Equal reserves"},
-			{0, 1000, "Zero reserve0"},
-			{1000, 0, "Zero reserve1"},
-			{1, 1000000, "Large reserve ratio"},
-			{18446744073709551615, 1, "Maximum uint64 reserve0"},
+			{1, 1, "Equal"},
+			{0, 1000, "ZeroReserve0"},
+			{1000, 0, "ZeroReserve1"},
+			{1<<64 - 1, 1, "MaxReserve"},
+			{1, 1<<64 - 1, "MinRatio"},
+			{1 << 32, 1 << 32, "LargeEqual"},
+			{1000000000000, 1, "TrillionRatio"},
 		}
 
 		for _, tc := range testCases {
@@ -641,32 +782,29 @@ func TestDispatchPipeline(t *testing.T) {
 				logView.Addr[1] = 'x'
 				copy(logView.Addr[2:42], addr[:])
 
-				// Encode reserves as big-endian bytes
 				for i := 0; i < 8; i++ {
 					logView.Data[24+i] = byte(tc.reserve0 >> (8 * (7 - i)))
 					logView.Data[56+i] = byte(tc.reserve1 >> (8 * (7 - i)))
 				}
 
-				// Must handle edge cases without panic
 				DispatchTickUpdate(logView)
 			})
 		}
 	})
 
-	t.Run("MultiCoreBitManipulation", func(t *testing.T) {
-		// Validate dispatch to multiple non-contiguous cores via bit manipulation
+	t.Run("MultiCoreDispatch", func(t *testing.T) {
 		addr := generateMockAddress(888)
 		pairID := PairID(888)
 
 		RegisterPairAddress(addr[:], pairID)
 
-		// Assign to non-contiguous cores to validate bit manipulation logic
-		cores := []uint8{0, 3, 7, 15}
+		// Assign to many cores
+		cores := []uint8{0, 1, 2, 3, 7, 15, 31, 63}
 		for _, core := range cores {
 			RegisterPairToCore(pairID, core)
 		}
 
-		// Initialize required ring buffers for all assigned cores
+		// Initialize rings for assigned cores
 		for _, core := range cores {
 			if coreRings[core] == nil {
 				coreRings[core] = ring24.New(16)
@@ -688,35 +826,195 @@ func TestDispatchPipeline(t *testing.T) {
 			logView.Data[56+i] = byte(reserve1 >> (8 * (7 - i)))
 		}
 
-		// Validate dispatch to all assigned cores
 		DispatchTickUpdate(logView)
+	})
+
+	t.Run("AddressFormatValidation", func(t *testing.T) {
+		testCases := []struct {
+			name       string
+			setupAddr  func(*types.LogView)
+			shouldWork bool
+		}{
+			{
+				name: "Valid0xPrefix",
+				setupAddr: func(lv *types.LogView) {
+					lv.Addr[0] = '0'
+					lv.Addr[1] = 'x'
+					addr := generateMockAddress(12345)
+					copy(lv.Addr[2:42], addr[:])
+				},
+				shouldWork: true,
+			},
+			{
+				name: "InvalidPrefix",
+				setupAddr: func(lv *types.LogView) {
+					lv.Addr[0] = 'X'
+					lv.Addr[1] = 'Y'
+					addr := generateMockAddress(12345)
+					copy(lv.Addr[2:42], addr[:])
+				},
+				shouldWork: false,
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				logView := &types.LogView{
+					Addr: make([]byte, 64),
+					Data: make([]byte, 128),
+				}
+
+				tc.setupAddr(logView)
+
+				// Should not panic
+				DispatchTickUpdate(logView)
+			})
+		}
 	})
 }
 
-// ============================================================================
-// DATA STRUCTURE VALIDATION TESTS
-// ============================================================================
+// TestSecureRandomInt validates random generation
+func TestSecureRandomInt(t *testing.T) {
+	t.Run("BoundaryValues", func(t *testing.T) {
+		bounds := []int{1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 100, 1000}
 
-// TestDataStructureLayout validates memory layout and size requirements
-func TestDataStructureLayout(t *testing.T) {
-	t.Run("ArbitrageCycleStateLayout", func(t *testing.T) {
-		var state ArbitrageCycleState
-		size := unsafe.Sizeof(state)
+		for _, bound := range bounds {
+			results := make(map[int]int)
 
-		if size != 64 {
-			t.Errorf("ArbitrageCycleState size is %d bytes, expected 64 bytes", size)
+			for i := 0; i < bound*100; i++ {
+				result := secureRandomInt(bound)
+				if result < 0 || result >= bound {
+					t.Errorf("Result %d outside [0,%d)", result, bound)
+				}
+				results[result]++
+			}
+
+			// Verify all values appear
+			if len(results) != bound {
+				t.Errorf("Not all values seen for bound %d", bound)
+			}
 		}
 	})
 
-	t.Run("TickUpdateMessageLayout", func(t *testing.T) {
-		var update TickUpdate
-		size := unsafe.Sizeof(update)
+	t.Run("PowerOfTwoOptimization", func(t *testing.T) {
+		// Test power-of-2 bounds use fast path
+		powerOfTwo := []int{2, 4, 8, 16, 32, 64, 128, 256}
 
-		if size != 24 {
-			t.Errorf("TickUpdate size is %d bytes, expected 24 bytes", size)
+		for _, bound := range powerOfTwo {
+			// Verify distribution
+			results := make(map[int]int)
+			iterations := bound * 1000
+
+			for i := 0; i < iterations; i++ {
+				result := secureRandomInt(bound)
+				results[result]++
+			}
+
+			// Check uniform distribution
+			expectedCount := iterations / bound
+			for val, count := range results {
+				deviation := math.Abs(float64(count-expectedCount)) / float64(expectedCount)
+				if deviation > 0.1 {
+					t.Errorf("Non-uniform for bound %d, val %d: %d counts", bound, val, count)
+				}
+			}
+		}
+	})
+}
+
+// TestShuffleEdgeBindings validates shuffle algorithm
+func TestShuffleEdgeBindings(t *testing.T) {
+	t.Run("EmptySlice", func(t *testing.T) {
+		var empty []ArbitrageEdgeBinding
+		shuffleEdgeBindings(empty) // Must not panic
+	})
+
+	t.Run("SingleElement", func(t *testing.T) {
+		single := []ArbitrageEdgeBinding{
+			{cyclePairs: [3]PairID{1, 2, 3}, edgeIndex: 0},
+		}
+		original := single[0]
+		shuffleEdgeBindings(single)
+
+		if single[0] != original {
+			t.Error("Single element modified")
+		}
+	})
+
+	t.Run("Uniformity", func(t *testing.T) {
+		// Create test slice
+		size := 10
+		bindings := make([]ArbitrageEdgeBinding, size)
+		for i := 0; i < size; i++ {
+			bindings[i] = ArbitrageEdgeBinding{
+				cyclePairs: [3]PairID{PairID(i), PairID(i + 1), PairID(i + 2)},
+				edgeIndex:  uint16(i % 3),
+			}
 		}
 
-		// Validate unsafe pointer casting for message buffer operations
+		// Track position frequencies
+		positionCounts := make([][]int, size)
+		for i := range positionCounts {
+			positionCounts[i] = make([]int, size)
+		}
+
+		// Run many shuffles
+		iterations := 10000
+		for iter := 0; iter < iterations; iter++ {
+			// Make copy
+			testBindings := make([]ArbitrageEdgeBinding, size)
+			copy(testBindings, bindings)
+
+			shuffleEdgeBindings(testBindings)
+
+			// Record positions
+			for pos, binding := range testBindings {
+				originalIndex := int(binding.cyclePairs[0])
+				positionCounts[originalIndex][pos]++
+			}
+		}
+
+		// Verify uniform distribution
+		expectedCount := iterations / size
+		tolerance := float64(expectedCount) * 0.1
+
+		for orig := 0; orig < size; orig++ {
+			for pos := 0; pos < size; pos++ {
+				count := positionCounts[orig][pos]
+				deviation := math.Abs(float64(count - expectedCount))
+				if deviation > tolerance {
+					t.Errorf("Non-uniform: element %d at position %d occurred %d times", orig, pos, count)
+				}
+			}
+		}
+	})
+}
+
+// TestDataStructureLayout validates memory layout
+func TestDataStructureLayout(t *testing.T) {
+	tests := []struct {
+		name     string
+		size     uintptr
+		expected uintptr
+	}{
+		{"ArbitrageCycleState", unsafe.Sizeof(ArbitrageCycleState{}), 64},
+		{"TickUpdate", unsafe.Sizeof(TickUpdate{}), 24},
+		{"AddressKey", unsafe.Sizeof(AddressKey{}), 64},
+		{"ArbitrageCoreExecutor", unsafe.Sizeof(ArbitrageCoreExecutor{}), 192},
+		{"FanoutEntry", unsafe.Sizeof(FanoutEntry{}), 32},
+		{"PairShardBucket", unsafe.Sizeof(PairShardBucket{}), 32},
+		{"ArbitrageEdgeBinding", unsafe.Sizeof(ArbitrageEdgeBinding{}), 16},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.size != tt.expected {
+				t.Errorf("%s size is %d bytes, expected %d bytes", tt.name, tt.size, tt.expected)
+			}
+		})
+	}
+
+	t.Run("MessageBufferCasting", func(t *testing.T) {
 		var messageBuffer [24]byte
 		tickUpdate := (*TickUpdate)(unsafe.Pointer(&messageBuffer))
 
@@ -725,90 +1023,80 @@ func TestDataStructureLayout(t *testing.T) {
 		tickUpdate.reverseTick = -1.23
 
 		if tickUpdate.pairID != PairID(12345) {
-			t.Error("TickUpdate message buffer casting validation failed")
+			t.Error("Message buffer casting failed")
 		}
 	})
 
-	t.Run("AddressKeyAlignment", func(t *testing.T) {
-		var key AddressKey
-		size := unsafe.Sizeof(key)
-
-		if size != 64 {
-			t.Errorf("AddressKey size is %d bytes, expected 64 bytes for cache alignment", size)
-		}
-	})
-
-	t.Run("ArbitrageCoreExecutorLayout", func(t *testing.T) {
+	t.Run("CacheLineAlignment", func(t *testing.T) {
+		// Verify critical structures are cache-aligned
+		var cycleState ArbitrageCycleState
+		var addressKey AddressKey
 		var executor ArbitrageCoreExecutor
-		size := unsafe.Sizeof(executor)
 
-		if size != 192 {
-			t.Errorf("ArbitrageCoreExecutor size is %d bytes, expected 192 bytes (3 cache lines)", size)
+		if uintptr(unsafe.Pointer(&cycleState))%64 != 0 {
+			t.Error("ArbitrageCycleState not cache-aligned")
+		}
+
+		if uintptr(unsafe.Pointer(&addressKey))%64 != 0 {
+			t.Error("AddressKey not cache-aligned")
+		}
+
+		if uintptr(unsafe.Pointer(&executor))%64 != 0 {
+			t.Error("ArbitrageCoreExecutor not cache-aligned")
 		}
 	})
 }
 
-// ============================================================================
-// UTILITY FUNCTION VALIDATION TESTS
-// ============================================================================
-
-// TestUtilityFunctions validates supporting utility function correctness
+// TestUtilityFunctions validates supporting functions
 func TestUtilityFunctions(t *testing.T) {
-	t.Run("SecureRandomIntBounds", func(t *testing.T) {
-		for bound := 2; bound <= 100; bound++ {
-			for i := 0; i < 10; i++ {
-				result := secureRandomInt(bound)
-				if result < 0 || result >= bound {
-					t.Errorf("secureRandomInt(%d) returned %d, outside bounds [0, %d)", bound, result, bound)
-				}
+	t.Run("LoadBE64", func(t *testing.T) {
+		testCases := []struct {
+			input    []byte
+			expected uint64
+		}{
+			{[]byte{0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF}, 0x0123456789ABCDEF},
+			{[]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 0x0000000000000000},
+			{[]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, 0xFFFFFFFFFFFFFFFF},
+			{[]byte{0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 0x8000000000000000},
+		}
+
+		for _, tc := range testCases {
+			result := utils.LoadBE64(tc.input)
+			if result != tc.expected {
+				t.Errorf("LoadBE64: expected 0x%X, got 0x%X", tc.expected, result)
 			}
 		}
 	})
 
-	t.Run("ShuffleEdgeBindings", func(t *testing.T) {
-		// Validate empty slice handling
-		var empty []ArbitrageEdgeBinding
-		shuffleEdgeBindings(empty) // Must not panic
-
-		// Validate single element stability
-		single := []ArbitrageEdgeBinding{
-			{cyclePairs: [3]PairID{1, 2, 3}, edgeIndex: 0},
-		}
-		original := single[0]
-		shuffleEdgeBindings(single)
-
-		if single[0] != original {
-			t.Error("Single element must remain unchanged after shuffle")
-		}
-	})
-
-	t.Run("UtilsIntegration", func(t *testing.T) {
-		// Validate utils.LoadBE64 integration
-		testData := []byte{0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF}
-		expected := uint64(0x0123456789ABCDEF)
-
-		result := utils.LoadBE64(testData)
-		if result != expected {
-			t.Errorf("LoadBE64 integration failed: expected 0x%X, got 0x%X", expected, result)
-		}
-	})
-
-	t.Run("FastuniIntegration", func(t *testing.T) {
-		reserve0 := uint64(2000)
-		reserve1 := uint64(1000)
-
-		tickValue, err := fastuni.Log2ReserveRatio(reserve0, reserve1)
-		if err != nil {
-			t.Errorf("Log2ReserveRatio integration failed: %v", err)
+	t.Run("Log2ReserveRatio", func(t *testing.T) {
+		testCases := []struct {
+			reserve0  uint64
+			reserve1  uint64
+			expected  float64
+			tolerance float64
+		}{
+			{2000, 1000, 1.0, 0.01},
+			{1000, 2000, -1.0, 0.01},
+			{1000, 1000, 0.0, 0.01},
+			{8000, 1000, 3.0, 0.01},
+			{1000, 8000, -3.0, 0.01},
 		}
 
-		// Should be approximately log2(2) = 1
-		if math.Abs(tickValue-1.0) > 0.1 {
-			t.Errorf("Log2ReserveRatio result: expected ~1.0, got %f", tickValue)
+		for _, tc := range testCases {
+			tickValue, err := fastuni.Log2ReserveRatio(tc.reserve0, tc.reserve1)
+			if err != nil {
+				t.Errorf("Log2ReserveRatio error: %v", err)
+				continue
+			}
+
+			if math.Abs(tickValue-tc.expected) > tc.tolerance {
+				t.Errorf("Log2ReserveRatio(%d,%d): expected %f, got %f",
+					tc.reserve0, tc.reserve1, tc.expected, tickValue)
+			}
 		}
 	})
 
-	t.Run("BitsTrailingZerosValidation", func(t *testing.T) {
+	t.Run("TrailingZeros", func(t *testing.T) {
 		testCases := []struct {
 			value    uint64
 			expected int
@@ -818,6 +1106,12 @@ func TestUtilityFunctions(t *testing.T) {
 			{0x4, 2},
 			{0x8, 3},
 			{0x10, 4},
+			{0x100, 8},
+			{0x1000, 12},
+			{0x10000, 16},
+			{0x80000000, 31},
+			{0x8000000000000000, 63},
+			{0xFFFFFFFF00000000, 32},
 		}
 
 		for _, tc := range testCases {
@@ -829,63 +1123,43 @@ func TestUtilityFunctions(t *testing.T) {
 	})
 }
 
-// ============================================================================
-// SYSTEM INTEGRATION TESTS
-// ============================================================================
-
-// TestSystemIntegration validates complete system workflow integration
+// TestSystemIntegration validates complete workflow
 func TestSystemIntegration(t *testing.T) {
-	t.Run("SystemInitializationWorkflow", func(t *testing.T) {
+	t.Run("InitializationWorkflow", func(t *testing.T) {
 		cycles := []ArbitrageTriplet{
 			{PairID(1), PairID(2), PairID(3)},
 			{PairID(4), PairID(5), PairID(6)},
 		}
 
 		InitializeArbitrageSystem(cycles)
-		time.Sleep(50 * time.Millisecond) // Allow initialization to complete
+		time.Sleep(50 * time.Millisecond)
 
-		// Signal graceful shutdown
 		control.Shutdown()
-		time.Sleep(50 * time.Millisecond) // Allow shutdown to complete
+		time.Sleep(50 * time.Millisecond)
 	})
 
-	t.Run("TickUpdateProcessingWorkflow", func(t *testing.T) {
-		setup := createMockArbitrageSetup()
+	t.Run("LargeScaleInitialization", func(t *testing.T) {
+		// Test with many cycles
+		cycleCount := 1000
+		cycles := make([]ArbitrageTriplet, cycleCount)
 
-		// Register all address mappings
-		for pairID, addr := range setup.addressMappings {
-			RegisterPairAddress(addr[:], pairID)
+		for i := 0; i < cycleCount; i++ {
+			baseID := uint32(i * 3)
+			cycles[i] = ArbitrageTriplet{
+				PairID(baseID),
+				PairID(baseID + 1),
+				PairID(baseID + 2),
+			}
 		}
 
-		processedCount := 0
-		for i := 0; i < 5 && i < len(setup.tickUpdateQueue); i++ {
-			update := setup.tickUpdateQueue[i]
+		InitializeArbitrageSystem(cycles)
+		time.Sleep(100 * time.Millisecond)
 
-			logView := &types.LogView{
-				Addr: make([]byte, 64),
-				Data: make([]byte, 128),
-			}
-
-			logView.Addr[0] = '0'
-			logView.Addr[1] = 'x'
-			addr := setup.addressMappings[update.pairID]
-			copy(logView.Addr[2:42], addr[:])
-
-			// Encode reserves as big-endian
-			for j := 0; j < 8; j++ {
-				logView.Data[24+j] = byte(update.reserve0 >> (8 * (7 - j)))
-				logView.Data[56+j] = byte(update.reserve1 >> (8 * (7 - j)))
-			}
-
-			DispatchTickUpdate(logView)
-			processedCount++
-		}
-
-		t.Logf("Successfully processed %d tick updates", processedCount)
+		control.Shutdown()
+		time.Sleep(100 * time.Millisecond)
 	})
 
 	t.Run("CompleteArbitrageWorkflow", func(t *testing.T) {
-		// Validate complete end-to-end arbitrage detection workflow
 		cycles := []ArbitrageTriplet{
 			{PairID(1001), PairID(1002), PairID(1003)},
 		}
@@ -893,14 +1167,12 @@ func TestSystemIntegration(t *testing.T) {
 		InitializeArbitrageSystem(cycles)
 		time.Sleep(20 * time.Millisecond)
 
-		// Register addresses and configure core assignments
 		for i := uint64(1001); i <= 1003; i++ {
 			addr := generateMockAddress(i * 1000)
 			RegisterPairAddress(addr[:], PairID(i))
 			RegisterPairToCore(PairID(i), uint8(i%2))
 		}
 
-		// Initialize required ring buffers for processing
 		if coreRings[0] == nil {
 			coreRings[0] = ring24.New(16)
 		}
@@ -908,7 +1180,6 @@ func TestSystemIntegration(t *testing.T) {
 			coreRings[1] = ring24.New(16)
 		}
 
-		// Process realistic tick update sequence
 		for i := uint64(1001); i <= 1003; i++ {
 			addr := generateMockAddress(i * 1000)
 
@@ -932,29 +1203,55 @@ func TestSystemIntegration(t *testing.T) {
 			DispatchTickUpdate(logView)
 		}
 
-		// Perform graceful system cleanup
 		control.Shutdown()
 		time.Sleep(50 * time.Millisecond)
+	})
 
-		t.Log("Complete arbitrage workflow validation successful")
+	t.Run("ShardDistribution", func(t *testing.T) {
+		// Test shard bucket creation and distribution
+		cycles := make([]ArbitrageTriplet, 100)
+		for i := 0; i < 100; i++ {
+			baseID := uint32(i * 3)
+			cycles[i] = ArbitrageTriplet{
+				PairID(baseID),
+				PairID(baseID + 1),
+				PairID(baseID + 2),
+			}
+		}
+
+		buildFanoutShardBuckets(cycles)
+
+		// Verify shard creation
+		totalShards := 0
+		for _, shards := range pairShardBuckets {
+			totalShards += len(shards)
+		}
+
+		if totalShards == 0 {
+			t.Error("No shards created")
+		}
+
+		// Verify shard size limits
+		for pairID, shards := range pairShardBuckets {
+			for _, shard := range shards {
+				if len(shard.edgeBindings) > constants.MaxCyclesPerShard {
+					t.Errorf("Shard for pair %d exceeds max size", pairID)
+				}
+			}
+		}
 	})
 }
 
-// ============================================================================
-// MEMORY EFFICIENCY AND CONCURRENCY TESTS
-// ============================================================================
-
-// TestMemoryEfficiency validates memory allocation patterns and efficiency
+// TestMemoryEfficiency validates allocation patterns
 func TestMemoryEfficiency(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping memory efficiency validation in short test mode")
+		t.Skip("Skipping memory test in short mode")
 	}
 
 	var m1, m2 runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&m1)
 
-	// Perform operations that must be allocation-efficient
 	for i := 0; i < 50; i++ {
 		addr := generateMockAddress(uint64(i + 1000))
 		pairID := PairID(i + 1000)
@@ -965,75 +1262,167 @@ func TestMemoryEfficiency(t *testing.T) {
 	runtime.ReadMemStats(&m2)
 
 	allocatedBytes := m2.TotalAlloc - m1.TotalAlloc
-	t.Logf("Memory allocated during operations: %d bytes", allocatedBytes)
 
 	if allocatedBytes > maxMemoryAllocBytes {
-		t.Errorf("Excessive memory allocation: %d bytes (limit: %d)", allocatedBytes, maxMemoryAllocBytes)
+		t.Errorf("Excessive allocation: %d bytes", allocatedBytes)
 	}
 }
 
-// TestConcurrentSafety validates concurrent operation safety and data integrity
+// TestConcurrentSafety validates concurrent operations
 func TestConcurrentSafety(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping concurrent safety validation in short test mode")
+		t.Skip("Skipping concurrent test in short mode")
 	}
 
-	const goroutineCount = 8
-	const operationsPerGoroutine = 50
+	t.Run("ConcurrentRegistration", func(t *testing.T) {
+		const goroutineCount = 16
+		const operationsPerGoroutine = 100
 
-	var wg sync.WaitGroup
-	processed := uint64(0)
+		var wg sync.WaitGroup
+		processed := uint64(0)
 
-	// Validate concurrent address registration and lookup
-	for g := 0; g < goroutineCount; g++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
+		for g := 0; g < goroutineCount; g++ {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
 
-			for i := 0; i < operationsPerGoroutine; i++ {
-				addr := generateMockAddress(uint64(workerID*1000 + i))
-				pairID := PairID(workerID*1000 + i + 50000)
+				for i := 0; i < operationsPerGoroutine; i++ {
+					addr := generateMockAddress(uint64(workerID*10000 + i))
+					pairID := PairID(workerID*10000 + i + 50000)
 
-				RegisterPairAddress(addr[:], pairID)
+					RegisterPairAddress(addr[:], pairID)
 
-				// Immediate verification
-				found := lookupPairIDByAddress(addr[:])
-				if found == pairID {
-					atomic.AddUint64(&processed, 1)
+					found := lookupPairIDByAddress(addr[:])
+					if found == pairID {
+						atomic.AddUint64(&processed, 1)
+					}
 				}
-			}
-		}(g)
-	}
+			}(g)
+		}
 
-	wg.Wait()
+		wg.Wait()
 
-	expectedTotal := uint64(goroutineCount * operationsPerGoroutine)
-	if processed != expectedTotal {
-		t.Errorf("Concurrent operations failed: expected %d successful, got %d", expectedTotal, processed)
-	} else {
-		t.Logf("Concurrent safety validated: %d operations completed successfully", processed)
-	}
+		expectedTotal := uint64(goroutineCount * operationsPerGoroutine)
+		if processed != expectedTotal {
+			t.Errorf("Expected %d successful, got %d", expectedTotal, processed)
+		}
+	})
+
+	t.Run("ConcurrentCoreAssignment", func(t *testing.T) {
+		const goroutineCount = 8
+		const pairsPerGoroutine = 50
+
+		var wg sync.WaitGroup
+
+		for g := 0; g < goroutineCount; g++ {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+
+				for i := 0; i < pairsPerGoroutine; i++ {
+					pairID := PairID(workerID*1000 + i)
+					coreID := uint8((workerID + i) % 64)
+
+					RegisterPairToCore(pairID, coreID)
+
+					// Verify assignment
+					assignment := pairToCoreAssignment[pairID]
+					expectedBit := uint64(1) << coreID
+
+					if assignment&expectedBit == 0 {
+						t.Errorf("Core assignment failed for pair %d", pairID)
+					}
+				}
+			}(g)
+		}
+
+		wg.Wait()
+	})
+
+	t.Run("ConcurrentDispatch", func(t *testing.T) {
+		// Setup shared pairs
+		sharedPairs := 10
+		for i := 0; i < sharedPairs; i++ {
+			addr := generateMockAddress(uint64(200000 + i))
+			pairID := PairID(200000 + i)
+			RegisterPairAddress(addr[:], pairID)
+			RegisterPairToCore(pairID, 0)
+		}
+
+		if coreRings[0] == nil {
+			coreRings[0] = ring24.New(1024)
+		}
+
+		const goroutineCount = 8
+		const updatesPerGoroutine = 100
+
+		var wg sync.WaitGroup
+		dispatched := uint64(0)
+
+		for g := 0; g < goroutineCount; g++ {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+
+				for i := 0; i < updatesPerGoroutine; i++ {
+					pairIdx := (workerID + i) % sharedPairs
+					addr := generateMockAddress(uint64(200000 + pairIdx))
+
+					logView := &types.LogView{
+						Addr: make([]byte, 64),
+						Data: make([]byte, 128),
+					}
+
+					logView.Addr[0] = '0'
+					logView.Addr[1] = 'x'
+					copy(logView.Addr[2:42], addr[:])
+
+					reserve0 := uint64(1000 + workerID*100 + i)
+					reserve1 := uint64(2000 - workerID*50 - i)
+
+					for j := 0; j < 8; j++ {
+						logView.Data[24+j] = byte(reserve0 >> (8 * (7 - j)))
+						logView.Data[56+j] = byte(reserve1 >> (8 * (7 - j)))
+					}
+
+					DispatchTickUpdate(logView)
+					atomic.AddUint64(&dispatched, 1)
+				}
+			}(g)
+		}
+
+		wg.Wait()
+
+		expectedDispatches := uint64(goroutineCount * updatesPerGoroutine)
+		if dispatched != expectedDispatches {
+			t.Errorf("Expected %d dispatches, got %d", expectedDispatches, dispatched)
+		}
+	})
 }
 
-// TestHighThroughputValidation validates system performance under sustained load
-func TestHighThroughputValidation(t *testing.T) {
+// TestHighThroughput validates sustained load performance
+func TestHighThroughput(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping throughput validation in short test mode")
+		t.Skip("Skipping throughput test in short mode")
 	}
 
 	setup := createMockArbitrageSetup()
 
-	// Pre-register all address mappings
+	// Pre-register addresses
 	for pairID, addr := range setup.addressMappings {
 		RegisterPairAddress(addr[:], pairID)
+		RegisterPairToCore(pairID, 0)
 	}
 
-	const operationCount = 1000
+	if coreRings[0] == nil {
+		coreRings[0] = ring24.New(1024)
+	}
+
+	const operationCount = 10000
 	processed := uint64(0)
 
 	start := time.Now()
 
-	// Execute high-volume tick updates
 	for i := 0; i < operationCount; i++ {
 		update := setup.tickUpdateQueue[i%len(setup.tickUpdateQueue)]
 
@@ -1047,6 +1436,11 @@ func TestHighThroughputValidation(t *testing.T) {
 		addr := setup.addressMappings[update.pairID]
 		copy(logView.Addr[2:42], addr[:])
 
+		for j := 0; j < 8; j++ {
+			logView.Data[24+j] = byte(update.reserve0 >> (8 * (7 - j)))
+			logView.Data[56+j] = byte(update.reserve1 >> (8 * (7 - j)))
+		}
+
 		DispatchTickUpdate(logView)
 		atomic.AddUint64(&processed, 1)
 	}
@@ -1054,44 +1448,44 @@ func TestHighThroughputValidation(t *testing.T) {
 	elapsed := time.Since(start)
 	throughput := float64(processed) / elapsed.Seconds()
 
-	t.Logf("Processed %d operations in %v", processed, elapsed)
-	t.Logf("Achieved throughput: %.0f operations/second", throughput)
+	t.Logf("Throughput: %.0f ops/sec", throughput)
 
 	if throughput < minThroughputOpsPerSec {
-		t.Errorf("Insufficient throughput: %.0f ops/sec (minimum: %d)", throughput, minThroughputOpsPerSec)
+		t.Errorf("Insufficient throughput: %.0f ops/sec", throughput)
 	}
 }
 
-// ============================================================================
-// PERFORMANCE BENCHMARKS
-// ============================================================================
+// Benchmarks - Realistic production workloads
 
-// BenchmarkAddressLookup measures direct address lookup performance
+// BenchmarkAddressLookup measures lookup performance
 func BenchmarkAddressLookup(b *testing.B) {
-	setup := createMockArbitrageSetup()
+	// Simulate production-scale address table
+	const addressCount = 50000
+	addresses := make([][40]byte, addressCount)
 
-	// Pre-populate hash table
-	for pairID, addr := range setup.addressMappings {
-		RegisterPairAddress(addr[:], pairID)
-	}
-
-	addresses := make([][40]byte, 0, len(setup.addressMappings))
-	for _, addr := range setup.addressMappings {
-		addresses = append(addresses, addr)
+	for i := 0; i < addressCount; i++ {
+		addr := generateMockAddress(uint64(i * 7))
+		addresses[i] = addr
+		RegisterPairAddress(addr[:], PairID(i+100000))
 	}
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		addr := addresses[i%len(addresses)]
+		addr := addresses[i%addressCount]
 		_ = lookupPairIDByAddress(addr[:])
 	}
 }
 
-// BenchmarkTickQuantization measures tick quantization performance
+// BenchmarkTickQuantization measures quantization performance
 func BenchmarkTickQuantization(b *testing.B) {
-	inputs := []float64{-100.0, -50.0, -10.0, 0.0, 10.0, 50.0, 100.0}
+	// Realistic tick values from production
+	inputs := []float64{
+		-150.0, -100.0, -50.0, -25.0, -10.0, -5.0, -2.5, -1.0,
+		-0.5, -0.1, -0.01, 0.0, 0.01, 0.1, 0.5, 1.0,
+		2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 150.0,
+	}
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -1102,18 +1496,37 @@ func BenchmarkTickQuantization(b *testing.B) {
 	}
 }
 
-// BenchmarkTickUpdateDispatch measures complete dispatch pipeline performance
+// BenchmarkTickUpdateDispatch measures dispatch performance
 func BenchmarkTickUpdateDispatch(b *testing.B) {
-	setup := createMockArbitrageSetup()
+	// Production-scale setup
+	const pairCount = 10000
+	const coreCount = 16
 
-	// Pre-populate address mappings
-	for pairID, addr := range setup.addressMappings {
+	// Register addresses
+	addresses := make([][40]byte, pairCount)
+	for i := 0; i < pairCount; i++ {
+		addr := generateMockAddress(uint64(i * 13))
+		addresses[i] = addr
+		pairID := PairID(i)
 		RegisterPairAddress(addr[:], pairID)
+
+		// Distribute across cores
+		core1 := uint8(i % coreCount)
+		core2 := uint8((i + coreCount/2) % coreCount)
+		RegisterPairToCore(pairID, core1)
+		RegisterPairToCore(pairID, core2)
 	}
 
-	// Pre-generate LogView structures
-	logViews := make([]*types.LogView, len(setup.tickUpdateQueue))
-	for i, update := range setup.tickUpdateQueue {
+	// Initialize rings
+	for i := 0; i < coreCount; i++ {
+		if coreRings[i] == nil {
+			coreRings[i] = ring24.New(1024)
+		}
+	}
+
+	// Pre-generate realistic log views
+	logViews := make([]*types.LogView, 1000)
+	for i := range logViews {
 		logView := &types.LogView{
 			Addr: make([]byte, 64),
 			Data: make([]byte, 128),
@@ -1121,12 +1534,16 @@ func BenchmarkTickUpdateDispatch(b *testing.B) {
 
 		logView.Addr[0] = '0'
 		logView.Addr[1] = 'x'
-		addr := setup.addressMappings[update.pairID]
+		addr := addresses[i%pairCount]
 		copy(logView.Addr[2:42], addr[:])
 
+		// Realistic reserve values
+		reserve0 := uint64(1000000 + i*1000)
+		reserve1 := uint64(2000000 - i*500)
+
 		for j := 0; j < 8; j++ {
-			logView.Data[24+j] = byte(update.reserve0 >> (8 * (7 - j)))
-			logView.Data[56+j] = byte(update.reserve1 >> (8 * (7 - j)))
+			logView.Data[24+j] = byte(reserve0 >> (8 * (7 - j)))
+			logView.Data[56+j] = byte(reserve1 >> (8 * (7 - j)))
 		}
 
 		logViews[i] = logView
@@ -1141,15 +1558,16 @@ func BenchmarkTickUpdateDispatch(b *testing.B) {
 	}
 }
 
-// BenchmarkRobinHoodOperations measures hash table operation performance
+// BenchmarkRobinHoodOperations measures hash table performance
 func BenchmarkRobinHoodOperations(b *testing.B) {
 	// Pre-generate test data
-	addresses := make([][40]byte, 1000)
-	pairIDs := make([]PairID, 1000)
+	const dataSize = 10000
+	addresses := make([][40]byte, dataSize)
+	pairIDs := make([]PairID, dataSize)
 
-	for i := 0; i < 1000; i++ {
-		addresses[i] = generateMockAddress(uint64(i + 100000))
-		pairIDs[i] = PairID(i + 100000)
+	for i := 0; i < dataSize; i++ {
+		addresses[i] = generateMockAddress(uint64(i * 17))
+		pairIDs[i] = PairID(i + 500000)
 	}
 
 	b.Run("Registration", func(b *testing.B) {
@@ -1157,13 +1575,13 @@ func BenchmarkRobinHoodOperations(b *testing.B) {
 		b.ReportAllocs()
 
 		for i := 0; i < b.N; i++ {
-			idx := i % 1000
+			idx := i % dataSize
 			RegisterPairAddress(addresses[idx][:], pairIDs[idx])
 		}
 	})
 
-	// Pre-populate for lookup benchmark
-	for i := 0; i < 1000; i++ {
+	// Pre-populate for lookup
+	for i := 0; i < dataSize; i++ {
 		RegisterPairAddress(addresses[i][:], pairIDs[i])
 	}
 
@@ -1172,73 +1590,238 @@ func BenchmarkRobinHoodOperations(b *testing.B) {
 		b.ReportAllocs()
 
 		for i := 0; i < b.N; i++ {
-			idx := i % 1000
+			idx := i % dataSize
 			_ = lookupPairIDByAddress(addresses[idx][:])
 		}
 	})
-}
 
-// BenchmarkMessageBufferOperations measures message buffer manipulation performance
-func BenchmarkMessageBufferOperations(b *testing.B) {
-	b.Run("TickUpdateCreation", func(b *testing.B) {
+	b.Run("MixedOperations", func(b *testing.B) {
 		b.ResetTimer()
 		b.ReportAllocs()
 
 		for i := 0; i < b.N; i++ {
-			var messageBuffer [24]byte
-			tickUpdate := (*TickUpdate)(unsafe.Pointer(&messageBuffer))
-
-			tickUpdate.pairID = PairID(i)
-			tickUpdate.forwardTick = float64(i) * 0.1
-			tickUpdate.reverseTick = float64(-i) * 0.1
-		}
-	})
-
-	b.Run("CoreBitManipulation", func(b *testing.B) {
-		testPairID := PairID(200000)
-
-		// Setup core assignments
-		RegisterPairToCore(testPairID, 0)
-		RegisterPairToCore(testPairID, 2)
-		RegisterPairToCore(testPairID, 4)
-		RegisterPairToCore(testPairID, 6)
-
-		b.ResetTimer()
-		b.ReportAllocs()
-
-		for i := 0; i < b.N; i++ {
-			coreAssignments := pairToCoreAssignment[testPairID]
-			coreCount := 0
-
-			for coreAssignments != 0 {
-				coreID := bits.TrailingZeros64(uint64(coreAssignments))
-				coreCount++
-				coreAssignments &^= 1 << coreID
+			if i%3 == 0 {
+				// Registration
+				idx := (i + dataSize) % (dataSize * 2)
+				addr := generateMockAddress(uint64(idx * 19))
+				RegisterPairAddress(addr[:], PairID(idx+600000))
+			} else {
+				// Lookup
+				idx := i % dataSize
+				_ = lookupPairIDByAddress(addresses[idx][:])
 			}
 		}
 	})
 }
 
-// BenchmarkSystemIntegration measures end-to-end system performance
-func BenchmarkSystemIntegration(b *testing.B) {
-	setup := createMockArbitrageSetup()
-
-	// Complete system setup
-	for pairID, addr := range setup.addressMappings {
-		RegisterPairAddress(addr[:], pairID)
-		RegisterPairToCore(pairID, uint8(pairID%4))
+// BenchmarkProcessTickUpdate measures tick processing
+func BenchmarkProcessTickUpdate(b *testing.B) {
+	// Setup realistic executor
+	executor := &ArbitrageCoreExecutor{
+		isReverseDirection: false,
+		priorityQueues:     make([]quantumqueue64.QuantumQueue64, 100),
+		fanoutTables:       make([][]FanoutEntry, 100),
+		pairToQueueIndex:   localidx.New(1024),
+		cycleStates:        make([]ArbitrageCycleState, 1000),
 	}
 
-	// Initialize ring buffers
-	for core := 0; core < 4; core++ {
-		if coreRings[core] == nil {
-			coreRings[core] = ring24.New(64)
+	// Initialize queues and cycles
+	for i := 0; i < 100; i++ {
+		executor.priorityQueues[i] = *quantumqueue64.New()
+		executor.pairToQueueIndex.Put(uint32(i+1000), uint32(i))
+	}
+
+	// Setup realistic cycles
+	for i := 0; i < 1000; i++ {
+		executor.cycleStates[i] = ArbitrageCycleState{
+			tickValues: [3]float64{
+				float64(i%10) * 0.1,
+				float64(i%7) * 0.2,
+				float64(i%5) * 0.3,
+			},
+			pairIDs: [3]PairID{
+				PairID(i * 3),
+				PairID(i*3 + 1),
+				PairID(i*3 + 2),
+			},
+		}
+
+		// Add to queues
+		queueIdx := i % 100
+		handle, _ := executor.priorityQueues[queueIdx].BorrowSafe()
+		priority := quantizeTickToInt64(executor.cycleStates[i].tickValues[0])
+		executor.priorityQueues[queueIdx].Push(priority, handle, uint64(i))
+	}
+
+	// Setup fanout entries
+	for i := 0; i < 100; i++ {
+		fanoutCount := 10 + (i % 20)
+		executor.fanoutTables[i] = make([]FanoutEntry, fanoutCount)
+
+		for j := 0; j < fanoutCount; j++ {
+			cycleIdx := (i*10 + j) % 1000
+			handle, _ := executor.priorityQueues[i].BorrowSafe()
+
+			executor.fanoutTables[i][j] = FanoutEntry{
+				queueHandle:     handle,
+				edgeIndex:       uint16(j % 3),
+				cycleStateIndex: CycleStateIndex(cycleIdx),
+				queue:           &executor.priorityQueues[i],
+			}
 		}
 	}
 
-	// Pre-generate LogView messages
-	logViews := make([]*types.LogView, len(setup.tickUpdateQueue))
-	for i, update := range setup.tickUpdateQueue {
+	// Pre-generate tick updates
+	updates := make([]*TickUpdate, 1000)
+	for i := range updates {
+		updates[i] = &TickUpdate{
+			pairID:      PairID(i%100 + 1000),
+			forwardTick: math.Sin(float64(i)) * 10.0,
+			reverseTick: -math.Sin(float64(i)) * 10.0,
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		update := updates[i%len(updates)]
+		processTickUpdate(executor, update)
+	}
+}
+
+// BenchmarkArbitrageDetection measures arbitrage detection overhead
+func BenchmarkArbitrageDetection(b *testing.B) {
+	// Setup with profitable cycles
+	executor := &ArbitrageCoreExecutor{
+		isReverseDirection: false,
+		priorityQueues:     make([]quantumqueue64.QuantumQueue64, 10),
+		fanoutTables:       make([][]FanoutEntry, 10),
+		pairToQueueIndex:   localidx.New(16),
+		cycleStates:        make([]ArbitrageCycleState, 100),
+	}
+
+	for i := 0; i < 10; i++ {
+		executor.priorityQueues[i] = *quantumqueue64.New()
+		executor.pairToQueueIndex.Put(uint32(i), uint32(i))
+	}
+
+	// Create mix of profitable and non-profitable cycles
+	for i := 0; i < 100; i++ {
+		profitability := -5.0 + float64(i%20)*0.5
+		executor.cycleStates[i] = ArbitrageCycleState{
+			tickValues: [3]float64{
+				profitability / 3,
+				profitability / 3,
+				profitability / 3,
+			},
+			pairIDs: [3]PairID{
+				PairID(i * 3),
+				PairID(i*3 + 1),
+				PairID(i*3 + 2),
+			},
+		}
+
+		queueIdx := i % 10
+		handle, _ := executor.priorityQueues[queueIdx].BorrowSafe()
+		priority := quantizeTickToInt64(profitability)
+		executor.priorityQueues[queueIdx].Push(priority, handle, uint64(i))
+	}
+
+	updates := make([]*TickUpdate, 100)
+	for i := range updates {
+		updates[i] = &TickUpdate{
+			pairID:      PairID(i % 10),
+			forwardTick: -0.5 - float64(i%5)*0.1,
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		update := updates[i%len(updates)]
+		processTickUpdate(executor, update)
+	}
+}
+
+// BenchmarkCoreAssignmentLookup measures core assignment performance
+func BenchmarkCoreAssignmentLookup(b *testing.B) {
+	// Setup realistic core assignments
+	const pairCount = 100000
+
+	for i := 0; i < pairCount; i++ {
+		pairID := PairID(i)
+		// Typical pattern: pairs assigned to 2-4 cores
+		numCores := 2 + (i % 3)
+		for j := 0; j < numCores; j++ {
+			coreID := uint8((i + j*16) % 64)
+			RegisterPairToCore(pairID, coreID)
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		pairID := PairID(i % pairCount)
+		coreAssignments := pairToCoreAssignment[pairID]
+
+		// Simulate dispatch loop
+		for coreAssignments != 0 {
+			coreID := bits.TrailingZeros64(uint64(coreAssignments))
+			coreAssignments &^= 1 << coreID
+			// In production, would dispatch here
+			_ = coreID
+		}
+	}
+}
+
+// BenchmarkSystemIntegration measures end-to-end performance
+func BenchmarkSystemIntegration(b *testing.B) {
+	// Production-scale setup
+	const triangleCount = 10000
+	const coreCount = 32
+
+	// Generate triangles
+	cycles := make([]ArbitrageTriplet, triangleCount)
+	for i := 0; i < triangleCount; i++ {
+		baseID := uint32(i * 3)
+		cycles[i] = ArbitrageTriplet{
+			PairID(baseID),
+			PairID(baseID + 1),
+			PairID(baseID + 2),
+		}
+	}
+
+	// Initialize system
+	InitializeArbitrageSystem(cycles)
+	time.Sleep(100 * time.Millisecond)
+
+	// Register all addresses
+	addressMap := make(map[PairID][40]byte)
+	for i := 0; i < triangleCount*3; i++ {
+		pairID := PairID(i)
+		addr := generateMockAddress(uint64(i * 23))
+		addressMap[pairID] = addr
+		RegisterPairAddress(addr[:], pairID)
+	}
+
+	// Initialize rings if needed
+	for i := 0; i < coreCount; i++ {
+		if coreRings[i] == nil {
+			coreRings[i] = ring24.New(1024)
+		}
+	}
+
+	// Pre-generate realistic workload
+	workloadSize := 10000
+	logViews := make([]*types.LogView, workloadSize)
+
+	for i := 0; i < workloadSize; i++ {
+		pairID := PairID(i % (triangleCount * 3))
+		addr := addressMap[pairID]
+
 		logView := &types.LogView{
 			Addr: make([]byte, 64),
 			Data: make([]byte, 128),
@@ -1246,12 +1829,20 @@ func BenchmarkSystemIntegration(b *testing.B) {
 
 		logView.Addr[0] = '0'
 		logView.Addr[1] = 'x'
-		addr := setup.addressMappings[update.pairID]
 		copy(logView.Addr[2:42], addr[:])
 
+		// Realistic reserve dynamics
+		baseReserve0 := uint64(1000000)
+		baseReserve1 := uint64(1000000)
+
+		// Add market volatility
+		volatility := math.Sin(float64(i) * 0.01)
+		reserve0 := baseReserve0 + uint64(float64(baseReserve0)*volatility*0.1)
+		reserve1 := baseReserve1 - uint64(float64(baseReserve1)*volatility*0.1)
+
 		for j := 0; j < 8; j++ {
-			logView.Data[24+j] = byte(update.reserve0 >> (8 * (7 - j)))
-			logView.Data[56+j] = byte(update.reserve1 >> (8 * (7 - j)))
+			logView.Data[24+j] = byte(reserve0 >> (8 * (7 - j)))
+			logView.Data[56+j] = byte(reserve1 >> (8 * (7 - j)))
 		}
 
 		logViews[i] = logView
@@ -1261,30 +1852,339 @@ func BenchmarkSystemIntegration(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		logView := logViews[i%len(logViews)]
+		logView := logViews[i%workloadSize]
 		DispatchTickUpdate(logView)
+	}
+
+	// Cleanup
+	control.Shutdown()
+	time.Sleep(100 * time.Millisecond)
+}
+
+// BenchmarkSecureRandomInt measures random generation performance
+func BenchmarkSecureRandomInt(b *testing.B) {
+	bounds := []int{2, 4, 8, 16, 32, 64, 100, 128, 256, 1000}
+
+	for _, bound := range bounds {
+		b.Run(fmt.Sprintf("Bound%d", bound), func(b *testing.B) {
+			b.ResetTimer()
+			b.ReportAllocs()
+
+			for i := 0; i < b.N; i++ {
+				_ = secureRandomInt(bound)
+			}
+		})
 	}
 }
 
-// ============================================================================
-// SYSTEM LIFECYCLE TESTS
-// ============================================================================
+// BenchmarkShuffleEdgeBindings measures shuffle performance
+func BenchmarkShuffleEdgeBindings(b *testing.B) {
+	sizes := []int{10, 100, 1000, 10000}
 
-// TestSystemLifecycle validates complete system startup and shutdown
-func TestSystemLifecycle(t *testing.T) {
-	t.Run("GracefulShutdown", func(t *testing.T) {
-		// Validate graceful system shutdown sequence
-		cycles := []ArbitrageTriplet{
-			{PairID(9001), PairID(9002), PairID(9003)},
+	for _, size := range sizes {
+		b.Run(fmt.Sprintf("Size%d", size), func(b *testing.B) {
+			// Create test data
+			bindings := make([]ArbitrageEdgeBinding, size)
+			for i := 0; i < size; i++ {
+				bindings[i] = ArbitrageEdgeBinding{
+					cyclePairs: [3]PairID{PairID(i), PairID(i + 1), PairID(i + 2)},
+					edgeIndex:  uint16(i % 3),
+				}
+			}
+
+			b.ResetTimer()
+			b.ReportAllocs()
+
+			for i := 0; i < b.N; i++ {
+				// Make copy to avoid modifying original
+				testBindings := make([]ArbitrageEdgeBinding, size)
+				copy(testBindings, bindings)
+				shuffleEdgeBindings(testBindings)
+			}
+		})
+	}
+}
+
+// BenchmarkFanoutTableConstruction measures fanout building
+func BenchmarkFanoutTableConstruction(b *testing.B) {
+	cycleCount := []int{100, 1000, 10000}
+
+	for _, count := range cycleCount {
+		b.Run(fmt.Sprintf("Cycles%d", count), func(b *testing.B) {
+			cycles := make([]ArbitrageTriplet, count)
+			for i := 0; i < count; i++ {
+				baseID := uint32(i * 3)
+				cycles[i] = ArbitrageTriplet{
+					PairID(baseID),
+					PairID(baseID + 1),
+					PairID(baseID + 2),
+				}
+			}
+
+			b.ResetTimer()
+			b.ReportAllocs()
+
+			for i := 0; i < b.N; i++ {
+				buildFanoutShardBuckets(cycles)
+			}
+		})
+	}
+}
+
+// BenchmarkQuantumQueueOperations measures queue performance
+func BenchmarkQuantumQueueOperations(b *testing.B) {
+	b.Run("PushPop", func(b *testing.B) {
+		queue := quantumqueue64.New()
+
+		// Pre-allocate handles
+		handles := make([]quantumqueue64.Handle, 1000)
+		for i := range handles {
+			handles[i], _ = queue.BorrowSafe()
 		}
 
-		InitializeArbitrageSystem(cycles)
-		time.Sleep(50 * time.Millisecond) // Allow system initialization
+		b.ResetTimer()
+		b.ReportAllocs()
 
-		// Signal graceful shutdown
-		control.Shutdown()
-		time.Sleep(100 * time.Millisecond) // Allow cleanup completion
+		for i := 0; i < b.N; i++ {
+			idx := i % len(handles)
+			priority := int64(i % 1000)
 
-		t.Log("System shutdown completed successfully")
+			queue.Push(priority, handles[idx], uint64(idx))
+			handle, _, _ := queue.PeepMin()
+			queue.UnlinkMin(handle)
+		}
+	})
+
+	b.Run("MoveTick", func(b *testing.B) {
+		queue := quantumqueue64.New()
+
+		// Setup queue with elements
+		handles := make([]quantumqueue64.Handle, 100)
+		for i := range handles {
+			handles[i], _ = queue.BorrowSafe()
+			queue.Push(int64(i*10), handles[i], uint64(i))
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			idx := i % len(handles)
+			newPriority := int64((i + 50) % 1000)
+			queue.MoveTick(handles[idx], newPriority)
+		}
+	})
+}
+
+// BenchmarkLocalIndexOperations measures local index performance
+func BenchmarkLocalIndexOperations(b *testing.B) {
+	b.Run("Put", func(b *testing.B) {
+		idx := localidx.New(1024)
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			key := uint32(i % 10000)
+			value := uint32(i % 100)
+			idx.Put(key, value)
+		}
+	})
+
+	b.Run("Get", func(b *testing.B) {
+		idx := localidx.New(1024)
+
+		// Pre-populate
+		for i := 0; i < 1000; i++ {
+			idx.Put(uint32(i), uint32(i%100))
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			key := uint32(i % 1000)
+			_, _ = idx.Get(key)
+		}
+	})
+}
+
+// BenchmarkRing24Operations measures ring buffer performance
+func BenchmarkRing24Operations(b *testing.B) {
+	ring := ring24.New(1024)
+
+	// Pre-generate messages
+	messages := make([][24]byte, 100)
+	for i := range messages {
+		update := &TickUpdate{
+			pairID:      PairID(i),
+			forwardTick: float64(i) * 0.1,
+			reverseTick: float64(-i) * 0.1,
+		}
+		messages[i] = *(*[24]byte)(unsafe.Pointer(update))
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		msg := &messages[i%len(messages)]
+		ring.Push(msg)
+	}
+}
+
+// BenchmarkMemoryLayout measures struct access patterns
+func BenchmarkMemoryLayout(b *testing.B) {
+	b.Run("ArbitrageCycleStateAccess", func(b *testing.B) {
+		states := make([]ArbitrageCycleState, 1000)
+		for i := range states {
+			states[i] = ArbitrageCycleState{
+				tickValues: [3]float64{
+					float64(i) * 0.1,
+					float64(i) * 0.2,
+					float64(i) * 0.3,
+				},
+				pairIDs: [3]PairID{
+					PairID(i * 3),
+					PairID(i*3 + 1),
+					PairID(i*3 + 2),
+				},
+			}
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		sum := 0.0
+		for i := 0; i < b.N; i++ {
+			state := &states[i%len(states)]
+			sum += state.tickValues[0] + state.tickValues[1] + state.tickValues[2]
+		}
+
+		_ = sum
+	})
+
+	b.Run("FanoutEntryTraversal", func(b *testing.B) {
+		entries := make([]FanoutEntry, 1000)
+		for i := range entries {
+			entries[i] = FanoutEntry{
+				queueHandle:     quantumqueue64.Handle(i),
+				edgeIndex:       uint16(i % 3),
+				cycleStateIndex: CycleStateIndex(i),
+			}
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			entry := &entries[i%len(entries)]
+			_ = entry.queueHandle
+			_ = entry.edgeIndex
+			_ = entry.cycleStateIndex
+		}
+	})
+}
+
+// BenchmarkWorstCaseScenarios measures performance under stress
+func BenchmarkWorstCaseScenarios(b *testing.B) {
+	b.Run("HashTableHighCollision", func(b *testing.B) {
+		// Generate addresses that collide heavily
+		addresses := make([][40]byte, 1000)
+		for i := 0; i < len(addresses); i++ {
+			// Create addresses with similar prefixes
+			addr := generateMockAddress(uint64(i))
+			// Force similar hash by setting first 8 bytes
+			for j := 0; j < 8; j++ {
+				addr[j] = byte(i % 256)
+			}
+			addresses[i] = addr
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			idx := i % len(addresses)
+			RegisterPairAddress(addresses[idx][:], PairID(i))
+		}
+	})
+
+	b.Run("MaxFanoutProcessing", func(b *testing.B) {
+		executor := &ArbitrageCoreExecutor{
+			isReverseDirection: false,
+			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
+			fanoutTables:       make([][]FanoutEntry, 1),
+			pairToQueueIndex:   localidx.New(16),
+			cycleStates:        make([]ArbitrageCycleState, 1000),
+		}
+
+		executor.priorityQueues[0] = *quantumqueue64.New()
+		executor.pairToQueueIndex.Put(123, 0)
+
+		// Maximum fanout scenario
+		executor.fanoutTables[0] = make([]FanoutEntry, 500)
+		for i := 0; i < 500; i++ {
+			handle, _ := executor.priorityQueues[0].BorrowSafe()
+			executor.fanoutTables[0][i] = FanoutEntry{
+				queueHandle:     handle,
+				edgeIndex:       uint16(i % 3),
+				cycleStateIndex: CycleStateIndex(i),
+				queue:           &executor.priorityQueues[0],
+			}
+
+			executor.cycleStates[i] = ArbitrageCycleState{
+				tickValues: [3]float64{0.0, 0.0, 0.0},
+				pairIDs:    [3]PairID{PairID(i * 3), PairID(i*3 + 1), PairID(i*3 + 2)},
+			}
+		}
+
+		update := &TickUpdate{
+			pairID:      PairID(123),
+			forwardTick: 1.5,
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			processTickUpdate(executor, update)
+		}
+	})
+
+	b.Run("AllCoresDispatch", func(b *testing.B) {
+		// Worst case: dispatch to all 64 cores
+		pairID := PairID(999999)
+		for core := uint8(0); core < 64; core++ {
+			RegisterPairToCore(pairID, core)
+			if coreRings[core] == nil {
+				coreRings[core] = ring24.New(16)
+			}
+		}
+
+		addr := generateMockAddress(999999)
+		RegisterPairAddress(addr[:], pairID)
+
+		logView := &types.LogView{
+			Addr: make([]byte, 64),
+			Data: make([]byte, 128),
+		}
+
+		logView.Addr[0] = '0'
+		logView.Addr[1] = 'x'
+		copy(logView.Addr[2:42], addr[:])
+
+		reserve0, reserve1 := uint64(1000000), uint64(1000000)
+		for i := 0; i < 8; i++ {
+			logView.Data[24+i] = byte(reserve0 >> (8 * (7 - i)))
+			logView.Data[56+i] = byte(reserve1 >> (8 * (7 - i)))
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			DispatchTickUpdate(logView)
+		}
 	})
 }
