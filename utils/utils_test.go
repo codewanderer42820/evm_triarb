@@ -1,3 +1,27 @@
+// utils_test.go — Comprehensive test suite for high-performance utility functions
+// ============================================================================
+// UTILS TEST SUITE
+// ============================================================================
+//
+// Complete testing framework for zero-allocation utility functions with
+// comprehensive coverage of performance, correctness, and edge case scenarios.
+//
+// Test coverage includes:
+//   • Unit tests for type conversion functions with allocation validation
+//   • JSON parsing utilities with hop-based traversal verification
+//   • Unaligned memory operations with endianness testing
+//   • Hex parsing functions with malformed input handling
+//   • Hashing functions with distribution and collision analysis
+//   • Performance benchmarks with allocation counting
+//   • Stress testing with large data sets and concurrent access
+//   • Edge case validation with boundary conditions
+//
+// Performance validation:
+//   • Zero-allocation verification for all hot path functions
+//   • Nanosecond-scale operation timing requirements
+//   • Memory access pattern optimization validation
+//   • Concurrent safety under high contention scenarios
+
 package utils
 
 import (
@@ -12,17 +36,19 @@ import (
 )
 
 // ============================================================================
-// HELPER FUNCTIONS
+// TEST HELPER FUNCTIONS
 // ============================================================================
 
 // generateRandomBytes creates a byte slice of specified length with random data
+// for comprehensive testing of utility functions with varied input patterns
 func generateRandomBytes(n int) []byte {
 	b := make([]byte, n)
 	rand.Read(b)
 	return b
 }
 
-// generateHexString creates a valid hex string of specified length
+// generateHexString creates a valid hex string of specified length using
+// deterministic patterns for reproducible test scenarios
 func generateHexString(n int) string {
 	chars := "0123456789abcdef"
 	result := make([]byte, n)
@@ -32,11 +58,12 @@ func generateHexString(n int) string {
 	return string(result)
 }
 
-// generateJSONWithQuotes creates JSON-like data with embedded quotes at specific positions
+// generateJSONWithQuotes creates JSON-like data with embedded quotes at specific
+// positions for testing JSON parsing utilities with realistic data patterns
 func generateJSONWithQuotes(size int, quotePositions []int) []byte {
 	data := make([]byte, size)
 	for i := range data {
-		data[i] = 'a' // Fill with 'a'
+		data[i] = 'a' // Fill with 'a' for consistent background
 	}
 	for _, pos := range quotePositions {
 		if pos < size {
@@ -95,7 +122,7 @@ func TestB2s(t *testing.T) {
 				t.Errorf("B2s() = %q, expected %q", result, tt.expected)
 			}
 
-			// Verify zero allocation behavior
+			// Verify zero allocation behavior through data sharing
 			if len(tt.input) > 0 {
 				// Check that the underlying data is shared
 				inputPtr := unsafe.Pointer(&tt.input[0])
@@ -165,7 +192,7 @@ func TestItoa(t *testing.T) {
 				t.Errorf("Itoa(%d) = %q, expected %q", tt.input, result, tt.expected)
 			}
 
-			// Cross-verify with standard library
+			// Cross-verify with standard library for correctness
 			stdResult := strconv.Itoa(tt.input)
 			if result != stdResult {
 				t.Errorf("Itoa(%d) = %q, strconv.Itoa = %q", tt.input, result, stdResult)
@@ -185,7 +212,7 @@ func TestItoa_ZeroAllocation(t *testing.T) {
 }
 
 func TestItoa_EdgeCases(t *testing.T) {
-	// Test boundary conditions
+	// Test boundary conditions for digit transitions
 	testCases := []int{1, 9, 10, 99, 100, 999, 1000, 9999, 10000}
 
 	for _, n := range testCases {
@@ -215,7 +242,7 @@ func TestPrintInfo(t *testing.T) {
 
 	for _, msg := range testCases {
 		t.Run(fmt.Sprintf("message_len_%d", len(msg)), func(t *testing.T) {
-			// Should not panic
+			// Should not panic during execution
 			PrintInfo(msg)
 		})
 	}
@@ -245,7 +272,7 @@ func TestPrintWarning(t *testing.T) {
 
 	for _, msg := range testCases {
 		t.Run(fmt.Sprintf("message_len_%d", len(msg)), func(t *testing.T) {
-			// Should not panic
+			// Should not panic during execution
 			PrintWarning(msg)
 		})
 	}
@@ -566,13 +593,13 @@ func TestSkipToClosingBracket(t *testing.T) {
 }
 
 func TestJSONParsing_StressTest(t *testing.T) {
-	// Test with very large JSON-like data
+	// Test with very large JSON-like data for performance validation
 	size := 100000
 	data := make([]byte, size)
 	for i := range data {
 		data[i] = 'a'
 	}
-	// Add quotes at specific positions
+	// Add quotes at specific positions for predictable testing
 	data[size/4] = '"'
 	data[size/2] = '"'
 	data[size*3/4] = '"'
@@ -616,12 +643,12 @@ func TestLoad64(t *testing.T) {
 		{
 			name:     "Sequential bytes",
 			input:    []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
-			expected: 0x0807060504030201, // Little-endian
+			expected: 0x0807060504030201, // Little-endian byte order
 		},
 		{
 			name:     "Mixed pattern",
 			input:    []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22},
-			expected: 0x2211FFEEDDCCBBAA, // Little-endian
+			expected: 0x2211FFEEDDCCBBAA, // Little-endian byte order
 		},
 	}
 
@@ -694,12 +721,12 @@ func TestLoadBE64(t *testing.T) {
 		{
 			name:     "Sequential bytes",
 			input:    []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
-			expected: 0x0102030405060708, // Big-endian
+			expected: 0x0102030405060708, // Big-endian byte order
 		},
 		{
 			name:     "Mixed pattern",
 			input:    []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22},
-			expected: 0xAABBCCDDEEFF1122, // Big-endian
+			expected: 0xAABBCCDDEEFF1122, // Big-endian byte order
 		},
 	}
 
@@ -714,13 +741,13 @@ func TestLoadBE64(t *testing.T) {
 }
 
 func TestMemoryOperations_Alignment(t *testing.T) {
-	// Test with unaligned memory access
+	// Test with unaligned memory access scenarios
 	data := make([]byte, 32)
 	for i := range data {
 		data[i] = byte(i)
 	}
 
-	// Test Load64 at various offsets
+	// Test Load64 at various offsets for unaligned access validation
 	for offset := 0; offset < 8; offset++ {
 		t.Run(fmt.Sprintf("Load64_offset_%d", offset), func(t *testing.T) {
 			if offset+8 <= len(data) {
@@ -733,12 +760,12 @@ func TestMemoryOperations_Alignment(t *testing.T) {
 		})
 	}
 
-	// Test Load128 at various offsets
+	// Test Load128 at various offsets for unaligned access validation
 	for offset := 0; offset < 8; offset++ {
 		t.Run(fmt.Sprintf("Load128_offset_%d", offset), func(t *testing.T) {
 			if offset+16 <= len(data) {
 				r1, r2 := Load128(data[offset:])
-				// Verify it doesn't panic
+				// Verify it doesn't panic during unaligned access
 				if r1 == 0 && r2 == 0 && offset > 0 {
 					t.Error("Load128 should handle unaligned access")
 				}
@@ -960,7 +987,7 @@ func TestParseHexU32(t *testing.T) {
 }
 
 func TestHexParsing_Performance(t *testing.T) {
-	// Test with various hex string sizes
+	// Test with various hex string sizes for performance validation
 	sizes := []int{2, 4, 8, 16}
 
 	for _, size := range sizes {
@@ -1002,7 +1029,7 @@ func TestHexParsing_EdgeCases(t *testing.T) {
 
 	for _, tc := range edgeCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Should not panic
+			// Should not panic during processing
 			_ = ParseHexU64(tc.input)
 			_ = ParseHexN(tc.input)
 			_ = ParseHexU32(tc.input)
@@ -1064,7 +1091,7 @@ func TestMix64(t *testing.T) {
 }
 
 func TestMix64_Properties(t *testing.T) {
-	// Test hash function properties
+	// Test hash function properties for quality validation
 	t.Run("Deterministic", func(t *testing.T) {
 		input := uint64(0x123456789abcdef0)
 		result1 := Mix64(input)
@@ -1173,7 +1200,7 @@ func TestHash17_Distribution(t *testing.T) {
 	// Test hash distribution for Ethereum-like addresses
 	buckets := make([]int, 1<<17) // 131072 buckets
 
-	// Generate test addresses
+	// Generate test addresses with varied patterns
 	for i := 0; i < 100000; i++ {
 		addr := fmt.Sprintf("%06x", i)
 		hash := Hash17([]byte(addr))
@@ -1239,7 +1266,7 @@ func TestStressScenarios(t *testing.T) {
 	})
 
 	t.Run("Massive hex parsing", func(t *testing.T) {
-		// Test parsing many hex values
+		// Test parsing many hex values for performance validation
 		hexValues := make([][]byte, 10000)
 		for i := range hexValues {
 			hexValues[i] = []byte(fmt.Sprintf("%016x", uint64(i)))
@@ -1269,7 +1296,7 @@ func TestStressScenarios(t *testing.T) {
 			seen[hash] = true
 		}
 
-		// Should have very few collisions
+		// Should have very few collisions with good hash function
 		if collisions > 10 {
 			t.Errorf("Too many hash collisions: %d", collisions)
 		}
