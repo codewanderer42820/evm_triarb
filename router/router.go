@@ -390,8 +390,6 @@ func DispatchUpdate(v *types.LogView) {
 	upd := (*TickUpdate)(unsafe.Pointer(&msg))
 	upd.Pair, upd.FwdTick, upd.RevTick = pid, tick, -tick
 
-	control.SignalActivity() // Signal global hot flag
-
 	for m := pair2cores[pid]; m != 0; {
 		core := bits.TrailingZeros64(uint64(m))
 		rings[core].Push(&msg)

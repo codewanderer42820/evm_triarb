@@ -3,6 +3,7 @@ package ws
 import (
 	"errors"
 	"main/constants"
+	"main/control"
 	"net"
 	"unsafe"
 )
@@ -192,6 +193,9 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+
+		// Signal global activity as soon as any data arrives
+		control.SignalActivity()
 
 		// Extract frame information
 		opcode = headerBuf[0] & 0x0F
