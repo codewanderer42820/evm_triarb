@@ -166,7 +166,7 @@ type CoreExecutor struct {
 	Heaps     []quantumqueue64.QuantumQueue64 // 24 B  ← owns queues directly, dereference from New()
 	Fanouts   [][]FanoutEntry                 // 24 B  (offset 24 → 47)
 	IsReverse bool                            //  1 B  (offset 48)
-	_         [7]byte                         // pad
+	_         [7]bool                         // pad
 	Done      <-chan struct{}                 //  8 B  (offset 56 → 63)
 
 	// ── second line: 64-byte local index header (pointers & mask) ──
