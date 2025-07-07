@@ -292,42 +292,71 @@ func TestAddressKeyOperations(t *testing.T) {
 }
 
 // ============================================================================
-// UNIT TESTS - HASH FUNCTIONS
+// UNIT TESTS - HASH FUNCTIONS (utils.Hash17)
 // ============================================================================
 
 func TestHashFunctions(t *testing.T) {
-	t.Run("FastHash40Consistency", func(t *testing.T) {
+	// Note: We're testing the existing utils.Hash17 function behavior
+	// since fastHash40 was removed in the revert
+
+	t.Run("Hash17Consistency", func(t *testing.T) {
 		data := make([]byte, 40)
 		copy(data, "0123456789abcdef0123456789abcdef01234567")
 
-		hash1 := fastHash40(data)
-		hash2 := fastHash40(data)
+		// utils.Hash17 should be deterministic
+		// We can't directly test it here since it's in utils package,
+		// but we can test that address registration/lookup is consistent
+		addr := generateMockAddress(12345)
+		pairID := PairID(999)
 
-		if hash1 != hash2 {
-			t.Error("Hash function should be deterministic")
+		RegisterPairAddress(addr[:], pairID)
+		found := lookupPairIDByAddress(addr[:])
+
+		if found != pairID {
+			t.Error("Hash function should produce consistent results")
 		}
 	})
 
-	t.Run("FastHash40Distribution", func(t *testing.T) {
-		data1 := make([]byte, 40)
-		data2 := make([]byte, 40)
+	t.Run("Hash17Distribution", func(t *testing.T) {
+		// Test that different addresses produce different lookup results
+		addr1 := generateMockAddress(1111)
+		addr2 := generateMockAddress(2222)
 
-		copy(data1, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-		copy(data2, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+		pairID1 := PairID(1001)
+		pairID2 := PairID(1002)
 
-		hash1 := fastHash40(data1)
-		hash2 := fastHash40(data2)
+		RegisterPairAddress(addr1[:], pairID1)
+		RegisterPairAddress(addr2[:], pairID2)
 
-		if hash1 == hash2 {
-			t.Error("Different inputs should produce different hashes")
+		found1 := lookupPairIDByAddress(addr1[:])
+		found2 := lookupPairIDByAddress(addr2[:])
+
+		if found1 == found2 {
+			t.Error("Different addresses should map to different pairs")
 		}
 	})
 
-	t.Run("FastHash40ZeroHandling", func(t *testing.T) {
-		data := make([]byte, 40)
-		hash := fastHash40(data)
-		t.Logf("Zero data hash: %d", hash)
-		// Hash can be any value, including zero
+	t.Run("HashCollisionHandling", func(t *testing.T) {
+		// Test that the Robin Hood implementation handles collisions properly
+		// by registering many addresses and ensuring they can all be found
+		const testCount = 100
+		pairs := make(map[PairID][40]byte)
+
+		for i := 0; i < testCount; i++ {
+			addr := generateMockAddress(uint64(i + 50000))
+			pairID := PairID(i + 10000)
+			pairs[pairID] = addr
+
+			RegisterPairAddress(addr[:], pairID)
+		}
+
+		// Verify all can be found
+		for pairID, addr := range pairs {
+			found := lookupPairIDByAddress(addr[:])
+			if found != pairID {
+				t.Errorf("Hash collision handling failed: pair %d not found", pairID)
+			}
+		}
 	})
 }
 
