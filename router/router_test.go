@@ -1272,37 +1272,33 @@ func TestSystemIntegration(t *testing.T) {
 
 // TestMemoryEfficiency validates allocation patterns
 func TestMemoryEfficiency(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping memory test in short mode")
-	}
-
-	// Clear any existing state
-	for i := range pairAddressKeys {
-		pairAddressKeys[i] = AddressKey{}
-		addressToPairID[i] = 0
-	}
-
 	var m1, m2 runtime.MemStats
+
+	// Force GC and get clean baseline
 	runtime.GC()
+	runtime.GC() // Double GC for clean state
 	runtime.ReadMemStats(&m1)
 
-	// Register a small number of addresses
+	// Test the actual operation
 	for i := 0; i < 50; i++ {
 		addr := generateMockAddress(uint64(i + 1000))
-		pairID := PairID(i + 1000)
-		RegisterPairAddress(addr[:], pairID)
+		RegisterPairAddress(addr[:], PairID(i+1000))
 	}
 
-	runtime.GC()
 	runtime.ReadMemStats(&m2)
 
-	allocatedBytes := m2.TotalAlloc - m1.TotalAlloc
-	t.Logf("Memory allocated: %d bytes", allocatedBytes)
+	// Check CURRENT allocations, not cumulative
+	heapInUse := m2.HeapInuse - m1.HeapInuse
+	allocObjects := m2.HeapObjects - m1.HeapObjects
 
-	// The Robin Hood hash table doesn't allocate per insertion
-	// Only stack allocations should occur
-	if allocatedBytes > 10000 {
-		t.Logf("Note: %d bytes allocated (mostly GC metadata)", allocatedBytes)
+	t.Logf("Heap growth: %d bytes, Objects: %d", heapInUse, allocObjects)
+
+	// Robin Hood should allocate ZERO heap memory
+	if heapInUse > 0 {
+		t.Errorf("Unexpected heap allocation: %d bytes", heapInUse)
+	}
+	if allocObjects > 0 {
+		t.Errorf("Unexpected object allocation: %d objects", allocObjects)
 	}
 }
 
