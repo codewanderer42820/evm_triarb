@@ -510,6 +510,8 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 //go:norace
 //go:nocheckptr
 //go:nosplit
+//go:inline
+//go:registerparams
 func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShardBucket) {
 	// Lock worker to specific OS thread for optimal cache affinity
 	runtime.LockOSThread()
@@ -553,6 +555,8 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 //go:norace
 //go:nocheckptr
 //go:nosplit
+//go:inline
+//go:registerparams
 func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 	coreCount := runtime.NumCPU() - 1 // Reserve one core for system tasks
 	if coreCount > 64 {
@@ -610,6 +614,8 @@ func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 //go:norace
 //go:nocheckptr
 //go:nosplit
+//go:inline
+//go:registerparams
 func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 	pairShardBuckets = make(map[PairID][]PairShardBucket)
 	temporaryBindings := make(map[PairID][]ArbitrageEdgeBinding, len(cycles)*3)
