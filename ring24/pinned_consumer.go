@@ -184,3 +184,75 @@ func PinnedConsumer(
 		}
 	}()
 }
+
+// PinnedConsumerWithCooldown is specialized for core 1 with global cooldown management
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func PinnedConsumerWithCooldown(
+	core int, // Target logical CPU core for affinity
+	ring *Ring, // SPSC ring buffer for data consumption
+	stop *uint32, // Atomic stop flag (1 = shutdown requested)
+	hot *uint32, // Atomic hot flag (1 = producer active)
+	handler func(*[24]byte), // Payload processing callback
+	done chan<- struct{}, // Completion signaling channel
+) {
+	go func() {
+		// ====================================================================
+		// INITIALIZATION PHASE
+		// ====================================================================
+
+		// Bind goroutine to single OS thread for affinity stability
+		runtime.LockOSThread()
+
+		// Configure CPU core affinity for cache locality
+		setAffinity(core)
+
+		// Ensure proper cleanup on goroutine termination
+		defer func() {
+			runtime.UnlockOSThread()
+			close(done)
+		}()
+
+		// ====================================================================
+		// ADAPTIVE POLLING LOOP
+		// ====================================================================
+
+		var miss int          // Consecutive miss counter for relaxation
+		lastHit := time.Now() // Timestamp of last successful consumption
+
+		for {
+			// Check for shutdown signal
+			if *stop != 0 {
+				return
+			}
+
+			// Attempt data consumption
+			if p := ring.Pop(); p != nil {
+				// Data available: Process immediately
+				handler(p)
+				miss = 0
+				lastHit = time.Now()
+				continue
+			}
+
+			// No data available: Determine polling strategy
+
+			// Hot polling conditions:
+			// 1. Producer explicitly signaled as active
+			// 2. Recent activity within hot window
+			if *hot == 1 || time.Since(lastHit) <= hotWindow {
+				continue // Maintain hot polling for immediate response
+			}
+
+			// Cold polling: Implement CPU relaxation after budget exhaustion
+			if miss++; miss >= spinBudget {
+				miss = 0
+				cpuRelax() // Yield CPU resources to reduce power consumption
+			}
+		}
+	}()
+}
