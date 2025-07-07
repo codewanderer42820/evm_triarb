@@ -314,8 +314,10 @@ func attachShard(ex *CoreExecutor, sh *PairShard) {
 /*──────────────────────────── Tick handling ─────────────────────────────────*/
 
 func handleTick(ex *CoreExecutor, upd *TickUpdate) {
-	tick := upd.FwdTick
-	if ex.IsReverse {
+	var tick float64
+	if !ex.IsReverse {
+		tick = upd.FwdTick
+	} else {
 		tick = upd.RevTick
 	}
 
