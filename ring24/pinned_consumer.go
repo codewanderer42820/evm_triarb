@@ -43,6 +43,7 @@
 package ring24
 
 import (
+	"main/control"
 	"runtime"
 	"time"
 )
@@ -238,6 +239,9 @@ func PinnedConsumerWithCooldown(
 				lastHit = time.Now()
 				continue
 			}
+
+			// No data available: Core 1 manages global cooldown
+			control.PollCooldown() // Single core handles global hot flag cooldown
 
 			// No data available: Determine polling strategy
 
