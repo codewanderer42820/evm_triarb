@@ -14,7 +14,7 @@
 //   • Graceful shutdown coordination across all consumer cores
 //
 // Performance characteristics:
-//   • Sub-nanosecond flag operations with compiler inlining
+//   • Nanosecond-scale flag operations with compiler inlining
 //   • Cache-friendly memory layout for optimal access patterns
 //   • Lock-free atomic operations for maximum throughput
 //   • Automatic cooldown management with configurable timeouts
@@ -56,7 +56,7 @@ var (
 // for automatic cooldown management. Called from WebSocket ingress layer
 // upon receiving transaction logs or price updates.
 //
-// Performance: Sub-nanosecond execution with compiler optimization
+// Performance: Nanosecond-scale execution with compiler optimization
 // Thread safety: Safe for concurrent calls from WebSocket threads
 //
 //go:norace
