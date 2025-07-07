@@ -440,17 +440,28 @@ func TestCoreAssignment(t *testing.T) {
 // TestCriticalExecutionPaths validates the most performance-critical code paths
 func TestCriticalExecutionPaths(t *testing.T) {
 	t.Run("ReverseDirectionProcessing", func(t *testing.T) {
-		// Validate reverse direction tick processing branch
+		// Validate reverse direction tick processing branch with properly initialized executor
 		executor := &ArbitrageCoreExecutor{
 			isReverseDirection: true, // Triggers reverse tick selection
 			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
 			fanoutTables:       make([][]FanoutEntry, 1),
 			pairToQueueIndex:   localidx.New(16),
+			cycleStates:        make([]ArbitrageCycleState, 1),
 		}
 
 		executor.priorityQueues[0] = *quantumqueue64.New()
 		executor.fanoutTables[0] = nil
 		executor.pairToQueueIndex.Put(123, 0)
+
+		// Create and populate cycle state (realistic initialization)
+		executor.cycleStates[0] = ArbitrageCycleState{
+			tickValues: [3]float64{0.0, 0.0, 0.0},
+			pairIDs:    [3]PairID{123, 124, 125},
+		}
+
+		// Populate queue with cycle (matches production initialization)
+		handle, _ := executor.priorityQueues[0].BorrowSafe()
+		executor.priorityQueues[0].Push(constants.MaxInitializationPriority, handle, 0)
 
 		update := &TickUpdate{
 			pairID:      PairID(123),
@@ -458,12 +469,12 @@ func TestCriticalExecutionPaths(t *testing.T) {
 			reverseTick: -2.0, // This value should be selected for reverse direction
 		}
 
-		// Execute critical path
+		// Execute critical path - now with populated queue
 		processTickUpdate(executor, update)
 	})
 
 	t.Run("ProfitableArbitrageDetection", func(t *testing.T) {
-		// Validate profitable arbitrage cycle detection and emission
+		// Validate profitable arbitrage cycle detection and emission with realistic setup
 		executor := &ArbitrageCoreExecutor{
 			isReverseDirection: false,
 			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
@@ -474,16 +485,17 @@ func TestCriticalExecutionPaths(t *testing.T) {
 
 		executor.priorityQueues[0] = *quantumqueue64.New()
 		executor.fanoutTables[0] = nil
+		executor.pairToQueueIndex.Put(123, 0)
 
-		// Create cycle with negative total (profitable)
+		// Create cycle with negative total (profitable) - realistic scenario
 		executor.cycleStates[0] = ArbitrageCycleState{
 			tickValues: [3]float64{-0.5, -0.3, -0.1}, // Total: -0.9
 			pairIDs:    [3]PairID{100, 101, 102},
 		}
 
+		// Populate queue with cycle (essential for realistic test)
 		handle, _ := executor.priorityQueues[0].BorrowSafe()
-		executor.priorityQueues[0].Push(0, handle, 0)
-		executor.pairToQueueIndex.Put(123, 0)
+		executor.priorityQueues[0].Push(0, handle, 0) // Use profitable priority
 
 		update := &TickUpdate{
 			pairID:      PairID(123),
@@ -495,7 +507,7 @@ func TestCriticalExecutionPaths(t *testing.T) {
 	})
 
 	t.Run("FanoutTablePropagation", func(t *testing.T) {
-		// Validate fanout table update propagation mechanism
+		// Validate fanout table update propagation mechanism with realistic setup
 		executor := &ArbitrageCoreExecutor{
 			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
 			fanoutTables:       make([][]FanoutEntry, 1),
@@ -505,13 +517,17 @@ func TestCriticalExecutionPaths(t *testing.T) {
 		}
 
 		executor.priorityQueues[0] = *quantumqueue64.New()
+		executor.pairToQueueIndex.Put(123, 0)
+
+		// Initialize cycle state properly
 		executor.cycleStates[0] = ArbitrageCycleState{
 			tickValues: [3]float64{0.0, 0.0, 0.0},
 			pairIDs:    [3]PairID{100, 101, 102},
 		}
 
+		// Populate queue with cycle (matches production behavior)
 		handle, _ := executor.priorityQueues[0].BorrowSafe()
-		executor.priorityQueues[0].Push(0, handle, 0)
+		executor.priorityQueues[0].Push(constants.MaxInitializationPriority, handle, 0)
 
 		// Setup fanout entry to update tick at index 1
 		executor.fanoutTables[0] = []FanoutEntry{
@@ -522,8 +538,6 @@ func TestCriticalExecutionPaths(t *testing.T) {
 				queue:           &executor.priorityQueues[0],
 			},
 		}
-
-		executor.pairToQueueIndex.Put(123, 0)
 
 		update := &TickUpdate{
 			pairID:      PairID(123),
@@ -546,7 +560,7 @@ func TestCriticalExecutionPaths(t *testing.T) {
 // TestDispatchPipeline validates the complete tick update dispatch system
 func TestDispatchPipeline(t *testing.T) {
 	t.Run("CompleteDispatchExecution", func(t *testing.T) {
-		// Validate end-to-end DispatchTickUpdate execution
+		// Validate end-to-end DispatchTickUpdate execution pipeline
 		addr := generateMockAddress(555)
 		pairID := PairID(555)
 
@@ -554,7 +568,7 @@ func TestDispatchPipeline(t *testing.T) {
 		RegisterPairToCore(pairID, 0)
 		RegisterPairToCore(pairID, 1)
 
-		// Initialize required ring buffers
+		// Initialize required ring buffers for dispatch validation
 		if coreRings[0] == nil {
 			coreRings[0] = ring24.New(16)
 		}
@@ -562,18 +576,18 @@ func TestDispatchPipeline(t *testing.T) {
 			coreRings[1] = ring24.New(16)
 		}
 
-		// Create realistic LogView structure
+		// Construct realistic LogView structure
 		logView := &types.LogView{
 			Addr: make([]byte, 64),
 			Data: make([]byte, 128),
 		}
 
-		// Format address in LogView format (0x prefix + 40 hex characters)
+		// Format address with proper LogView layout (0x prefix + 40 hex characters)
 		logView.Addr[0] = '0'
 		logView.Addr[1] = 'x'
 		copy(logView.Addr[2:42], addr[:])
 
-		// Set reserve values in LogView data format
+		// Encode reserve values in LogView data format
 		reserve0, reserve1 := uint64(1000), uint64(500)
 		for i := 0; i < 8; i++ {
 			logView.Data[24+i] = byte(reserve0 >> (8 * (7 - i)))
@@ -640,19 +654,19 @@ func TestDispatchPipeline(t *testing.T) {
 	})
 
 	t.Run("MultiCoreBitManipulation", func(t *testing.T) {
-		// Validate dispatch to multiple non-contiguous cores
+		// Validate dispatch to multiple non-contiguous cores via bit manipulation
 		addr := generateMockAddress(888)
 		pairID := PairID(888)
 
 		RegisterPairAddress(addr[:], pairID)
 
-		// Assign to non-contiguous cores to validate bit manipulation
+		// Assign to non-contiguous cores to validate bit manipulation logic
 		cores := []uint8{0, 3, 7, 15}
 		for _, core := range cores {
 			RegisterPairToCore(pairID, core)
 		}
 
-		// Initialize required ring buffers
+		// Initialize required ring buffers for all assigned cores
 		for _, core := range cores {
 			if coreRings[core] == nil {
 				coreRings[core] = ring24.New(16)
@@ -674,7 +688,7 @@ func TestDispatchPipeline(t *testing.T) {
 			logView.Data[56+i] = byte(reserve1 >> (8 * (7 - i)))
 		}
 
-		// Must dispatch to all assigned cores
+		// Validate dispatch to all assigned cores
 		DispatchTickUpdate(logView)
 	})
 }
@@ -879,14 +893,14 @@ func TestSystemIntegration(t *testing.T) {
 		InitializeArbitrageSystem(cycles)
 		time.Sleep(20 * time.Millisecond)
 
-		// Register addresses and core assignments
+		// Register addresses and configure core assignments
 		for i := uint64(1001); i <= 1003; i++ {
 			addr := generateMockAddress(i * 1000)
 			RegisterPairAddress(addr[:], PairID(i))
 			RegisterPairToCore(PairID(i), uint8(i%2))
 		}
 
-		// Initialize required ring buffers
+		// Initialize required ring buffers for processing
 		if coreRings[0] == nil {
 			coreRings[0] = ring24.New(16)
 		}
@@ -894,7 +908,7 @@ func TestSystemIntegration(t *testing.T) {
 			coreRings[1] = ring24.New(16)
 		}
 
-		// Process realistic tick updates
+		// Process realistic tick update sequence
 		for i := uint64(1001); i <= 1003; i++ {
 			addr := generateMockAddress(i * 1000)
 
@@ -918,7 +932,7 @@ func TestSystemIntegration(t *testing.T) {
 			DispatchTickUpdate(logView)
 		}
 
-		// Cleanup
+		// Perform graceful system cleanup
 		control.Shutdown()
 		time.Sleep(50 * time.Millisecond)
 
@@ -1265,11 +1279,11 @@ func TestSystemLifecycle(t *testing.T) {
 		}
 
 		InitializeArbitrageSystem(cycles)
-		time.Sleep(50 * time.Millisecond) // Allow initialization
+		time.Sleep(50 * time.Millisecond) // Allow system initialization
 
-		// Signal shutdown
+		// Signal graceful shutdown
 		control.Shutdown()
-		time.Sleep(100 * time.Millisecond) // Allow cleanup
+		time.Sleep(100 * time.Millisecond) // Allow cleanup completion
 
 		t.Log("System shutdown completed successfully")
 	})
