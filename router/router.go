@@ -139,6 +139,7 @@ type TickUpdate struct { // 24 B (exact ring24 slot size)
 // Each entry references canonical cycle state and maintains queue handle for
 // efficient priority updates when tick values change.
 //
+//go:align 32
 //go:notinheap
 type FanoutEntry struct { // 32 B total
 	queueHandle     quantumqueue64.Handle          // 4 B ← hottest: used in every MoveTick call
@@ -152,6 +153,7 @@ type FanoutEntry struct { // 32 B total
 // ArbitrageEdgeBinding represents a single edge within an arbitrage cycle.
 // Array-first layout enables efficient stride-based batch scanning operations.
 //
+//go:align 16
 //go:notinheap
 type ArbitrageEdgeBinding struct { // 16 B total
 	cyclePairs [3]PairID // 12 B ← complete triplet for this cycle
@@ -162,6 +164,7 @@ type ArbitrageEdgeBinding struct { // 16 B total
 // PairShardBucket groups multiple arbitrage cycles by their common pair.
 // Memory layout optimizes for batch processing during executor initialization.
 //
+//go:align 32
 //go:notinheap
 type PairShardBucket struct { // 32 B total
 	pairID       PairID                 // 4 B  ← hottest: used for queue lookup
@@ -173,8 +176,8 @@ type PairShardBucket struct { // 32 B total
 // arbitrage opportunity detection. Memory layout is optimized for cache
 // performance with hot fields in the first cache line.
 //
-//go:notinheap
 //go:align 64
+//go:notinheap
 type ArbitrageCoreExecutor struct {
 	// ── Cache line 1: Hot path fields (64 bytes) ──
 	priorityQueues     []quantumqueue64.QuantumQueue64 // 24 B ← owned queue instances
