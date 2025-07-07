@@ -480,9 +480,9 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 	// Use stack-allocated array for optimal cache performance
 	type ProcessedCycle struct {
 		queueHandle     quantumqueue64.Handle // 4B - hottest: used in Push() call
-		_               uint32                // 4B - padding for alignment
-		cycleStateIndex CycleStateIndex       // 8B - hot: used in Push() payload
-		originalTick    int64                 // 8B - cold: only used in Push() priority
+		_               uint32                // 4B - padding for 8-byte alignment
+		originalTick    int64                 // 8B - hot: used in Push() priority
+		cycleStateIndex CycleStateIndex       // 8B - warm: used in Push() payload
 		_               uint64                // 8B - padding to reach 32B total
 	} // 32 bytes total = exactly 2 structs per 64-byte cache line
 
@@ -491,10 +491,6 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 
 	// Extract and evaluate cycles until unprofitable or capacity reached
 	for {
-		if queue.Empty() {
-			break
-		}
-
 		handle, queueTick, cycleData := queue.PeepMin()
 		cycleIndex := CycleStateIndex(cycleData)
 		cycle := &executor.cycleStates[cycleIndex]
@@ -509,8 +505,16 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 			emitArbitrageOpportunity(cycle, currentTick)
 		}
 
-		// Store cycle information for later reprocessing
-		processedCycles[cycleCount] = ProcessedCycle{
+		// Stop processing if unprofitable or reached capacity limit
+		if !isProfitable || cycleCount == len(processedCycles) {
+			break
+		}
+
+		// Store cycle information for later reprocessing with eliminated bounds check
+		*(*ProcessedCycle)(unsafe.Add(
+			unsafe.Pointer(&processedCycles[0]),
+			uintptr(cycleCount)*unsafe.Sizeof(ProcessedCycle{}),
+		)) = ProcessedCycle{
 			queueHandle:     handle,
 			cycleStateIndex: cycleIndex,
 			originalTick:    queueTick,
@@ -520,15 +524,17 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 		// Remove from queue for reprocessing
 		queue.UnlinkMin(handle)
 
-		// Stop processing if unprofitable or reached capacity limit
-		if !isProfitable || cycleCount == len(processedCycles) {
+		if queue.Empty() {
 			break
 		}
 	}
 
 	// Reinsert all processed cycles using original handles (zero allocation)
 	for i := 0; i < cycleCount; i++ {
-		cycle := processedCycles[i]
+		cycle := (*ProcessedCycle)(unsafe.Add(
+			unsafe.Pointer(&processedCycles[0]),
+			uintptr(i)*unsafe.Sizeof(ProcessedCycle{}),
+		))
 		queue.Push(cycle.originalTick, cycle.queueHandle, uint64(cycle.cycleStateIndex))
 	}
 
