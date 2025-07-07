@@ -1009,7 +1009,7 @@ func BenchmarkFragmentationParsing(b *testing.B) {
 				msgEnd := 0
 
 				// Process each fragment (your stitching logic)
-				for fragIdx, fragment := range s.fragments {
+				for _, fragment := range s.fragments {
 					copy(processor.buffer[msgEnd:], fragment)
 
 					// Parse header
