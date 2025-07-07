@@ -15,6 +15,12 @@
 //   • Robin Hood hash table collision resolution validation
 //   • Complete tick dispatch pipeline testing
 //   • System initialization and graceful shutdown verification
+//
+// Performance validation:
+//   • Nanosecond-scale operation timing verification
+//   • Zero-allocation hot path enforcement
+//   • Concurrent throughput under sustained load
+//   • Memory layout and cache alignment validation
 
 package router
 
@@ -43,12 +49,12 @@ import (
 // ============================================================================
 
 const (
-	// Test scale parameters - balanced for comprehensive testing without timeouts
-	testTrianglePairCount = 5  // Small scale for unit test efficiency
-	testTickUpdatesCount  = 20 // Moderate tick update volume
-	testCoreCount         = 4  // Reduced core count for test environment
+	// Test scale parameters - calibrated for comprehensive testing without timeouts
+	testTrianglePairCount = 5  // Reduced scale for unit test efficiency
+	testTickUpdatesCount  = 20 // Moderate tick update volume for validation
+	testCoreCount         = 4  // Constrained core count for test environment
 
-	// Performance validation thresholds
+	// Performance validation thresholds - conservative for reliable CI/CD
 	maxMemoryAllocBytes    = 50000 // 50KB allocation limit for efficiency tests
 	minThroughputOpsPerSec = 100   // Conservative throughput requirement
 )
@@ -57,7 +63,7 @@ const (
 // MOCK DATA STRUCTURES AND GENERATORS
 // ============================================================================
 
-// MockEthereumAddress represents a 40-character hex Ethereum address for testing
+// MockEthereumAddress represents a 40-character hexadecimal Ethereum address for testing
 type MockEthereumAddress [40]byte
 
 // MockTickUpdate represents a price update event for testing dispatch pipeline
@@ -144,23 +150,23 @@ func createMockArbitrageSetup() *MockArbitrageSetup {
 // UNIT TESTS - CORE COMPONENT VALIDATION
 // ============================================================================
 
-// TestAddressKeyOperations validates the fundamental address key operations
+// TestAddressKeyOperations validates fundamental address key operations
 func TestAddressKeyOperations(t *testing.T) {
 	t.Run("KeyGeneration", func(t *testing.T) {
 		addr1 := generateMockAddress(12345)
-		addr2 := generateMockAddress(12345) // Same seed should produce identical address
-		addr3 := generateMockAddress(54321) // Different seed should produce different address
+		addr2 := generateMockAddress(12345) // Same seed must produce identical address
+		addr3 := generateMockAddress(54321) // Different seed must produce different address
 
 		key1 := bytesToAddressKey(addr1[:])
 		key2 := bytesToAddressKey(addr2[:])
 		key3 := bytesToAddressKey(addr3[:])
 
 		if !key1.isEqual(key2) {
-			t.Error("Identical addresses should generate equal keys")
+			t.Error("Identical addresses must generate equal keys")
 		}
 
 		if key1.isEqual(key3) {
-			t.Error("Different addresses should generate different keys")
+			t.Error("Different addresses must generate different keys")
 		}
 	})
 
@@ -168,17 +174,17 @@ func TestAddressKeyOperations(t *testing.T) {
 		addr := generateMockAddress(99999)
 		key := bytesToAddressKey(addr[:])
 
-		// Test reflexivity
+		// Validate reflexivity property
 		if !key.isEqual(key) {
-			t.Error("Key should equal itself (reflexivity)")
+			t.Error("Key must equal itself (reflexivity property)")
 		}
 
-		// Test inequality after modification
+		// Validate inequality after modification
 		modifiedKey := key
 		modifiedKey.words[2] ^= 1
 
 		if key.isEqual(modifiedKey) {
-			t.Error("Modified key should not equal original")
+			t.Error("Modified key must not equal original")
 		}
 	})
 
@@ -187,7 +193,7 @@ func TestAddressKeyOperations(t *testing.T) {
 		addr2 := generateMockAddress(12345)
 
 		if addr1 != addr2 {
-			t.Error("Address generation must be deterministic for same seed")
+			t.Error("Address generation must be deterministic for identical seed")
 		}
 	})
 
@@ -196,7 +202,7 @@ func TestAddressKeyOperations(t *testing.T) {
 		size := unsafe.Sizeof(key)
 
 		if size != 64 {
-			t.Errorf("AddressKey size is %d bytes, expected 64 bytes for cache alignment", size)
+			t.Errorf("AddressKey size is %d bytes, expected 64 bytes for cache line alignment", size)
 		}
 	})
 }
@@ -210,7 +216,7 @@ func TestDirectAddressIndexing(t *testing.T) {
 		index2 := directAddressToIndex64(addr[:])
 
 		if index1 != index2 {
-			t.Error("Address indexing should be deterministic")
+			t.Error("Address indexing must be deterministic")
 		}
 	})
 
@@ -224,7 +230,7 @@ func TestDirectAddressIndexing(t *testing.T) {
 			indices[index]++
 		}
 
-		// Check for reasonable distribution (no single index should dominate)
+		// Verify reasonable distribution (no single index should dominate)
 		maxCollisions := 0
 		for _, count := range indices {
 			if count > maxCollisions {
@@ -232,7 +238,7 @@ func TestDirectAddressIndexing(t *testing.T) {
 			}
 		}
 
-		// With good distribution, max collisions should be relatively low
+		// With proper distribution, maximum collisions should be relatively low
 		if maxCollisions > testCount/10 {
 			t.Errorf("Poor address index distribution: max collisions %d (expected < %d)", maxCollisions, testCount/10)
 		}
@@ -269,7 +275,7 @@ func TestRobinHoodHashTable(t *testing.T) {
 		foundID := lookupPairIDByAddress(unknownAddr[:])
 
 		if foundID != 0 {
-			t.Error("Unknown address should return 0")
+			t.Error("Unknown address must return 0")
 		}
 	})
 
@@ -277,7 +283,7 @@ func TestRobinHoodHashTable(t *testing.T) {
 		const testCount = 100
 		pairs := make(map[PairID][40]byte)
 
-		// Insert multiple addresses that may collide
+		// Insert multiple addresses that may produce hash collisions
 		for i := 0; i < testCount; i++ {
 			addr := generateMockAddress(uint64(i + 50000))
 			pairID := PairID(i + 10000)
@@ -350,7 +356,7 @@ func TestTickQuantization(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			result := quantizeTickToInt64(tc.input)
 
-			// Verify result is within valid quantization range
+			// Verify result falls within valid quantization range
 			if result < 0 || result > constants.MaxQuantizedTick {
 				t.Errorf("Quantization result %d outside valid range [0, %d]", result, constants.MaxQuantizedTick)
 			}
@@ -364,7 +370,7 @@ func TestTickQuantization(t *testing.T) {
 		val3 := quantizeTickToInt64(50.0)
 
 		if val1 >= val2 || val2 >= val3 {
-			t.Error("Quantization should maintain monotonicity")
+			t.Error("Quantization must maintain monotonicity")
 		}
 	})
 }
@@ -434,7 +440,7 @@ func TestCoreAssignment(t *testing.T) {
 // TestCriticalExecutionPaths validates the most performance-critical code paths
 func TestCriticalExecutionPaths(t *testing.T) {
 	t.Run("ReverseDirectionProcessing", func(t *testing.T) {
-		// Test reverse direction tick processing branch
+		// Validate reverse direction tick processing branch
 		executor := &ArbitrageCoreExecutor{
 			isReverseDirection: true, // Triggers reverse tick selection
 			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
@@ -457,7 +463,7 @@ func TestCriticalExecutionPaths(t *testing.T) {
 	})
 
 	t.Run("ProfitableArbitrageDetection", func(t *testing.T) {
-		// Test profitable arbitrage cycle detection and emission
+		// Validate profitable arbitrage cycle detection and emission
 		executor := &ArbitrageCoreExecutor{
 			isReverseDirection: false,
 			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
@@ -489,7 +495,7 @@ func TestCriticalExecutionPaths(t *testing.T) {
 	})
 
 	t.Run("FanoutTablePropagation", func(t *testing.T) {
-		// Test fanout table update propagation mechanism
+		// Validate fanout table update propagation mechanism
 		executor := &ArbitrageCoreExecutor{
 			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
 			fanoutTables:       make([][]FanoutEntry, 1),
@@ -540,7 +546,7 @@ func TestCriticalExecutionPaths(t *testing.T) {
 // TestDispatchPipeline validates the complete tick update dispatch system
 func TestDispatchPipeline(t *testing.T) {
 	t.Run("CompleteDispatchExecution", func(t *testing.T) {
-		// Test end-to-end DispatchTickUpdate execution
+		// Validate end-to-end DispatchTickUpdate execution
 		addr := generateMockAddress(555)
 		pairID := PairID(555)
 
@@ -562,7 +568,7 @@ func TestDispatchPipeline(t *testing.T) {
 			Data: make([]byte, 128),
 		}
 
-		// Format address in LogView format (0x prefix + 40 hex chars)
+		// Format address in LogView format (0x prefix + 40 hex characters)
 		logView.Addr[0] = '0'
 		logView.Addr[1] = 'x'
 		copy(logView.Addr[2:42], addr[:])
@@ -590,7 +596,7 @@ func TestDispatchPipeline(t *testing.T) {
 		logView.Addr[1] = 'x'
 		copy(logView.Addr[2:42], unknownAddr[:])
 
-		// Should handle unknown address gracefully without panic
+		// Must handle unknown address gracefully without panic
 		DispatchTickUpdate(logView)
 	})
 
@@ -627,20 +633,20 @@ func TestDispatchPipeline(t *testing.T) {
 					logView.Data[56+i] = byte(tc.reserve1 >> (8 * (7 - i)))
 				}
 
-				// Should handle edge cases without panic
+				// Must handle edge cases without panic
 				DispatchTickUpdate(logView)
 			})
 		}
 	})
 
 	t.Run("MultiCoreBitManipulation", func(t *testing.T) {
-		// Test dispatch to multiple non-contiguous cores
+		// Validate dispatch to multiple non-contiguous cores
 		addr := generateMockAddress(888)
 		pairID := PairID(888)
 
 		RegisterPairAddress(addr[:], pairID)
 
-		// Assign to non-contiguous cores to test bit manipulation
+		// Assign to non-contiguous cores to validate bit manipulation
 		cores := []uint8{0, 3, 7, 15}
 		for _, core := range cores {
 			RegisterPairToCore(pairID, core)
@@ -668,7 +674,7 @@ func TestDispatchPipeline(t *testing.T) {
 			logView.Data[56+i] = byte(reserve1 >> (8 * (7 - i)))
 		}
 
-		// Should dispatch to all assigned cores
+		// Must dispatch to all assigned cores
 		DispatchTickUpdate(logView)
 	})
 }
@@ -696,7 +702,7 @@ func TestDataStructureLayout(t *testing.T) {
 			t.Errorf("TickUpdate size is %d bytes, expected 24 bytes", size)
 		}
 
-		// Test unsafe pointer casting for message buffer operations
+		// Validate unsafe pointer casting for message buffer operations
 		var messageBuffer [24]byte
 		tickUpdate := (*TickUpdate)(unsafe.Pointer(&messageBuffer))
 
@@ -746,11 +752,11 @@ func TestUtilityFunctions(t *testing.T) {
 	})
 
 	t.Run("ShuffleEdgeBindings", func(t *testing.T) {
-		// Test empty slice handling
+		// Validate empty slice handling
 		var empty []ArbitrageEdgeBinding
-		shuffleEdgeBindings(empty) // Should not panic
+		shuffleEdgeBindings(empty) // Must not panic
 
-		// Test single element stability
+		// Validate single element stability
 		single := []ArbitrageEdgeBinding{
 			{cyclePairs: [3]PairID{1, 2, 3}, edgeIndex: 0},
 		}
@@ -758,12 +764,12 @@ func TestUtilityFunctions(t *testing.T) {
 		shuffleEdgeBindings(single)
 
 		if single[0] != original {
-			t.Error("Single element should remain unchanged after shuffle")
+			t.Error("Single element must remain unchanged after shuffle")
 		}
 	})
 
 	t.Run("UtilsIntegration", func(t *testing.T) {
-		// Test utils.LoadBE64 integration
+		// Validate utils.LoadBE64 integration
 		testData := []byte{0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF}
 		expected := uint64(0x0123456789ABCDEF)
 
@@ -865,7 +871,7 @@ func TestSystemIntegration(t *testing.T) {
 	})
 
 	t.Run("CompleteArbitrageWorkflow", func(t *testing.T) {
-		// Test complete end-to-end arbitrage detection workflow
+		// Validate complete end-to-end arbitrage detection workflow
 		cycles := []ArbitrageTriplet{
 			{PairID(1001), PairID(1002), PairID(1003)},
 		}
@@ -916,7 +922,7 @@ func TestSystemIntegration(t *testing.T) {
 		control.Shutdown()
 		time.Sleep(50 * time.Millisecond)
 
-		t.Log("Complete arbitrage workflow test completed successfully")
+		t.Log("Complete arbitrage workflow validation successful")
 	})
 }
 
@@ -927,14 +933,14 @@ func TestSystemIntegration(t *testing.T) {
 // TestMemoryEfficiency validates memory allocation patterns and efficiency
 func TestMemoryEfficiency(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping memory efficiency test in short mode")
+		t.Skip("Skipping memory efficiency validation in short test mode")
 	}
 
 	var m1, m2 runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&m1)
 
-	// Perform operations that should be allocation-efficient
+	// Perform operations that must be allocation-efficient
 	for i := 0; i < 50; i++ {
 		addr := generateMockAddress(uint64(i + 1000))
 		pairID := PairID(i + 1000)
@@ -955,7 +961,7 @@ func TestMemoryEfficiency(t *testing.T) {
 // TestConcurrentSafety validates concurrent operation safety and data integrity
 func TestConcurrentSafety(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping concurrent safety test in short mode")
+		t.Skip("Skipping concurrent safety validation in short test mode")
 	}
 
 	const goroutineCount = 8
@@ -964,7 +970,7 @@ func TestConcurrentSafety(t *testing.T) {
 	var wg sync.WaitGroup
 	processed := uint64(0)
 
-	// Test concurrent address registration and lookup
+	// Validate concurrent address registration and lookup
 	for g := 0; g < goroutineCount; g++ {
 		wg.Add(1)
 		go func(workerID int) {
@@ -995,10 +1001,10 @@ func TestConcurrentSafety(t *testing.T) {
 	}
 }
 
-// TestHighThroughputValidation validates system performance under load
+// TestHighThroughputValidation validates system performance under sustained load
 func TestHighThroughputValidation(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping throughput validation test in short mode")
+		t.Skip("Skipping throughput validation in short test mode")
 	}
 
 	setup := createMockArbitrageSetup()
@@ -1253,7 +1259,7 @@ func BenchmarkSystemIntegration(b *testing.B) {
 // TestSystemLifecycle validates complete system startup and shutdown
 func TestSystemLifecycle(t *testing.T) {
 	t.Run("GracefulShutdown", func(t *testing.T) {
-		// Test graceful system shutdown sequence
+		// Validate graceful system shutdown sequence
 		cycles := []ArbitrageTriplet{
 			{PairID(9001), PairID(9002), PairID(9003)},
 		}
