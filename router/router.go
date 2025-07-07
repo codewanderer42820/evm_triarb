@@ -42,6 +42,7 @@ package router
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"math/bits"
 	"runtime"
 	"unsafe"
@@ -345,11 +346,11 @@ func lookupPairIDByAddress(address40Bytes []byte) PairID {
 func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
 	debug.DropMessage("[ARBITRAGE_OPPORTUNITY]", "")
 	debug.DropMessage("  pairIDs", utils.B2s((*[12]byte)(unsafe.Pointer(&cycle.pairIDs))[:]))
-	debug.DropMessage("  tick0", utils.F2s(cycle.tickValues[0]))
-	debug.DropMessage("  tick1", utils.F2s(cycle.tickValues[1]))
-	debug.DropMessage("  tick2", utils.F2s(cycle.tickValues[2]))
-	debug.DropMessage("  newTick", utils.F2s(newTick))
-	debug.DropMessage("  totalProfit", utils.F2s(newTick+cycle.tickValues[0]+cycle.tickValues[1]+cycle.tickValues[2]))
+	debug.DropMessage("  tick0", utils.B2s([]byte(fmt.Sprintf("%.6f", cycle.tickValues[0]))))
+	debug.DropMessage("  tick1", utils.B2s([]byte(fmt.Sprintf("%.6f", cycle.tickValues[1]))))
+	debug.DropMessage("  tick2", utils.B2s([]byte(fmt.Sprintf("%.6f", cycle.tickValues[2]))))
+	debug.DropMessage("  newTick", utils.B2s([]byte(fmt.Sprintf("%.6f", newTick))))
+	debug.DropMessage("  totalProfit", utils.B2s([]byte(fmt.Sprintf("%.6f", newTick+cycle.tickValues[0]+cycle.tickValues[1]+cycle.tickValues[2]))))
 }
 
 // ============================================================================
