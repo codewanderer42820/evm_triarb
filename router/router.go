@@ -198,7 +198,7 @@ var (
 	coreRings [constants.MaxSupportedCores]*ring24.Ring
 
 	// Pair-to-core routing table - determines which cores process each pair
-	pairToCoreAssignment [1 << 20]uint64
+	pairToCoreAssignment [constants.PairRoutingTableCapacity]uint64
 
 	// Shard bucket mapping - groups cycles by common pairs for load balancing
 	pairShardBuckets map[PairID][]PairShardBucket
