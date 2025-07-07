@@ -15,6 +15,12 @@
 //   • Memory safety and pointer stability verification
 //   • Race condition detection under high contention
 //   • Boundary condition testing for edge cases
+//
+// Performance validation:
+//   • Sub-microsecond flag access operations
+//   • Zero-allocation hot path verification
+//   • Concurrent throughput under load
+//   • Memory layout and alignment validation
 
 package control
 
@@ -32,17 +38,17 @@ import (
 // ============================================================================
 
 const (
-	// Test timing parameters - balanced for reliable CI/CD execution
-	testActivityDuration = 10 * time.Millisecond  // Short activity bursts
-	testCooldownPeriod   = 50 * time.Millisecond  // Accelerated cooldown for testing
-	testShutdownTimeout  = 100 * time.Millisecond // Maximum shutdown wait time
+	// Test timing parameters - calibrated for reliable CI/CD execution
+	testActivityDuration = 10 * time.Millisecond  // Duration for sustained activity simulation
+	testCooldownPeriod   = 50 * time.Millisecond  // Accelerated cooldown for testing efficiency
+	testShutdownTimeout  = 100 * time.Millisecond // Maximum graceful shutdown wait time
 
-	// Concurrency test parameters
-	testGoroutineCount      = 16  // Concurrent test workers
-	testOperationsPerWorker = 100 // Operations per worker thread
+	// Concurrency test parameters - optimized for comprehensive coverage
+	testGoroutineCount      = 16  // Concurrent worker threads for stress testing
+	testOperationsPerWorker = 100 // Operations per worker thread for statistical significance
 
-	// Timing tolerance for flaky test prevention
-	timingToleranceMs = 5 // 5ms tolerance for timing-sensitive tests
+	// Timing tolerance parameters - prevents flaky test failures
+	timingToleranceMs = 5 // 5ms tolerance for timing-sensitive assertions
 )
 
 // ============================================================================
@@ -52,7 +58,7 @@ const (
 // TestInitialState validates the initial state of all control flags
 func TestInitialState(t *testing.T) {
 	t.Run("FlagsInitiallyZero", func(t *testing.T) {
-		// Reset state for clean test
+		// Initialize clean test environment
 		hot = 0
 		stop = 0
 		lastHot = 0
@@ -60,44 +66,44 @@ func TestInitialState(t *testing.T) {
 		stopPtr, hotPtr := Flags()
 
 		if *stopPtr != 0 {
-			t.Error("Stop flag should initially be 0")
+			t.Error("Stop flag must initialize to 0")
 		}
 
 		if *hotPtr != 0 {
-			t.Error("Hot flag should initially be 0")
+			t.Error("Hot flag must initialize to 0")
 		}
 
 		if lastHot != 0 {
-			t.Error("Last hot timestamp should initially be 0")
+			t.Error("Activity timestamp must initialize to 0")
 		}
 	})
 
 	t.Run("PointerStability", func(t *testing.T) {
-		// Verify that repeated calls return same pointers
+		// Verify pointer consistency across multiple flag access calls
 		stopPtr1, hotPtr1 := Flags()
 		stopPtr2, hotPtr2 := Flags()
 
 		if stopPtr1 != stopPtr2 {
-			t.Error("Stop flag pointer should be stable across calls")
+			t.Error("Stop flag pointer must remain stable across calls")
 		}
 
 		if hotPtr1 != hotPtr2 {
-			t.Error("Hot flag pointer should be stable across calls")
+			t.Error("Hot flag pointer must remain stable across calls")
 		}
 	})
 
 	t.Run("MemoryLayout", func(t *testing.T) {
-		// Verify expected memory sizes for flags
+		// Validate expected memory layout for cache alignment
 		if unsafe.Sizeof(hot) != 4 {
-			t.Errorf("Hot flag size is %d bytes, expected 4 bytes", unsafe.Sizeof(hot))
+			t.Errorf("Hot flag size is %d bytes, expected 4 bytes for uint32", unsafe.Sizeof(hot))
 		}
 
 		if unsafe.Sizeof(stop) != 4 {
-			t.Errorf("Stop flag size is %d bytes, expected 4 bytes", unsafe.Sizeof(stop))
+			t.Errorf("Stop flag size is %d bytes, expected 4 bytes for uint32", unsafe.Sizeof(stop))
 		}
 
 		if unsafe.Sizeof(lastHot) != 8 {
-			t.Errorf("LastHot timestamp size is %d bytes, expected 8 bytes", unsafe.Sizeof(lastHot))
+			t.Errorf("Activity timestamp size is %d bytes, expected 8 bytes for int64", unsafe.Sizeof(lastHot))
 		}
 	})
 }
@@ -109,7 +115,7 @@ func TestInitialState(t *testing.T) {
 // TestSignalActivity validates activity signaling functionality
 func TestSignalActivity(t *testing.T) {
 	t.Run("BasicActivitySignaling", func(t *testing.T) {
-		// Reset state
+		// Initialize clean test state
 		hot = 0
 		stop = 0
 		lastHot = 0
@@ -121,28 +127,28 @@ func TestSignalActivity(t *testing.T) {
 		stopPtr, hotPtr := Flags()
 
 		if *hotPtr != 1 {
-			t.Error("Hot flag should be 1 after SignalActivity()")
+			t.Error("Hot flag must be set to 1 after SignalActivity()")
 		}
 
 		if *stopPtr != 0 {
-			t.Error("Stop flag should remain 0 after SignalActivity()")
+			t.Error("Stop flag must remain unchanged after SignalActivity()")
 		}
 
 		if lastHot < beforeTime || lastHot > afterTime {
-			t.Error("LastHot timestamp should be updated to current time")
+			t.Error("Activity timestamp must be updated to current nanosecond time")
 		}
 	})
 
 	t.Run("RepeatedActivitySignaling", func(t *testing.T) {
-		// Reset state
+		// Initialize clean test state
 		hot = 0
 		lastHot = 0
 
-		// Signal activity multiple times
+		// Execute first activity signal
 		SignalActivity()
 		firstTimestamp := lastHot
 
-		time.Sleep(1 * time.Millisecond) // Ensure time progression
+		time.Sleep(1 * time.Millisecond) // Ensure temporal progression
 
 		SignalActivity()
 		secondTimestamp := lastHot
@@ -150,16 +156,16 @@ func TestSignalActivity(t *testing.T) {
 		_, hotPtr := Flags()
 
 		if *hotPtr != 1 {
-			t.Error("Hot flag should remain 1 after repeated signaling")
+			t.Error("Hot flag must remain set after repeated signaling")
 		}
 
 		if secondTimestamp <= firstTimestamp {
-			t.Error("LastHot timestamp should be updated on each signal")
+			t.Error("Activity timestamp must advance on each signal")
 		}
 	})
 
 	t.Run("ActivityTimestampPrecision", func(t *testing.T) {
-		// Test timestamp precision and progression over time
+		// Validate timestamp precision and temporal progression
 		hot = 0
 		lastHot = 0
 
@@ -168,28 +174,28 @@ func TestSignalActivity(t *testing.T) {
 		for i := 0; i < 5; i++ {
 			SignalActivity()
 			timestamps[i] = lastHot
-			// Add a small delay to ensure timestamp progression
+			// Introduce microsecond delay to ensure temporal progression
 			time.Sleep(time.Microsecond)
 		}
 
-		// Verify first and last timestamps show progression
+		// Verify overall temporal progression from first to last timestamp
 		if timestamps[4] <= timestamps[0] {
-			t.Errorf("Final timestamp (%d) should be greater than initial timestamp (%d)",
+			t.Errorf("Final timestamp (%d) must exceed initial timestamp (%d)",
 				timestamps[4], timestamps[0])
 		}
 
-		// Verify all timestamps are reasonable (within last second)
+		// Validate all timestamps fall within reasonable temporal bounds
 		currentTime := time.Now().UnixNano()
 		for i, ts := range timestamps {
 			if ts < currentTime-int64(time.Second) || ts > currentTime+int64(time.Second) {
-				t.Errorf("Timestamp %d (%d) is not within reasonable time range", i, ts)
+				t.Errorf("Timestamp %d (%d) exceeds reasonable temporal bounds", i, ts)
 			}
 		}
 
-		// Verify timestamps are non-decreasing (allow equal for rapid calls)
+		// Verify timestamps maintain non-decreasing order (allow equal for rapid calls)
 		for i := 1; i < len(timestamps); i++ {
 			if timestamps[i] < timestamps[i-1] {
-				t.Errorf("Timestamp %d (%d) should not decrease from timestamp %d (%d)",
+				t.Errorf("Timestamp %d (%d) must not regress from timestamp %d (%d)",
 					i, timestamps[i], i-1, timestamps[i-1])
 			}
 		}
@@ -202,13 +208,13 @@ func TestSignalActivity(t *testing.T) {
 
 // TestCooldownBehavior validates automatic cooldown functionality
 func TestCooldownBehavior(t *testing.T) {
-	// Temporarily override cooldown period for faster testing
+	// Configure accelerated cooldown period for efficient testing
 	originalCooldown := cooldownNs
 	cooldownNs = int64(testCooldownPeriod)
 	defer func() { cooldownNs = originalCooldown }()
 
 	t.Run("CooldownAfterInactivity", func(t *testing.T) {
-		// Reset state and signal activity
+		// Initialize system with active state
 		hot = 0
 		lastHot = 0
 		SignalActivity()
@@ -216,41 +222,41 @@ func TestCooldownBehavior(t *testing.T) {
 		_, hotPtr := Flags()
 
 		if *hotPtr != 1 {
-			t.Error("Hot flag should be 1 immediately after activity")
+			t.Error("Hot flag must be active immediately after signaling")
 		}
 
-		// Wait for cooldown period to elapse
+		// Allow cooldown period to elapse completely
 		time.Sleep(testCooldownPeriod + time.Duration(timingToleranceMs)*time.Millisecond)
 
-		// Poll cooldown to trigger automatic clearance
+		// Trigger cooldown evaluation
 		PollCooldown()
 
 		if *hotPtr != 0 {
-			t.Error("Hot flag should be 0 after cooldown period")
+			t.Error("Hot flag must clear after cooldown period expiration")
 		}
 	})
 
 	t.Run("NoCooldownDuringActivity", func(t *testing.T) {
-		// Reset state
+		// Initialize system with active state
 		hot = 0
 		lastHot = 0
 		SignalActivity()
 
 		_, hotPtr := Flags()
 
-		// Poll cooldown immediately - should not clear hot flag
+		// Immediate cooldown polling should preserve hot state
 		PollCooldown()
 
 		if *hotPtr != 1 {
-			t.Error("Hot flag should remain 1 immediately after activity")
+			t.Error("Hot flag must remain active immediately after signaling")
 		}
 
-		// Wait half the cooldown period
+		// Mid-cooldown polling should preserve hot state
 		time.Sleep(testCooldownPeriod / 2)
 		PollCooldown()
 
 		if *hotPtr != 1 {
-			t.Error("Hot flag should remain 1 during cooldown period")
+			t.Error("Hot flag must remain active during cooldown period")
 		}
 	})
 
@@ -388,11 +394,11 @@ func TestShutdownBehavior(t *testing.T) {
 // TestConcurrentAccess validates thread safety under concurrent operations
 func TestConcurrentAccess(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping concurrency test in short mode")
+		t.Skip("Skipping concurrency validation in short test mode")
 	}
 
 	t.Run("ConcurrentActivitySignaling", func(t *testing.T) {
-		// Reset state
+		// Initialize clean concurrent test environment
 		hot = 0
 		stop = 0
 		lastHot = 0
@@ -400,7 +406,7 @@ func TestConcurrentAccess(t *testing.T) {
 		var wg sync.WaitGroup
 		activityCount := uint64(0)
 
-		// Launch concurrent activity signalers
+		// Deploy concurrent activity signaling workers
 		for i := 0; i < testGoroutineCount; i++ {
 			wg.Add(1)
 			go func() {
@@ -408,7 +414,7 @@ func TestConcurrentAccess(t *testing.T) {
 				for j := 0; j < testOperationsPerWorker; j++ {
 					SignalActivity()
 					atomic.AddUint64(&activityCount, 1)
-					runtime.Gosched() // Yield to increase contention
+					runtime.Gosched() // Yield execution to increase contention
 				}
 			}()
 		}
@@ -418,37 +424,37 @@ func TestConcurrentAccess(t *testing.T) {
 		_, hotPtr := Flags()
 
 		if *hotPtr != 1 {
-			t.Error("Hot flag should be 1 after concurrent activity")
+			t.Error("Hot flag must be active after concurrent signaling operations")
 		}
 
 		expectedOperations := uint64(testGoroutineCount * testOperationsPerWorker)
 		if activityCount != expectedOperations {
-			t.Errorf("Expected %d operations, got %d", expectedOperations, activityCount)
+			t.Errorf("Operation count mismatch: expected %d, executed %d", expectedOperations, activityCount)
 		}
 
 		if lastHot == 0 {
-			t.Error("LastHot timestamp should be updated after concurrent activity")
+			t.Error("Activity timestamp must be updated after concurrent operations")
 		}
 	})
 
 	t.Run("ConcurrentFlagAccess", func(t *testing.T) {
-		// Reset state
+		// Initialize clean concurrent test environment
 		hot = 0
 		stop = 0
 
 		var wg sync.WaitGroup
 		accessCount := uint64(0)
 
-		// Launch concurrent flag readers
+		// Deploy concurrent flag access workers
 		for i := 0; i < testGoroutineCount; i++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				for j := 0; j < testOperationsPerWorker; j++ {
 					stopPtr, hotPtr := Flags()
-					// Verify pointers are consistent
+					// Validate pointer consistency and non-null guarantees
 					if stopPtr == nil || hotPtr == nil {
-						t.Error("Flag pointers should never be nil")
+						t.Error("Flag pointers must never be null")
 						return
 					}
 					atomic.AddUint64(&accessCount, 1)
@@ -461,7 +467,7 @@ func TestConcurrentAccess(t *testing.T) {
 
 		expectedAccesses := uint64(testGoroutineCount * testOperationsPerWorker)
 		if accessCount != expectedAccesses {
-			t.Errorf("Expected %d flag accesses, got %d", expectedAccesses, accessCount)
+			t.Errorf("Access count mismatch: expected %d, executed %d", expectedAccesses, accessCount)
 		}
 	})
 
@@ -766,11 +772,11 @@ func TestEdgeCases(t *testing.T) {
 // TestPerformanceCharacteristics validates timing and efficiency
 func TestPerformanceCharacteristics(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping performance test in short mode")
+		t.Skip("Skipping performance validation in short test mode")
 	}
 
 	t.Run("FlagAccessPerformance", func(t *testing.T) {
-		// Measure flag access performance
+		// Measure flag access operation latency
 		iterations := 1000000
 
 		start := time.Now()
@@ -780,16 +786,16 @@ func TestPerformanceCharacteristics(t *testing.T) {
 		elapsed := time.Since(start)
 
 		nanosPerOp := elapsed.Nanoseconds() / int64(iterations)
-		t.Logf("Flag access: %d ns/op over %d iterations", nanosPerOp, iterations)
+		t.Logf("Flag access performance: %d ns/operation over %d iterations", nanosPerOp, iterations)
 
-		// Flag access should be extremely fast (sub-microsecond)
+		// Validate sub-microsecond performance requirement
 		if nanosPerOp > 1000 {
-			t.Errorf("Flag access too slow: %d ns/op (expected < 1000 ns/op)", nanosPerOp)
+			t.Errorf("Flag access latency exceeds requirement: %d ns/op (maximum: 1000 ns/op)", nanosPerOp)
 		}
 	})
 
 	t.Run("ActivitySignalPerformance", func(t *testing.T) {
-		// Measure activity signaling performance
+		// Measure activity signaling operation latency
 		iterations := 100000
 
 		start := time.Now()
@@ -799,11 +805,11 @@ func TestPerformanceCharacteristics(t *testing.T) {
 		elapsed := time.Since(start)
 
 		nanosPerOp := elapsed.Nanoseconds() / int64(iterations)
-		t.Logf("Activity signaling: %d ns/op over %d iterations", nanosPerOp, iterations)
+		t.Logf("Activity signaling performance: %d ns/operation over %d iterations", nanosPerOp, iterations)
 
-		// Activity signaling should be very fast
+		// Validate high-performance requirement for hot path
 		if nanosPerOp > 5000 {
-			t.Errorf("Activity signaling too slow: %d ns/op (expected < 5000 ns/op)", nanosPerOp)
+			t.Errorf("Activity signaling latency exceeds requirement: %d ns/op (maximum: 5000 ns/op)", nanosPerOp)
 		}
 	})
 
