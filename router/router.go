@@ -47,6 +47,7 @@ import (
 	"runtime"
 	"unsafe"
 
+	"main/constants"
 	"main/control"
 	"main/debug"
 	"main/fastuni"
@@ -55,28 +56,6 @@ import (
 	"main/ring24"
 	"main/types"
 	"main/utils"
-)
-
-// ============================================================================
-// FUNDAMENTAL CONSTANTS
-// ============================================================================
-
-const (
-	// Tick value domain constraints for numerical stability
-	tickClampingBound = 128.0                                            // domain: -128 … +128
-	maxQuantizedTick  = 262_143                                          // 18-bit ceiling (2^18 - 1)
-	quantizationScale = (maxQuantizedTick - 1) / (2 * tickClampingBound) // ~1023.99
-
-	// Ethereum address hex string boundaries within LogView.Addr
-	addressHexStart = 3  // v.Addr[3:43] == 40-byte ASCII hex
-	addressHexEnd   = 43 // exclusive
-
-	// Hash table configuration - Direct address indexing optimized
-	addressTableCapacity = 1 << 20                  // 1M entries for production use
-	addressTableMask     = addressTableCapacity - 1 // For bit masking (power of 2)
-
-	// Shard splitting threshold - maximum cycles per shard for cache optimization
-	maxCyclesPerShard = 1 << 16
 )
 
 // ============================================================================
@@ -213,10 +192,10 @@ type ArbitrageCoreExecutor struct {
 
 var (
 	// Core executor instances - one per CPU core for lock-free parallel processing
-	coreExecutors [64]*ArbitrageCoreExecutor
+	coreExecutors [constants.MaxSupportedCores]*ArbitrageCoreExecutor
 
 	// Inter-core communication rings - SPSC lock-free message passing
-	coreRings [64]*ring24.Ring
+	coreRings [constants.MaxSupportedCores]*ring24.Ring
 
 	// Pair-to-core routing table - determines which cores process each pair
 	pairToCoreAssignment [1 << 20]uint64
@@ -227,8 +206,8 @@ var (
 
 // Direct address indexing tables - Ethereum addresses are already uniformly distributed keccak256 hashes
 var (
-	pairAddressKeys [addressTableCapacity]AddressKey // Address keys for comparison
-	addressToPairID [addressTableCapacity]PairID     // PairID values (0 = empty)
+	pairAddressKeys [constants.AddressTableCapacity]AddressKey // Address keys for comparison
+	addressToPairID [constants.AddressTableCapacity]PairID     // PairID values (0 = empty)
 )
 
 // ============================================================================
@@ -244,13 +223,13 @@ var (
 //go:registerparams
 func quantizeTickToInt64(tickValue float64) int64 {
 	switch {
-	case tickValue <= -tickClampingBound:
+	case tickValue <= -constants.TickClampingBound:
 		return 0
-	case tickValue >= tickClampingBound:
-		return maxQuantizedTick
+	case tickValue >= constants.TickClampingBound:
+		return constants.MaxQuantizedTick
 	default:
 		// Map (-128, +128) → (0, 262142) with proper scaling
-		return int64((tickValue + tickClampingBound) * quantizationScale)
+		return int64((tickValue + constants.TickClampingBound) * constants.QuantizationScale)
 	}
 }
 
@@ -292,7 +271,7 @@ func directAddressToIndex64(address40Bytes []byte) uint32 {
 	// Use first 8 bytes as uint64, then reduce to 20 bits
 	// This gives us maximum entropy from the address
 	hash64 := binary.LittleEndian.Uint64(address40Bytes[0:8])
-	return uint32(hash64) & addressTableMask
+	return uint32(hash64) & constants.AddressTableMask
 }
 
 // bytesToAddressKey converts 40-byte address slice to AddressKey using
@@ -357,7 +336,7 @@ func RegisterPairAddress(address40Bytes []byte, pairID PairID) {
 		// Robin Hood displacement check
 		currentKey := pairAddressKeys[hashIndex]
 		currentKeyIndex := directAddressToIndex64((*[40]byte)(unsafe.Pointer(&currentKey.words[0]))[:])
-		currentDist := (hashIndex + addressTableCapacity - currentKeyIndex) & addressTableMask
+		currentDist := (hashIndex + constants.AddressTableCapacity - currentKeyIndex) & constants.AddressTableMask
 
 		// Displace if incoming key has traveled farther (Robin Hood principle)
 		if currentDist < dist {
@@ -370,11 +349,11 @@ func RegisterPairAddress(address40Bytes []byte, pairID PairID) {
 		}
 
 		// Move to next slot
-		hashIndex = (hashIndex + 1) & addressTableMask
+		hashIndex = (hashIndex + 1) & constants.AddressTableMask
 		dist++
 
 		// Safety check to prevent infinite loops (should never happen with Robin Hood)
-		if dist > addressTableCapacity {
+		if dist > constants.AddressTableCapacity {
 			panic("Robin Hood hash table full - this should never happen")
 		}
 	}
@@ -410,7 +389,7 @@ func lookupPairIDByAddress(address40Bytes []byte) PairID {
 		// Robin Hood early termination
 		currentKey := pairAddressKeys[hashIndex]
 		currentKeyIndex := directAddressToIndex64((*[40]byte)(unsafe.Pointer(&currentKey.words[0]))[:])
-		currentDist := (hashIndex + addressTableCapacity - currentKeyIndex) & addressTableMask
+		currentDist := (hashIndex + constants.AddressTableCapacity - currentKeyIndex) & constants.AddressTableMask
 
 		// If current resident traveled less distance, target key cannot be present
 		if currentDist < dist {
@@ -418,11 +397,11 @@ func lookupPairIDByAddress(address40Bytes []byte) PairID {
 		}
 
 		// Move to next slot
-		hashIndex = (hashIndex + 1) & addressTableMask
+		hashIndex = (hashIndex + 1) & constants.AddressTableMask
 		dist++
 
 		// Safety check (should never be needed with proper Robin Hood)
-		if dist > addressTableCapacity {
+		if dist > constants.AddressTableCapacity {
 			return 0
 		}
 	}
@@ -580,7 +559,7 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 func DispatchTickUpdate(logView *types.LogView) {
 	// Resolve Ethereum address to internal pair ID using direct indexing
 	// Leverages uniform distribution of keccak256-derived addresses
-	pairID := lookupPairIDByAddress(logView.Addr[addressHexStart:addressHexEnd])
+	pairID := lookupPairIDByAddress(logView.Addr[constants.AddressHexStart:constants.AddressHexEnd])
 	if pairID == 0 {
 		return // Unknown pair - ignore
 	}
@@ -652,8 +631,8 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 		shuffleEdgeBindings(bindings) // Randomize for load balancing
 
 		// Split into cache-optimized shards
-		for offset := 0; offset < len(bindings); offset += maxCyclesPerShard {
-			endOffset := offset + maxCyclesPerShard
+		for offset := 0; offset < len(bindings); offset += constants.MaxCyclesPerShard {
+			endOffset := offset + constants.MaxCyclesPerShard
 			if endOffset > len(bindings) {
 				endOffset = len(bindings)
 			}
@@ -696,9 +675,9 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 		cycleIndex := CycleStateIndex(len(executor.cycleStates) - 1)
 
 		// Allocate queue handle and insert with minimum priority (initialization state)
-		// Use maximum quantized value (262_143) for lowest priority until real ticks arrive
+		// Use maximum quantized value for lowest priority until real ticks arrive
 		queueHandle, _ := queue.BorrowSafe()
-		queue.Push(262_143, queueHandle, uint64(cycleIndex))
+		queue.Push(constants.MaxInitializationPriority, queueHandle, uint64(cycleIndex))
 
 		// Create fanout entries for the other two edges in this cycle
 		// Each cycle creates fanouts for edges it doesn't directly own
@@ -735,13 +714,13 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 
 	// Initialize core executor with optimal memory layout
 	executor := &ArbitrageCoreExecutor{
-		pairToQueueIndex:   localidx.New(1 << 16),
+		pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
 		isReverseDirection: coreID >= forwardCoreCount,
 		shutdownSignal:     shutdownChannel,
 		cycleStates:        make([]ArbitrageCycleState, 0), // Canonical storage
 	}
 	coreExecutors[coreID] = executor
-	coreRings[coreID] = ring24.New(1 << 16)
+	coreRings[coreID] = ring24.New(constants.DefaultRingSize)
 
 	// Process all assigned shards
 	for shard := range shardInput {
@@ -773,8 +752,8 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 //go:registerparams
 func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 	coreCount := runtime.NumCPU() - 1 // Reserve one core for system tasks
-	if coreCount > 64 {
-		coreCount = 64 // Maximum supported cores
+	if coreCount > constants.MaxSupportedCores {
+		coreCount = constants.MaxSupportedCores // Maximum supported cores
 	}
 	if coreCount&1 == 1 {
 		coreCount-- // Ensure even number for forward/reverse pairing
@@ -787,7 +766,7 @@ func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 	// Create worker channels for parallel shard distribution
 	shardChannels := make([]chan PairShardBucket, coreCount)
 	for i := range shardChannels {
-		shardChannels[i] = make(chan PairShardBucket, 1<<10) // 1K buffer depth
+		shardChannels[i] = make(chan PairShardBucket, constants.ShardChannelBufferSize)
 		go launchShardWorker(i, forwardCoreCount, shardChannels[i])
 	}
 
