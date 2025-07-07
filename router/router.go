@@ -107,6 +107,25 @@ type AddressKey struct{ words [5]uint64 }
 // CACHE-ALIGNED DATA STRUCTURES
 // ============================================================================
 
+// ============================================================================
+// CORE MESSAGE TYPES
+// ============================================================================
+
+// TickUpdate represents a price tick update dispatched across cores via ring buffers.
+// Size exactly matches ring24 slot size (24 bytes) for zero-copy message passing.
+//
+//go:notinheap
+type TickUpdate struct { // 24 B (exact ring24 slot size)
+	forwardTick float64 // 8 B ← forward direction price tick
+	reverseTick float64 // 8 B ← reverse direction price tick
+	pairID      PairID  // 4 B ← pair identifier
+	_           uint32  // 4 B ← alignment padding to reach 24 bytes
+}
+
+// ============================================================================
+// ARBITRAGE CYCLE REPRESENTATION
+// ============================================================================
+
 // ArbitrageCycleState represents the complete state of a triangular arbitrage cycle.
 // Memory layout is optimized for cache performance with hot tick data first.
 //
@@ -124,16 +143,20 @@ type ArbitrageCycleState struct {
 	_ [3]uint64 // 24 B ← pad to exactly 64 bytes
 } // Total: exactly one 64-byte cache line
 
-// TickUpdate represents a price tick update dispatched across cores via ring buffers.
-// Size exactly matches ring24 slot size (24 bytes) for zero-copy message passing.
+// ArbitrageEdgeBinding represents a single edge within an arbitrage cycle.
+// Array-first layout enables efficient stride-based batch scanning operations.
 //
+//go:align 16
 //go:notinheap
-type TickUpdate struct { // 24 B (exact ring24 slot size)
-	forwardTick float64 // 8 B ← forward direction price tick
-	reverseTick float64 // 8 B ← reverse direction price tick
-	pairID      PairID  // 4 B ← pair identifier
-	_           uint32  // 4 B ← alignment padding to reach 24 bytes
+type ArbitrageEdgeBinding struct { // 16 B total
+	cyclePairs [3]PairID // 12 B ← complete triplet for this cycle
+	edgeIndex  uint16    // 2 B  ← which edge this binding represents (0, 1, 2)
+	_          uint16    // 2 B  ← alignment padding
 }
+
+// ============================================================================
+// FANOUT AND ROUTING STRUCTURES
+// ============================================================================
 
 // FanoutEntry represents a single edge in the arbitrage cycle fanout table.
 // Each entry references canonical cycle state and maintains queue handle for
@@ -150,17 +173,6 @@ type FanoutEntry struct { // 32 B total
 	_               uint64                         // 8 B ← padding to reach 32 bytes
 }
 
-// ArbitrageEdgeBinding represents a single edge within an arbitrage cycle.
-// Array-first layout enables efficient stride-based batch scanning operations.
-//
-//go:align 16
-//go:notinheap
-type ArbitrageEdgeBinding struct { // 16 B total
-	cyclePairs [3]PairID // 12 B ← complete triplet for this cycle
-	edgeIndex  uint16    // 2 B  ← which edge this binding represents (0, 1, 2)
-	_          uint16    // 2 B  ← alignment padding
-}
-
 // PairShardBucket groups multiple arbitrage cycles by their common pair.
 // Memory layout optimizes for batch processing during executor initialization.
 //
@@ -171,6 +183,10 @@ type PairShardBucket struct { // 32 B total
 	_            uint32                 // 4 B  ← alignment padding
 	edgeBindings []ArbitrageEdgeBinding // 24 B ← cold: slice header (ptr,len,cap)
 }
+
+// ============================================================================
+// CORE EXECUTOR (TOP-LEVEL ORCHESTRATOR)
+// ============================================================================
 
 // ArbitrageCoreExecutor owns per-core queues and fan-out tables for parallel
 // arbitrage opportunity detection. Memory layout is optimized for cache
