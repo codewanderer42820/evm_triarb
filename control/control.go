@@ -13,8 +13,11 @@ var (
 // SignalActivity sets the global hot flag and updates timestamp.
 // Call from WebSocket layer.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
 func SignalActivity() {
 	hot = 1
 	lastHot = time.Now().UnixNano()
@@ -23,8 +26,11 @@ func SignalActivity() {
 // PollCooldown checks if hot flag should be cleared based on time.
 // Call this inline during hot spinning loops for automatic cooldown.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
 func PollCooldown() {
 	if hot == 1 && time.Now().UnixNano()-lastHot > cooldownNs {
 		hot = 0
@@ -33,8 +39,11 @@ func PollCooldown() {
 
 // Shutdown sets the global stop flag.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
 func Shutdown() {
 	stop = 1
 }
@@ -42,8 +51,11 @@ func Shutdown() {
 // Flags returns pointers to the global flags.
 // Use with PinnedConsumer.
 //
+//go:norace
+//go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
 func Flags() (*uint32, *uint32) {
 	return &stop, &hot
 }
