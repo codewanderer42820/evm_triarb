@@ -25,7 +25,7 @@ import (
 	"main/control"
 	"main/fastuni"
 	"main/localidx"
-	"main/quantumqueue"
+	"main/quantumqueue64"
 	"main/ring24"
 	"main/types"
 	"main/utils"
@@ -113,7 +113,7 @@ type PairID uint32
 type PairTriplet [3]PairID
 
 // CycleStateRef is an index into the canonical storage arena
-type CycleStateRef uint32
+type CycleStateRef uint64
 
 //go:align 64
 //go:notinheap
@@ -128,14 +128,14 @@ type CycleState struct { // 64 B
 
 // FanoutEntry now references canonical storage via index
 type FanoutEntry struct { // 32 B
-	StateRef CycleStateRef              //  4 B  ← index into canonical arena
-	_        uint32                     //  4 B pad (offset 4-7)
-	Queue    *quantumqueue.QuantumQueue //  8 B
-	Handle   quantumqueue.Handle        //  4 B
-	_        uint32                     //  4 B pad (offset 4-7)
-	EdgeIdx  uint16                     //  2 B
-	_        uint16                     //  2 B pad
-	_        uint32                     // 8 B pad → 32 B
+	StateRef CycleStateRef                  //  4 B  ← index into canonical arena
+	_        uint32                         //  4 B pad (offset 4-7)
+	Queue    *quantumqueue64.QuantumQueue64 //  8 B
+	Handle   quantumqueue64.Handle          //  4 B
+	_        uint32                         //  4 B pad (offset 4-7)
+	EdgeIdx  uint16                         //  2 B
+	_        uint16                         //  2 B pad
+	_        uint32                         // 8 B pad → 32 B
 }
 
 // PairShard is cold; but slice header first lets len/cap live in same line
@@ -163,11 +163,11 @@ type EdgeBinding struct { // 16 B
 // CoreExecutor owns per-core queues and fan-out tables.
 type CoreExecutor struct {
 	// ── hot header: always-touched fields, all within first 64 B ──
-	Heaps     []quantumqueue.QuantumQueue // 24 B  ← owns queues directly, dereference from New()
-	Fanouts   [][]FanoutEntry             // 24 B  (offset 24 → 47)
-	IsReverse bool                        //  1 B  (offset 48)
-	_         [7]byte                     // pad
-	Done      <-chan struct{}             //  8 B  (offset 56 → 63)
+	Heaps     []quantumqueue64.QuantumQueue64 // 24 B  ← owns queues directly, dereference from New()
+	Fanouts   [][]FanoutEntry                 // 24 B  (offset 24 → 47)
+	IsReverse bool                            //  1 B  (offset 48)
+	_         [7]byte                         // pad
+	Done      <-chan struct{}                 //  8 B  (offset 56 → 63)
 
 	// ── second line: 64-byte local index header (pointers & mask) ──
 	LocalIdx localidx.Hash // 64 B  (offset 64 → 127)
@@ -289,7 +289,7 @@ func shardWorker(coreID, half int, in <-chan PairShard) {
 func attachShard(ex *CoreExecutor, sh *PairShard) {
 	lid := ex.LocalIdx.Put(uint32(sh.Pair), uint32(len(ex.Heaps)))
 	if int(lid) == len(ex.Heaps) { // first time we see pair on this core
-		ex.Heaps = append(ex.Heaps, *quantumqueue.New()) // dereference and own the queue
+		ex.Heaps = append(ex.Heaps, *quantumqueue64.New()) // dereference and own the queue
 		ex.Fanouts = append(ex.Fanouts, nil)
 	}
 	hq := &ex.Heaps[lid] // take address of the owned queue
@@ -299,9 +299,9 @@ func attachShard(ex *CoreExecutor, sh *PairShard) {
 		ex.States = append(ex.States, CycleState{Pairs: eb.Pairs})
 		stateRef := CycleStateRef(len(ex.States) - 1)
 
-		// Store reference in queue, not the actual state
+		// Store reference in queue using uint64 payload
 		h, _ := hq.BorrowSafe()
-		hq.Push(262_143, h, (*[48]byte)(unsafe.Pointer(&stateRef)))
+		hq.Push(262_143, h, uint64(stateRef))
 
 		// Fanouts reference the same canonical storage
 		for _, edge := range [...]uint16{(eb.EdgeIdx + 1) % 3, (eb.EdgeIdx + 2) % 3} {
@@ -324,7 +324,7 @@ func handleTick(ex *CoreExecutor, upd *TickUpdate) {
 	fans := ex.Fanouts[lid]
 
 	type rec struct {
-		h        quantumqueue.Handle
+		h        quantumqueue64.Handle
 		stateRef CycleStateRef
 		prof     bool
 	}
@@ -336,8 +336,8 @@ func handleTick(ex *CoreExecutor, upd *TickUpdate) {
 		if hq.Empty() {
 			break
 		}
-		h, _, ptr := hq.PeepMin()
-		stateRef := *(*CycleStateRef)(unsafe.Pointer(ptr))
+		h, _, data := hq.PeepMin()
+		stateRef := CycleStateRef(data) // direct uint64 to CycleStateRef conversion
 		cs := &ex.States[stateRef]
 		prof := (tick + cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2]) < 0
 		stash[n] = rec{h, stateRef, prof}
@@ -356,7 +356,7 @@ func handleTick(ex *CoreExecutor, upd *TickUpdate) {
 		if !r.prof {
 			key = log2ToTick(cs.Ticks[0] + cs.Ticks[1] + cs.Ticks[2])
 		}
-		hq.Push(key, r.h, (*[48]byte)(unsafe.Pointer(&r.stateRef)))
+		hq.Push(key, r.h, uint64(r.stateRef))
 	}
 
 	// Update fanouts using MoveTick for tick changes
