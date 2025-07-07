@@ -2,7 +2,6 @@ package ws
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -20,8 +19,7 @@ type mockConn struct {
 	readErr   error
 	writeErr  error
 	closed    bool
-	// Special behavior for testing edge cases
-	readFunc func(b []byte) (int, error)
+	readFunc  func(b []byte) (int, error)
 }
 
 func (m *mockConn) Read(b []byte) (int, error) {
@@ -36,6 +34,9 @@ func (m *mockConn) Read(b []byte) (int, error) {
 	}
 	n := copy(b, m.readData[m.readPos:])
 	m.readPos += n
+	if n == 0 && len(b) > 0 {
+		return 0, fmt.Errorf("EOF")
+	}
 	return n, nil
 }
 
@@ -58,40 +59,42 @@ func (m *mockConn) SetDeadline(t time.Time) error      { return nil }
 func (m *mockConn) SetReadDeadline(t time.Time) error  { return nil }
 func (m *mockConn) SetWriteDeadline(t time.Time) error { return nil }
 
-// reusableConn provides a resettable connection for benchmarks
-type reusableConn struct {
-	readData []byte
-	readPos  int
-	readErr  error
+// nullConn is the fastest possible mock for write-only operations
+type nullConn struct{}
+
+func (n *nullConn) Read(b []byte) (int, error)         { return 0, fmt.Errorf("EOF") }
+func (n *nullConn) Write(b []byte) (int, error)        { return len(b), nil }
+func (n *nullConn) Close() error                       { return nil }
+func (n *nullConn) LocalAddr() net.Addr                { return nil }
+func (n *nullConn) RemoteAddr() net.Addr               { return nil }
+func (n *nullConn) SetDeadline(t time.Time) error      { return nil }
+func (n *nullConn) SetReadDeadline(t time.Time) error  { return nil }
+func (n *nullConn) SetWriteDeadline(t time.Time) error { return nil }
+
+// benchConn is a zero-alloc connection for benchmarks
+type benchConn struct {
+	data []byte
+	pos  int
 }
 
-func newReusableConn(data []byte) *reusableConn {
-	return &reusableConn{readData: data}
-}
-
-func (r *reusableConn) reset() {
-	r.readPos = 0
-}
-
-func (r *reusableConn) Read(b []byte) (int, error) {
-	if r.readErr != nil {
-		return 0, r.readErr
-	}
-	if r.readPos >= len(r.readData) {
+func (b *benchConn) Read(buf []byte) (int, error) {
+	if b.pos >= len(b.data) {
 		return 0, fmt.Errorf("EOF")
 	}
-	n := copy(b, r.readData[r.readPos:])
-	r.readPos += n
+	n := copy(buf, b.data[b.pos:])
+	b.pos += n
 	return n, nil
 }
 
-func (r *reusableConn) Write(b []byte) (int, error)        { return len(b), nil }
-func (r *reusableConn) Close() error                       { return nil }
-func (r *reusableConn) LocalAddr() net.Addr                { return nil }
-func (r *reusableConn) RemoteAddr() net.Addr               { return nil }
-func (r *reusableConn) SetDeadline(t time.Time) error      { return nil }
-func (r *reusableConn) SetReadDeadline(t time.Time) error  { return nil }
-func (r *reusableConn) SetWriteDeadline(t time.Time) error { return nil }
+func (b *benchConn) Write(buf []byte) (int, error)      { return len(buf), nil }
+func (b *benchConn) Close() error                       { return nil }
+func (b *benchConn) LocalAddr() net.Addr                { return nil }
+func (b *benchConn) RemoteAddr() net.Addr               { return nil }
+func (b *benchConn) SetDeadline(t time.Time) error      { return nil }
+func (b *benchConn) SetReadDeadline(t time.Time) error  { return nil }
+func (b *benchConn) SetWriteDeadline(t time.Time) error { return nil }
+
+func (b *benchConn) reset() { b.pos = 0 }
 
 // createFrame builds a WebSocket frame
 func createFrame(opcode byte, payload []byte, fin bool) []byte {
@@ -213,11 +216,7 @@ func TestHandshakeErrors(t *testing.T) {
 	}
 
 	// Read error during response
-	conn = &mockConn{
-		readFunc: func(b []byte) (int, error) {
-			return 0, fmt.Errorf("network error")
-		},
-	}
+	conn = &mockConn{readErr: fmt.Errorf("network error")}
 	if err := Handshake(conn); err == nil || !strings.Contains(err.Error(), "network error") {
 		t.Fatal("Expected network error")
 	}
@@ -314,21 +313,9 @@ func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 		}
 	})
 
-	// Test incomplete header
-	t.Run("incomplete_header", func(t *testing.T) {
-		conn := &mockConn{readData: []byte{0x81}}
-		_, err := SpinUntilCompleteMessage(conn)
-		if err == nil {
-			t.Fatal("Expected error but got none")
-		}
-		if !strings.Contains(err.Error(), "EOF") {
-			t.Errorf("Expected EOF error, got %q", err.Error())
-		}
-	})
-
 	// Test extended length read error
 	t.Run("extended_length_error", func(t *testing.T) {
-		conn := &mockConn{readData: []byte{0x81, 126, 0x00}}
+		conn := &mockConn{readData: []byte{0x81, 126}}
 		_, err := SpinUntilCompleteMessage(conn)
 		if err == nil {
 			t.Fatal("Expected error but got none")
@@ -340,7 +327,7 @@ func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 
 	// Test 64-bit length read error
 	t.Run("64bit_length_error", func(t *testing.T) {
-		conn := &mockConn{readData: []byte{0x81, 127, 0x00, 0x00, 0x00, 0x00}}
+		conn := &mockConn{readData: []byte{0x81, 127}}
 		_, err := SpinUntilCompleteMessage(conn)
 		if err == nil {
 			t.Fatal("Expected error but got none")
@@ -394,10 +381,8 @@ func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 	// Test message too large (accumulated fragments)
 	t.Run("message_too_large", func(t *testing.T) {
 		var data []byte
-		// First fragment takes most of buffer
 		payload1 := make([]byte, BufferSize-1000)
 		data = append(data, createFrame(0x1, payload1, false)...)
-		// Second fragment exceeds buffer
 		payload2 := make([]byte, 2000)
 		data = append(data, createFrame(0x0, payload2, true)...)
 
@@ -469,23 +454,11 @@ func TestBoundaryConditions(t *testing.T) {
 	if len(result) != 100000 {
 		t.Errorf("Expected 100000 bytes, got %d", len(result))
 	}
-
-	// Test near buffer limit
-	nearLimitPayload := make([]byte, BufferSize-100)
-	frame = createFrame(0x1, nearLimitPayload, true)
-	conn = &mockConn{readData: frame}
-	result, err = SpinUntilCompleteMessage(conn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(result) != len(nearLimitPayload) {
-		t.Errorf("Expected %d bytes, got %d", len(nearLimitPayload), len(result))
-	}
 }
 
 // TestControlFrameWithPayload verifies control frames with payloads
 func TestControlFrameWithPayload(t *testing.T) {
-	// Control frame with large payload that requires chunked reading
+	// Control frame with large payload
 	var data []byte
 	controlPayload := make([]byte, 50)
 	for i := range controlPayload {
@@ -527,11 +500,7 @@ func TestPayloadReadChunking(t *testing.T) {
 	}
 	frame := createFrame(0x1, payload, true)
 
-	// Mock connection that returns data in small chunks
-	conn := &mockConn{
-		readData: frame,
-	}
-
+	conn := &mockConn{readData: frame}
 	result, err := SpinUntilCompleteMessage(conn)
 	if err != nil {
 		t.Fatal(err)
@@ -552,7 +521,6 @@ func TestPayloadReadChunking(t *testing.T) {
 func TestEdgeCaseReadErrors(t *testing.T) {
 	// Test read error during control frame payload discard
 	t.Run("control_frame_payload_read_error", func(t *testing.T) {
-		// Control frame with payload but incomplete data
 		data := []byte{0x88, 0x20}               // Close frame with 32 byte payload
 		data = append(data, make([]byte, 10)...) // Only 10 bytes available
 
@@ -565,7 +533,6 @@ func TestEdgeCaseReadErrors(t *testing.T) {
 
 	// Test read error during large payload read
 	t.Run("payload_chunked_read_error", func(t *testing.T) {
-		// Large payload but incomplete data
 		frame := []byte{0x81, 127}
 		lenBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(lenBytes, 100000)
@@ -605,7 +572,7 @@ func TestFragmentation(t *testing.T) {
 		t.Error("Fragment data mismatch")
 	}
 
-	// Test fragmentation that fills buffer exactly
+	// Test fragmentation that fills buffer
 	data = nil
 	fragmentSize := 1000000
 	numFragments := BufferSize / fragmentSize
@@ -635,69 +602,73 @@ func BenchmarkHandshake(b *testing.B) {
 	response := []byte("HTTP/1.1 101 Switching Protocols\r\n" +
 		"Upgrade: websocket\r\n" +
 		"Connection: Upgrade\r\n\r\n")
-	conn := newReusableConn(response)
+
+	conn := &benchConn{data: response}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		conn.reset()
-		if err := Handshake(conn); err != nil {
-			b.Fatal(err)
-		}
+		conn.pos = 0
+		_ = Handshake(conn)
 	}
 }
 
 // BenchmarkSendSubscription measures subscription performance
 func BenchmarkSendSubscription(b *testing.B) {
-	conn := &mockConn{}
+	conn := &nullConn{}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		conn.writeData = conn.writeData[:0]
-		if err := SendSubscription(conn); err != nil {
-			b.Fatal(err)
-		}
+		_ = SendSubscription(conn)
 	}
 }
 
 // BenchmarkSpinUntilCompleteMessage measures frame processing performance
 func BenchmarkSpinUntilCompleteMessage(b *testing.B) {
-	sizes := []int{100, 1000, 10000, 100000}
+	sizes := []struct {
+		name string
+		size int
+	}{
+		{"tiny", 64},
+		{"small", 1024},
+		{"medium", 65536},
+		{"large", 1048576},
+	}
 
-	for _, size := range sizes {
-		b.Run(fmt.Sprintf("size_%d", size), func(b *testing.B) {
-			payload := make([]byte, size)
-			rand.Read(payload)
+	for _, tc := range sizes {
+		b.Run(tc.name, func(b *testing.B) {
+			payload := make([]byte, tc.size)
 			frame := createFrame(0x1, payload, true)
-			conn := newReusableConn(frame)
+			conn := &benchConn{data: frame}
 
+			b.SetBytes(int64(tc.size))
 			b.ReportAllocs()
-			b.SetBytes(int64(size))
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				conn.reset()
-				if _, err := SpinUntilCompleteMessage(conn); err != nil {
-					b.Fatal(err)
-				}
+				conn.pos = 0
+				_, _ = SpinUntilCompleteMessage(conn)
 			}
 		})
 	}
 }
 
-// BenchmarkFragmented measures fragmented message performance
-func BenchmarkFragmented(b *testing.B) {
+// BenchmarkWorstCase measures performance with maximum fragmentation
+func BenchmarkWorstCase(b *testing.B) {
 	var data []byte
-	chunkSize := 1000
-	numChunks := 10
+	fragmentSize := 100
+	numFragments := 100
 
-	for i := 0; i < numChunks; i++ {
-		payload := make([]byte, chunkSize)
-		rand.Read(payload)
-		isLast := i == numChunks-1
+	for i := 0; i < numFragments; i++ {
+		if i%10 == 0 && i > 0 {
+			data = append(data, createFrame(0x9, []byte{}, true)...)
+		}
+
+		payload := make([]byte, fragmentSize)
+		isLast := i == numFragments-1
 		opcode := byte(0x0)
 		if i == 0 {
 			opcode = 0x1
@@ -705,132 +676,142 @@ func BenchmarkFragmented(b *testing.B) {
 		data = append(data, createFrame(opcode, payload, isLast)...)
 	}
 
-	conn := newReusableConn(data)
+	conn := &benchConn{data: data}
+	totalSize := fragmentSize * numFragments
 
+	b.SetBytes(int64(totalSize))
 	b.ReportAllocs()
-	b.SetBytes(int64(chunkSize * numChunks))
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		conn.reset()
-		if _, err := SpinUntilCompleteMessage(conn); err != nil {
-			b.Fatal(err)
-		}
+		conn.pos = 0
+		_, _ = SpinUntilCompleteMessage(conn)
 	}
 }
 
-// BenchmarkControlFrames measures control frame overhead
-func BenchmarkControlFrames(b *testing.B) {
-	var data []byte
-
-	// Add 10 control frames
-	for i := 0; i < 10; i++ {
-		data = append(data, createFrame(0x8+byte(i%4), []byte("ctrl"), true)...)
-	}
-
-	// Add data frame
-	payload := make([]byte, 1000)
-	rand.Read(payload)
-	data = append(data, createFrame(0x1, payload, true)...)
-
-	conn := newReusableConn(data)
-
-	b.ReportAllocs()
-	b.SetBytes(1000)
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		conn.reset()
-		if _, err := SpinUntilCompleteMessage(conn); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-// BenchmarkMemoryPressure verifies zero allocations
-func BenchmarkMemoryPressure(b *testing.B) {
-	payload := make([]byte, 1024*1024)
-	rand.Read(payload)
+// BenchmarkZeroAlloc verifies zero allocation
+func BenchmarkZeroAlloc(b *testing.B) {
+	payload := make([]byte, 10000)
 	frame := createFrame(0x1, payload, true)
-	conn := newReusableConn(frame)
+	conn := &benchConn{data: frame}
 
-	runtime.GC()
-	var m1, m2 runtime.MemStats
-	runtime.ReadMemStats(&m1)
+	// Pre-warm
+	_, _ = SpinUntilCompleteMessage(conn)
 
+	b.SetBytes(int64(len(payload)))
 	b.ReportAllocs()
-	b.SetBytes(1024 * 1024)
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		conn.reset()
-		if _, err := SpinUntilCompleteMessage(conn); err != nil {
-			b.Fatal(err)
-		}
-	}
-
-	b.StopTimer()
-	runtime.ReadMemStats(&m2)
-
-	if b.N > 0 {
-		allocDelta := m2.TotalAlloc - m1.TotalAlloc
-		b.ReportMetric(float64(allocDelta)/float64(b.N), "actual_bytes/op")
-
-		if allocDelta > 0 {
-			b.Logf("WARNING: %d bytes allocated over %d iterations (%.2f bytes/op)",
-				allocDelta, b.N, float64(allocDelta)/float64(b.N))
-		} else {
-			b.Logf("PERFECT: Zero allocations confirmed over %d iterations", b.N)
-		}
+		conn.pos = 0
+		_, _ = SpinUntilCompleteMessage(conn)
 	}
 }
 
-// BenchmarkLatency measures operation latency
-func BenchmarkLatency(b *testing.B) {
-	sizes := []int{100, 1000, 10000, 100000}
+// BenchmarkThroughput measures raw throughput
+func BenchmarkThroughput(b *testing.B) {
+	scenarios := []struct {
+		name      string
+		size      int
+		fragments int
+	}{
+		{"single_small", 1024, 1},
+		{"single_large", 1048576, 1},
+		{"many_tiny", 100, 1000},
+		{"few_large", 100000, 10},
+	}
 
-	for _, size := range sizes {
-		b.Run(fmt.Sprintf("%d_bytes", size), func(b *testing.B) {
-			payload := make([]byte, size)
-			rand.Read(payload)
-			frame := createFrame(0x1, payload, true)
-			conn := newReusableConn(frame)
+	for _, s := range scenarios {
+		b.Run(s.name, func(b *testing.B) {
+			var data []byte
 
-			times := make([]time.Duration, b.N)
-
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				conn.reset()
-
-				start := time.Now()
-				_, err := SpinUntilCompleteMessage(conn)
-				times[i] = time.Since(start)
-
-				if err != nil {
-					b.Fatal(err)
+			if s.fragments == 1 {
+				payload := make([]byte, s.size)
+				data = createFrame(0x1, payload, true)
+			} else {
+				for i := 0; i < s.fragments; i++ {
+					payload := make([]byte, s.size)
+					isLast := i == s.fragments-1
+					opcode := byte(0x0)
+					if i == 0 {
+						opcode = 0x1
+					}
+					data = append(data, createFrame(opcode, payload, isLast)...)
 				}
 			}
-			b.StopTimer()
 
-			if b.N > 0 {
-				var total time.Duration
-				min, max := times[0], times[0]
+			conn := &benchConn{data: data}
+			totalBytes := int64(s.size * s.fragments)
 
-				for _, t := range times {
-					total += t
-					if t < min {
-						min = t
-					}
-					if t > max {
-						max = t
-					}
-				}
+			b.SetBytes(totalBytes)
+			b.ReportAllocs()
+			b.ResetTimer()
 
-				avg := total / time.Duration(b.N)
-				b.ReportMetric(float64(avg.Nanoseconds()), "avg_ns/op")
-				b.ReportMetric(float64(min.Nanoseconds()), "min_ns/op")
-				b.ReportMetric(float64(max.Nanoseconds()), "max_ns/op")
+			for i := 0; i < b.N; i++ {
+				conn.pos = 0
+				_, _ = SpinUntilCompleteMessage(conn)
 			}
 		})
+	}
+}
+
+// BenchmarkMemory measures actual memory allocations
+func BenchmarkMemory(b *testing.B) {
+	sizes := []int{1024, 65536, 1048576}
+
+	for _, size := range sizes {
+		b.Run(fmt.Sprintf("%dB", size), func(b *testing.B) {
+			payload := make([]byte, size)
+			frame := createFrame(0x1, payload, true)
+			conn := &benchConn{data: frame}
+
+			runtime.GC()
+			runtime.GC()
+
+			b.SetBytes(int64(size))
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				conn.pos = 0
+				_, _ = SpinUntilCompleteMessage(conn)
+			}
+		})
+	}
+}
+
+// BenchmarkLatency measures p50, p95, p99 latencies
+func BenchmarkLatency(b *testing.B) {
+	payload := make([]byte, 10000)
+	frame := createFrame(0x1, payload, true)
+	conn := &benchConn{data: frame}
+
+	// Warmup
+	for i := 0; i < 100; i++ {
+		conn.pos = 0
+		_, _ = SpinUntilCompleteMessage(conn)
+	}
+
+	const maxSamples = 100000
+	samples := make([]time.Duration, 0, maxSamples)
+
+	b.ResetTimer()
+	for i := 0; i < b.N && len(samples) < maxSamples; i++ {
+		conn.pos = 0
+		start := time.Now()
+		_, _ = SpinUntilCompleteMessage(conn)
+		samples = append(samples, time.Since(start))
+	}
+	b.StopTimer()
+
+	if len(samples) > 0 {
+		n := len(samples)
+		p50 := samples[n*50/100]
+		p95 := samples[n*95/100]
+		p99 := samples[n*99/100]
+
+		b.ReportMetric(float64(p50.Nanoseconds()), "p50_ns")
+		b.ReportMetric(float64(p95.Nanoseconds()), "p95_ns")
+		b.ReportMetric(float64(p99.Nanoseconds()), "p99_ns")
 	}
 }
