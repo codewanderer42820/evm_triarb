@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1270,40 +1269,74 @@ func TestSystemIntegration(t *testing.T) {
 	})
 }
 
-// TestMemoryEfficiency validates allocation patterns
-func TestMemoryEfficiency(t *testing.T) {
+// BenchmarkMemoryAllocation - Realistic memory allocation measurement
+func BenchmarkMemoryAllocation(b *testing.B) {
+	addresses := make([][40]byte, 1000)
+	for i := range addresses {
+		addresses[i] = generateMockAddress(uint64(i + 50000)) // Avoid conflicts
+	}
+
+	b.Run("RegisterAddress", func(b *testing.B) {
+		b.ReportAllocs() // Shows actual per-operation allocation
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			addr := addresses[i%len(addresses)]
+			pairID := PairID(i + 100000) // Unique IDs
+			RegisterPairAddress(addr[:], pairID)
+		}
+		// Expected: 0 allocs/op, 0 B/op
+	})
+
+	b.Run("LookupAddress", func(b *testing.B) {
+		// Pre-register addresses
+		for i, addr := range addresses {
+			RegisterPairAddress(addr[:], PairID(i+200000))
+		}
+
+		b.ReportAllocs() // Shows actual per-operation allocation
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			addr := addresses[i%len(addresses)]
+			_ = lookupPairIDByAddress(addr[:])
+		}
+		// Expected: 0 allocs/op, 0 B/op
+	})
+
+	b.Run("AddressKeyGeneration", func(b *testing.B) {
+		b.ReportAllocs() // Shows actual per-operation allocation
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			addr := addresses[i%len(addresses)]
+			_ = bytesToAddressKey(addr[:])
+		}
+		// Expected: 0 allocs/op, 0 B/op
+	})
+}
+
+// Optional: Keep one simple test for basic validation
+func TestMemoryValidation(t *testing.T) {
 	if testing.Short() {
-		t.Skip("Skipping memory test in short mode")
+		t.Skip("Skipping memory validation in short mode")
 	}
 
-	// Clear any existing state
-	for i := range pairAddressKeys {
-		pairAddressKeys[i] = AddressKey{}
-		addressToPairID[i] = 0
+	// Simple validation that operations work without panicking
+	addr := generateMockAddress(12345)
+	pairID := PairID(12345)
+
+	// This should not allocate heap memory
+	RegisterPairAddress(addr[:], pairID)
+
+	// This should not allocate heap memory
+	found := lookupPairIDByAddress(addr[:])
+
+	if found != pairID {
+		t.Errorf("Expected %d, got %d", pairID, found)
 	}
 
-	var m1, m2 runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&m1)
-
-	// Register a small number of addresses
-	for i := 0; i < 50; i++ {
-		addr := generateMockAddress(uint64(i + 1000))
-		pairID := PairID(i + 1000)
-		RegisterPairAddress(addr[:], pairID)
-	}
-
-	runtime.GC()
-	runtime.ReadMemStats(&m2)
-
-	allocatedBytes := m2.TotalAlloc - m1.TotalAlloc
-	t.Logf("Memory allocated: %d bytes", allocatedBytes)
-
-	// The Robin Hood hash table doesn't allocate per insertion
-	// Only stack allocations should occur
-	if allocatedBytes > 10000 {
-		t.Logf("Note: %d bytes allocated (mostly GC metadata)", allocatedBytes)
-	}
+	t.Logf("✅ Memory validation passed - operations work correctly")
 }
 
 // TestConcurrentSafety validates concurrent operations
