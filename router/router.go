@@ -279,9 +279,17 @@ func shardWorker(coreID, half int, in <-chan PairShard) {
 	}
 
 	stop, hot := control.Flags()
-	ring24.PinnedConsumer(coreID, rings[coreID], stop, hot,
-		func(p *[24]byte) { handleTick(ex, (*TickUpdate)(unsafe.Pointer(p))) },
-		done)
+
+	// Core 0 gets the special cooldown-managing consumer
+	if coreID == 0 {
+		ring24.PinnedConsumerWithCooldown(coreID, rings[coreID], stop, hot,
+			func(p *[24]byte) { handleTick(ex, (*TickUpdate)(unsafe.Pointer(p))) },
+			done)
+	} else {
+		ring24.PinnedConsumer(coreID, rings[coreID], stop, hot,
+			func(p *[24]byte) { handleTick(ex, (*TickUpdate)(unsafe.Pointer(p))) },
+			done)
+	}
 }
 
 /*──────────────────── attachShard (fan-in construction) ─────────────────────*/
