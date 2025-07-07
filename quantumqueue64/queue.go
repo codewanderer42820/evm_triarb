@@ -520,10 +520,9 @@ func (q *QuantumQueue64) MoveTick(h Handle, newTick int64) {
 //
 //	h, tick, data := q.PeepMin()
 //	// Process data...
-//	q.UnlinkMin(h, tick)
+//	q.UnlinkMin(h)
 //
 // Performance notes:
-//   - Tick parameter ignored for maximum call site optimization
 //   - Relies on caller correctness for handle validity
 //   - Zero validation for maximum throughput
 //
@@ -532,6 +531,6 @@ func (q *QuantumQueue64) MoveTick(h Handle, newTick int64) {
 //go:nosplit
 //go:inline
 //go:registerparams
-func (q *QuantumQueue64) UnlinkMin(h Handle, _ int64) {
+func (q *QuantumQueue64) UnlinkMin(h Handle) {
 	q.unlink(h)
 }

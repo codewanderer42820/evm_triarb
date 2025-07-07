@@ -459,7 +459,7 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 		cycleCount++
 
 		// Remove from queue for reprocessing
-		queue.UnlinkMin(handle, 0)
+		queue.UnlinkMin(handle)
 
 		// Stop processing if unprofitable or reached capacity limit
 		if !isProfitable || cycleCount == len(processedCycles) {
