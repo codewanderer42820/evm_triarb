@@ -282,13 +282,15 @@ func directAddressToIndex64(address40Bytes []byte) uint32 {
 //go:inline
 //go:registerparams
 func bytesToAddressKey(addressBytes []byte) AddressKey {
-	return AddressKey{words: [5]uint64{
-		binary.LittleEndian.Uint64(addressBytes[0:8]),
-		binary.LittleEndian.Uint64(addressBytes[8:16]),
-		binary.LittleEndian.Uint64(addressBytes[16:24]),
-		binary.LittleEndian.Uint64(addressBytes[24:32]),
-		binary.LittleEndian.Uint64(addressBytes[32:40]),
-	}}
+	return AddressKey{
+		words: [5]uint64{
+			binary.LittleEndian.Uint64(addressBytes[0:8]),
+			binary.LittleEndian.Uint64(addressBytes[8:16]),
+			binary.LittleEndian.Uint64(addressBytes[16:24]),
+			binary.LittleEndian.Uint64(addressBytes[24:32]),
+			binary.LittleEndian.Uint64(addressBytes[32:40]),
+		},
+	}
 }
 
 // isEqual performs SIMD-optimized comparison of two AddressKey instances
@@ -516,8 +518,8 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 			uintptr(cycleCount)*unsafe.Sizeof(ProcessedCycle{}),
 		)) = ProcessedCycle{
 			queueHandle:     handle,
-			cycleStateIndex: cycleIndex,
 			originalTick:    queueTick,
+			cycleStateIndex: cycleIndex,
 		}
 		cycleCount++
 
@@ -580,9 +582,9 @@ func DispatchTickUpdate(logView *types.LogView) {
 	// Prepare tick update message (exactly 24 bytes for ring buffer)
 	var messageBuffer [24]byte
 	tickUpdate := (*TickUpdate)(unsafe.Pointer(&messageBuffer))
-	tickUpdate.pairID = pairID
 	tickUpdate.forwardTick = tickValue
 	tickUpdate.reverseTick = -tickValue // Inverse for reverse direction
+	tickUpdate.pairID = pairID
 
 	// Dispatch to all assigned cores using bit manipulation
 	coreAssignments := pairToCoreAssignment[pairID]
@@ -625,11 +627,20 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 	// Group cycles by their constituent pairs
 	for _, triplet := range cycles {
 		temporaryBindings[triplet[0]] = append(temporaryBindings[triplet[0]],
-			ArbitrageEdgeBinding{cyclePairs: triplet, edgeIndex: 0})
+			ArbitrageEdgeBinding{
+				cyclePairs: triplet,
+				edgeIndex:  0,
+			})
 		temporaryBindings[triplet[1]] = append(temporaryBindings[triplet[1]],
-			ArbitrageEdgeBinding{cyclePairs: triplet, edgeIndex: 1})
+			ArbitrageEdgeBinding{
+				cyclePairs: triplet,
+				edgeIndex:  1,
+			})
 		temporaryBindings[triplet[2]] = append(temporaryBindings[triplet[2]],
-			ArbitrageEdgeBinding{cyclePairs: triplet, edgeIndex: 2})
+			ArbitrageEdgeBinding{
+				cyclePairs: triplet,
+				edgeIndex:  2,
+			})
 	}
 
 	// Create optimally-sized shards with cache-friendly random distribution
@@ -693,10 +704,10 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 		for _, edgeIdx := range [...]uint16{otherEdge1, otherEdge2} {
 			executor.fanoutTables[queueIndex] = append(executor.fanoutTables[queueIndex],
 				FanoutEntry{
-					cycleStateIndex: cycleIndex,
-					queue:           queue,
 					queueHandle:     queueHandle,
 					edgeIndex:       edgeIdx,
+					cycleStateIndex: cycleIndex,
+					queue:           queue,
 				})
 		}
 	}
@@ -720,9 +731,9 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 
 	// Initialize core executor with optimal memory layout
 	executor := &ArbitrageCoreExecutor{
-		pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
 		isReverseDirection: coreID >= forwardCoreCount,
 		shutdownSignal:     shutdownChannel,
+		pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
 		cycleStates:        make([]ArbitrageCycleState, 0), // Canonical storage
 	}
 	coreExecutors[coreID] = executor
