@@ -393,7 +393,7 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 		isProfitable := totalProfitability < 0
 
 		if isProfitable {
-			emitArbitrageOpportunity(cycle, currentTick)
+			//emitArbitrageOpportunity(cycle, currentTick)
 		}
 
 		if !isProfitable || cycleCount == len(processedCycles) {
