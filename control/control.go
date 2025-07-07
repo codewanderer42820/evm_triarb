@@ -29,6 +29,18 @@
 //   • Race-free flag access with proper memory ordering
 //   • Bounded cooldown periods prevent infinite hot spinning
 //   • Deterministic shutdown behavior across all cores
+//
+// Memory layout legend:
+//	┌────────────────────────────────────────────────────────────────────┐
+//	│ websocket ─▶ SignalActivity ─▶ hot=1 ─▶ consumers ─▶ PollCooldown │
+//	│                                ▲                        │         │
+//	│                          hot=0 ◀────────────────────────┘         │
+//	└────────────────────────────────────────────────────────────────────┘
+//
+// Compiler optimizations:
+//   • //go:nosplit for stack management elimination
+//   • //go:inline for call overhead elimination
+//   • //go:registerparams for register-based parameter passing
 
 package control
 
@@ -39,13 +51,13 @@ import "time"
 // ============================================================================
 
 var (
-	// Global coordination flags - accessed by all consumer threads
-	hot  uint32 // Activity indicator: 1 = active WebSocket traffic, 0 = idle
-	stop uint32 // Shutdown signal: 1 = initiate graceful shutdown, 0 = running
+	// Global coordination flags - accessed by all consumer threads with lock-free semantics
+	hot  uint32 // Activity indicator: 1 = active WebSocket traffic, 0 = idle state
+	stop uint32 // Shutdown signal: 1 = initiate graceful shutdown, 0 = normal operation
 
-	// Activity timing for automatic cooldown management
-	lastHot    int64                    // Nanosecond timestamp of last WebSocket activity
-	cooldownNs = int64(1 * time.Second) // Cooldown duration: 1 second idle period
+	// Activity timing for automatic cooldown management with nanosecond precision
+	lastHot    int64                    // Nanosecond timestamp of most recent WebSocket activity
+	cooldownNs = int64(1 * time.Second) // Cooldown duration: system idle threshold period
 )
 
 // ============================================================================
@@ -54,10 +66,11 @@ var (
 
 // SignalActivity marks the system as active and records precise timing
 // for automatic cooldown management. Called from WebSocket ingress layer
-// upon receiving transaction logs or price updates.
+// upon receiving transaction logs, price updates, or any market data.
 //
-// Performance: Nanosecond-scale execution with compiler optimization
-// Thread safety: Safe for concurrent calls from WebSocket threads
+// Threading model: Safe for concurrent calls from multiple WebSocket threads
+// Performance impact: Nanosecond-scale execution with zero heap allocations
+// Memory ordering: Compiler barriers ensure proper flag visibility
 //
 //go:norace
 //go:nocheckptr
@@ -75,10 +88,11 @@ func SignalActivity() {
 
 // PollCooldown implements automatic hot-flag clearance based on elapsed
 // time since last activity. Integrates seamlessly into consumer hot loops
-// to prevent unnecessary CPU spinning during idle periods.
+// to prevent unnecessary CPU spinning during market idle periods.
 //
 // Call frequency: Inline during consumer spin loops for optimal efficiency
-// Timing precision: Nanosecond-accurate cooldown detection
+// Timing precision: Nanosecond-accurate cooldown detection with monotonic clock
+// Performance impact: Single comparison operation in the common case
 //
 //go:norace
 //go:nocheckptr
@@ -97,10 +111,11 @@ func PollCooldown() {
 
 // Shutdown initiates graceful system termination by setting the global
 // stop flag. All pinned consumer threads monitor this flag and terminate
-// cleanly upon detection, ensuring proper resource cleanup.
+// cleanly upon detection, ensuring proper resource cleanup and data integrity.
 //
-// Shutdown sequence: Signal → Consumer detection → Resource cleanup → Exit
-// Coordination: Broadcast signal reaches all cores simultaneously
+// Shutdown sequence: Signal broadcast → Consumer detection → Resource cleanup → Exit
+// Coordination model: Single writer, multiple readers with memory barrier guarantees
+// Timing guarantees: Immediate visibility across all CPU cores
 //
 //go:norace
 //go:nocheckptr
@@ -119,8 +134,9 @@ func Shutdown() {
 // zero-allocation access by pinned consumer threads. Enables efficient
 // polling without function call overhead in performance-critical loops.
 //
-// Return values: (*stop_flag, *hot_flag) for PinnedConsumer integration
+// Return values: (*stop_flag, *hot_flag) for direct memory access
 // Memory safety: Returned pointers remain valid for application lifetime
+// Cache performance: Flags stored in adjacent memory for optimal access patterns
 //
 //go:norace
 //go:nocheckptr

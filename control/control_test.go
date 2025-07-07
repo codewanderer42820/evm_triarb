@@ -19,7 +19,7 @@
 // Performance validation:
 //   • Sub-microsecond flag access operations
 //   • Zero-allocation hot path verification
-//   • Concurrent throughput under load
+//   • Concurrent throughput under sustained load
 //   • Memory layout and alignment validation
 
 package control
@@ -47,12 +47,12 @@ const (
 	testGoroutineCount      = 16  // Concurrent worker threads for stress testing
 	testOperationsPerWorker = 100 // Operations per worker thread for statistical significance
 
-	// Timing tolerance parameters - prevents flaky test failures
+	// Timing tolerance parameters - prevents flaky test failures in CI environments
 	timingToleranceMs = 5 // 5ms tolerance for timing-sensitive assertions
 )
 
 // ============================================================================
-// BASIC FUNCTIONALITY TESTS
+// UNIT TESTS - CORE COMPONENT VALIDATION
 // ============================================================================
 
 // TestInitialState validates the initial state of all control flags
