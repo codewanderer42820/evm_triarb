@@ -1,4 +1,3 @@
-// router_test.go — High-performance triangular arbitrage router test suite with ZERO-OVERHEAD benchmarks
 package router
 
 import (
