@@ -388,10 +388,10 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 	// Process profitable cycles
 	type ProcessedCycle struct {
 		queueHandle     quantumqueue64.Handle // 4B
-		_               uint32                // 4B - Padding
+		_               [4]byte               // 4B - Padding
 		originalTick    int64                 // 8B
 		cycleStateIndex CycleStateIndex       // 8B
-		_               uint64                // 8B - Padding to 32B
+		_               [8]byte               // 8B - Padding to 32B
 	}
 
 	var processedCycles [128]ProcessedCycle
