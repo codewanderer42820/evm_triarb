@@ -40,7 +40,7 @@ type node struct {
 type groupBlock struct {
 	l1Summary uint64            // 8B - Active lanes bitmask
 	l2        [LaneCount]uint64 // 512B - Per-lane bucket masks
-	_         [7]uint64         // 56B - Cache line padding
+	_         [56]byte          // 56B - Cache line padding
 }
 
 // QuantumQueue64 - High-performance priority queue with 50% smaller footprint
