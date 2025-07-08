@@ -26,5 +26,5 @@ type LogView struct {
 	TagLo uint64 // Lower 64 bits of fingerprint
 
 	// Cache line padding
-	_ [4]uint64
+	_ [32]byte
 }
