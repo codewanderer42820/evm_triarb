@@ -25,12 +25,12 @@ type idx32 = Handle
 //go:notinheap
 //go:align 32
 type node struct {
-	tick int64  // 8B - Active tick or -1 if free
-	data uint64 // 8B - Compact payload (vs 48 bytes in QuantumQueue)
-	prev Handle // 4B - Previous in chain
-	_    uint32 // 4B - Alignment padding
-	next Handle // 4B - Next in chain or freelist
-	_    uint32 // 4B - Alignment padding
+	tick int64   // 8B - Active tick or -1 if free
+	data uint64  // 8B - Compact payload (vs 48 bytes in QuantumQueue)
+	prev Handle  // 4B - Previous in chain
+	_    [4]byte // 4B - Alignment padding
+	next Handle  // 4B - Next in chain or freelist
+	_    [4]byte // 4B - Alignment padding
 }
 
 // groupBlock - 2-level bitmap for O(1) minimum finding
