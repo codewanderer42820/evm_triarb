@@ -388,3 +388,28 @@ func PrintWarning(msg string) {
 	msgBytes := *(*[]byte)(unsafe.Pointer(&msg))
 	syscall.Write(2, msgBytes)
 }
+
+// ============================================================================
+// FAST HASHING AND DEDUPLICATION
+// ============================================================================
+
+// Mix64 applies Murmur3-style 64-bit hash finalization for fast hash table
+// operations and content deduplication in high-throughput scenarios.
+//
+// Performance impact: Fixed number of operations independent of input size
+// Hash quality: Excellent avalanche properties for uniform distribution
+// Use case: Hash table operations and content fingerprinting
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func Mix64(x uint64) uint64 {
+	x ^= x >> 33
+	x *= 0xff51afd7ed558ccd
+	x ^= x >> 33
+	x *= 0xc4ceb9fe1a85ec53
+	x ^= x >> 33
+	return x
+}
