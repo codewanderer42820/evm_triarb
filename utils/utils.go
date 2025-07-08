@@ -131,7 +131,7 @@ func ParseHexU32(b []byte) uint32 {
 	return result
 }
 
-// ParseHexU64 parses hex string to uint64 with branchless optimization
+// ParseHexU64 parses hex string to uint64 using SIMD optimization with efficient padding
 //
 //go:norace
 //go:nocheckptr
@@ -139,29 +139,94 @@ func ParseHexU32(b []byte) uint32 {
 //go:inline
 //go:registerparams
 func ParseHexU64(b []byte) uint64 {
-	if len(b) == 0 {
-		return 0
+	// Process up to 16 chars, truncate if longer
+	processLen := len(b)
+	if processLen > 16 {
+		processLen = 16
 	}
 
-	j := 0
-	// Skip 0x prefix
-	if len(b) >= 2 && b[0] == '0' && (b[1]|0x20) == 'x' {
-		j = 2
+	// For inputs up to 8 chars, use single SIMD operation
+	if processLen <= 8 {
+		padded := [8]byte{'0', '0', '0', '0', '0', '0', '0', '0'}
+		copy(padded[8-processLen:], b[:processLen])
+
+		chunk := Load64(padded[:])
+
+		// Convert ASCII to nibbles
+		chunk |= 0x2020202020202020                            // Force lowercase
+		letterMask := (chunk & 0x4040404040404040) >> 6        // Detect letters
+		chunk = chunk - 0x3030303030303030 - (letterMask * 39) // Convert to nibbles
+
+		// SIMD nibble compaction
+		extracted := chunk & 0x000F000F000F000F
+		chunk ^= extracted
+		chunk |= extracted << 12
+
+		extracted = chunk & 0xFF000000FF000000
+		chunk ^= extracted
+		chunk |= extracted >> 24
+
+		extracted = chunk & 0x000000000000FFFF
+		chunk ^= extracted
+		chunk |= extracted << 48
+
+		return chunk >> 32
 	}
 
+	// For inputs 9-16 chars, use two SIMD operations
 	var result uint64
 
-	// Handle up to 16 hex chars for uint64 with branchless optimization
-	for ; j < len(b) && j < 18; j++ { // 18 = 2 (0x) + 16 (hex chars)
-		c := b[j] | 0x20
-		v := c - '0' - ((c&0x40)>>6)*39
+	// First 8 chars
+	chunk1 := Load64(b[:8])
 
-		if v > 15 {
-			break
-		}
+	// Convert ASCII to nibbles
+	chunk1 |= 0x2020202020202020                              // Force lowercase
+	letterMask1 := (chunk1 & 0x4040404040404040) >> 6         // Detect letters
+	chunk1 = chunk1 - 0x3030303030303030 - (letterMask1 * 39) // Convert to nibbles
 
-		result = (result << 4) | uint64(v)
-	}
+	// SIMD nibble compaction
+	extracted := chunk1 & 0x000F000F000F000F
+	chunk1 ^= extracted
+	chunk1 |= extracted << 12
+
+	extracted = chunk1 & 0xFF000000FF000000
+	chunk1 ^= extracted
+	chunk1 |= extracted >> 24
+
+	extracted = chunk1 & 0x000000000000FFFF
+	chunk1 ^= extracted
+	chunk1 |= extracted << 48
+
+	result = chunk1 >> 32
+
+	// Second chunk (remaining chars) - efficient padding
+	remaining2 := processLen - 8
+	padded := [8]byte{'0', '0', '0', '0', '0', '0', '0', '0'}
+	copy(padded[8-remaining2:], b[8:8+remaining2])
+
+	chunk2 := Load64(padded[:])
+
+	// Convert ASCII to nibbles
+	chunk2 |= 0x2020202020202020                              // Force lowercase
+	letterMask2 := (chunk2 & 0x4040404040404040) >> 6         // Detect letters
+	chunk2 = chunk2 - 0x3030303030303030 - (letterMask2 * 39) // Convert to nibbles
+
+	// SIMD nibble compaction
+	extracted = chunk2 & 0x000F000F000F000F
+	chunk2 ^= extracted
+	chunk2 |= extracted << 12
+
+	extracted = chunk2 & 0xFF000000FF000000
+	chunk2 ^= extracted
+	chunk2 |= extracted >> 24
+
+	extracted = chunk2 & 0x000000000000FFFF
+	chunk2 ^= extracted
+	chunk2 |= extracted << 48
+
+	// Combine results: first chunk shifted left, second chunk in lower bits
+	secondValue := chunk2 >> 32
+	result = (result << (remaining2 * 4)) | secondValue
 
 	return result
 }
