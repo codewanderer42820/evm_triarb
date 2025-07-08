@@ -22,204 +22,6 @@ func assertZeroAllocs(t *testing.T, name string, fn func()) {
 }
 
 // ============================================================================
-// TYPE CONVERSION TESTS
-// ============================================================================
-
-func TestB2s(t *testing.T) {
-	tests := []struct {
-		name  string
-		input []byte
-		want  string
-	}{
-		{"empty", []byte{}, ""},
-		{"single", []byte{'a'}, "a"},
-		{"ascii", []byte("hello world"), "hello world"},
-		{"utf8", []byte("héllo wørld"), "héllo wørld"},
-		{"binary", []byte{0x00, 0x01, 0xFF}, string([]byte{0x00, 0x01, 0xFF})},
-		{"large", []byte(strings.Repeat("x", 1000)), strings.Repeat("x", 1000)},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := B2s(tt.input)
-			if got != tt.want {
-				t.Errorf("B2s() = %q, want %q", got, tt.want)
-			}
-
-			// Verify zero-copy behavior for non-empty slices
-			if len(tt.input) > 0 {
-				inputPtr := unsafe.Pointer(&tt.input[0])
-				resultPtr := unsafe.Pointer(unsafe.StringData(got))
-				if inputPtr != resultPtr {
-					t.Error("B2s() should share underlying data")
-				}
-			}
-		})
-	}
-}
-
-func TestB2s_ZeroAllocation(t *testing.T) {
-	input := []byte("test")
-	assertZeroAllocs(t, "B2s()", func() {
-		_ = B2s(input)
-	})
-}
-
-func TestItoa(t *testing.T) {
-	tests := []struct {
-		name  string
-		input int
-		want  string
-	}{
-		{"zero", 0, "0"},
-		{"single", 5, "5"},
-		{"double", 42, "42"},
-		{"triple", 123, "123"},
-		{"large", 987654321, "987654321"},
-		{"max32", 2147483647, "2147483647"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := Itoa(tt.input)
-			if got != tt.want {
-				t.Errorf("Itoa(%d) = %q, want %q", tt.input, got, tt.want)
-			}
-			// Cross-verify with stdlib
-			if got != strconv.Itoa(tt.input) {
-				t.Errorf("Itoa(%d) differs from strconv", tt.input)
-			}
-		})
-	}
-}
-
-// ============================================================================
-// OUTPUT FUNCTION TESTS
-// ============================================================================
-
-func TestPrintFunctions(t *testing.T) {
-	// Test that functions don't panic with various inputs
-	messages := []string{
-		"",
-		"test",
-		"unicode: 测试",
-		strings.Repeat("x", 100),
-	}
-
-	for _, msg := range messages {
-		// These write to stdout/stderr during test
-		PrintInfo(msg)
-		PrintWarning(msg)
-	}
-}
-
-func TestPrintFunctions_ZeroAllocation(t *testing.T) {
-	msg := "test"
-
-	assertZeroAllocs(t, "PrintInfo()", func() {
-		PrintInfo(msg)
-	})
-
-	assertZeroAllocs(t, "PrintWarning()", func() {
-		PrintWarning(msg)
-	})
-}
-
-// ============================================================================
-// JSON PARSING TESTS
-// ============================================================================
-
-func TestSkipToQuoteEarlyExit(t *testing.T) {
-	tests := []struct {
-		name      string
-		data      []byte
-		start     int
-		hop       int
-		max       int
-		wantIdx   int
-		wantEarly bool
-	}{
-		{"found_quote", []byte(`{"x":"y"}`), 2, 1, 10, 3, false},
-		{"early_exit", []byte(`{verylong`), 1, 1, 3, 4, true},
-		{"not_found", []byte(`{x:y}`), 1, 1, 10, -1, false},
-		{"large_hop", []byte(`{"a":"b"}`), 0, 3, 10, 3, false},
-		{"at_quote", []byte(`"test"`), 0, 1, 10, 0, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			idx, early := SkipToQuoteEarlyExit(tt.data, tt.start, tt.hop, tt.max)
-			if idx != tt.wantIdx || early != tt.wantEarly {
-				t.Errorf("SkipToQuoteEarlyExit() = (%d, %v), want (%d, %v)",
-					idx, early, tt.wantIdx, tt.wantEarly)
-			}
-		})
-	}
-}
-
-func TestSkipToClosingBracketEarlyExit(t *testing.T) {
-	tests := []struct {
-		name      string
-		data      []byte
-		start     int
-		hop       int
-		max       int
-		wantIdx   int
-		wantEarly bool
-	}{
-		{"found_bracket", []byte(`[1,2]`), 1, 1, 10, 4, false},
-		{"early_exit", []byte(`[very,long`), 1, 1, 3, 4, true},
-		{"not_found", []byte(`[unclosed`), 1, 1, 20, -1, false},
-		{"large_hop", []byte(`[1,2,3]`), 0, 3, 10, 6, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			idx, early := SkipToClosingBracketEarlyExit(tt.data, tt.start, tt.hop, tt.max)
-			if idx != tt.wantIdx || early != tt.wantEarly {
-				t.Errorf("SkipToClosingBracketEarlyExit() = (%d, %v), want (%d, %v)",
-					idx, early, tt.wantIdx, tt.wantEarly)
-			}
-		})
-	}
-}
-
-func TestSkipFunctions(t *testing.T) {
-	testCases := []struct {
-		name string
-		fn   func([]byte, int, int) int
-		char byte
-	}{
-		{"SkipToQuote", SkipToQuote, '"'},
-		{"SkipToOpeningBracket", SkipToOpeningBracket, '['},
-		{"SkipToClosingBracket", SkipToClosingBracket, ']'},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			tests := []struct {
-				data  []byte
-				start int
-				hop   int
-				want  int
-			}{
-				{[]byte("abc" + string(tc.char) + "def"), 0, 1, 3},
-				{[]byte("abcdef"), 0, 1, -1},
-				{[]byte(string(tc.char) + "test"), 0, 1, 0},
-			}
-
-			for _, tt := range tests {
-				got := tc.fn(tt.data, tt.start, tt.hop)
-				if got != tt.want {
-					t.Errorf("%s(%q, %d, %d) = %d, want %d",
-						tc.name, tt.data, tt.start, tt.hop, got, tt.want)
-				}
-			}
-		})
-	}
-}
-
-// ============================================================================
 // MEMORY OPERATION TESTS
 // ============================================================================
 
@@ -307,8 +109,113 @@ func TestMemoryOperations_ZeroAllocation(t *testing.T) {
 }
 
 // ============================================================================
+// TYPE CONVERSION TESTS
+// ============================================================================
+
+func TestB2s(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []byte
+		want  string
+	}{
+		{"empty", []byte{}, ""},
+		{"single", []byte{'a'}, "a"},
+		{"ascii", []byte("hello world"), "hello world"},
+		{"utf8", []byte("héllo wørld"), "héllo wørld"},
+		{"binary", []byte{0x00, 0x01, 0xFF}, string([]byte{0x00, 0x01, 0xFF})},
+		{"large", []byte(strings.Repeat("x", 1000)), strings.Repeat("x", 1000)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := B2s(tt.input)
+			if got != tt.want {
+				t.Errorf("B2s() = %q, want %q", got, tt.want)
+			}
+
+			// Verify zero-copy behavior for non-empty slices
+			if len(tt.input) > 0 {
+				inputPtr := unsafe.Pointer(&tt.input[0])
+				resultPtr := unsafe.Pointer(unsafe.StringData(got))
+				if inputPtr != resultPtr {
+					t.Error("B2s() should share underlying data")
+				}
+			}
+		})
+	}
+}
+
+func TestItoa(t *testing.T) {
+	tests := []struct {
+		name  string
+		input int
+		want  string
+	}{
+		{"zero", 0, "0"},
+		{"single", 5, "5"},
+		{"double", 42, "42"},
+		{"triple", 123, "123"},
+		{"large", 987654321, "987654321"},
+		{"max32", 2147483647, "2147483647"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Itoa(tt.input)
+			if got != tt.want {
+				t.Errorf("Itoa(%d) = %q, want %q", tt.input, got, tt.want)
+			}
+			// Cross-verify with stdlib
+			if got != strconv.Itoa(tt.input) {
+				t.Errorf("Itoa(%d) differs from strconv", tt.input)
+			}
+		})
+	}
+}
+
+func TestTypeConversion_ZeroAllocation(t *testing.T) {
+	input := []byte("test")
+	assertZeroAllocs(t, "B2s()", func() {
+		_ = B2s(input)
+	})
+
+	assertZeroAllocs(t, "Itoa()", func() {
+		_ = Itoa(12345)
+	})
+}
+
+// ============================================================================
 // HEX PARSING TESTS
 // ============================================================================
+
+func TestParseHexU32(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []byte
+		want  uint32
+	}{
+		{"zero", []byte("0"), 0},
+		{"single", []byte("f"), 15},
+		{"0x_prefix", []byte("0xff"), 255},
+		{"0X_prefix", []byte("0XFF"), 255},
+		{"four", []byte("1234"), 0x1234},
+		{"eight", []byte("deadbeef"), 0xdeadbeef},
+		{"max32", []byte("ffffffff"), 0xffffffff},
+		{"mixed_case", []byte("DeAdBeEf"), 0xdeadbeef},
+		{"invalid_stops", []byte("12g34"), 0x12},
+		{"empty", []byte(""), 0},
+		{"only_0x", []byte("0x"), 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseHexU32(tt.input)
+			if got != tt.want {
+				t.Errorf("ParseHexU32(%q) = 0x%X, want 0x%X", tt.input, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestParseHexU64(t *testing.T) {
 	tests := []struct {
@@ -322,7 +229,8 @@ func TestParseHexU64(t *testing.T) {
 		{"0X_prefix", []byte("0XFF"), 255},
 		{"no_prefix", []byte("deadbeef"), 0xdeadbeef},
 		{"mixed_case", []byte("DeAdBeEf"), 0xdeadbeef},
-		{"max64", []byte("ffffffffffffffff"), 0xffffffffffffffff},
+		{"sixteen_chars", []byte("0123456789abcdef"), 0x0123456789abcdef},
+		{"max64_truncated", []byte("ffffffffffffffff"), 0xffffffffffffffff},
 		{"invalid_stops", []byte("12g34"), 0x12},
 		{"empty", []byte(""), 0},
 		{"only_0x", []byte("0x"), 0},
@@ -338,135 +246,229 @@ func TestParseHexU64(t *testing.T) {
 	}
 }
 
-func TestParseHexN(t *testing.T) {
+func TestParseEthereumAddress(t *testing.T) {
 	tests := []struct {
 		name  string
 		input []byte
-		want  uint64
+		want  [20]byte
 	}{
-		{"single", []byte("a"), 0xa},
-		{"four", []byte("1234"), 0x1234},
-		{"eight", []byte("deadbeef"), 0xdeadbeef},
-		{"sixteen", []byte("0123456789abcdef"), 0x0123456789abcdef},
-		{"mixed_case", []byte("AbCdEf"), 0xabcdef},
-		{"empty", []byte(""), 0},
+		{
+			"full_address_no_prefix",
+			[]byte("1234567890abcdefABCDEF1234567890abcdefAB"),
+			[20]byte{0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0xab},
+		},
+		{
+			"full_address_0x_prefix",
+			[]byte("0x1234567890abcdefABCDEF1234567890abcdefAB"),
+			[20]byte{0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0xab},
+		},
+		{
+			"real_ethereum_address",
+			[]byte("0xdAC17F958D2ee523a2206206994597C13D831ec7"),
+			[20]byte{0xda, 0xc1, 0x7f, 0x95, 0x8d, 0x2e, 0xe5, 0x23, 0xa2, 0x20, 0x62, 0x06, 0x99, 0x45, 0x97, 0xc1, 0x3d, 0x83, 0x1e, 0xc7},
+		},
+		{
+			"zeros_address",
+			[]byte("0x0000000000000000000000000000000000000000"),
+			[20]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			"max_address",
+			[]byte("0xffffffffffffffffffffffffffffffffffffffff"),
+			[20]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+		},
+		{
+			"empty_input",
+			[]byte(""),
+			[20]byte{},
+		},
+		{
+			"only_0x",
+			[]byte("0x"),
+			[20]byte{},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ParseHexN(tt.input)
+			got := ParseEthereumAddress(tt.input)
 			if got != tt.want {
-				t.Errorf("ParseHexN(%q) = 0x%X, want 0x%X", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestParseHexU32(t *testing.T) {
-	tests := []struct {
-		name  string
-		input []byte
-		want  uint32
-	}{
-		{"four", []byte("1234"), 0x1234},
-		{"eight", []byte("deadbeef"), 0xdeadbeef},
-		{"max32", []byte("ffffffff"), 0xffffffff},
-		{"zero", []byte("0"), 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ParseHexU32(tt.input)
-			if got != tt.want {
-				t.Errorf("ParseHexU32(%q) = 0x%X, want 0x%X", tt.input, got, tt.want)
+				t.Errorf("ParseEthereumAddress(%q) = %x, want %x", tt.input, got, tt.want)
 			}
 		})
 	}
 }
 
 func TestHexParsing_ZeroAllocation(t *testing.T) {
-	hex := []byte("deadbeef")
-
-	assertZeroAllocs(t, "ParseHexU64()", func() {
-		_ = ParseHexU64(hex)
-	})
-
-	assertZeroAllocs(t, "ParseHexN()", func() {
-		_ = ParseHexN(hex)
-	})
+	hex32 := []byte("deadbeef")
+	hex64 := []byte("deadbeef12345678")
+	ethAddr := []byte("0x1234567890abcdefABCDEF1234567890abcdefAB")
 
 	assertZeroAllocs(t, "ParseHexU32()", func() {
-		_ = ParseHexU32(hex)
+		_ = ParseHexU32(hex32)
+	})
+
+	assertZeroAllocs(t, "ParseHexU64()", func() {
+		_ = ParseHexU64(hex64)
+	})
+
+	assertZeroAllocs(t, "ParseEthereumAddress()", func() {
+		_ = ParseEthereumAddress(ethAddr)
 	})
 }
 
 // ============================================================================
-// HASHING TESTS
+// JSON PARSING TESTS
 // ============================================================================
 
-func TestMix64(t *testing.T) {
-	input := uint64(0x123456789abcdef0)
-
-	// Test deterministic behavior
-	h1 := Mix64(input)
-	h2 := Mix64(input)
-	if h1 != h2 {
-		t.Error("Mix64() not deterministic")
+func TestSkipToQuote(t *testing.T) {
+	tests := []struct {
+		data  []byte
+		start int
+		hop   int
+		want  int
+	}{
+		{[]byte(`"test"`), 0, 1, 0},
+		{[]byte(`abc"def`), 0, 1, 3},
+		{[]byte(`abcdef`), 0, 1, -1},
+		{[]byte(`{"a":"b"}`), 0, 3, 3},
 	}
 
-	// Test avalanche effect
-	h3 := Mix64(input ^ 1)
-	if h1 == h3 {
-		t.Error("Mix64() poor avalanche")
-	}
-
-	// Verify bit distribution
-	diff := h1 ^ h3
-	bits := 0
-	for diff != 0 {
-		bits++
-		diff &= diff - 1
-	}
-	if bits < 20 || bits > 44 {
-		t.Errorf("Mix64() avalanche: %d bits changed, want ~32", bits)
+	for _, tt := range tests {
+		got := SkipToQuote(tt.data, tt.start, tt.hop)
+		if got != tt.want {
+			t.Errorf("SkipToQuote(%q, %d, %d) = %d, want %d",
+				tt.data, tt.start, tt.hop, got, tt.want)
+		}
 	}
 }
 
-func TestHash17(t *testing.T) {
+func TestSkipToOpeningBracket(t *testing.T) {
 	tests := []struct {
-		name  string
-		input []byte
-		want  uint32
+		data  []byte
+		start int
+		hop   int
+		want  int
 	}{
-		{"short", []byte("123"), 0},
-		{"exact6", []byte("123456"), uint32(ParseHexN([]byte("123456")) & ((1 << 17) - 1))},
-		{"0x_prefix", []byte("0x1234567890abcdef"), uint32(ParseHexN([]byte("0x1234")) & ((1 << 17) - 1))},
-		{"zeros", []byte("000000"), 0},
-		{"max17", []byte("ffffff"), (1 << 17) - 1},
+		{[]byte(`[test]`), 0, 1, 0},
+		{[]byte(`abc[def`), 0, 1, 3},
+		{[]byte(`abcdef`), 0, 1, -1},
+	}
+
+	for _, tt := range tests {
+		got := SkipToOpeningBracket(tt.data, tt.start, tt.hop)
+		if got != tt.want {
+			t.Errorf("SkipToOpeningBracket(%q, %d, %d) = %d, want %d",
+				tt.data, tt.start, tt.hop, got, tt.want)
+		}
+	}
+}
+
+func TestSkipToClosingBracket(t *testing.T) {
+	tests := []struct {
+		data  []byte
+		start int
+		hop   int
+		want  int
+	}{
+		{[]byte(`]test`), 0, 1, 0},
+		{[]byte(`abc]def`), 0, 1, 3},
+		{[]byte(`abcdef`), 0, 1, -1},
+	}
+
+	for _, tt := range tests {
+		got := SkipToClosingBracket(tt.data, tt.start, tt.hop)
+		if got != tt.want {
+			t.Errorf("SkipToClosingBracket(%q, %d, %d) = %d, want %d",
+				tt.data, tt.start, tt.hop, got, tt.want)
+		}
+	}
+}
+
+func TestSkipToQuoteEarlyExit(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      []byte
+		start     int
+		hop       int
+		max       int
+		wantIdx   int
+		wantEarly bool
+	}{
+		{"found_quote", []byte(`{"x":"y"}`), 2, 1, 10, 3, false},
+		{"early_exit", []byte(`{verylong`), 1, 1, 3, 4, true},
+		{"not_found", []byte(`{x:y}`), 1, 1, 10, -1, false},
+		{"large_hop", []byte(`{"a":"b"}`), 0, 3, 10, 3, false},
+		{"at_quote", []byte(`"test"`), 0, 1, 10, 0, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Hash17(tt.input)
-			if got != tt.want {
-				t.Errorf("Hash17(%q) = %d, want %d", tt.input, got, tt.want)
-			}
-			// Verify 17-bit range
-			if got >= (1 << 17) {
-				t.Errorf("Hash17(%q) = %d exceeds 17-bit range", tt.input, got)
+			idx, early := SkipToQuoteEarlyExit(tt.data, tt.start, tt.hop, tt.max)
+			if idx != tt.wantIdx || early != tt.wantEarly {
+				t.Errorf("SkipToQuoteEarlyExit() = (%d, %v), want (%d, %v)",
+					idx, early, tt.wantIdx, tt.wantEarly)
 			}
 		})
 	}
 }
 
-func TestHashing_ZeroAllocation(t *testing.T) {
-	assertZeroAllocs(t, "Mix64()", func() {
-		_ = Mix64(0x12345678)
+func TestSkipToClosingBracketEarlyExit(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      []byte
+		start     int
+		hop       int
+		max       int
+		wantIdx   int
+		wantEarly bool
+	}{
+		{"found_bracket", []byte(`[1,2]`), 1, 1, 10, 4, false},
+		{"early_exit", []byte(`[very,long`), 1, 1, 3, 4, true},
+		{"not_found", []byte(`[unclosed`), 1, 1, 20, -1, false},
+		{"large_hop", []byte(`[1,2,3]`), 0, 3, 10, 6, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idx, early := SkipToClosingBracketEarlyExit(tt.data, tt.start, tt.hop, tt.max)
+			if idx != tt.wantIdx || early != tt.wantEarly {
+				t.Errorf("SkipToClosingBracketEarlyExit() = (%d, %v), want (%d, %v)",
+					idx, early, tt.wantIdx, tt.wantEarly)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// SYSTEM I/O TESTS
+// ============================================================================
+
+func TestPrintFunctions(t *testing.T) {
+	// Test that functions don't panic with various inputs
+	messages := []string{
+		"",
+		"test",
+		"unicode: 测试",
+		strings.Repeat("x", 100),
+	}
+
+	for _, msg := range messages {
+		// These write to stdout/stderr during test
+		PrintInfo(msg)
+		PrintWarning(msg)
+	}
+}
+
+func TestPrintFunctions_ZeroAllocation(t *testing.T) {
+	msg := "test"
+
+	assertZeroAllocs(t, "PrintInfo()", func() {
+		PrintInfo(msg)
 	})
 
-	addr := []byte("123456789abc")
-	assertZeroAllocs(t, "Hash17()", func() {
-		_ = Hash17(addr)
+	assertZeroAllocs(t, "PrintWarning()", func() {
+		PrintWarning(msg)
 	})
 }
 
@@ -478,16 +480,15 @@ func TestEdgeCases(t *testing.T) {
 	t.Run("nil_safety", func(t *testing.T) {
 		// Verify functions handle nil/empty inputs gracefully
 		_ = B2s(nil)
-		_ = Hash17(nil)
+		_ = ParseHexU32(nil)
 		_ = ParseHexU64(nil)
-		_ = ParseHexN(nil)
+		_ = ParseEthereumAddress(nil)
 		PrintInfo("")
 		PrintWarning("")
 	})
 
 	t.Run("boundaries", func(t *testing.T) {
 		// Test minimum required sizes
-		_ = Hash17(make([]byte, 6))
 		_ = Load64(make([]byte, 8))
 		_, _ = Load128(make([]byte, 16))
 		_ = LoadBE64(make([]byte, 8))
@@ -505,46 +506,6 @@ func TestEdgeCases(t *testing.T) {
 // ============================================================================
 // BENCHMARKS
 // ============================================================================
-
-func BenchmarkB2s(b *testing.B) {
-	sizes := []int{10, 100, 1000}
-	for _, size := range sizes {
-		data := make([]byte, size)
-		b.Run("size_"+strconv.Itoa(size), func(b *testing.B) {
-			b.SetBytes(int64(size))
-			for i := 0; i < b.N; i++ {
-				_ = B2s(data)
-			}
-		})
-	}
-}
-
-func BenchmarkItoa(b *testing.B) {
-	values := []int{0, 42, 12345, 987654321}
-	for _, v := range values {
-		b.Run("val_"+strconv.Itoa(v), func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
-				_ = Itoa(v)
-			}
-		})
-	}
-}
-
-func BenchmarkJSONParsing(b *testing.B) {
-	data := []byte(`{"field":"value","array":[1,2,3],"nested":{"a":"b"}}`)
-
-	b.Run("SkipToQuote", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			_ = SkipToQuote(data, 0, 1)
-		}
-	})
-
-	b.Run("SkipToOpeningBracket", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			_ = SkipToOpeningBracket(data, 0, 1)
-		}
-	})
-}
 
 func BenchmarkMemoryOps(b *testing.B) {
 	data := make([]byte, 16)
@@ -571,39 +532,59 @@ func BenchmarkMemoryOps(b *testing.B) {
 	})
 }
 
-func BenchmarkHexParsing(b *testing.B) {
-	hex := []byte("deadbeef1234567890abcdef")
+func BenchmarkTypeConversion(b *testing.B) {
+	testInt := 123456
+	testBytes := []byte("hello world")
 
-	b.Run("ParseHexU64", func(b *testing.B) {
+	b.Run("B2s", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = ParseHexU64(hex)
+			_ = B2s(testBytes)
 		}
 	})
 
-	b.Run("ParseHexN", func(b *testing.B) {
+	b.Run("Itoa", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = ParseHexN(hex[:8])
-		}
-	})
-
-	b.Run("ParseHexU32", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			_ = ParseHexU32(hex[:8])
+			_ = Itoa(testInt)
 		}
 	})
 }
 
-func BenchmarkHashing(b *testing.B) {
-	b.Run("Mix64", func(b *testing.B) {
+func BenchmarkHexParsing(b *testing.B) {
+	hex32 := []byte("deadbeef")
+	hex64 := []byte("deadbeef12345678")
+	ethAddr := []byte("0x1234567890abcdefABCDEF1234567890abcdefAB")
+
+	b.Run("ParseHexU32", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = Mix64(uint64(i))
+			_ = ParseHexU32(hex32)
 		}
 	})
 
-	addr := []byte("0x1234567890abcdef")
-	b.Run("Hash17", func(b *testing.B) {
+	b.Run("ParseHexU64", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = Hash17(addr)
+			_ = ParseHexU64(hex64)
+		}
+	})
+
+	b.Run("ParseEthereumAddress", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_ = ParseEthereumAddress(ethAddr)
+		}
+	})
+}
+
+func BenchmarkJSONParsing(b *testing.B) {
+	data := []byte(`{"field":"value","array":[1,2,3],"nested":{"a":"b"}}`)
+
+	b.Run("SkipToQuote", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_ = SkipToQuote(data, 0, 1)
+		}
+	})
+
+	b.Run("SkipToOpeningBracket", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_ = SkipToOpeningBracket(data, 0, 1)
 		}
 	})
 }
@@ -640,6 +621,7 @@ func BenchmarkComparison(b *testing.B) {
 func BenchmarkZeroAlloc(b *testing.B) {
 	data := make([]byte, 1024)
 	hex := []byte("deadbeef")
+	ethAddr := []byte("0x1234567890abcdefABCDEF1234567890abcdefAB")
 
 	var m1, m2 runtime.MemStats
 	runtime.GC()
@@ -650,7 +632,7 @@ func BenchmarkZeroAlloc(b *testing.B) {
 		_ = B2s(data)
 		_ = Load64(data)
 		_ = ParseHexU64(hex)
-		_ = Mix64(uint64(i))
+		_ = ParseEthereumAddress(ethAddr)
 	}
 
 	b.StopTimer()
