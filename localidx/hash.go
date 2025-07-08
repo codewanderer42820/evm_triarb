@@ -8,10 +8,10 @@ import "unsafe"
 //go:notinheap
 //go:align 64
 type Hash struct {
-	keys    []uint32 // Key array (0 = empty sentinel)
-	vals    []uint32 // Value array (parallel to keys)
-	mask, _ uint32   // Size mask for modulo + padding
-	_       uint64   // Reserved for future use
+	keys []uint32 // Key array (0 = empty sentinel)
+	vals []uint32 // Value array (parallel to keys)
+	mask uint32   // Size mask for modulo
+	_    [12]byte // Padding to 64-byte cache line boundary
 }
 
 // nextPow2 finds smallest power-of-2 ≥ n
