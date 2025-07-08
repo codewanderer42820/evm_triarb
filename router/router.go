@@ -52,12 +52,11 @@ type ArbitrageCycleState struct {
 	// Hot fields (24 bytes) - accessed every calculation
 	tickValues [3]float64 // 24B - Price ticks for each edge
 
-	// Warm fields (16 bytes)
+	// Warm fields (12 bytes)
 	pairIDs [3]PairID // 12B - Pair identifiers
-	_       uint32    // 4B - Padding to 16-byte boundary
 
 	// Padding to 64 bytes
-	_ [3]uint64 // 24B - Cache line padding
+	_ [28]byte // 28B - Padding to 64-byte cache line boundary
 }
 
 // ArbitrageEdgeBinding - Edge within arbitrage cycle
