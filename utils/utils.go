@@ -393,12 +393,7 @@ func PrintWarning(msg string) {
 // FAST HASHING AND DEDUPLICATION
 // ============================================================================
 
-// Mix64 applies Murmur3-style 64-bit hash finalization for fast hash table
-// operations and content deduplication in high-throughput scenarios.
-//
-// Performance impact: Fixed number of operations independent of input size
-// Hash quality: Excellent avalanche properties for uniform distribution
-// Use case: Hash table operations and content fingerprinting
+// Mix64 applies Murmur3-style 64-bit hash finalization
 //
 //go:norace
 //go:nocheckptr
