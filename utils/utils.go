@@ -1,4 +1,3 @@
-// utils.go — Maximum performance utilities with all safety checks removed
 package utils
 
 import (

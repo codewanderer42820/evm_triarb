@@ -1,4 +1,3 @@
-// utils_test.go — Comprehensive test suite for high-performance utility functions
 package utils
 
 import (
