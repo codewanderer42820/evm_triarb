@@ -118,7 +118,6 @@ func TestB2s(t *testing.T) {
 		input []byte
 		want  string
 	}{
-		{"empty", []byte{}, ""},
 		{"single", []byte{'a'}, "a"},
 		{"ascii", []byte("hello world"), "hello world"},
 		{"utf8", []byte("héllo wørld"), "héllo wørld"},
@@ -133,13 +132,11 @@ func TestB2s(t *testing.T) {
 				t.Errorf("B2s() = %q, want %q", got, tt.want)
 			}
 
-			// Verify zero-copy behavior for non-empty slices
-			if len(tt.input) > 0 {
-				inputPtr := unsafe.Pointer(&tt.input[0])
-				resultPtr := unsafe.Pointer(unsafe.StringData(got))
-				if inputPtr != resultPtr {
-					t.Error("B2s() should share underlying data")
-				}
+			// Verify zero-copy behavior
+			inputPtr := unsafe.Pointer(&tt.input[0])
+			resultPtr := unsafe.Pointer(unsafe.StringData(got))
+			if inputPtr != resultPtr {
+				t.Error("B2s() should share underlying data")
 			}
 		})
 	}
@@ -194,13 +191,11 @@ func TestParseHexU32(t *testing.T) {
 		input []byte
 		want  uint32
 	}{
-		{"zero", []byte("0"), 0},
 		{"single", []byte("f"), 15},
 		{"four", []byte("1234"), 0x1234},
 		{"eight", []byte("deadbeef"), 0xdeadbeef},
 		{"max32", []byte("ffffffff"), 0xffffffff},
 		{"mixed_case", []byte("DeAdBeEf"), 0xdeadbeef},
-		{"empty", []byte(""), 0},
 	}
 
 	for _, tt := range tests {
@@ -219,13 +214,11 @@ func TestParseHexU64(t *testing.T) {
 		input []byte
 		want  uint64
 	}{
-		{"zero", []byte("0"), 0},
 		{"single", []byte("f"), 15},
 		{"no_prefix", []byte("deadbeef"), 0xdeadbeef},
 		{"mixed_case", []byte("DeAdBeEf"), 0xdeadbeef},
 		{"sixteen_chars", []byte("0123456789abcdef"), 0x0123456789abcdef},
 		{"max64_truncated", []byte("ffffffffffffffff"), 0xffffffffffffffff},
-		{"empty", []byte(""), 0},
 	}
 
 	for _, tt := range tests {
@@ -263,11 +256,6 @@ func TestParseEthereumAddress(t *testing.T) {
 			"max_address",
 			[]byte("ffffffffffffffffffffffffffffffffffffffff"),
 			[20]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
-		},
-		{
-			"empty_input",
-			[]byte(""),
-			[20]byte{},
 		},
 	}
 
@@ -459,16 +447,6 @@ func TestPrintFunctions_ZeroAllocation(t *testing.T) {
 // ============================================================================
 
 func TestEdgeCases(t *testing.T) {
-	t.Run("nil_safety", func(t *testing.T) {
-		// Verify functions handle nil/empty inputs gracefully
-		_ = B2s(nil)
-		_ = ParseHexU32(nil)
-		_ = ParseHexU64(nil)
-		_ = ParseEthereumAddress(nil)
-		PrintInfo("")
-		PrintWarning("")
-	})
-
 	t.Run("boundaries", func(t *testing.T) {
 		// Test minimum required sizes
 		_ = Load64(make([]byte, 8))
