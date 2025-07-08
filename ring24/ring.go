@@ -32,7 +32,7 @@ type Ring struct {
 	step uint64 // Size for sequence reset
 	buf  []slot // Backing buffer
 
-	_ [3]uint64 // Tail padding
+	_ [24]byte // Tail padding
 }
 
 // New creates ring with power-of-2 capacity
