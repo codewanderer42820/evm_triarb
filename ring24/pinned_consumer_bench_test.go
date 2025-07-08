@@ -150,7 +150,7 @@ func warmupConsumer(s *benchConsumerState, operations int) {
 	atomic.StoreUint32(s.hot, 1)
 	for i := 0; i < operations; i++ {
 		data := testData(byte(i))
-		for !s.ring.Push(&data) {
+		for !s.ring.Push(data) {
 			time.Sleep(time.Microsecond)
 		}
 	}
@@ -185,7 +185,7 @@ func BenchmarkPinnedConsumer_CallbackLatency(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				data := testData(byte(i))
-				for !s.ring.Push(&data) {
+				for !s.ring.Push(data) {
 					// Spin until space available
 				}
 			}
@@ -226,7 +226,7 @@ func BenchmarkPinnedConsumer_MinimalLatency(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		data := testData(byte(i))
-		for !s.ring.Push(&data) {
+		for !s.ring.Push(data) {
 			// Busy wait
 		}
 	}
@@ -267,7 +267,7 @@ func BenchmarkPinnedConsumer_ProcessingLatency(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				data := testData(byte(i))
-				for !s.ring.Push(&data) {
+				for !s.ring.Push(data) {
 					time.Sleep(time.Microsecond)
 				}
 			}
@@ -318,7 +318,7 @@ func BenchmarkPinnedConsumer_SustainedThroughput(b *testing.B) {
 			for time.Since(start) < duration {
 				for i := 0; i < 1000 && time.Since(start) < duration; i++ {
 					data := testData(byte(operations))
-					if s.ring.Push(&data) {
+					if s.ring.Push(data) {
 						operations++
 					}
 				}
@@ -372,7 +372,7 @@ func BenchmarkPinnedConsumer_BurstThroughput(b *testing.B) {
 				// Push burst
 				for i := 0; i < currentBurst; i++ {
 					data := testData(byte(burst + i))
-					for !s.ring.Push(&data) {
+					for !s.ring.Push(data) {
 						time.Sleep(time.Microsecond)
 					}
 				}
@@ -425,7 +425,7 @@ func BenchmarkPinnedConsumer_CoreAffinity(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				data := testData(byte(i))
-				for !s.ring.Push(&data) {
+				for !s.ring.Push(data) {
 					time.Sleep(time.Microsecond)
 				}
 			}
@@ -467,7 +467,7 @@ func BenchmarkPinnedConsumer_CrossCore(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		data := testData(byte(i))
-		for !s.ring.Push(&data) {
+		for !s.ring.Push(data) {
 			// Spin on producer core
 		}
 	}
@@ -504,7 +504,7 @@ func BenchmarkPinnedConsumer_HotTransitions(b *testing.B) {
 
 		// Push data
 		data := testData(byte(i))
-		for !s.ring.Push(&data) {
+		for !s.ring.Push(data) {
 			time.Sleep(time.Microsecond)
 		}
 
@@ -558,7 +558,7 @@ func BenchmarkPinnedConsumer_ColdResume(b *testing.B) {
 				data := testData(byte(i))
 
 				start := time.Now()
-				for !s.ring.Push(&data) {
+				for !s.ring.Push(data) {
 					time.Sleep(time.Microsecond)
 				}
 
@@ -601,7 +601,7 @@ func BenchmarkPinnedConsumer_ShutdownLatency(b *testing.B) {
 				atomic.StoreUint32(s.hot, 1)
 				for j := 0; j < load; j++ {
 					data := testData(byte(j))
-					s.ring.Push(&data)
+					s.ring.Push(data)
 				}
 
 				// Measure shutdown time
@@ -635,7 +635,7 @@ func BenchmarkPinnedConsumer_ShutdownUnderLoad(b *testing.B) {
 		atomic.StoreUint32(s.hot, 1)
 		for i := 0; atomic.LoadUint32(s.stop) == 0; i++ {
 			data := testData(byte(i))
-			s.ring.Push(&data)
+			s.ring.Push(data)
 			time.Sleep(10 * time.Microsecond)
 		}
 	}()
@@ -689,7 +689,7 @@ func BenchmarkPinnedConsumerWithCooldown_Performance(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				data := testData(byte(i))
-				for !s.ring.Push(&data) {
+				for !s.ring.Push(data) {
 					time.Sleep(time.Microsecond)
 				}
 			}
@@ -755,7 +755,7 @@ func BenchmarkPinnedConsumer_CacheEfficiency(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				data := testData(byte(i))
-				for !s.ring.Push(&data) {
+				for !s.ring.Push(data) {
 					time.Sleep(time.Microsecond)
 				}
 			}
@@ -802,7 +802,7 @@ func BenchmarkPinnedConsumer_ResourceScaling(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				data := testData(byte(i))
-				for !s.ring.Push(&data) {
+				for !s.ring.Push(data) {
 					time.Sleep(time.Microsecond)
 				}
 			}
@@ -859,7 +859,7 @@ func BenchmarkPinnedConsumer_MultipleConsumers(b *testing.B) {
 
 					for j := 0; j < opsPerConsumer; j++ {
 						data := testData(byte(consumerIdx*256 + j))
-						for !s.ring.Push(&data) {
+						for !s.ring.Push(data) {
 							time.Sleep(time.Microsecond)
 						}
 					}
@@ -934,7 +934,7 @@ func BenchmarkPinnedConsumer_StressTest(b *testing.B) {
 				data := testData(byte(producerID*64 + i%256))
 
 				retries := 0
-				for !s.ring.Push(&data) {
+				for !s.ring.Push(data) {
 					retries++
 					if retries > 1000 {
 						time.Sleep(time.Microsecond)
@@ -994,7 +994,7 @@ func BenchmarkPinnedConsumer_MemoryPressure(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		data := testData(byte(i))
-		for !s.ring.Push(&data) {
+		for !s.ring.Push(data) {
 			time.Sleep(time.Microsecond)
 		}
 	}
@@ -1044,7 +1044,7 @@ func BenchmarkPinnedConsumer_CpuRelaxImpact(b *testing.B) {
 				data := testData(byte(i))
 
 				start := time.Now()
-				for !s.ring.Push(&data) {
+				for !s.ring.Push(data) {
 					time.Sleep(time.Microsecond)
 				}
 
@@ -1092,7 +1092,7 @@ func BenchmarkPinnedConsumer_AtomicOperations(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		data := testData(byte(i))
-		for !s.ring.Push(&data) {
+		for !s.ring.Push(data) {
 			time.Sleep(time.Microsecond)
 		}
 	}
@@ -1131,7 +1131,7 @@ func BenchmarkPinnedConsumer_vsChannel(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			data := testData(byte(i))
-			for !s.ring.Push(&data) {
+			for !s.ring.Push(data) {
 				time.Sleep(time.Microsecond)
 			}
 		}
@@ -1163,7 +1163,7 @@ func BenchmarkPinnedConsumer_vsChannel(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			data := testData(byte(i))
-			ch <- data
+			ch <- *data
 		}
 
 		close(ch)
@@ -1194,7 +1194,7 @@ func BenchmarkPinnedConsumer_vsSync(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			data := testData(byte(i))
-			for !s.ring.Push(&data) {
+			for !s.ring.Push(data) {
 				time.Sleep(time.Microsecond)
 			}
 		}
@@ -1244,7 +1244,7 @@ func BenchmarkPinnedConsumer_vsSync(b *testing.B) {
 			data := testData(byte(i))
 
 			mu.Lock()
-			queue = append(queue, data)
+			queue = append(queue, *data)
 			mu.Unlock()
 		}
 
@@ -1284,7 +1284,7 @@ func BenchmarkPinnedConsumer_Regression(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		data := testData(byte(i))
-		for !s.ring.Push(&data) {
+		for !s.ring.Push(data) {
 			time.Sleep(time.Microsecond)
 		}
 	}
@@ -1341,7 +1341,7 @@ func BenchmarkPinnedConsumer_WorstCase(b *testing.B) {
 
 		// Force maximum retry cycles due to ring being full
 		retries := 0
-		for !s.ring.Push(&data) {
+		for !s.ring.Push(data) {
 			retries++
 			if retries > 1000 {
 				time.Sleep(time.Microsecond)
@@ -1404,7 +1404,7 @@ func BenchmarkPinnedConsumer_ProfilerFriendly(b *testing.B) {
 
 	for time.Since(start) < duration {
 		data := testData(byte(operations))
-		if s.ring.Push(&data) {
+		if s.ring.Push(data) {
 			operations++
 		} else {
 			time.Sleep(time.Microsecond)
