@@ -77,14 +77,14 @@ type FanoutEntry struct {
 	// Hot fields (8 bytes)
 	queueHandle quantumqueue64.Handle // 4B - Used in MoveTick
 	edgeIndex   uint16                // 2B - Tick selection
-	_           uint16                // 2B - Padding
+	_           [2]byte               // 2B - Padding
 
 	// Warm fields (8 bytes)
 	cycleStateIndex CycleStateIndex // 8B - State lookup
 
 	// Cold fields (16 bytes)
 	queue *quantumqueue64.QuantumQueue64 // 8B - Queue pointer
-	_     uint64                         // 8B - Padding to 32 bytes
+	_     [8]byte                        // 8B - Padding to 32 bytes
 }
 
 // PairShardBucket - Cycle grouping by common pair
