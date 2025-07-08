@@ -55,7 +55,7 @@ func Itoa(n int) string {
 //go:registerparams
 func PrintWarning(msg string) {
 	msgBytes := *(*[]byte)(unsafe.Pointer(&msg))
-	_, _ = syscall.Write(2, msgBytes)
+	syscall.Write(2, msgBytes)
 }
 
 // PrintInfo writes to stdout via direct syscall
@@ -67,7 +67,7 @@ func PrintWarning(msg string) {
 //go:registerparams
 func PrintInfo(msg string) {
 	msgBytes := *(*[]byte)(unsafe.Pointer(&msg))
-	_, _ = syscall.Write(1, msgBytes)
+	syscall.Write(1, msgBytes)
 }
 
 // SkipToQuoteEarlyExit finds quote with hop limit
@@ -204,7 +204,21 @@ func LoadBE64(b []byte) uint64 {
 		uint64(b[6])<<8 | uint64(b[7])
 }
 
-// ParseHexU64 parses hex string to uint64
+// Bswap32 reverses byte order in a 32-bit value
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func Bswap32(x uint32) uint32 {
+	return ((x & 0xFF) << 24) |
+		(((x >> 8) & 0xFF) << 16) |
+		(((x >> 16) & 0xFF) << 8) |
+		((x >> 24) & 0xFF)
+}
+
+// ParseHexU64 parses hex string to uint64 with big-endian order
 //
 //go:norace
 //go:nocheckptr
@@ -212,28 +226,124 @@ func LoadBE64(b []byte) uint64 {
 //go:inline
 //go:registerparams
 func ParseHexU64(b []byte) uint64 {
+	if len(b) == 0 {
+		return 0
+	}
+
 	j := 0
 	// Skip 0x prefix
 	if len(b) >= 2 && b[0] == '0' && (b[1]|0x20) == 'x' {
 		j = 2
 	}
 
-	var u uint64
+	var result uint64
+
+	// Process 8 bytes at a time with SIMD algorithm
+	for j+7 < len(b) && j < 18 {
+		chunk := Load64(b[j:])
+
+		// Convert ASCII to nibbles
+		chunk |= 0x2020202020202020                            // Force lowercase
+		letterMask := (chunk & 0x4040404040404040) >> 6        // Detect letters
+		chunk = chunk - 0x3030303030303030 - (letterMask * 39) // Convert to nibbles
+
+		// SIMD nibble compaction with endian correction
+		extracted := chunk & 0x000F000F000F000F
+		chunk ^= extracted
+		chunk |= extracted << 12
+
+		extracted = chunk & 0xFF000000FF000000
+		chunk ^= extracted
+		chunk |= extracted >> 24
+
+		chunk <<= 16
+
+		extracted = chunk & 0xFFFF000000000000
+		chunk ^= extracted
+		chunk |= extracted >> 48
+
+		result = (result << 32) | chunk
+		j += 8
+	}
+
+	// Handle remaining bytes
 	for ; j < len(b) && j < 18; j++ {
-		c := b[j] | 0x20 // Lowercase
-		if c < '0' || c > 'f' || (c > '9' && c < 'a') {
+		c := b[j] | 0x20
+		isLetter := (c & 0x40) >> 6
+		v := c - '0' - (isLetter * 39)
+
+		if v > 15 {
 			break
 		}
-		v := uint64(c - '0')
-		if c > '9' {
-			v -= 39 // Convert a-f to 10-15
-		}
-		u = (u << 4) | v
+		result = (result << 4) | uint64(v)
 	}
-	return u
+
+	return result
 }
 
-// ParseHexN parses up to 16 hex chars
+// ParseHexU64Raw parses hex string to uint64 with raw byte order
+// Use for internal operations where byte order doesn't matter
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func ParseHexU64Raw(b []byte) uint64 {
+	if len(b) == 0 {
+		return 0
+	}
+
+	j := 0
+	// Skip 0x prefix
+	if len(b) >= 2 && b[0] == '0' && (b[1]|0x20) == 'x' {
+		j = 2
+	}
+
+	var result uint64
+
+	// Process 8 bytes at a time with SIMD algorithm
+	for j+7 < len(b) && j < 18 {
+		chunk := Load64(b[j:])
+
+		// Convert ASCII to nibbles
+		chunk |= 0x2020202020202020
+		letterMask := (chunk & 0x4040404040404040) >> 6
+		chunk = chunk - 0x3030303030303030 - (letterMask * 39)
+
+		// SIMD nibble compaction (raw order)
+		extracted := chunk & 0x0F000F000F000F00
+		chunk ^= extracted
+		chunk |= extracted >> 4
+
+		extracted = chunk & 0x00FF000000FF0000
+		chunk ^= extracted
+		chunk |= extracted >> 8
+
+		extracted = chunk & 0x0000FFFF00000000
+		chunk ^= extracted
+		chunk |= extracted >> 16
+
+		result = (result << 32) | chunk
+		j += 8
+	}
+
+	// Handle remaining bytes
+	for ; j < len(b) && j < 18; j++ {
+		c := b[j] | 0x20
+		isLetter := (c & 0x40) >> 6
+		v := c - '0' - (isLetter * 39)
+
+		if v > 15 {
+			break
+		}
+		result = (result << 4) | uint64(v)
+	}
+
+	return result
+}
+
+// ParseHexN parses up to 16 hex chars with bit manipulation
 //
 //go:norace
 //go:nocheckptr
@@ -241,19 +351,20 @@ func ParseHexU64(b []byte) uint64 {
 //go:inline
 //go:registerparams
 func ParseHexN(b []byte) uint64 {
-	var v uint64
+	var result uint64
+
 	for _, c := range b {
-		v <<= 4
-		switch {
-		case c >= '0' && c <= '9':
-			v |= uint64(c - '0')
-		case c >= 'a' && c <= 'f':
-			v |= uint64(c-'a') + 10
-		case c >= 'A' && c <= 'F':
-			v |= uint64(c-'A') + 10
+		c |= 0x20 // Force lowercase
+		isLetter := (c & 0x40) >> 6
+		v := c - '0' - (isLetter * 39)
+
+		if v > 15 {
+			break
 		}
+		result = (result << 4) | uint64(v)
 	}
-	return v
+
+	return result
 }
 
 // ParseHexU32 parses hex to uint32
