@@ -6,6 +6,10 @@ import (
 	"unsafe"
 )
 
+// ============================================================================
+// TYPE CONVERSION UTILITIES
+// ============================================================================
+
 // B2s converts byte slice to string without allocation
 // ⚠️  WARNING: Input slice must not be modified after conversion
 //
@@ -36,7 +40,7 @@ func Itoa(n int) string {
 	var buf [10]byte // Max 10 digits for 32-bit int
 	i := len(buf)
 
-	// Convert digits in reverse
+	// Convert digits in reverse order
 	for n > 0 {
 		i--
 		buf[i] = byte(n%10 + '0')
@@ -45,6 +49,10 @@ func Itoa(n int) string {
 
 	return string(buf[i:])
 }
+
+// ============================================================================
+// SYSTEM I/O UTILITIES
+// ============================================================================
 
 // PrintWarning writes to stderr via direct syscall
 //
@@ -70,7 +78,209 @@ func PrintInfo(msg string) {
 	syscall.Write(1, msgBytes)
 }
 
-// SkipToQuoteEarlyExit finds quote with hop limit
+// ============================================================================
+// MEMORY OPERATIONS
+// ============================================================================
+
+// Load64 loads 8 bytes as uint64 from unaligned memory
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func Load64(b []byte) uint64 {
+	return *(*uint64)(unsafe.Pointer(&b[0]))
+}
+
+// Load128 loads 16 bytes as two uint64s
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func Load128(b []byte) (uint64, uint64) {
+	p := (*[2]uint64)(unsafe.Pointer(&b[0]))
+	return p[0], p[1]
+}
+
+// LoadBE64 loads 8 bytes as big-endian uint64
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func LoadBE64(b []byte) uint64 {
+	_ = b[7] // Bounds check hint
+	return uint64(b[0])<<56 | uint64(b[1])<<48 |
+		uint64(b[2])<<40 | uint64(b[3])<<32 |
+		uint64(b[4])<<24 | uint64(b[5])<<16 |
+		uint64(b[6])<<8 | uint64(b[7])
+}
+
+// ============================================================================
+// HEX PARSING UTILITIES
+// ============================================================================
+
+// ParseEthereumAddress parses 40-char Ethereum address to [20]byte using SIMD optimization
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func ParseEthereumAddress(b []byte) [20]byte {
+	var result [20]byte
+
+	if len(b) == 0 {
+		return result
+	}
+
+	j := 0
+	// Skip 0x prefix
+	if len(b) >= 2 && b[0] == '0' && (b[1]|0x20) == 'x' {
+		j = 2
+	}
+
+	byteIdx := 0
+
+	// Process 8 bytes at a time with SIMD algorithm
+	for j+7 < len(b) && j < 42 && byteIdx < 20 { // 42 = 2 (0x) + 40 (address chars)
+		chunk := Load64(b[j:])
+
+		// Convert ASCII to nibbles
+		chunk |= 0x2020202020202020                            // Force lowercase
+		letterMask := (chunk & 0x4040404040404040) >> 6        // Detect letters
+		chunk = chunk - 0x3030303030303030 - (letterMask * 39) // Convert to nibbles
+
+		// SIMD nibble compaction with endian correction
+		extracted := chunk & 0x000F000F000F000F
+		chunk ^= extracted
+		chunk |= extracted << 12
+
+		extracted = chunk & 0xFF000000FF000000
+		chunk ^= extracted
+		chunk |= extracted >> 24
+
+		extracted = chunk & 0x000000000000FFFF
+		chunk ^= extracted
+		chunk |= extracted << 48
+
+		// Extract 4 bytes from compacted result
+		packed := chunk >> 32
+		if byteIdx+3 < 20 {
+			result[byteIdx] = byte(packed >> 24)
+			result[byteIdx+1] = byte(packed >> 16)
+			result[byteIdx+2] = byte(packed >> 8)
+			result[byteIdx+3] = byte(packed)
+			byteIdx += 4
+		}
+		j += 8
+	}
+
+	// Handle remaining bytes with branchless optimization
+	var currentByte byte
+	nibbleCount := 0
+
+	for ; j < len(b) && j < 42 && byteIdx < 20; j++ {
+		c := b[j] | 0x20
+		v := c - '0' - ((c&0x40)>>6)*39
+
+		if v > 15 {
+			break
+		}
+
+		if nibbleCount == 0 {
+			currentByte = byte(v) << 4
+			nibbleCount = 1
+		} else {
+			currentByte |= byte(v)
+			result[byteIdx] = currentByte
+			byteIdx++
+			nibbleCount = 0
+		}
+	}
+
+	return result
+}
+
+// ParseHexU64 parses hex string to uint64 with branchless optimization
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func ParseHexU64(b []byte) uint64 {
+	if len(b) == 0 {
+		return 0
+	}
+
+	j := 0
+	// Skip 0x prefix
+	if len(b) >= 2 && b[0] == '0' && (b[1]|0x20) == 'x' {
+		j = 2
+	}
+
+	var result uint64
+
+	// Handle up to 16 hex chars for uint64 with branchless optimization
+	for ; j < len(b) && j < 18; j++ { // 18 = 2 (0x) + 16 (hex chars)
+		c := b[j] | 0x20
+		v := c - '0' - ((c&0x40)>>6)*39
+
+		if v > 15 {
+			break
+		}
+
+		result = (result << 4) | uint64(v)
+	}
+
+	return result
+}
+
+// ParseHexU32 parses hex to uint32 with branchless optimization
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func ParseHexU32(b []byte) uint32 {
+	if len(b) == 0 {
+		return 0
+	}
+
+	j := 0
+	// Skip 0x prefix
+	if len(b) >= 2 && b[0] == '0' && (b[1]|0x20) == 'x' {
+		j = 2
+	}
+
+	var result uint32
+
+	// Handle up to 8 hex chars for uint32
+	for ; j < len(b) && j < 10; j++ { // 10 = 2 (0x) + 8 (hex chars)
+		c := b[j] | 0x20
+		v := c - '0' - ((c&0x40)>>6)*39
+
+		if v > 15 {
+			break
+		}
+
+		result = (result << 4) | uint32(v)
+	}
+
+	return result
+}
+
+// ============================================================================
+// JSON PARSING UTILITIES
+// ============================================================================
+
+// SkipToQuoteEarlyExit finds quote with hop limit for bounded parsing
 //
 //go:norace
 //go:nocheckptr
@@ -94,7 +304,7 @@ func SkipToQuoteEarlyExit(p []byte, startIdx int, hopSize int, maxHops int) (int
 	return -1, false
 }
 
-// SkipToClosingBracketEarlyExit finds ] with hop limit
+// SkipToClosingBracketEarlyExit finds ] with hop limit for bounded parsing
 //
 //go:norace
 //go:nocheckptr
@@ -134,7 +344,7 @@ func SkipToQuote(p []byte, startIdx int, hopSize int) int {
 	return -1
 }
 
-// SkipToOpeningBracket finds [ character
+// SkipToOpeningBracket finds [ character with hop-based traversal
 //
 //go:norace
 //go:nocheckptr
@@ -150,7 +360,7 @@ func SkipToOpeningBracket(p []byte, startIdx int, hopSize int) int {
 	return -1
 }
 
-// SkipToClosingBracket finds ] character
+// SkipToClosingBracket finds ] character with hop-based traversal
 //
 //go:norace
 //go:nocheckptr
@@ -166,143 +376,11 @@ func SkipToClosingBracket(p []byte, startIdx int, hopSize int) int {
 	return -1
 }
 
-// Load64 loads 8 bytes as uint64 from unaligned memory
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func Load64(b []byte) uint64 {
-	return *(*uint64)(unsafe.Pointer(&b[0]))
-}
+// ============================================================================
+// HASHING UTILITIES
+// ============================================================================
 
-// Load128 loads 16 bytes as two uint64s
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func Load128(b []byte) (uint64, uint64) {
-	p := (*[2]uint64)(unsafe.Pointer(&b[0]))
-	return p[0], p[1]
-}
-
-// LoadBE64 parses 8 bytes as big-endian uint64
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func LoadBE64(b []byte) uint64 {
-	_ = b[7] // Bounds check hint
-	return uint64(b[0])<<56 | uint64(b[1])<<48 |
-		uint64(b[2])<<40 | uint64(b[3])<<32 |
-		uint64(b[4])<<24 | uint64(b[5])<<16 |
-		uint64(b[6])<<8 | uint64(b[7])
-}
-
-// ParseHexU64 parses hex string to uint64 with big-endian order
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func ParseHexU64(b []byte) uint64 {
-	if len(b) == 0 {
-		return 0
-	}
-
-	j := 0
-	// Skip 0x prefix
-	if len(b) >= 2 && b[0] == '0' && (b[1]|0x20) == 'x' {
-		j = 2
-	}
-
-	var result uint64
-
-	// Process 8 bytes at a time with SIMD algorithm
-	for j+7 < len(b) && j < 18 {
-		chunk := Load64(b[j:])
-
-		// Convert ASCII to nibbles
-		chunk |= 0x2020202020202020                            // Force lowercase
-		letterMask := (chunk & 0x4040404040404040) >> 6        // Detect letters
-		chunk = chunk - 0x3030303030303030 - (letterMask * 39) // Convert to nibbles
-
-		// SIMD nibble compaction with endian correction
-		extracted := chunk & 0x000F000F000F000F
-		chunk ^= extracted
-		chunk |= extracted << 12
-
-		extracted = chunk & 0xFF000000FF000000
-		chunk ^= extracted
-		chunk |= extracted >> 24
-
-		extracted = chunk & 0x000000000000FFFF
-		chunk ^= extracted
-		chunk |= extracted << 48
-
-		// Extract final result from upper 32 bits where compaction placed it
-		result = (result << 32) | (chunk >> 32)
-		j += 8
-	}
-
-	// Handle remaining bytes with branchless optimization
-	for ; j < len(b) && j < 18; j++ {
-		c := b[j] | 0x20
-		v := c - '0' - ((c&0x40)>>6)*39
-
-		// Branchless exit: if invalid, v will be > 15
-		if v > 15 {
-			break
-		}
-
-		result = (result << 4) | uint64(v)
-	}
-
-	return result
-}
-
-// ParseHexN parses up to 16 hex chars with bit manipulation
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func ParseHexN(b []byte) uint64 {
-	var result uint64
-
-	for _, c := range b {
-		c |= 0x20 // Force lowercase
-		isLetter := (c & 0x40) >> 6
-		v := c - '0' - (isLetter * 39)
-
-		if v > 15 {
-			break
-		}
-		result = (result << 4) | uint64(v)
-	}
-
-	return result
-}
-
-// ParseHexU32 parses hex to uint32
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func ParseHexU32(b []byte) uint32 {
-	return uint32(ParseHexN(b))
-}
-
-// Mix64 applies Murmur3 finalization
+// Mix64 applies Murmur3 finalization for hash distribution
 //
 //go:norace
 //go:nocheckptr
@@ -318,7 +396,7 @@ func Mix64(x uint64) uint64 {
 	return x
 }
 
-// Hash17 reduces address to 17-bit hash
+// Hash17 reduces address to 17-bit hash for compact storage
 //
 //go:norace
 //go:nocheckptr
