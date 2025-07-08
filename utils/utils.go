@@ -1,4 +1,4 @@
-// utils.go — High-performance utilities for zero-allocation operations
+// utils.go — Maximum performance utilities with all safety checks removed
 package utils
 
 import (
@@ -34,7 +34,6 @@ func Load128(b []byte) (uint64, uint64) {
 }
 
 // LoadBE64 loads 8 bytes as big-endian uint64
-// Note: Go compiler recognizes this pattern and compiles to single BSWAP instruction on ARM64/x86
 //
 //go:norace
 //go:nocheckptr
@@ -42,7 +41,6 @@ func Load128(b []byte) (uint64, uint64) {
 //go:inline
 //go:registerparams
 func LoadBE64(b []byte) uint64 {
-	_ = b[7] // Bounds check hint
 	return uint64(b[0])<<56 | uint64(b[1])<<48 |
 		uint64(b[2])<<40 | uint64(b[3])<<32 |
 		uint64(b[4])<<24 | uint64(b[5])<<16 |
@@ -62,9 +60,6 @@ func LoadBE64(b []byte) uint64 {
 //go:inline
 //go:registerparams
 func B2s(b []byte) string {
-	if len(b) == 0 {
-		return ""
-	}
 	return unsafe.String(&b[0], len(b))
 }
 
@@ -94,10 +89,11 @@ func Itoa(n int) string {
 }
 
 // ============================================================================
-// HEX PARSING UTILITIES
+// HEX PARSING UTILITIES - ZERO CHECKS
 // ============================================================================
 
 // ParseHexU32 parses hex to uint32 with branchless optimization
+// Input must be valid hex chars only - no validation
 //
 //go:norace
 //go:nocheckptr
@@ -105,34 +101,20 @@ func Itoa(n int) string {
 //go:inline
 //go:registerparams
 func ParseHexU32(b []byte) uint32 {
-	if len(b) == 0 {
-		return 0
-	}
-
-	j := 0
-	// Skip 0x prefix
-	if len(b) >= 2 && b[0] == '0' && (b[1]|0x20) == 'x' {
-		j = 2
-	}
-
 	var result uint32
 
 	// Handle up to 8 hex chars for uint32
-	for ; j < len(b) && j < 10; j++ { // 10 = 2 (0x) + 8 (hex chars)
+	for j := 0; j < len(b) && j < 8; j++ {
 		c := b[j] | 0x20
 		v := c - '0' - ((c&0x40)>>6)*39
-
-		if v > 15 {
-			break
-		}
-
 		result = (result << 4) | uint32(v)
 	}
 
 	return result
 }
 
-// ParseHexU64 parses hex string to uint64 using SIMD optimization with efficient padding
+// ParseHexU64 parses hex string to uint64 using SIMD optimization
+// Input must be valid hex chars only - no validation or prefix handling
 //
 //go:norace
 //go:nocheckptr
@@ -233,6 +215,7 @@ func ParseHexU64(b []byte) uint64 {
 }
 
 // ParseEthereumAddress parses 40-char Ethereum address to [20]byte using SIMD optimization
+// Input must be exactly 40 valid hex chars - no validation or prefix handling
 //
 //go:norace
 //go:nocheckptr
@@ -241,22 +224,11 @@ func ParseHexU64(b []byte) uint64 {
 //go:registerparams
 func ParseEthereumAddress(b []byte) [20]byte {
 	var result [20]byte
-
-	if len(b) == 0 {
-		return result
-	}
-
-	j := 0
-	// Skip 0x prefix
-	if len(b) >= 2 && b[0] == '0' && (b[1]|0x20) == 'x' {
-		j = 2
-	}
-
 	byteIdx := 0
 
 	// Process exactly 5 iterations of 8 chars each = 40 chars = 20 bytes
-	for byteIdx < 20 && j+7 < len(b) {
-		chunk := Load64(b[j:])
+	for byteIdx < 20 {
+		chunk := Load64(b[byteIdx*2:])
 
 		// Convert ASCII to nibbles
 		chunk |= 0x2020202020202020                            // Force lowercase
@@ -284,7 +256,6 @@ func ParseEthereumAddress(b []byte) [20]byte {
 		result[byteIdx+3] = byte(packed)
 
 		byteIdx += 4
-		j += 8
 	}
 
 	return result

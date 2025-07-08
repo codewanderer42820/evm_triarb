@@ -250,33 +250,23 @@ func TestParseEthereumAddress(t *testing.T) {
 			[20]byte{0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0xab},
 		},
 		{
-			"full_address_0x_prefix",
-			[]byte("0x1234567890abcdefABCDEF1234567890abcdefAB"),
-			[20]byte{0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0xab},
-		},
-		{
 			"real_ethereum_address",
-			[]byte("0xdAC17F958D2ee523a2206206994597C13D831ec7"),
+			[]byte("dAC17F958D2ee523a2206206994597C13D831ec7"),
 			[20]byte{0xda, 0xc1, 0x7f, 0x95, 0x8d, 0x2e, 0xe5, 0x23, 0xa2, 0x20, 0x62, 0x06, 0x99, 0x45, 0x97, 0xc1, 0x3d, 0x83, 0x1e, 0xc7},
 		},
 		{
 			"zeros_address",
-			[]byte("0x0000000000000000000000000000000000000000"),
+			[]byte("0000000000000000000000000000000000000000"),
 			[20]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 		},
 		{
 			"max_address",
-			[]byte("0xffffffffffffffffffffffffffffffffffffffff"),
+			[]byte("ffffffffffffffffffffffffffffffffffffffff"),
 			[20]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
 		},
 		{
 			"empty_input",
 			[]byte(""),
-			[20]byte{},
-		},
-		{
-			"only_0x",
-			[]byte("0x"),
 			[20]byte{},
 		},
 	}
@@ -294,7 +284,7 @@ func TestParseEthereumAddress(t *testing.T) {
 func TestHexParsing_ZeroAllocation(t *testing.T) {
 	hex32 := []byte("deadbeef")
 	hex64 := []byte("deadbeef12345678")
-	ethAddr := []byte("0x1234567890abcdefABCDEF1234567890abcdefAB")
+	ethAddr := []byte("1234567890abcdefABCDEF1234567890abcdefAB")
 
 	assertZeroAllocs(t, "ParseHexU32()", func() {
 		_ = ParseHexU32(hex32)
@@ -544,7 +534,7 @@ func BenchmarkTypeConversion(b *testing.B) {
 func BenchmarkHexParsing(b *testing.B) {
 	hex32 := []byte("deadbeef")
 	hex64 := []byte("deadbeef12345678")
-	ethAddr := []byte("0x1234567890abcdefABCDEF1234567890abcdefAB")
+	ethAddr := []byte("1234567890abcdefABCDEF1234567890abcdefAB")
 
 	b.Run("ParseHexU32", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
@@ -613,7 +603,7 @@ func BenchmarkComparison(b *testing.B) {
 func BenchmarkZeroAlloc(b *testing.B) {
 	data := make([]byte, 1024)
 	hex := []byte("deadbeef")
-	ethAddr := []byte("0x1234567890abcdefABCDEF1234567890abcdefAB")
+	ethAddr := []byte("1234567890abcdefABCDEF1234567890abcdefAB")
 
 	var m1, m2 runtime.MemStats
 	runtime.GC()
