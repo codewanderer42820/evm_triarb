@@ -219,6 +219,7 @@ func TestParseHexU64(t *testing.T) {
 		{"mixed_case", []byte("DeAdBeEf"), 0xdeadbeef},
 		{"sixteen_chars", []byte("0123456789abcdef"), 0x0123456789abcdef},
 		{"max64_truncated", []byte("ffffffffffffffff"), 0xffffffffffffffff},
+		{"over_sixteen_chars", []byte("ffffffffffffffffdeadbeef"), 0xffffffffffffffff}, // Truncates to first 16 chars
 	}
 
 	for _, tt := range tests {
