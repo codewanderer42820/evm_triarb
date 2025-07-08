@@ -1,4 +1,3 @@
-// types.go — Zero-copy data structures for Ethereum log processing
 package types
 
 // LogView - Zero-copy reference to decoded Ethereum event data.
