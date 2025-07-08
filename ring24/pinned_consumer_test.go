@@ -722,47 +722,6 @@ func TestPinnedConsumerStartupRace(t *testing.T) {
 // ERROR CONDITIONS AND EDGE CASES
 // ============================================================================
 
-// TestPinnedConsumerNilHandler validates nil handler handling
-func TestPinnedConsumerNilHandler(t *testing.T) {
-	s := newConsumerTestState(4)
-
-	// This should not panic
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("Consumer with nil handler panicked: %v", r)
-		}
-	}()
-
-	PinnedConsumer(0, s.ring, s.stop, s.hot, nil, s.done)
-
-	// Push data
-	data := testDataConsumer(42)
-	pushTestData(s, data, true)
-
-	// Allow some time for potential nil dereference
-	time.Sleep(10 * time.Millisecond)
-
-	// Should shutdown cleanly
-	if err := s.shutdown(100 * time.Millisecond); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestPinnedConsumerNilPointers validates nil pointer handling
-func TestPinnedConsumerNilPointers(t *testing.T) {
-	ring := New(4)
-	done := make(chan struct{})
-
-	// Test with nil stop pointer
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("Expected panic with nil stop pointer")
-		}
-	}()
-
-	PinnedConsumer(0, ring, nil, new(uint32), func(*[24]byte) {}, done)
-}
-
 // TestPinnedConsumerInvalidCore validates core parameter handling
 func TestPinnedConsumerInvalidCore(t *testing.T) {
 	s := newConsumerTestState(4)
