@@ -41,7 +41,7 @@ type TickUpdate struct {
 	forwardTick float64 // 8B - Forward direction price
 	reverseTick float64 // 8B - Reverse direction price
 	pairID      PairID  // 4B - Pair identifier
-	_           uint32  // 4B - Padding to 24 bytes
+	_           [4]byte // 4B - Padding to 24 bytes
 }
 
 // ArbitrageCycleState - Cycle state with hot data first
