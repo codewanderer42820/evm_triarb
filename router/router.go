@@ -93,8 +93,8 @@ type FanoutEntry struct {
 //go:align 32
 type PairShardBucket struct {
 	// Hot fields (8 bytes)
-	pairID PairID // 4B - Queue lookup
-	_      uint32 // 4B - Padding
+	pairID PairID  // 4B - Queue lookup
+	_      [4]byte // 4B - Padding
 
 	// Cold fields (24 bytes)
 	edgeBindings []ArbitrageEdgeBinding // 24B - Slice header (ptr,len,cap)
@@ -117,7 +117,7 @@ type ArbitrageCoreExecutor struct {
 
 	// Cache line 3: Canonical storage (64 bytes)
 	cycleStates []ArbitrageCycleState // 24B - Direct storage
-	_           [5]uint64             // 40B - Padding to 64 bytes
+	_           [40]byte              // 40B - Padding to 64 bytes
 }
 
 // Global state
