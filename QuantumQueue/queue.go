@@ -52,7 +52,7 @@ type QuantumQueue struct {
 	freeHead Handle // 4B - Freelist head
 
 	// Padding to cache line boundary (48 bytes)
-	_ [6]uint64 // 48B - Cache isolation
+	_ [48]byte // 48B - Cache isolation
 
 	// Large data structures
 	arena   [CapItems]node         // Fixed allocation pool
