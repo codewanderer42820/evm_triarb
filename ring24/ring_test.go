@@ -714,6 +714,11 @@ func TestMemoryLayout(t *testing.T) {
 		t.Errorf("tail offset = %d, want 128", tailAddr-ringAddr)
 	}
 
+	// Verify mask is in configuration section (cache line 4)
+	if maskAddr < tailAddr {
+		t.Error("mask field appears before tail field")
+	}
+
 	// Verify sufficient spacing between critical fields
 	if tailAddr-headAddr < 64 {
 		t.Error("insufficient spacing between head and tail")

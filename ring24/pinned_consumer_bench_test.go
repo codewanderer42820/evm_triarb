@@ -633,7 +633,7 @@ func BenchmarkPinnedConsumer_ShutdownUnderLoad(b *testing.B) {
 	// Create sustained load
 	go func() {
 		atomic.StoreUint32(s.hot, 1)
-		for i := 0; !atomic.LoadUint32(s.stop) != 0; i++ {
+		for i := 0; atomic.LoadUint32(s.stop) == 0; i++ {
 			data := testData(byte(i))
 			s.ring.Push(&data)
 			time.Sleep(10 * time.Microsecond)

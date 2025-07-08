@@ -166,8 +166,8 @@ func (s *consumerTestState) getDataStats() map[[24]byte]int {
 	return result
 }
 
-// testData creates deterministic test payload
-func testData(seed byte) [24]byte {
+// testDataConsumer creates deterministic test payload for consumer tests
+func testDataConsumer(seed byte) [24]byte {
 	var data [24]byte
 	for i := range data {
 		data[i] = seed + byte(i)
@@ -207,7 +207,7 @@ func TestPinnedConsumerBasicOperation(t *testing.T) {
 	s.launch(handler)
 
 	// Test data delivery
-	want := testData(42)
+	want := testDataConsumer(42)
 	if !pushTestData(s, want, true) {
 		t.Fatal("Failed to push test data")
 	}
@@ -247,7 +247,7 @@ func TestPinnedConsumerMultipleItems(t *testing.T) {
 	atomic.StoreUint32(s.hot, 1)
 
 	for _, item := range testItems {
-		data := testData(item)
+		data := testDataConsumer(item)
 		if !s.ring.Push(&data) {
 			t.Fatalf("Failed to push item %d", item)
 		}
@@ -263,7 +263,7 @@ func TestPinnedConsumerMultipleItems(t *testing.T) {
 	// Verify all data was received
 	stats := s.getDataStats()
 	for _, item := range testItems {
-		expected := testData(item)
+		expected := testDataConsumer(item)
 		if count, exists := stats[expected]; !exists || count != 1 {
 			t.Errorf("Item %v: expected 1 occurrence, got %d", expected, count)
 		}
@@ -285,7 +285,7 @@ func TestPinnedConsumerWithCooldownBasic(t *testing.T) {
 	s.launchWithCooldown(handler)
 
 	// Test data delivery
-	want := testData(99)
+	want := testDataConsumer(99)
 	if !pushTestData(s, want, true) {
 		t.Fatal("Failed to push test data")
 	}
@@ -349,7 +349,7 @@ func TestPinnedConsumerShutdownDuringProcessing(t *testing.T) {
 	// Push data continuously
 	atomic.StoreUint32(s.hot, 1)
 	for i := 0; i < 10; i++ {
-		data := testData(byte(i))
+		data := testDataConsumer(byte(i))
 		s.ring.Push(&data)
 	}
 
@@ -408,7 +408,7 @@ func TestPinnedConsumerHotWindowPersistence(t *testing.T) {
 	s.launch(handler)
 
 	// Process item to activate hot window
-	data := testData(42)
+	data := testDataConsumer(42)
 	if !pushTestData(s, data, true) {
 		t.Fatal("Failed to push initial data")
 	}
@@ -429,7 +429,7 @@ func TestPinnedConsumerHotWindowPersistence(t *testing.T) {
 	}
 
 	// Push another item to verify responsiveness
-	data2 := testData(43)
+	data2 := testDataConsumer(43)
 	if !pushTestData(s, data2, false) {
 		t.Fatal("Failed to push second data during hot window")
 	}
@@ -468,7 +468,7 @@ func TestPinnedConsumerHotFlagBehavior(t *testing.T) {
 	atomic.StoreUint32(s.hot, 0)
 
 	// Now push data to verify consumer is still responsive
-	data := testData(55)
+	data := testDataConsumer(55)
 	if !s.ring.Push(&data) {
 		t.Fatal("Failed to push data after clearing hot flag")
 	}
@@ -492,8 +492,6 @@ func TestPinnedConsumerHotWindowExpiry(t *testing.T) {
 
 	s := newConsumerTestState(8)
 
-	// Track CPU relaxation calls
-	relaxCount := uint32(0)
 	handler := func(data *[24]byte) {
 		atomic.AddUint32(s.callCount, 1)
 	}
@@ -501,7 +499,7 @@ func TestPinnedConsumerHotWindowExpiry(t *testing.T) {
 	s.launch(handler)
 
 	// Process initial item
-	data := testData(77)
+	data := testDataConsumer(77)
 	if !pushTestData(s, data, true) {
 		t.Fatal("Failed to push initial data")
 	}
@@ -514,7 +512,7 @@ func TestPinnedConsumerHotWindowExpiry(t *testing.T) {
 	time.Sleep(6 * time.Second)
 
 	// Push new data after hot window expiry
-	data2 := testData(78)
+	data2 := testDataConsumer(78)
 	if !pushTestData(s, data2, false) {
 		t.Fatal("Failed to push data after hot window expiry")
 	}
@@ -546,7 +544,7 @@ func TestPinnedConsumerColdResume(t *testing.T) {
 	s.launch(handler)
 
 	// Initial processing
-	data1 := testData(10)
+	data1 := testDataConsumer(10)
 	if !pushTestData(s, data1, true) {
 		t.Fatal("Failed to push initial data")
 	}
@@ -559,7 +557,7 @@ func TestPinnedConsumerColdResume(t *testing.T) {
 	time.Sleep(6*time.Second + 100*time.Millisecond)
 
 	// Resume activity
-	data2 := testData(11)
+	data2 := testDataConsumer(11)
 	resumeStart := time.Now()
 
 	if !pushTestData(s, data2, true) {
@@ -611,7 +609,7 @@ func TestPinnedConsumerSpinBudgetBehavior(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Push data after potential CPU relaxation
-	data := testData(99)
+	data := testDataConsumer(99)
 	if !pushTestData(s, data, false) {
 		t.Fatal("Failed to push data after spin period")
 	}
@@ -641,7 +639,7 @@ func TestPinnedConsumerDelayedStartup(t *testing.T) {
 	// Push data before consumer starts
 	prePushedData := []byte{1, 2, 3}
 	for _, item := range prePushedData {
-		data := testData(item)
+		data := testDataConsumer(item)
 		if !s.ring.Push(&data) {
 			t.Fatalf("Failed to pre-push data %d", item)
 		}
@@ -660,7 +658,7 @@ func TestPinnedConsumerDelayedStartup(t *testing.T) {
 	// Verify all pre-pushed data was received
 	stats := s.getDataStats()
 	for _, item := range prePushedData {
-		expected := testData(item)
+		expected := testDataConsumer(item)
 		if count, exists := stats[expected]; !exists || count != 1 {
 			t.Errorf("Pre-pushed item %v: expected 1, got %d", expected, count)
 		}
@@ -685,7 +683,7 @@ func TestPinnedConsumerStartupRace(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				for i := 0; i < 5; i++ {
-					data := testData(byte(i))
+					data := testDataConsumer(byte(i))
 					s.ring.Push(&data)
 					time.Sleep(time.Microsecond)
 				}
@@ -738,7 +736,7 @@ func TestPinnedConsumerNilHandler(t *testing.T) {
 	PinnedConsumer(0, s.ring, s.stop, s.hot, nil, s.done)
 
 	// Push data
-	data := testData(42)
+	data := testDataConsumer(42)
 	pushTestData(s, data, true)
 
 	// Allow some time for potential nil dereference
@@ -786,7 +784,7 @@ func TestPinnedConsumerInvalidCore(t *testing.T) {
 			PinnedConsumer(core, s.ring, s.stop, s.hot, handler, s.done)
 
 			// Should still function despite invalid affinity
-			data := testData(42)
+			data := testDataConsumer(42)
 			pushTestData(s, data, true)
 
 			if err := s.waitForCalls(1, 100*time.Millisecond); err != nil {
@@ -833,7 +831,7 @@ func TestPinnedConsumerLatency(t *testing.T) {
 
 	for i := 0; i < numOps; i++ {
 		s.startTime = time.Now()
-		data := testData(byte(i))
+		data := testDataConsumer(byte(i))
 		if !s.ring.Push(&data) {
 			t.Fatalf("Push %d failed", i)
 		}
@@ -905,7 +903,7 @@ func TestPinnedConsumerThroughput(t *testing.T) {
 
 	operations := 0
 	for time.Since(start) < duration {
-		data := testData(byte(operations % 256))
+		data := testDataConsumer(byte(operations % 256))
 		if s.ring.Push(&data) {
 			operations++
 		} else {
@@ -957,7 +955,7 @@ func TestPinnedConsumerGoroutineCleanup(t *testing.T) {
 		s.launch(handler)
 
 		// Brief activity
-		data := testData(byte(i))
+		data := testDataConsumer(byte(i))
 		pushTestData(s, data, true)
 		s.waitForCalls(1, 50*time.Millisecond)
 
@@ -1000,7 +998,7 @@ func TestPinnedConsumerMemoryLeaks(t *testing.T) {
 
 		// Push some data
 		for j := 0; j < 10; j++ {
-			data := testData(byte(i*10 + j))
+			data := testDataConsumer(byte(i*10 + j))
 			pushTestData(s, data, true)
 		}
 
@@ -1061,7 +1059,7 @@ func TestPinnedConsumerConcurrentAccess(t *testing.T) {
 			atomic.StoreUint32(s.hot, 1)
 
 			for i := 0; i < opsPerProducer; i++ {
-				data := testData(byte(producerID*100 + i))
+				data := testDataConsumer(byte(producerID*100 + i))
 				for !s.ring.Push(&data) {
 					time.Sleep(time.Microsecond)
 				}
@@ -1127,7 +1125,7 @@ func TestPinnedConsumerStopFlagRace(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				for i := 0; i < 10; i++ {
-					data := testData(byte(i))
+					data := testDataConsumer(byte(i))
 					if !s.ring.Push(&data) {
 						break
 					}
