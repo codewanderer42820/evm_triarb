@@ -186,10 +186,10 @@ func directAddressToIndex64(address40Bytes []byte) uint32 {
 	// Parse to get 2x density (40 hex chars → 20 bytes)
 	addressBytes := utils.ParseEthereumAddress(address40Bytes)
 
-	// Use bytes 8-12 (middle of address) for different distribution
-	hash32 := *(*uint32)(unsafe.Pointer(&addressBytes[8]))
+	// Use 8 bytes (64 bits) for maximum entropy without mixing
+	hash64 := *(*uint64)(unsafe.Pointer(&addressBytes[0]))
 
-	return hash32 & constants.AddressTableMask
+	return uint32(hash64) & constants.AddressTableMask
 }
 
 // bytesToAddressKey converts address bytes to AddressKey
@@ -203,13 +203,14 @@ func bytesToAddressKey(addressBytes []byte) AddressKey {
 	// Parse hex string to 20-byte address
 	parsedAddress := utils.ParseEthereumAddress(addressBytes)
 
+	// Pack all 20 bytes efficiently: 8+8+4 = 20 bytes exactly
 	return AddressKey{
 		words: [5]uint64{
-			*(*uint64)(unsafe.Pointer(&parsedAddress[0])),
-			*(*uint64)(unsafe.Pointer(&parsedAddress[8])),
-			*(*uint64)(unsafe.Pointer(&parsedAddress[12])), // Overlapping last 8 bytes to cover all 20
-			0,
-			0,
+			*(*uint64)(unsafe.Pointer(&parsedAddress[0])),          // Bytes 0-7
+			*(*uint64)(unsafe.Pointer(&parsedAddress[8])),          // Bytes 8-15
+			uint64(*(*uint32)(unsafe.Pointer(&parsedAddress[16]))), // Bytes 16-19
+			0, // Unused
+			0, // Unused
 		},
 	}
 }
@@ -222,10 +223,12 @@ func bytesToAddressKey(addressBytes []byte) AddressKey {
 //go:inline
 //go:registerparams
 func (a AddressKey) isEqual(b AddressKey) bool {
-	// Compare first 3 words (covers 20 bytes with some overlap)
+	// Compare all 5 words to detect any modifications
 	return a.words[0] == b.words[0] &&
 		a.words[1] == b.words[1] &&
-		a.words[2] == b.words[2]
+		a.words[2] == b.words[2] &&
+		a.words[3] == b.words[3] &&
+		a.words[4] == b.words[4]
 }
 
 // RegisterPairAddress inserts address→pair mapping with Robin Hood
@@ -258,6 +261,7 @@ func RegisterPairAddress(address40HexBytes []byte, pairID PairID) {
 
 		// Robin Hood displacement
 		currentKey := pairAddressKeys[hashIndex]
+		// Use same hash calculation as directAddressToIndex64
 		currentKeyHash := uint32(currentKey.words[0]) & constants.AddressTableMask
 		currentDist := (hashIndex + constants.AddressTableCapacity - currentKeyHash) & constants.AddressTableMask
 
@@ -306,6 +310,7 @@ func lookupPairIDByAddress(address40HexBytes []byte) PairID {
 
 		// Robin Hood early termination
 		currentKey := pairAddressKeys[hashIndex]
+		// Use same hash calculation as directAddressToIndex64
 		currentKeyHash := uint32(currentKey.words[0]) & constants.AddressTableMask
 		currentDist := (hashIndex + constants.AddressTableCapacity - currentKeyHash) & constants.AddressTableMask
 
