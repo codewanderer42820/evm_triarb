@@ -31,7 +31,7 @@ type CycleStateIndex uint64
 //go:align 64
 type AddressKey struct {
 	words [5]uint64 // 40B Ethereum address as 5×8-byte words
-	_     [3]uint64 // 24B padding to 64 bytes
+	_     [24]byte  // 24B padding to 64 bytes
 }
 
 // TickUpdate - Price tick message (24 bytes for ring buffer)
