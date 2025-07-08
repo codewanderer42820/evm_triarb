@@ -13,6 +13,7 @@
 //   - Edge cases: Boundary conditions, reuse safety, and idle behavior
 //   - Memory safety: Pointer validity and lifetime management
 //   - Sequence integrity: Ordering guarantees and consistency checks
+//   - Memory layout: Field offset and cache line optimization validation
 //
 // Validation methodology:
 //   - Single-threaded operation validation (SPSC discipline)
@@ -23,7 +24,7 @@
 //   - Memory access pattern validation
 //
 // Performance assumptions:
-//   - Sub-10ns operation latency for Push/Pop operations
+//   - Sub-50ns operation latency for Push/Pop operations
 //   - Zero allocation during steady-state operation
 //   - Predictable behavior under varying load conditions
 //   - Cache-friendly access patterns for sequential operations

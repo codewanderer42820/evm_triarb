@@ -11,10 +11,10 @@
 //   - Hot window behavior: Activity-based polling state management
 //   - Cold resume logic: Recovery from idle periods and backoff behavior
 //   - Delayed startup: Pre-pushed data handling and consumer initialization
-//   - Error conditions: Invalid parameters and edge cases
+//   - Core parameter validation: Invalid core number handling
 //   - Performance characteristics: Latency and throughput validation
 //   - Memory safety: Goroutine cleanup and resource management
-//   - Concurrency safety: Thread-safe operation validation
+//   - Race condition safety: Stop flag coordination under concurrent access
 //
 // Validation methodology:
 //   - Multi-core environment setup for realistic testing
@@ -25,7 +25,7 @@
 //   - Statistical analysis of timing behavior
 //
 // Performance assumptions:
-//   - Sub-microsecond callback invocation latency
+//   - Sub-100ns push operation latency for ISR-grade performance
 //   - Immediate response to producer activity signals
 //   - Graceful degradation during idle periods
 //   - Deterministic shutdown within bounded time limits
