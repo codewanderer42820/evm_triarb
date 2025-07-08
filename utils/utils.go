@@ -204,20 +204,6 @@ func LoadBE64(b []byte) uint64 {
 		uint64(b[6])<<8 | uint64(b[7])
 }
 
-// Bswap32 reverses byte order in a 32-bit value
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func Bswap32(x uint32) uint32 {
-	return ((x & 0xFF) << 24) |
-		(((x >> 8) & 0xFF) << 16) |
-		(((x >> 16) & 0xFF) << 8) |
-		((x >> 24) & 0xFF)
-}
-
 // ParseHexU64 parses hex string to uint64 with big-endian order
 //
 //go:norace
@@ -256,87 +242,25 @@ func ParseHexU64(b []byte) uint64 {
 		chunk ^= extracted
 		chunk |= extracted >> 24
 
-		chunk <<= 16
-
-		extracted = chunk & 0xFFFF000000000000
+		extracted = chunk & 0x000000000000FFFF
 		chunk ^= extracted
-		chunk |= extracted >> 48
+		chunk |= extracted << 48
 
-		result = (result << 32) | chunk
+		// Extract final result from upper 32 bits where compaction placed it
+		result = (result << 32) | (chunk >> 32)
 		j += 8
 	}
 
-	// Handle remaining bytes
+	// Handle remaining bytes with branchless optimization
 	for ; j < len(b) && j < 18; j++ {
 		c := b[j] | 0x20
-		isLetter := (c & 0x40) >> 6
-		v := c - '0' - (isLetter * 39)
+		v := c - '0' - ((c&0x40)>>6)*39
 
+		// Branchless exit: if invalid, v will be > 15
 		if v > 15 {
 			break
 		}
-		result = (result << 4) | uint64(v)
-	}
 
-	return result
-}
-
-// ParseHexU64Raw parses hex string to uint64 with raw byte order
-// Use for internal operations where byte order doesn't matter
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func ParseHexU64Raw(b []byte) uint64 {
-	if len(b) == 0 {
-		return 0
-	}
-
-	j := 0
-	// Skip 0x prefix
-	if len(b) >= 2 && b[0] == '0' && (b[1]|0x20) == 'x' {
-		j = 2
-	}
-
-	var result uint64
-
-	// Process 8 bytes at a time with SIMD algorithm
-	for j+7 < len(b) && j < 18 {
-		chunk := Load64(b[j:])
-
-		// Convert ASCII to nibbles
-		chunk |= 0x2020202020202020
-		letterMask := (chunk & 0x4040404040404040) >> 6
-		chunk = chunk - 0x3030303030303030 - (letterMask * 39)
-
-		// SIMD nibble compaction (raw order)
-		extracted := chunk & 0x0F000F000F000F00
-		chunk ^= extracted
-		chunk |= extracted >> 4
-
-		extracted = chunk & 0x00FF000000FF0000
-		chunk ^= extracted
-		chunk |= extracted >> 8
-
-		extracted = chunk & 0x0000FFFF00000000
-		chunk ^= extracted
-		chunk |= extracted >> 16
-
-		result = (result << 32) | chunk
-		j += 8
-	}
-
-	// Handle remaining bytes
-	for ; j < len(b) && j < 18; j++ {
-		c := b[j] | 0x20
-		isLetter := (c & 0x40) >> 6
-		v := c - '0' - (isLetter * 39)
-
-		if v > 15 {
-			break
-		}
 		result = (result << 4) | uint64(v)
 	}
 
