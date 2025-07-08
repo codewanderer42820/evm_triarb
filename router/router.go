@@ -66,7 +66,7 @@ type ArbitrageCycleState struct {
 type ArbitrageEdgeBinding struct {
 	cyclePairs [3]PairID // 12B - Complete triplet
 	edgeIndex  uint16    // 2B - Edge index (0-2)
-	_          uint16    // 2B - Padding to 16 bytes
+	_          [2]byte   // 2B - Padding to 16 bytes
 }
 
 // FanoutEntry - Edge reference in fanout table
