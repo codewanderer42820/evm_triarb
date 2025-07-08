@@ -46,15 +46,6 @@ import (
 // TEST UTILITIES AND HELPERS
 // ============================================================================
 
-// testConsumerConfig holds configuration for consumer tests
-type testConsumerConfig struct {
-	core      int
-	ringSize  int
-	timeout   time.Duration
-	warmup    time.Duration
-	validator func(*testing.T, *consumerTestState)
-}
-
 // consumerTestState tracks test execution state
 type consumerTestState struct {
 	ring         *Ring

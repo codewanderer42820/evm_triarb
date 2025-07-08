@@ -33,8 +33,6 @@ package ring24
 import (
 	"crypto/rand"
 	"fmt"
-	"runtime"
-	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -72,12 +70,6 @@ func validateData(t *testing.T, got, want *[24]byte, context string) {
 	if got != nil && want != nil && *got != *want {
 		t.Fatalf("%s: got %v, want %v", context, got, want)
 	}
-}
-
-// memoryBarrier ensures memory ordering for test synchronization
-func memoryBarrier() {
-	runtime.Gosched()
-	atomic.LoadUint64(new(uint64))
 }
 
 // ============================================================================
