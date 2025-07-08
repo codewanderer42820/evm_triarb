@@ -75,8 +75,10 @@ func BenchmarkSize(b *testing.B) {
 // BenchmarkBorrow measures unchecked handle allocation performance.
 // Expected performance: 1-3ns (freelist pop with minimal validation).
 //
+// ⚠️  FOOTGUN GRADE 8/10: No exhaustion checking
 // Operation tested: q.Borrow()
 // Typical use case: High-frequency allocation in ISR contexts
+// DANGER: Undefined behavior when freelist exhausted
 func BenchmarkBorrow(b *testing.B) {
 	q := New()
 	handles := make([]Handle, benchSize)
@@ -186,6 +188,7 @@ func BenchmarkPushUpdate(b *testing.B) {
 // BenchmarkPushSameTickZero measures performance for edge case tick value (0).
 // Validates consistent performance across the tick range boundary conditions.
 //
+// ⚠️  FOOTGUN NOTE: No bounds validation on tick values
 // Edge case validation:
 //   - Minimum tick value handling
 //   - Bitmap index computation accuracy
@@ -298,11 +301,13 @@ func BenchmarkPushBursty(b *testing.B) {
 // BenchmarkPeepMin measures minimum finding performance via bitmap hierarchy.
 // Tests O(1) minimum extraction using CLZ-based bitmap traversal.
 //
+// ⚠️  FOOTGUN GRADE 10/10: Undefined behavior on empty queue
 // Algorithm performance:
 //   - 3-level bitmap hierarchy traversal
 //   - CLZ instruction utilization
 //   - Cache-optimized data structure access
 //   - Expected latency: 3-6ns per operation (improved from 4-8ns)
+//   - DANGER: Crashes or corrupts on empty queue
 func BenchmarkPeepMin(b *testing.B) {
 	q := New()
 	handles := make([]Handle, benchSize)
@@ -606,12 +611,14 @@ func BenchmarkMoveTickRandom(b *testing.B) {
 // BenchmarkMixedOperations measures realistic workload performance.
 // Combines all operations in patterns typical of ISR usage.
 //
+// ⚠️  FOOTGUN AWARENESS: Assumes correct operation sequencing
 // Mixed workload characteristics:
 //   - 40% Push operations (new entries)
 //   - 30% PeepMin operations (scheduling queries)
 //   - 20% UnlinkMin operations (task completion)
 //   - 10% MoveTick operations (priority updates)
 //   - Expected latency: 4-12ns per operation
+//   - DANGER: No validation of operation preconditions
 func BenchmarkMixedOperations(b *testing.B) {
 	q := New()
 	handles := make([]Handle, benchSize)
