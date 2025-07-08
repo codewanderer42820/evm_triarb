@@ -34,6 +34,7 @@ func Load128(b []byte) (uint64, uint64) {
 }
 
 // LoadBE64 loads 8 bytes as big-endian uint64
+// Note: Go compiler recognizes this pattern and compiles to single BSWAP instruction on ARM64/x86
 //
 //go:norace
 //go:nocheckptr

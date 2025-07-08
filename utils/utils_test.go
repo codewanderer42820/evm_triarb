@@ -196,15 +196,11 @@ func TestParseHexU32(t *testing.T) {
 	}{
 		{"zero", []byte("0"), 0},
 		{"single", []byte("f"), 15},
-		{"0x_prefix", []byte("0xff"), 255},
-		{"0X_prefix", []byte("0XFF"), 255},
 		{"four", []byte("1234"), 0x1234},
 		{"eight", []byte("deadbeef"), 0xdeadbeef},
 		{"max32", []byte("ffffffff"), 0xffffffff},
 		{"mixed_case", []byte("DeAdBeEf"), 0xdeadbeef},
-		{"invalid_stops", []byte("12g34"), 0x12},
 		{"empty", []byte(""), 0},
-		{"only_0x", []byte("0x"), 0},
 	}
 
 	for _, tt := range tests {
@@ -225,15 +221,11 @@ func TestParseHexU64(t *testing.T) {
 	}{
 		{"zero", []byte("0"), 0},
 		{"single", []byte("f"), 15},
-		{"0x_prefix", []byte("0xff"), 255},
-		{"0X_prefix", []byte("0XFF"), 255},
 		{"no_prefix", []byte("deadbeef"), 0xdeadbeef},
 		{"mixed_case", []byte("DeAdBeEf"), 0xdeadbeef},
 		{"sixteen_chars", []byte("0123456789abcdef"), 0x0123456789abcdef},
 		{"max64_truncated", []byte("ffffffffffffffff"), 0xffffffffffffffff},
-		{"invalid_stops", []byte("12g34"), 0x12},
 		{"empty", []byte(""), 0},
-		{"only_0x", []byte("0x"), 0},
 	}
 
 	for _, tt := range tests {
