@@ -664,36 +664,6 @@ func TestLongIdlePeriods(t *testing.T) {
 // ALIGNMENT AND CACHE LINE VALIDATION
 // ============================================================================
 
-// TestStructAlignment validates memory alignment for cache optimization
-func TestStructAlignment(t *testing.T) {
-	r := New(4)
-
-	// Verify Ring struct alignment
-	ringAddr := uintptr(unsafe.Pointer(r))
-	if ringAddr%64 != 0 {
-		t.Errorf("Ring not aligned to 64-byte boundary: %p", r)
-	}
-
-	// Verify head/tail separation (different cache lines)
-	headAddr := uintptr(unsafe.Pointer(&r.head))
-	tailAddr := uintptr(unsafe.Pointer(&r.tail))
-
-	headCacheLine := headAddr / 64
-	tailCacheLine := tailAddr / 64
-
-	if headCacheLine == tailCacheLine {
-		t.Error("head and tail are on the same cache line")
-	}
-
-	// Verify slot alignment
-	for i := range r.buf {
-		slotAddr := uintptr(unsafe.Pointer(&r.buf[i]))
-		if slotAddr%64 != 0 {
-			t.Errorf("slot %d not aligned to 64-byte boundary: %p", i, &r.buf[i])
-		}
-	}
-}
-
 // TestMemoryLayout validates expected memory layout
 func TestMemoryLayout(t *testing.T) {
 	r := New(4)

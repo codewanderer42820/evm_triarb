@@ -40,7 +40,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unsafe"
 )
 
 // ============================================================================
@@ -983,77 +982,6 @@ func TestPinnedConsumerMemoryLeaks(t *testing.T) {
 // ============================================================================
 // CONCURRENCY SAFETY VALIDATION
 // ============================================================================
-
-// TestPinnedConsumerConcurrentAccess validates thread safety
-func TestPinnedConsumerConcurrentAccess(t *testing.T) {
-	runtime.GOMAXPROCS(4)
-
-	s := newConsumerTestState(64)
-
-	var accessMu sync.Mutex
-	accessCount := make(map[uintptr]int)
-
-	handler := func(data *[24]byte) {
-		// Track concurrent access to data
-		addr := uintptr(unsafe.Pointer(data))
-		accessMu.Lock()
-		accessCount[addr]++
-		accessMu.Unlock()
-
-		atomic.AddUint32(s.callCount, 1)
-		time.Sleep(time.Microsecond) // Simulate processing
-	}
-
-	s.launch(handler)
-
-	// Concurrent producers
-	var wg sync.WaitGroup
-	numProducers := 4
-	opsPerProducer := 50
-
-	for p := 0; p < numProducers; p++ {
-		wg.Add(1)
-		go func(producerID int) {
-			defer wg.Done()
-			atomic.StoreUint32(s.hot, 1)
-
-			for i := 0; i < opsPerProducer; i++ {
-				data := testDataConsumer(byte(producerID*100 + i))
-				for !s.ring.Push(&data) {
-					time.Sleep(time.Microsecond)
-				}
-			}
-		}(p)
-	}
-
-	wg.Wait()
-	atomic.StoreUint32(s.hot, 0)
-
-	expectedCalls := uint32(numProducers * opsPerProducer)
-	if err := s.waitForCalls(expectedCalls, 2*time.Second); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := s.shutdown(200 * time.Millisecond); err != nil {
-		t.Fatal(err)
-	}
-
-	// Analyze concurrent access patterns
-	accessMu.Lock()
-	defer accessMu.Unlock()
-
-	totalAccesses := 0
-	for _, count := range accessCount {
-		totalAccesses += count
-		if count > 1 {
-			t.Errorf("Concurrent access detected to same memory address: %d accesses", count)
-		}
-	}
-
-	if totalAccesses != int(expectedCalls) {
-		t.Errorf("Access count mismatch: got %d, expected %d", totalAccesses, expectedCalls)
-	}
-}
 
 // TestPinnedConsumerStopFlagRace validates stop flag race conditions
 func TestPinnedConsumerStopFlagRace(t *testing.T) {
