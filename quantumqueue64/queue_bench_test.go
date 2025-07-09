@@ -10,6 +10,7 @@
 //   - Edge tick usage (0, max) included for performance consistency validation
 //   - Hot/cold path distinction models real-world ISR usage patterns
 //   - Bursty update patterns simulate interrupt coalescing scenarios
+//   - Pre-computed data values eliminate timing loop overhead
 //
 // Performance patterns tested:
 //   - Hot path: Same tick repeated updates (cache-friendly)
@@ -147,6 +148,7 @@ func BenchmarkBorrowSafe(b *testing.B) {
 func BenchmarkPushUnique(b *testing.B) {
 	q := New()
 	handles := make([]Handle, benchSize)
+	const testValue = uint64(0x123456789ABCDEF0) // Pre-computed constant
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
@@ -155,7 +157,7 @@ func BenchmarkPushUnique(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		h := handles[i%benchSize]
-		q.Push(int64(i%benchSize), h, uint64(i))
+		q.Push(int64(i%benchSize), h, testValue)
 	}
 }
 
@@ -170,16 +172,18 @@ func BenchmarkPushUnique(b *testing.B) {
 func BenchmarkPushUpdate(b *testing.B) {
 	q := New()
 	handles := make([]Handle, benchSize)
+	const initValue = uint64(0x1111111111111111)
+	const updateValue = uint64(0x2222222222222222)
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
-		q.Push(int64(i), h, uint64(i))
+		q.Push(int64(i), h, initValue)
 	}
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
 		h := handles[i%benchSize]
-		q.Push(int64(i%benchSize), h, uint64(i+benchSize))
+		q.Push(int64(i%benchSize), h, updateValue)
 	}
 }
 
@@ -194,10 +198,11 @@ func BenchmarkPushUpdate(b *testing.B) {
 func BenchmarkPushSameTickZero(b *testing.B) {
 	q := New()
 	h, _ := q.BorrowSafe()
+	const testValue = uint64(0x3333333333333333)
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		q.Push(0, h, uint64(i))
+		q.Push(0, h, testValue)
 	}
 }
 
@@ -212,10 +217,11 @@ func BenchmarkPushSameTickMax(b *testing.B) {
 	q := New()
 	h, _ := q.BorrowSafe()
 	maxTick := int64(BucketCount - 1)
+	const testValue = uint64(0x4444444444444444)
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		q.Push(maxTick, h, uint64(i))
+		q.Push(maxTick, h, testValue)
 	}
 }
 
@@ -230,6 +236,7 @@ func BenchmarkPushSameTickMax(b *testing.B) {
 func BenchmarkPushRandom(b *testing.B) {
 	q := New()
 	handles := make([]Handle, benchSize)
+	const testValue = uint64(0x5555555555555555)
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
@@ -246,7 +253,7 @@ func BenchmarkPushRandom(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		h := handles[i%benchSize]
-		q.Push(ticks[i%benchSize], h, uint64(i))
+		q.Push(ticks[i%benchSize], h, testValue)
 	}
 }
 
@@ -261,6 +268,7 @@ func BenchmarkPushRandom(b *testing.B) {
 func BenchmarkPushBursty(b *testing.B) {
 	q := New()
 	handles := make([]Handle, benchSize)
+	const testValue = uint64(0x6666666666666666)
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
@@ -288,7 +296,7 @@ func BenchmarkPushBursty(b *testing.B) {
 			tick = BucketCount - 1
 		}
 
-		q.Push(tick, h, uint64(i))
+		q.Push(tick, h, testValue)
 
 		// Shift burst window occasionally
 		if i%1000 == 0 {
@@ -393,12 +401,13 @@ func BenchmarkPeepMinDense(b *testing.B) {
 func BenchmarkUnlinkMin_StableBucket(b *testing.B) {
 	q := New()
 	h, _ := q.BorrowSafe()
-	q.Push(2048, h, 0x1234)
+	const testValue = uint64(0x1234567890ABCDEF)
+	q.Push(2048, h, testValue)
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
 		q.UnlinkMin(h)
-		q.Push(2048, h, uint64(i))
+		q.Push(2048, h, testValue)
 	}
 }
 
@@ -413,16 +422,17 @@ func BenchmarkUnlinkMin_StableBucket(b *testing.B) {
 func BenchmarkUnlinkMin_DenseBucket(b *testing.B) {
 	q := New()
 	var hs [3]Handle
+	const testValue = uint64(0x7777777777777777)
 	for i := 0; i < 3; i++ {
 		hs[i], _ = q.BorrowSafe()
-		q.Push(1234, hs[i], uint64(i))
+		q.Push(1234, hs[i], testValue)
 	}
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
 		h := hs[i%3]
 		q.UnlinkMin(h)
-		q.Push(1234, h, uint64(i))
+		q.Push(1234, h, testValue)
 	}
 }
 
@@ -437,11 +447,12 @@ func BenchmarkUnlinkMin_DenseBucket(b *testing.B) {
 func BenchmarkUnlinkMin_BitmapCollapse(b *testing.B) {
 	q := New()
 	h, _ := q.BorrowSafe()
+	const testValue = uint64(0x8888888888888888)
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
 		tick := int64(i % BucketCount)
-		q.Push(tick, h, uint64(i))
+		q.Push(tick, h, testValue)
 		q.UnlinkMin(h)
 	}
 }
@@ -457,6 +468,7 @@ func BenchmarkUnlinkMin_BitmapCollapse(b *testing.B) {
 func BenchmarkUnlinkMin_ScatterCollapse(b *testing.B) {
 	q := New()
 	h, _ := q.BorrowSafe()
+	const testValue = uint64(0x9999999999999999)
 
 	// Pre-generate random tick sequence for reproducibility
 	rand.Seed(42)
@@ -468,7 +480,7 @@ func BenchmarkUnlinkMin_ScatterCollapse(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		tick := ticks[i]
-		q.Push(tick, h, uint64(i))
+		q.Push(tick, h, testValue)
 		q.UnlinkMin(h)
 	}
 }
@@ -485,10 +497,11 @@ func BenchmarkUnlinkMin_ReinsertAfterCollapse(b *testing.B) {
 	q := New()
 	h, _ := q.BorrowSafe()
 	const tick = 4095
+	const testValue = uint64(0xAAAAAAAAAAAAAAAA)
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		q.Push(tick, h, uint64(i))
+		q.Push(tick, h, testValue)
 		q.UnlinkMin(h)
 	}
 }
@@ -505,12 +518,13 @@ func BenchmarkUnlinkMin_ChainTraversal(b *testing.B) {
 	q := New()
 	const chainLength = 10
 	handles := make([]Handle, chainLength)
+	const testValue = uint64(0xBBBBBBBBBBBBBBBB)
 
 	// Setup chain
 	for i := 0; i < chainLength; i++ {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
-		q.Push(1000, h, uint64(i))
+		q.Push(1000, h, testValue)
 	}
 
 	b.ResetTimer()
@@ -518,7 +532,7 @@ func BenchmarkUnlinkMin_ChainTraversal(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		h := handles[i%chainLength]
 		q.UnlinkMin(h)
-		q.Push(1000, h, uint64(i))
+		q.Push(1000, h, testValue)
 	}
 }
 
@@ -625,6 +639,7 @@ func BenchmarkMoveTickRandom(b *testing.B) {
 func BenchmarkMixedOperations(b *testing.B) {
 	q := New()
 	handles := make([]Handle, benchSize)
+	const testValue = uint64(0xCCCCCCCCCCCCCCCC)
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
@@ -646,7 +661,7 @@ func BenchmarkMixedOperations(b *testing.B) {
 		case op < 0.4: // 40% Push
 			h := handles[i%benchSize]
 			tick := rand.Int63n(BucketCount)
-			q.Push(tick, h, uint64(i))
+			q.Push(tick, h, testValue)
 
 		case op < 0.7: // 30% PeepMin
 			if !q.Empty() {
