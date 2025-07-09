@@ -1,15 +1,17 @@
-// router.go — MAXIMUM PERFORMANCE triangular arbitrage router
+// router.go — High-performance triangular arbitrage fan-out router (64 cores)
 package router
 
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"math/bits"
 	"runtime"
 	"unsafe"
 
 	"main/constants"
 	"main/control"
+	"main/debug"
 	"main/fastuni"
 	"main/localidx"
 	"main/quantumqueue64"
@@ -18,102 +20,108 @@ import (
 	"main/utils"
 )
 
+// Core type definitions
 type PairID uint32
 type ArbitrageTriplet [3]PairID
 type CycleStateIndex uint64
 
-// Cache-aligned, SIMD-optimized address key
+// AddressKey - 64-byte aligned for zero-copy address comparison
 //
 //go:notinheap
 //go:align 64
 type AddressKey struct {
-	words [5]uint64 // 40B address as 5×8-byte words
-	_     [3]uint64 // 24B padding to 64 bytes
+	words [5]uint64 // 40B Ethereum address as 5×8-byte words
+	_     [24]byte  // 24B padding to 64 bytes
 }
 
-// Hot data first, 24-byte tick message for ring buffer compatibility
+// TickUpdate - Price tick message (24 bytes for ring buffer)
 //
 //go:notinheap
 type TickUpdate struct {
-	forwardTick float64 // 8B - Hot data first
-	reverseTick float64 // 8B
-	pairID      PairID  // 4B
-	_           [4]byte // 4B - Total 24 bytes
+	forwardTick float64 // 8B - Forward direction price
+	reverseTick float64 // 8B - Reverse direction price
+	pairID      PairID  // 4B - Pair identifier
+	_           [4]byte // 4B - Padding to 24 bytes
 }
 
-// Cache-line optimized cycle state
+// ArbitrageCycleState - Cycle state with hot data first
 //
 //go:notinheap
 //go:align 64
 type ArbitrageCycleState struct {
-	// Cache line 1: Hot computation data (32 bytes)
-	tickValues [3]float64 // 24B - Accessed every calculation
-	_          uint64     // 8B - Padding
+	// Hot fields (24 bytes) - accessed every calculation
+	tickValues [3]float64 // 24B - Price ticks for each edge
 
-	// Cache line 1 continued: Warm data (32 bytes)
-	pairIDs [3]PairID // 12B - Accessed for logging
-	_       [5]uint32 // 20B - Padding to 64 bytes total
+	// Warm fields (16 bytes)
+	pairIDs [3]PairID // 12B - Pair identifiers
+	_       uint32    // 4B - Padding to 16-byte boundary
+
+	// Padding to 64 bytes
+	_ [3]uint64 // 24B - Cache line padding
 }
 
-// Prefetch-optimized edge binding
+// ArbitrageEdgeBinding - Edge within arbitrage cycle
+//
+//go:notinheap
+//go:align 16
+type ArbitrageEdgeBinding struct {
+	cyclePairs [3]PairID // 12B - Complete triplet
+	edgeIndex  uint16    // 2B - Edge index (0-2)
+	_          uint16    // 2B - Padding to 16 bytes
+}
+
+// FanoutEntry - Edge reference in fanout table
 //
 //go:notinheap
 //go:align 32
-type ArbitrageEdgeBinding struct {
-	cyclePairs [3]PairID // 12B
-	edgeIndex  uint16    // 2B
-	_          [18]byte  // 18B - Align to 32 bytes
-}
-
-// Cache-aligned fanout entry
-//
-//go:notinheap
-//go:align 64
 type FanoutEntry struct {
-	// Hot path fields (32 bytes)
-	queueHandle     quantumqueue64.Handle          // 4B
-	edgeIndex       uint16                         // 2B
-	_               uint16                         // 2B
-	cycleStateIndex CycleStateIndex                // 8B
-	queue           *quantumqueue64.QuantumQueue64 // 8B
-	_               uint64                         // 8B
+	// Hot fields (8 bytes)
+	queueHandle quantumqueue64.Handle // 4B - Used in MoveTick
+	edgeIndex   uint16                // 2B - Tick selection
+	_           uint16                // 2B - Padding
 
-	// Cold fields (32 bytes padding)
-	_ [4]uint64 // 32B - Padding to 64 bytes
+	// Warm fields (8 bytes)
+	cycleStateIndex CycleStateIndex // 8B - State lookup
+
+	// Cold fields (16 bytes)
+	queue *quantumqueue64.QuantumQueue64 // 8B - Queue pointer
+	_     uint64                         // 8B - Padding to 32 bytes
 }
 
-// Optimized shard bucket
+// PairShardBucket - Cycle grouping by common pair
 //
 //go:notinheap
-//go:align 64
+//go:align 32
 type PairShardBucket struct {
-	pairID       PairID                 // 4B
-	_            uint32                 // 4B
-	edgeBindings []ArbitrageEdgeBinding // 24B
-	_            [4]uint64              // 32B - Padding to 64 bytes
+	// Hot fields (8 bytes)
+	pairID PairID // 4B - Queue lookup
+	_      uint32 // 4B - Padding
+
+	// Cold fields (24 bytes)
+	edgeBindings []ArbitrageEdgeBinding // 24B - Slice header (ptr,len,cap)
 }
 
-// Maximum performance core executor - cache-optimized layout
+// ArbitrageCoreExecutor - Per-core queue and fanout owner
 //
 //go:notinheap
 //go:align 64
 type ArbitrageCoreExecutor struct {
-	// Cache line 1: Hottest data (64 bytes)
-	priorityQueues     []quantumqueue64.QuantumQueue64 // 24B - Most accessed
-	fanoutTables       [][]FanoutEntry                 // 24B - Second most accessed
-	shutdownChannel    chan struct{}                   // 8B
-	isReverseDirection bool                            // 1B - Branch predictor hint
-	_                  [7]byte                         // 7B - Padding
+	// Cache line 1: Hot fields (64 bytes)
+	priorityQueues     []quantumqueue64.QuantumQueue64 // 24B - Owned queues
+	fanoutTables       [][]FanoutEntry                 // 24B - Fanout mappings
+	shutdownSignal     <-chan struct{}                 // 8B - Shutdown channel
+	isReverseDirection bool                            // 1B - Direction flag
+	_                  [7]byte                         // 7B - Padding to 64 bytes
 
 	// Cache line 2: Local index (64 bytes)
-	pairToQueueIndex localidx.Hash // 64B - Dedicated cache line
+	pairToQueueIndex localidx.Hash // 64B - O(1) pair→queue mapping
 
-	// Cache line 3: Cycle storage (64 bytes)
-	cycleStates []ArbitrageCycleState // 24B
+	// Cache line 3: Canonical storage (64 bytes)
+	cycleStates []ArbitrageCycleState // 24B - Direct storage
 	_           [5]uint64             // 40B - Padding to 64 bytes
 }
 
-// Global state - cache-aligned
+// Global state
 var (
 	coreExecutors        [constants.MaxSupportedCores]*ArbitrageCoreExecutor
 	coreRings            [constants.MaxSupportedCores]*ring24.Ring
@@ -121,140 +129,145 @@ var (
 	pairShardBuckets     map[PairID][]PairShardBucket
 )
 
-// Custom high-performance address table with Robin Hood hashing
-//
-//go:align 64
+// Direct address indexing - leverages keccak256 uniformity
 var (
-	addressKeys  [constants.AddressTableCapacity]AddressKey
-	addressPairs [constants.AddressTableCapacity]PairID
+	pairAddressKeys [constants.AddressTableCapacity]AddressKey
+	addressToPairID [constants.AddressTableCapacity]PairID
 )
 
-// Branch-prediction optimized, SIMD-ready tick quantization
+// quantizeTickToInt64 converts float tick to queue priority
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
 func quantizeTickToInt64(tickValue float64) int64 {
-	// Branchless clamping for maximum performance
-	const scale = constants.QuantizationScale
-	const bound = constants.TickClampingBound
-
-	scaled := (tickValue + bound) * scale
-
-	// Branchless clamp using bit manipulation
-	asInt := int64(scaled)
-
-	// Fast clamp without branches
-	mask1 := asInt >> 63      // All 1s if negative, 0s if positive
-	clamped := asInt &^ mask1 // Zero if negative
-
-	mask2 := (constants.MaxQuantizedTick - clamped) >> 63 // All 1s if over max
-	return (clamped &^ mask2) | (constants.MaxQuantizedTick & mask2)
+	switch {
+	case tickValue <= -constants.TickClampingBound:
+		return 0
+	case tickValue >= constants.TickClampingBound:
+		return constants.MaxQuantizedTick
+	default:
+		return int64((tickValue + constants.TickClampingBound) * constants.QuantizationScale)
+	}
 }
 
-// Cryptographically secure, branch-free random generation
+// secureRandomInt generates crypto-secure random for shuffling
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
 func secureRandomInt(upperBound int) int {
-	if upperBound <= 0 {
-		return 0
-	}
-
 	var randomBytes [8]byte
-	rand.Read(randomBytes[:])
+	_, _ = rand.Read(randomBytes[:])
 	randomValue := binary.LittleEndian.Uint64(randomBytes[:])
 
-	// Branch-free power-of-2 optimization
+	// Power-of-2 optimization
 	if upperBound&(upperBound-1) == 0 {
 		return int(randomValue & uint64(upperBound-1))
 	}
 
-	// General case with unbiased reduction
+	// Unbiased modular reduction
 	high64, _ := bits.Mul64(randomValue, uint64(upperBound))
 	return int(high64)
 }
 
-// SIMD-optimized address key creation
+// directAddressToIndex64 extracts index from Ethereum address
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
+func directAddressToIndex64(address40Bytes []byte) uint32 {
+	// Parse to get 2x density (40 hex chars → 20 bytes)
+	addressBytes := utils.ParseEthereumAddress(address40Bytes)
+
+	// Use 8 bytes (64 bits) for maximum entropy without mixing
+	hash64 := *(*uint64)(unsafe.Pointer(&addressBytes[0]))
+
+	return uint32(hash64) & constants.AddressTableMask
+}
+
+// bytesToAddressKey converts address bytes to AddressKey
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func bytesToAddressKey(addressBytes []byte) AddressKey {
+	// Parse hex string to 20-byte address
 	parsedAddress := utils.ParseEthereumAddress(addressBytes)
 
-	// Optimized memory layout for SIMD comparison
+	// Pack all 20 bytes efficiently: 8+8+4 = 20 bytes exactly
 	return AddressKey{
 		words: [5]uint64{
 			*(*uint64)(unsafe.Pointer(&parsedAddress[0])),          // Bytes 0-7
 			*(*uint64)(unsafe.Pointer(&parsedAddress[8])),          // Bytes 8-15
 			uint64(*(*uint32)(unsafe.Pointer(&parsedAddress[16]))), // Bytes 16-19
-			0, // Padding for SIMD alignment
-			0, // Padding for SIMD alignment
+			0, // Unused
+			0, // Unused
 		},
 	}
 }
 
-// Cache-friendly SIMD address comparison
+// isEqual performs optimized address comparison (only compare actual address data)
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
 func (a AddressKey) isEqual(b AddressKey) bool {
-	// SIMD-optimized comparison - compiler will vectorize this
-	return (a.words[0] == b.words[0]) &&
-		(a.words[1] == b.words[1]) &&
-		(a.words[2] == b.words[2])
-	// Note: Only comparing first 3 words (20 bytes), last 2 are padding
+	// Only compare the 3 words containing actual address data (160 bits)
+	// words[3] and words[4] are always zero padding
+	return a.words[0] == b.words[0] &&
+		a.words[1] == b.words[1] &&
+		a.words[2] == b.words[2]
 }
 
-// Robin Hood hashing with linear probing optimization
+// RegisterPairAddress inserts address→pair mapping with Robin Hood
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
 func RegisterPairAddress(address40HexBytes []byte, pairID PairID) {
 	key := bytesToAddressKey(address40HexBytes)
-
-	// Fast hash using built-in entropy
-	hash := uint32(key.words[0] ^ key.words[1] ^ key.words[2])
-	hashIndex := hash & constants.AddressTableMask
-
+	hashIndex := directAddressToIndex64(address40HexBytes)
 	dist := uint32(0)
-	maxDist := uint32(constants.AddressTableCapacity >> 2) // Limit probe distance
 
-	for dist < maxDist {
-		currentPairID := addressPairs[hashIndex]
+	for {
+		currentPairID := addressToPairID[hashIndex]
 
-		// Empty slot - fast path
+		// Empty slot
 		if currentPairID == 0 {
-			addressKeys[hashIndex] = key
-			addressPairs[hashIndex] = pairID
+			pairAddressKeys[hashIndex] = key
+			addressToPairID[hashIndex] = pairID
 			return
 		}
 
-		// Key exists - update path
-		if addressKeys[hashIndex].isEqual(key) {
-			addressPairs[hashIndex] = pairID
+		// Key exists
+		if pairAddressKeys[hashIndex].isEqual(key) {
+			addressToPairID[hashIndex] = pairID
 			return
 		}
 
-		// Robin Hood displacement calculation
-		currentKey := addressKeys[hashIndex]
-		currentHash := uint32(currentKey.words[0] ^ currentKey.words[1] ^ currentKey.words[2])
-		currentIndex := currentHash & constants.AddressTableMask
-		currentDist := (hashIndex + constants.AddressTableCapacity - currentIndex) & constants.AddressTableMask
+		// Robin Hood displacement
+		currentKey := pairAddressKeys[hashIndex]
+		// Use same hash calculation as directAddressToIndex64
+		currentKeyHash := uint32(currentKey.words[0]) & constants.AddressTableMask
+		currentDist := (hashIndex + constants.AddressTableCapacity - currentKeyHash) & constants.AddressTableMask
 
-		// Swap if current entry is closer to home
 		if currentDist < dist {
-			addressKeys[hashIndex] = key
-			addressPairs[hashIndex] = pairID
+			// Swap with resident
+			pairAddressKeys[hashIndex] = key
+			addressToPairID[hashIndex] = pairID
 			key = currentKey
 			pairID = currentPairID
 			dist = currentDist
@@ -262,30 +275,27 @@ func RegisterPairAddress(address40HexBytes []byte, pairID PairID) {
 
 		hashIndex = (hashIndex + 1) & constants.AddressTableMask
 		dist++
+
+		if dist > constants.AddressTableCapacity {
+			panic("Robin Hood hash table full")
+		}
 	}
 }
 
-// Optimized address lookup with prefetching
+// lookupPairIDByAddress performs O(1) address lookup
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
 func lookupPairIDByAddress(address40HexBytes []byte) PairID {
 	key := bytesToAddressKey(address40HexBytes)
-
-	hash := uint32(key.words[0] ^ key.words[1] ^ key.words[2])
-	hashIndex := hash & constants.AddressTableMask
-
-	// Prefetch next cache line for better memory bandwidth
-	nextIndex := (hashIndex + 1) & constants.AddressTableMask
-	_ = addressKeys[nextIndex] // Prefetch hint
-
+	hashIndex := directAddressToIndex64(address40HexBytes)
 	dist := uint32(0)
-	maxDist := uint32(constants.AddressTableCapacity >> 2)
 
-	for dist < maxDist {
-		currentPairID := addressPairs[hashIndex]
+	for {
+		currentPairID := addressToPairID[hashIndex]
 
 		// Empty slot
 		if currentPairID == 0 {
@@ -293,15 +303,15 @@ func lookupPairIDByAddress(address40HexBytes []byte) PairID {
 		}
 
 		// Key found
-		if addressKeys[hashIndex].isEqual(key) {
+		if pairAddressKeys[hashIndex].isEqual(key) {
 			return currentPairID
 		}
 
 		// Robin Hood early termination
-		currentKey := addressKeys[hashIndex]
-		currentHash := uint32(currentKey.words[0] ^ currentKey.words[1] ^ currentKey.words[2])
-		currentIndex := currentHash & constants.AddressTableMask
-		currentDist := (hashIndex + constants.AddressTableCapacity - currentIndex) & constants.AddressTableMask
+		currentKey := pairAddressKeys[hashIndex]
+		// Use same hash calculation as directAddressToIndex64
+		currentKeyHash := uint32(currentKey.words[0]) & constants.AddressTableMask
+		currentDist := (hashIndex + constants.AddressTableCapacity - currentKeyHash) & constants.AddressTableMask
 
 		if currentDist < dist {
 			return 0
@@ -309,75 +319,108 @@ func lookupPairIDByAddress(address40HexBytes []byte) PairID {
 
 		hashIndex = (hashIndex + 1) & constants.AddressTableMask
 		dist++
-	}
 
-	return 0
+		if dist > constants.AddressTableCapacity {
+			return 0
+		}
+	}
 }
 
+// RegisterPairToCore assigns pair to specific core
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
 func RegisterPairToCore(pairID PairID, coreID uint8) {
 	pairToCoreAssignment[pairID] |= 1 << coreID
 }
 
-// Maximum performance tick processing with aggressive optimizations
+// emitArbitrageOpportunity logs profitable arbitrage
 //
 //go:norace
 //go:nocheckptr
-//go:noinline // Prevent inlining for better branch prediction
+//go:nosplit
+//go:inline
+//go:registerparams
+func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
+	debug.DropMessage("[ARBITRAGE_OPPORTUNITY]", "")
+
+	// Log pair IDs
+	debug.DropMessage("  pair0", utils.Itoa(int(cycle.pairIDs[0])))
+	debug.DropMessage("  pair1", utils.Itoa(int(cycle.pairIDs[1])))
+	debug.DropMessage("  pair2", utils.Itoa(int(cycle.pairIDs[2])))
+
+	// Log tick values
+	tick0Str := fmt.Sprintf("%.6f", cycle.tickValues[0])
+	tick1Str := fmt.Sprintf("%.6f", cycle.tickValues[1])
+	tick2Str := fmt.Sprintf("%.6f", cycle.tickValues[2])
+	newTickStr := fmt.Sprintf("%.6f", newTick)
+	totalProfitStr := fmt.Sprintf("%.6f", newTick+cycle.tickValues[0]+cycle.tickValues[1]+cycle.tickValues[2])
+
+	debug.DropMessage("  tick0", tick0Str)
+	debug.DropMessage("  tick1", tick1Str)
+	debug.DropMessage("  tick2", tick2Str)
+	debug.DropMessage("  newTick", newTickStr)
+	debug.DropMessage("  totalProfit", totalProfitStr)
+}
+
+// processTickUpdate handles price updates with arbitrage detection
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
-	// Branch predictor hint: reverse direction is less common
+	// Select tick based on direction (no branch hints - let CPU predict naturally)
 	var currentTick float64
-	if likely(!executor.isReverseDirection) {
+	if !executor.isReverseDirection {
 		currentTick = update.forwardTick
 	} else {
 		currentTick = update.reverseTick
 	}
 
+	// Get queue for pair
 	queueIndex, _ := executor.pairToQueueIndex.Get(uint32(update.pairID))
 	queue := &executor.priorityQueues[queueIndex]
 
-	// Stack-allocated batch buffer - optimized for L1 cache
+	// Process profitable cycles
 	type ProcessedCycle struct {
 		queueHandle     quantumqueue64.Handle // 4B
-		_               uint32                // 4B - Alignment
+		_               uint32                // 4B - Padding
 		originalTick    int64                 // 8B
 		cycleStateIndex CycleStateIndex       // 8B
 		_               uint64                // 8B - Padding to 32B
 	}
 
-	// 128 cycles × 32 bytes = 4KB (fits in L1 cache)
 	var processedCycles [128]ProcessedCycle
 	cycleCount := 0
 
-	// Aggressive cycle extraction with prefetching
+	// Extract profitable cycles (no branch hints)
 	for {
 		handle, queueTick, cycleData := queue.PeepMin()
 		cycleIndex := CycleStateIndex(cycleData)
 		cycle := &executor.cycleStates[cycleIndex]
 
-		// Prefetch next cycle for better memory bandwidth
-		if cycleIndex+1 < CycleStateIndex(len(executor.cycleStates)) {
-			_ = executor.cycleStates[cycleIndex+1] // Prefetch hint
+		// Check profitability
+		totalProfitability := currentTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
+		isProfitable := totalProfitability < 0
+
+		if isProfitable {
+			//emitArbitrageOpportunity(cycle, currentTick)
 		}
 
-		// Branch-free profitability calculation
-		totalTick := currentTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
-		isProfitable := totalTick < 0
-
-		// Early exit conditions with branch prediction hints
-		if unlikely(!isProfitable) || unlikely(cycleCount == len(processedCycles)) {
+		// Break conditions (no branch hints - natural prediction)
+		if !isProfitable || cycleCount == len(processedCycles) {
 			break
 		}
 
-		// Direct memory write for maximum performance
-		cyclePtr := (*ProcessedCycle)(unsafe.Add(
+		// Store for reprocessing
+		*(*ProcessedCycle)(unsafe.Add(
 			unsafe.Pointer(&processedCycles[0]),
 			uintptr(cycleCount)*unsafe.Sizeof(ProcessedCycle{}),
-		))
-		*cyclePtr = ProcessedCycle{
+		)) = ProcessedCycle{
 			queueHandle:     handle,
 			originalTick:    queueTick,
 			cycleStateIndex: cycleIndex,
@@ -386,110 +429,96 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 
 		queue.UnlinkMin(handle)
 
-		if unlikely(queue.Empty()) {
+		if queue.Empty() {
 			break
 		}
 	}
 
-	// Optimized batch reinsertion
+	// Reinsert processed cycles
 	for i := 0; i < cycleCount; i++ {
-		cyclePtr := (*ProcessedCycle)(unsafe.Add(
+		cycle := (*ProcessedCycle)(unsafe.Add(
 			unsafe.Pointer(&processedCycles[0]),
 			uintptr(i)*unsafe.Sizeof(ProcessedCycle{}),
 		))
-		queue.Push(cyclePtr.originalTick, cyclePtr.queueHandle, uint64(cyclePtr.cycleStateIndex))
+		queue.Push(cycle.originalTick, cycle.queueHandle, uint64(cycle.cycleStateIndex))
 	}
 
-	// Cache-optimized fanout processing
-	fanoutTable := executor.fanoutTables[queueIndex]
-	for i := range fanoutTable {
-		entry := &fanoutTable[i]
-		cycle := &executor.cycleStates[entry.cycleStateIndex]
+	// Update fanout entries
+	for _, fanoutEntry := range executor.fanoutTables[queueIndex] {
+		cycle := &executor.cycleStates[fanoutEntry.cycleStateIndex]
+		cycle.tickValues[fanoutEntry.edgeIndex] = currentTick
 
-		// Prefetch next cycle state
-		if i+1 < len(fanoutTable) {
-			nextEntry := &fanoutTable[i+1]
-			_ = executor.cycleStates[nextEntry.cycleStateIndex] // Prefetch
-		}
-
-		// Hot path: update tick value
-		cycle.tickValues[entry.edgeIndex] = currentTick
-
-		// Optimized priority calculation
-		newPriority := quantizeTickToInt64(
-			cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2])
-
-		entry.queue.MoveTick(entry.queueHandle, newPriority)
+		// Recalculate priority
+		newPriority := quantizeTickToInt64(cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2])
+		fanoutEntry.queue.MoveTick(fanoutEntry.queueHandle, newPriority)
 	}
 }
 
-// Maximum performance dispatch with vectorization hints
+// DispatchTickUpdate processes log and dispatches to cores
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
 func DispatchTickUpdate(logView *types.LogView) {
-	// Fast address lookup
+	// Resolve address to pair ID
 	pairID := lookupPairIDByAddress(logView.Addr[constants.AddressHexStart:constants.AddressHexEnd])
-	if unlikely(pairID == 0) {
+	if pairID == 0 {
 		return
 	}
 
-	// Optimized reserve extraction
+	// Extract reserves
 	reserve0 := utils.LoadBE64(logView.Data[24:])
 	reserve1 := utils.LoadBE64(logView.Data[56:])
+
+	// Calculate tick
 	tickValue, _ := fastuni.Log2ReserveRatio(reserve0, reserve1)
 
-	// Stack-allocated message for zero-copy performance (24 bytes for ring compatibility)
+	// Prepare message
 	var messageBuffer [24]byte
 	tickUpdate := (*TickUpdate)(unsafe.Pointer(&messageBuffer))
 	tickUpdate.forwardTick = tickValue
 	tickUpdate.reverseTick = -tickValue
 	tickUpdate.pairID = pairID
 
-	// Optimized core dispatch with bit manipulation
+	// Dispatch to assigned cores
 	coreAssignments := pairToCoreAssignment[pairID]
 	for coreAssignments != 0 {
-		coreID := bits.TrailingZeros64(coreAssignments)
-
-		// Prefetch ring buffer for better cache performance
-		ring := coreRings[coreID]
-		if likely(ring != nil) {
-			ring.Push((*[24]byte)(unsafe.Pointer(&messageBuffer)))
-		}
-
+		coreID := bits.TrailingZeros64(uint64(coreAssignments))
+		coreRings[coreID].Push(&messageBuffer)
 		coreAssignments &^= 1 << coreID
 	}
 }
 
-// Optimized Fisher-Yates shuffle with branch-free swaps
+// shuffleEdgeBindings performs Fisher-Yates shuffle
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
+//go:registerparams
 func shuffleEdgeBindings(bindings []ArbitrageEdgeBinding) {
 	for i := len(bindings) - 1; i > 0; i-- {
 		j := secureRandomInt(i + 1)
-		// Vectorized swap
 		bindings[i], bindings[j] = bindings[j], bindings[i]
 	}
 }
 
-// Memory-optimized shard construction
+// buildFanoutShardBuckets constructs shard buckets
 //
-//go:noinline // Better for large function optimization
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
-	// Pre-allocate with capacity hints for better memory allocation
-	pairShardBuckets = make(map[PairID][]PairShardBucket, len(cycles))
+	pairShardBuckets = make(map[PairID][]PairShardBucket)
 	temporaryBindings := make(map[PairID][]ArbitrageEdgeBinding, len(cycles)*3)
 
-	// Vectorized cycle processing
+	// Group by pairs
 	for _, triplet := range cycles {
 		for i := 0; i < 3; i++ {
-			pairID := triplet[i]
-			temporaryBindings[pairID] = append(temporaryBindings[pairID],
+			temporaryBindings[triplet[i]] = append(temporaryBindings[triplet[i]],
 				ArbitrageEdgeBinding{
 					cyclePairs: triplet,
 					edgeIndex:  uint16(i),
@@ -497,11 +526,10 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 		}
 	}
 
-	// Optimized shard creation
+	// Create shards
 	for pairID, bindings := range temporaryBindings {
 		shuffleEdgeBindings(bindings)
 
-		// Memory-efficient chunking
 		for offset := 0; offset < len(bindings); offset += constants.MaxCyclesPerShard {
 			endOffset := offset + constants.MaxCyclesPerShard
 			if endOffset > len(bindings) {
@@ -517,10 +545,14 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 	}
 }
 
-// Cache-optimized shard attachment
+// attachShardToExecutor integrates shard into executor
 //
-//go:noinline
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBucket) {
+	// Get/create queue index
 	queueIndex := executor.pairToQueueIndex.Put(uint32(shard.pairID), uint32(len(executor.priorityQueues)))
 
 	if int(queueIndex) == len(executor.priorityQueues) {
@@ -530,23 +562,19 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 
 	queue := &executor.priorityQueues[queueIndex]
 
-	// Pre-allocate fanout table for better cache locality
-	expectedFanoutSize := len(shard.edgeBindings) * 2
-	if cap(executor.fanoutTables[queueIndex]) < expectedFanoutSize {
-		executor.fanoutTables[queueIndex] = make([]FanoutEntry, 0, expectedFanoutSize)
-	}
-
+	// Process cycles
 	for _, edgeBinding := range shard.edgeBindings {
-		// Cache-aligned cycle state allocation
+		// Add to canonical storage
 		executor.cycleStates = append(executor.cycleStates, ArbitrageCycleState{
 			pairIDs: edgeBinding.cyclePairs,
 		})
 		cycleIndex := CycleStateIndex(len(executor.cycleStates) - 1)
 
+		// Allocate queue handle
 		queueHandle, _ := queue.BorrowSafe()
 		queue.Push(constants.MaxInitializationPriority, queueHandle, uint64(cycleIndex))
 
-		// Optimized fanout entry creation
+		// Create fanout entries
 		otherEdge1 := (edgeBinding.edgeIndex + 1) % 3
 		otherEdge2 := (edgeBinding.edgeIndex + 2) % 3
 
@@ -562,96 +590,97 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 	}
 }
 
-// NUMA-aware worker launch
+// launchShardWorker initializes core executor
 //
-//go:noinline
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShardBucket) {
 	runtime.LockOSThread()
 
-	// Cache-aligned executor allocation
+	shutdownChannel := make(chan struct{})
+
+	// Initialize executor
 	executor := &ArbitrageCoreExecutor{
 		isReverseDirection: coreID >= forwardCoreCount,
-		shutdownChannel:    make(chan struct{}),
+		shutdownSignal:     shutdownChannel,
 		pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
-		cycleStates:        make([]ArbitrageCycleState, 0, 1024), // Pre-allocate
+		cycleStates:        make([]ArbitrageCycleState, 0),
 	}
 	coreExecutors[coreID] = executor
 	coreRings[coreID] = ring24.New(constants.DefaultRingSize)
 
-	// Batch shard processing for better cache locality
+	// Process shards
 	for shard := range shardInput {
 		attachShardToExecutor(executor, &shard)
 	}
 
 	stopFlag, hotFlag := control.Flags()
 
-	// Optimized consumer launch
+	// Launch consumer
 	if coreID == 0 {
 		ring24.PinnedConsumerWithCooldown(coreID, coreRings[coreID], stopFlag, hotFlag,
 			func(messagePtr *[24]byte) {
 				processTickUpdate(executor, (*TickUpdate)(unsafe.Pointer(messagePtr)))
-			}, executor.shutdownChannel)
+			}, shutdownChannel)
 	} else {
 		ring24.PinnedConsumer(coreID, coreRings[coreID], stopFlag, hotFlag,
 			func(messagePtr *[24]byte) {
 				processTickUpdate(executor, (*TickUpdate)(unsafe.Pointer(messagePtr)))
-			}, executor.shutdownChannel)
+			}, shutdownChannel)
 	}
 }
 
-// Maximum performance system initialization
+// InitializeArbitrageSystem bootstraps the complete system
 //
-//go:noinline
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
-	// NUMA-aware core allocation
 	coreCount := runtime.NumCPU() - 1
 	if coreCount > constants.MaxSupportedCores {
 		coreCount = constants.MaxSupportedCores
 	}
 	if coreCount&1 == 1 {
-		coreCount--
+		coreCount-- // Ensure even
 	}
 	forwardCoreCount := coreCount / 2
 
-	// Memory-optimized shard construction
+	// Build shards
 	buildFanoutShardBuckets(arbitrageCycles)
 
-	// Batch worker launch for better initialization
+	// Create workers
 	shardChannels := make([]chan PairShardBucket, coreCount)
 	for i := range shardChannels {
 		shardChannels[i] = make(chan PairShardBucket, constants.ShardChannelBufferSize)
 		go launchShardWorker(i, forwardCoreCount, shardChannels[i])
 	}
 
-	// Optimized work distribution
+	// Distribute shards
 	currentCore := 0
 	for _, shardBuckets := range pairShardBuckets {
 		for _, shard := range shardBuckets {
 			forwardCore := currentCore % forwardCoreCount
 			reverseCore := forwardCore + forwardCoreCount
 
-			// Batch channel operations
+			// Send to both directions
 			shardChannels[forwardCore] <- shard
 			shardChannels[reverseCore] <- shard
 
-			// Vectorized core assignment
+			// Update routing
 			for _, edgeBinding := range shard.edgeBindings {
-				assignment := uint64(1<<forwardCore | 1<<reverseCore)
 				for _, pairID := range edgeBinding.cyclePairs {
-					pairToCoreAssignment[pairID] |= assignment
+					pairToCoreAssignment[pairID] |= 1<<forwardCore | 1<<reverseCore
 				}
 			}
 			currentCore++
 		}
 	}
 
-	// Clean shutdown
+	// Close channels
 	for _, channel := range shardChannels {
 		close(channel)
 	}
 }
-
-// Branch prediction hints (compiler intrinsics)
-func likely(b bool) bool { return b }
-
-func unlikely(b bool) bool { return !b }
