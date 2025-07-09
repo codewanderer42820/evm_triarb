@@ -238,9 +238,24 @@ func directAddressToIndex64(address40Bytes []byte) uint32 {
 	// Parse to get 2x density (40 hex chars → 20 bytes)
 	addressBytes := utils.ParseEthereumAddress(address40Bytes)
 
-	// Use 8 bytes (64 bits) for maximum entropy without mixing
-	hash64 := *(*uint64)(unsafe.Pointer(&addressBytes[0]))
+	// Use middle 8 bytes (6-13) to avoid vanity address patterns
+	// Vanity addresses target the beginning, middle has better entropy
+	hash64 := *(*uint64)(unsafe.Pointer(&addressBytes[6]))
 
+	return uint32(hash64) & constants.AddressTableMask
+}
+
+// directAddressToIndex64Stored extracts hash from stored AddressKey (for Robin Hood distance calculation)
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func directAddressToIndex64Stored(key AddressKey) uint32 {
+	// Extract middle 8 bytes from stored AddressKey (bytes 6-13 of original address)
+	// This matches directAddressToIndex64 but works on stored AddressKey format
+	hash64 := (key.words[0] >> 48) | (key.words[1] << 16)
 	return uint32(hash64) & constants.AddressTableMask
 }
 
@@ -282,7 +297,7 @@ func (a AddressKey) isEqual(b AddressKey) bool {
 		a.words[2] == b.words[2]
 }
 
-// RegisterPairAddress inserts address→pair mapping with Robin Hood
+// RegisterPairAddress inserts address→pair mapping with Robin Hood (matching localidx implementation)
 //
 //go:norace
 //go:nocheckptr
@@ -291,50 +306,44 @@ func (a AddressKey) isEqual(b AddressKey) bool {
 //go:registerparams
 func RegisterPairAddress(address40HexBytes []byte, pairID PairID) {
 	key := bytesToAddressKey(address40HexBytes)
-	hashIndex := directAddressToIndex64(address40HexBytes)
+	i := directAddressToIndex64(address40HexBytes)
 	dist := uint32(0)
 
 	for {
-		currentPairID := addressToPairID[hashIndex]
+		currentPairID := addressToPairID[i]
 
-		// Empty slot
+		// Empty slot - insert
 		if currentPairID == 0 {
-			pairAddressKeys[hashIndex] = key
-			addressToPairID[hashIndex] = pairID
+			pairAddressKeys[i] = key
+			addressToPairID[i] = pairID
 			return
 		}
 
-		// Key exists
-		if pairAddressKeys[hashIndex].isEqual(key) {
-			addressToPairID[hashIndex] = pairID
+		// Key exists - update
+		if pairAddressKeys[i].isEqual(key) {
+			addressToPairID[i] = pairID
 			return
 		}
 
-		// Robin Hood displacement
-		currentKey := pairAddressKeys[hashIndex]
-		// Use same hash calculation as directAddressToIndex64
-		currentKeyHash := uint32(currentKey.words[0]) & constants.AddressTableMask
-		currentDist := (hashIndex + constants.AddressTableCapacity - currentKeyHash) & constants.AddressTableMask
+		// Robin Hood displacement check (same formula as localidx)
+		currentKey := pairAddressKeys[i]
+		currentKeyHash := directAddressToIndex64Stored(currentKey)
+		currentDist := (i + constants.AddressTableCapacity - currentKeyHash) & constants.AddressTableMask
 
+		// Swap if incoming traveled farther
 		if currentDist < dist {
-			// Swap with resident
-			pairAddressKeys[hashIndex] = key
-			addressToPairID[hashIndex] = pairID
-			key = currentKey
-			pairID = currentPairID
+			key, pairAddressKeys[i] = pairAddressKeys[i], key
+			pairID, addressToPairID[i] = addressToPairID[i], pairID
 			dist = currentDist
 		}
 
-		hashIndex = (hashIndex + 1) & constants.AddressTableMask
+		// Advance
+		i = (i + 1) & constants.AddressTableMask
 		dist++
-
-		if dist > constants.AddressTableCapacity {
-			panic("Robin Hood hash table full")
-		}
 	}
 }
 
-// lookupPairIDByAddress performs O(1) address lookup
+// lookupPairIDByAddress performs O(1) address lookup (matching localidx implementation)
 //
 //go:norace
 //go:nocheckptr
@@ -343,38 +352,34 @@ func RegisterPairAddress(address40HexBytes []byte, pairID PairID) {
 //go:registerparams
 func lookupPairIDByAddress(address40HexBytes []byte) PairID {
 	key := bytesToAddressKey(address40HexBytes)
-	hashIndex := directAddressToIndex64(address40HexBytes)
+	i := directAddressToIndex64(address40HexBytes)
 	dist := uint32(0)
 
 	for {
-		currentPairID := addressToPairID[hashIndex]
+		currentPairID := addressToPairID[i]
 
-		// Empty slot
+		// Empty slot - not found
 		if currentPairID == 0 {
 			return 0
 		}
 
 		// Key found
-		if pairAddressKeys[hashIndex].isEqual(key) {
+		if pairAddressKeys[i].isEqual(key) {
 			return currentPairID
 		}
 
-		// Robin Hood early termination
-		currentKey := pairAddressKeys[hashIndex]
-		// Use same hash calculation as directAddressToIndex64
-		currentKeyHash := uint32(currentKey.words[0]) & constants.AddressTableMask
-		currentDist := (hashIndex + constants.AddressTableCapacity - currentKeyHash) & constants.AddressTableMask
+		// Robin Hood early termination (same formula as localidx)
+		currentKey := pairAddressKeys[i]
+		currentKeyHash := directAddressToIndex64Stored(currentKey)
+		currentDist := (i + constants.AddressTableCapacity - currentKeyHash) & constants.AddressTableMask
 
 		if currentDist < dist {
 			return 0
 		}
 
-		hashIndex = (hashIndex + 1) & constants.AddressTableMask
+		// Advance
+		i = (i + 1) & constants.AddressTableMask
 		dist++
-
-		if dist > constants.AddressTableCapacity {
-			return 0
-		}
 	}
 }
 
