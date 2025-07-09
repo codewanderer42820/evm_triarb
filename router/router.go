@@ -2,7 +2,6 @@
 package router
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"math/bits"
@@ -18,6 +17,8 @@ import (
 	"main/ring24"
 	"main/types"
 	"main/utils"
+
+	"golang.org/x/crypto/sha3"
 )
 
 // Core type definitions
@@ -121,6 +122,12 @@ type ArbitrageCoreExecutor struct {
 	_           [5]uint64             // 40B - Padding to 64 bytes
 }
 
+// keccakRandomState maintains deterministic random state for shuffling
+type keccakRandomState struct {
+	seed    [32]byte // Current seed
+	counter uint64   // Nonce counter
+}
+
 // Global state
 var (
 	coreExecutors        [constants.MaxSupportedCores]*ArbitrageCoreExecutor
@@ -153,24 +160,69 @@ func quantizeTickToInt64(tickValue float64) int64 {
 	}
 }
 
-// secureRandomInt generates crypto-secure random for shuffling
+// newKeccakRandom creates seeded deterministic random generator
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
-//go:registerparams
-func secureRandomInt(upperBound int) int {
-	var randomBytes [8]byte
-	_, _ = rand.Read(randomBytes[:])
-	randomValue := binary.LittleEndian.Uint64(randomBytes[:])
+func newKeccakRandom(initialSeed []byte) *keccakRandomState {
+	var seed [32]byte
+
+	// Hash provided seed to normalize length
+	hasher := sha3.NewLegacyKeccak256()
+	hasher.Write(initialSeed)
+	copy(seed[:], hasher.Sum(nil))
+
+	return &keccakRandomState{
+		seed:    seed,
+		counter: 0,
+	}
+}
+
+// nextUint64 generates next deterministic random uint64
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+func (k *keccakRandomState) nextUint64() uint64 {
+	// Create input: seed || counter
+	var input [40]byte
+	copy(input[:32], k.seed[:])
+	binary.LittleEndian.PutUint64(input[32:], k.counter)
+
+	// Hash to get random bytes
+	hasher := sha3.NewLegacyKeccak256()
+	hasher.Write(input[:])
+	output := hasher.Sum(nil)
+
+	// Increment counter for next call
+	k.counter++
+
+	// Return first 8 bytes as uint64
+	return binary.LittleEndian.Uint64(output[:8])
+}
+
+// nextInt generates random int in range [0, upperBound)
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+func (k *keccakRandomState) nextInt(upperBound int) int {
+	if upperBound <= 0 {
+		return 0
+	}
+
+	randomValue := k.nextUint64()
 
 	// Power-of-2 optimization
 	if upperBound&(upperBound-1) == 0 {
 		return int(randomValue & uint64(upperBound-1))
 	}
 
-	// Unbiased modular reduction
+	// Unbiased modular reduction using multiplication method
 	high64, _ := bits.Mul64(randomValue, uint64(upperBound))
 	return int(high64)
 }
@@ -491,21 +543,32 @@ func DispatchTickUpdate(logView *types.LogView) {
 	}
 }
 
-// shuffleEdgeBindings performs Fisher-Yates shuffle
+// keccakShuffleEdgeBindings performs deterministic Fisher-Yates shuffle using keccak256
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
-//go:registerparams
-func shuffleEdgeBindings(bindings []ArbitrageEdgeBinding) {
+func keccakShuffleEdgeBindings(bindings []ArbitrageEdgeBinding, pairID PairID) {
+	if len(bindings) <= 1 {
+		return
+	}
+
+	// Create deterministic seed from pairID
+	var seedInput [4]byte
+	binary.LittleEndian.PutUint32(seedInput[:], uint32(pairID))
+
+	// Initialize deterministic random generator
+	rng := newKeccakRandom(seedInput[:])
+
+	// Fisher-Yates shuffle with deterministic randomness
 	for i := len(bindings) - 1; i > 0; i-- {
-		j := secureRandomInt(i + 1)
+		j := rng.nextInt(i + 1)
 		bindings[i], bindings[j] = bindings[j], bindings[i]
 	}
 }
 
-// buildFanoutShardBuckets constructs shard buckets
+// buildFanoutShardBuckets constructs shard buckets with deterministic shuffle
 //
 //go:norace
 //go:nocheckptr
@@ -526,9 +589,10 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 		}
 	}
 
-	// Create shards
+	// Create shards with deterministic keccak256-based shuffle
 	for pairID, bindings := range temporaryBindings {
-		shuffleEdgeBindings(bindings)
+		// Per-pair deterministic shuffle based on pairID
+		keccakShuffleEdgeBindings(bindings, pairID)
 
 		for offset := 0; offset < len(bindings); offset += constants.MaxCyclesPerShard {
 			endOffset := offset + constants.MaxCyclesPerShard
@@ -648,7 +712,7 @@ func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 	}
 	forwardCoreCount := coreCount / 2
 
-	// Build shards
+	// Build shards with deterministic keccak256 shuffle
 	buildFanoutShardBuckets(arbitrageCycles)
 
 	// Create workers
