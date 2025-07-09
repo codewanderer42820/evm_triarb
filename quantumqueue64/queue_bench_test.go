@@ -5,8 +5,6 @@
 // Comprehensive performance measurement suite for QuantumQueue64 core operations.
 // Validates sub-8ns operation latency under realistic ISR workload patterns.
 //
-// COMPACT VERSION: Updated for uint64 payloads and 32-byte node layout.
-//
 // Benchmark methodology:
 //   - All benchmarks use pre-filled arenas (CapItems) for stress realism
 //   - Edge tick usage (0, max) included for performance consistency validation
@@ -285,11 +283,16 @@ func BenchmarkPushBursty(b *testing.B) {
 			tick = rand.Int63n(BucketCount)
 		}
 
+		// Ensure tick is within bounds
+		if tick >= BucketCount {
+			tick = BucketCount - 1
+		}
+
 		q.Push(tick, h, uint64(i))
 
 		// Shift burst window occasionally
 		if i%1000 == 0 {
-			baseTick = (baseTick + 100) % BucketCount
+			baseTick = (baseTick + 100) % (BucketCount - 100)
 		}
 	}
 }
