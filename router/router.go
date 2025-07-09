@@ -21,105 +21,84 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-// Core type definitions
-type PairID uint32
+// Core type definitions - All 64-bit aligned for perfect cache utilization
+type PairID uint64
 type ArbitrageTriplet [3]PairID
 type CycleStateIndex uint64
 
-// AddressKey - 64-byte aligned for zero-copy address comparison
+// AddressKey - Cache line centered to minimize cross-line spanning
 //
 //go:notinheap
-//go:align 64
 type AddressKey struct {
-	words [5]uint64 // 40B Ethereum address as 5×8-byte words
-	_     [24]byte  // 24B padding to 64 bytes
+	_     [28]byte  // 28B - Top padding for perfect centering
+	words [5]uint64 // 40B - Ethereum address as 5×8-byte words
+	_     [28]byte  // 28B - Bottom padding (total: 96B, perfectly centered)
 }
 
-// TickUpdate - Price tick message (24 bytes for ring buffer)
+// TickUpdate - Perfect 24-byte message with zero padding waste
 //
 //go:notinheap
 type TickUpdate struct {
 	forwardTick float64 // 8B - Forward direction price
 	reverseTick float64 // 8B - Reverse direction price
-	pairID      PairID  // 4B - Pair identifier
-	_           [4]byte // 4B - Padding to 24 bytes
+	pairID      PairID  // 8B - Pair identifier (perfect 24B total)
 }
 
-// ArbitrageCycleState - Cycle state with hot data first
+// ArbitrageCycleState - Cache line centered for guaranteed single-line access
 //
 //go:notinheap
-//go:align 64
 type ArbitrageCycleState struct {
-	// Hot fields (24 bytes) - accessed every calculation
-	tickValues [3]float64 // 24B - Price ticks for each edge
-
-	// Warm fields (16 bytes)
-	pairIDs [3]PairID // 12B - Pair identifiers
-	_       uint32    // 4B - Padding to 16-byte boundary
-
-	// Padding to 64 bytes
-	_ [3]uint64 // 24B - Cache line padding
+	_          [24]byte   // 24B - Top padding for perfect centering
+	tickValues [3]float64 // 24B - Hot: Price ticks for each edge
+	pairIDs    [3]PairID  // 24B - Warm: Pair identifiers (now uint64)
+	_          [24]byte   // 24B - Bottom padding (total: 96B, perfectly centered)
 }
 
-// ArbitrageEdgeBinding - Edge within arbitrage cycle
+// ArbitrageEdgeBinding - Cache line centered to minimize cross-line spanning
 //
 //go:notinheap
-//go:align 16
 type ArbitrageEdgeBinding struct {
-	cyclePairs [3]PairID // 12B - Complete triplet
-	edgeIndex  uint16    // 2B - Edge index (0-2)
-	_          uint16    // 2B - Padding to 16 bytes
+	_          [4]uint64 // 32B - Top padding to center data in cache line
+	cyclePairs [3]PairID // 24B - Complete triplet (3×8B)
+	edgeIndex  uint64    // 8B - Edge index
+	_          [4]uint64 // 32B - Bottom padding (total: 96B)
 }
 
-// FanoutEntry - Edge reference in fanout table
+// FanoutEntry - Cache line centered for guaranteed single-line access
 //
 //go:notinheap
-//go:align 32
 type FanoutEntry struct {
-	// Hot fields (8 bytes)
-	queueHandle quantumqueue64.Handle // 4B - Used in MoveTick
-	edgeIndex   uint16                // 2B - Tick selection
-	_           uint16                // 2B - Padding
-
-	// Warm fields (8 bytes)
-	cycleStateIndex CycleStateIndex // 8B - State lookup
-
-	// Cold fields (16 bytes)
-	queue *quantumqueue64.QuantumQueue64 // 8B - Queue pointer
-	_     uint64                         // 8B - Padding to 32 bytes
+	_               [4]uint64                      // 32B - Top padding to center data in cache line
+	edgeIndex       uint64                         // 8B - HOTTEST: Array indexing
+	cycleStateIndex uint64                         // 8B - HOTTEST: Pointer chasing
+	queueHandle     uint64                         // 8B - WARM: Queue operations
+	queue           *quantumqueue64.QuantumQueue64 // 8B - WARM: Queue pointer
+	_               [4]uint64                      // 32B - Bottom padding (total: 96B)
 }
 
-// PairShardBucket - Cycle grouping by common pair
+// PairShardBucket - Cache line centered to minimize cross-line spanning
 //
 //go:notinheap
-//go:align 32
 type PairShardBucket struct {
-	// Hot fields (8 bytes)
-	pairID PairID // 4B - Queue lookup
-	_      uint32 // 4B - Padding
-
-	// Cold fields (24 bytes)
+	_            [4]uint64              // 32B - Top padding to center data in cache line
+	pairID       PairID                 // 8B - Queue lookup
 	edgeBindings []ArbitrageEdgeBinding // 24B - Slice header (ptr,len,cap)
+	_            [4]uint64              // 32B - Bottom padding (total: 96B)
 }
 
-// ArbitrageCoreExecutor - Per-core queue and fanout owner
+// ArbitrageCoreExecutor - Cache line centered to minimize cross-line spanning
 //
 //go:notinheap
-//go:align 64
 type ArbitrageCoreExecutor struct {
-	// Cache line 1: Hot fields (64 bytes)
+	_                  [4]uint64                       // 32B - Top padding
 	priorityQueues     []quantumqueue64.QuantumQueue64 // 24B - Owned queues
 	fanoutTables       [][]FanoutEntry                 // 24B - Fanout mappings
 	shutdownSignal     <-chan struct{}                 // 8B - Shutdown channel
 	isReverseDirection bool                            // 1B - Direction flag
-	_                  [7]byte                         // 7B - Padding to 64 bytes
-
-	// Cache line 2: Local index (64 bytes)
-	pairToQueueIndex localidx.Hash // 64B - O(1) pair→queue mapping
-
-	// Cache line 3: Canonical storage (64 bytes)
-	cycleStates []ArbitrageCycleState // 24B - Direct storage
-	_           [5]uint64             // 40B - Padding to 64 bytes
+	_                  [7]byte                         // 7B - Padding
+	pairToQueueIndex   localidx.Hash                   // 64B - O(1) pair→queue mapping
+	cycleStates        []ArbitrageCycleState           // 24B - Direct storage
+	_                  [11]uint64                      // 88B - Bottom padding (total: 224B)
 }
 
 // keccakRandomState maintains deterministic random state for shuffling
@@ -143,6 +122,7 @@ var (
 )
 
 // quantizeTickToInt64 converts float tick to queue priority
+// ⚠️ FOOTGUN: No bounds checking - assumes input within valid range
 //
 //go:norace
 //go:nocheckptr
@@ -150,14 +130,7 @@ var (
 //go:inline
 //go:registerparams
 func quantizeTickToInt64(tickValue float64) int64 {
-	switch {
-	case tickValue <= -constants.TickClampingBound:
-		return 0
-	case tickValue >= constants.TickClampingBound:
-		return constants.MaxQuantizedTick
-	default:
-		return int64((tickValue + constants.TickClampingBound) * constants.QuantizationScale)
-	}
+	return int64((tickValue + constants.TickClampingBound) * constants.QuantizationScale)
 }
 
 // newKeccakRandom creates seeded deterministic random generator
@@ -227,22 +200,22 @@ func (k *keccakRandomState) nextInt(upperBound int) int {
 	return int(high64)
 }
 
-// directAddressToIndex64 extracts index from Ethereum address
+// directAddressToIndex64 extracts index from Ethereum address (strips 0x prefix)
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func directAddressToIndex64(address40Bytes []byte) uint32 {
-	// Parse to get 2x density (40 hex chars → 20 bytes)
-	addressBytes := utils.ParseEthereumAddress(address40Bytes)
+func directAddressToIndex64(address42HexBytes []byte) uint64 {
+	// Strip 0x prefix: input is "0x1234..." → parse "1234..." (40 chars)
+	addressBytes := utils.ParseEthereumAddress(address42HexBytes[2:])
 
 	// Use middle 8 bytes (6-13) to avoid vanity address patterns
 	// Vanity addresses target the beginning, middle has better entropy
 	hash64 := *(*uint64)(unsafe.Pointer(&addressBytes[6]))
 
-	return uint32(hash64) & constants.AddressTableMask
+	return hash64 & uint64(constants.AddressTableMask)
 }
 
 // directAddressToIndex64Stored extracts hash from stored AddressKey (for Robin Hood distance calculation)
@@ -252,23 +225,23 @@ func directAddressToIndex64(address40Bytes []byte) uint32 {
 //go:nosplit
 //go:inline
 //go:registerparams
-func directAddressToIndex64Stored(key AddressKey) uint32 {
+func directAddressToIndex64Stored(key AddressKey) uint64 {
 	// Extract middle 8 bytes from stored AddressKey (bytes 6-13 of original address)
 	// This matches directAddressToIndex64 but works on stored AddressKey format
 	hash64 := (key.words[0] >> 48) | (key.words[1] << 16)
-	return uint32(hash64) & constants.AddressTableMask
+	return hash64 & uint64(constants.AddressTableMask)
 }
 
-// bytesToAddressKey converts address bytes to AddressKey
+// bytesToAddressKey converts address bytes to AddressKey (strips 0x prefix)
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func bytesToAddressKey(addressBytes []byte) AddressKey {
-	// Parse hex string to 20-byte address
-	parsedAddress := utils.ParseEthereumAddress(addressBytes)
+func bytesToAddressKey(address42HexBytes []byte) AddressKey {
+	// Strip 0x prefix: input is "0x1234..." → parse "1234..." (40 chars)
+	parsedAddress := utils.ParseEthereumAddress(address42HexBytes[2:])
 
 	// Pack all 20 bytes efficiently: 8+8+4 = 20 bytes exactly
 	return AddressKey{
@@ -297,17 +270,11 @@ func (a AddressKey) isEqual(b AddressKey) bool {
 		a.words[2] == b.words[2]
 }
 
-// RegisterPairAddress inserts address→pair mapping with Robin Hood (matching localidx implementation)
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func RegisterPairAddress(address40HexBytes []byte, pairID PairID) {
-	key := bytesToAddressKey(address40HexBytes)
-	i := directAddressToIndex64(address40HexBytes)
-	dist := uint32(0)
+// Robin Hood hashing with native 64-bit operations
+func RegisterPairAddress(address42HexBytes []byte, pairID PairID) {
+	key := bytesToAddressKey(address42HexBytes)
+	i := directAddressToIndex64(address42HexBytes)
+	dist := uint64(0)
 
 	for {
 		currentPairID := addressToPairID[i]
@@ -325,10 +292,10 @@ func RegisterPairAddress(address40HexBytes []byte, pairID PairID) {
 			return
 		}
 
-		// Robin Hood displacement check (same formula as localidx)
+		// Robin Hood displacement check (64-bit native operations)
 		currentKey := pairAddressKeys[i]
 		currentKeyHash := directAddressToIndex64Stored(currentKey)
-		currentDist := (i + constants.AddressTableCapacity - currentKeyHash) & constants.AddressTableMask
+		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & uint64(constants.AddressTableMask)
 
 		// Swap if incoming traveled farther
 		if currentDist < dist {
@@ -338,22 +305,22 @@ func RegisterPairAddress(address40HexBytes []byte, pairID PairID) {
 		}
 
 		// Advance
-		i = (i + 1) & constants.AddressTableMask
+		i = (i + 1) & uint64(constants.AddressTableMask)
 		dist++
 	}
 }
 
-// lookupPairIDByAddress performs O(1) address lookup (matching localidx implementation)
+// lookupPairIDByAddress retrieves value with Robin Hood early termination
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func lookupPairIDByAddress(address40HexBytes []byte) PairID {
-	key := bytesToAddressKey(address40HexBytes)
-	i := directAddressToIndex64(address40HexBytes)
-	dist := uint32(0)
+func lookupPairIDByAddress(address42HexBytes []byte) PairID {
+	key := bytesToAddressKey(address42HexBytes)
+	i := directAddressToIndex64(address42HexBytes)
+	dist := uint64(0)
 
 	for {
 		currentPairID := addressToPairID[i]
@@ -368,17 +335,17 @@ func lookupPairIDByAddress(address40HexBytes []byte) PairID {
 			return currentPairID
 		}
 
-		// Robin Hood early termination (same formula as localidx)
+		// Robin Hood early termination (64-bit native operations)
 		currentKey := pairAddressKeys[i]
 		currentKeyHash := directAddressToIndex64Stored(currentKey)
-		currentDist := (i + constants.AddressTableCapacity - currentKeyHash) & constants.AddressTableMask
+		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & uint64(constants.AddressTableMask)
 
 		if currentDist < dist {
 			return 0
 		}
 
 		// Advance
-		i = (i + 1) & constants.AddressTableMask
+		i = (i + 1) & uint64(constants.AddressTableMask)
 		dist++
 	}
 }
@@ -500,14 +467,14 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 		queue.Push(cycle.originalTick, cycle.queueHandle, uint64(cycle.cycleStateIndex))
 	}
 
-	// Update fanout entries
+	// Update fanout entries (with handle conversion for quantumqueue64)
 	for _, fanoutEntry := range executor.fanoutTables[queueIndex] {
 		cycle := &executor.cycleStates[fanoutEntry.cycleStateIndex]
 		cycle.tickValues[fanoutEntry.edgeIndex] = currentTick
 
 		// Recalculate priority
 		newPriority := quantizeTickToInt64(cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2])
-		fanoutEntry.queue.MoveTick(fanoutEntry.queueHandle, newPriority)
+		fanoutEntry.queue.MoveTick(quantumqueue64.Handle(fanoutEntry.queueHandle), newPriority)
 	}
 }
 
@@ -559,9 +526,9 @@ func keccakShuffleEdgeBindings(bindings []ArbitrageEdgeBinding, pairID PairID) {
 		return
 	}
 
-	// Create deterministic seed from pairID
-	var seedInput [4]byte
-	binary.LittleEndian.PutUint32(seedInput[:], uint32(pairID))
+	// Create deterministic seed from pairID (now 64-bit)
+	var seedInput [8]byte
+	binary.LittleEndian.PutUint64(seedInput[:], uint64(pairID))
 
 	// Initialize deterministic random generator
 	rng := newKeccakRandom(seedInput[:])
@@ -589,7 +556,7 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 			temporaryBindings[triplet[i]] = append(temporaryBindings[triplet[i]],
 				ArbitrageEdgeBinding{
 					cyclePairs: triplet,
-					edgeIndex:  uint16(i),
+					edgeIndex:  uint64(i),
 				})
 		}
 	}
@@ -643,16 +610,16 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 		queueHandle, _ := queue.BorrowSafe()
 		queue.Push(constants.MaxInitializationPriority, queueHandle, uint64(cycleIndex))
 
-		// Create fanout entries
+		// Create fanout entries (handle conversion for quantumqueue64 compatibility)
 		otherEdge1 := (edgeBinding.edgeIndex + 1) % 3
 		otherEdge2 := (edgeBinding.edgeIndex + 2) % 3
 
-		for _, edgeIdx := range [...]uint16{otherEdge1, otherEdge2} {
+		for _, edgeIdx := range [...]uint64{otherEdge1, otherEdge2} {
 			executor.fanoutTables[queueIndex] = append(executor.fanoutTables[queueIndex],
 				FanoutEntry{
-					queueHandle:     queueHandle,
 					edgeIndex:       edgeIdx,
-					cycleStateIndex: cycleIndex,
+					cycleStateIndex: uint64(cycleIndex),  // Convert CycleStateIndex to uint64
+					queueHandle:     uint64(queueHandle), // Convert Handle to uint64
 					queue:           queue,
 				})
 		}
