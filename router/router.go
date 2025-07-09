@@ -286,7 +286,6 @@ func RegisterCore(pairID PairID, coreID CoreID) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func processTick(exec *Executor, tick *Tick) {
@@ -640,7 +639,6 @@ func attachShard(exec *Executor, shard *Shard) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func launchWorker(coreID, forwardCoreCount int, input <-chan Shard) {
@@ -693,7 +691,6 @@ func launchWorker(coreID, forwardCoreCount int, input <-chan Shard) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func Init(cycles []Triplet) {
