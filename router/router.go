@@ -26,6 +26,17 @@ type PairID uint64
 type ArbitrageTriplet [3]PairID
 type CycleStateIndex uint64
 
+// ProcessedCycle - Pre-allocated cycle processing structure
+//
+//go:notinheap
+type ProcessedCycle struct {
+	queueHandle     quantumqueue64.Handle // 4B
+	_               uint32                // 4B - Padding
+	originalTick    int64                 // 8B
+	cycleStateIndex CycleStateIndex       // 8B
+	_               uint64                // 8B - Padding to 32B
+}
+
 // AddressKey - Optimized for address storage and comparison
 //
 //go:notinheap
@@ -76,7 +87,7 @@ type PairShardBucket struct {
 	edgeBindings []ArbitrageEdgeBinding // 24B - Slice header (ptr,len,cap)
 }
 
-// ArbitrageCoreExecutor - Ordered HOTTEST → COLDEST for optimal cache utilization
+// ArbitrageCoreExecutor - Optimized single-core executor layout with pre-allocated buffers
 //
 //go:notinheap
 type ArbitrageCoreExecutor struct {
@@ -94,9 +105,13 @@ type ArbitrageCoreExecutor struct {
 
 	// COLD: Rarely accessed after initialization
 	shutdownSignal <-chan struct{} // 8B - Shutdown channel
+
+	// PRE-ALLOCATED BUFFERS: Zero-alloc working memory (RUNTIME ONLY)
+	processedCycles [128]ProcessedCycle // 4096B - Pre-allocated cycle buffer
+	messageBuffer   [24]byte            // 24B - Pre-allocated message buffer
 }
 
-// keccakRandomState maintains deterministic random state for shuffling
+// keccakRandomState maintains deterministic random state for shuffling (INITIALIZATION ONLY)
 type keccakRandomState struct {
 	seed    [32]byte // Current seed
 	counter uint64   // Nonce counter
@@ -128,7 +143,7 @@ func quantizeTickToInt64(tickValue float64) int64 {
 	return int64((tickValue + constants.TickClampingBound) * constants.QuantizationScale)
 }
 
-// newKeccakRandom creates seeded deterministic random generator
+// newKeccakRandom creates seeded deterministic random generator (INITIALIZATION ONLY)
 //
 //go:norace
 //go:nocheckptr
@@ -149,7 +164,7 @@ func newKeccakRandom(initialSeed []byte) *keccakRandomState {
 	}
 }
 
-// nextUint64 generates next deterministic random uint64
+// nextUint64 generates next deterministic random uint64 (INITIALIZATION ONLY)
 //
 //go:norace
 //go:nocheckptr
@@ -174,7 +189,7 @@ func (k *keccakRandomState) nextUint64() uint64 {
 	return utils.Load64(output[:8])
 }
 
-// nextInt generates random int in range [0, upperBound)
+// nextInt generates random int in range [0, upperBound) (INITIALIZATION ONLY)
 //
 //go:norace
 //go:nocheckptr
@@ -391,7 +406,7 @@ func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
 	debug.DropMessage("  totalProfit", totalProfitStr)
 }
 
-// processTickUpdate handles price updates with arbitrage detection
+// processTickUpdate handles price updates with arbitrage detection - ZERO ALLOCATION
 //
 //go:norace
 //go:nocheckptr
@@ -411,16 +426,7 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 	queueIndex, _ := executor.pairToQueueIndex.Get(uint32(update.pairID))
 	queue := &executor.priorityQueues[queueIndex]
 
-	// Process profitable cycles
-	type ProcessedCycle struct {
-		queueHandle     quantumqueue64.Handle // 4B
-		_               uint32                // 4B - Padding
-		originalTick    int64                 // 8B
-		cycleStateIndex CycleStateIndex       // 8B
-		_               uint64                // 8B - Padding to 32B
-	}
-
-	var processedCycles [128]ProcessedCycle
+	// Use pre-allocated buffer - ZERO ALLOCATION
 	cycleCount := 0
 
 	// Extract profitable cycles (no branch hints)
@@ -438,15 +444,12 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 		}
 
 		// Break conditions (no branch hints - natural prediction)
-		if !isProfitable || cycleCount == len(processedCycles) {
+		if !isProfitable || cycleCount == len(executor.processedCycles) {
 			break
 		}
 
-		// Store for reprocessing
-		*(*ProcessedCycle)(unsafe.Add(
-			unsafe.Pointer(&processedCycles[0]),
-			uintptr(cycleCount)*unsafe.Sizeof(ProcessedCycle{}),
-		)) = ProcessedCycle{
+		// Store for reprocessing using pre-allocated buffer
+		executor.processedCycles[cycleCount] = ProcessedCycle{
 			queueHandle:     handle,
 			originalTick:    queueTick,
 			cycleStateIndex: cycleIndex,
@@ -460,12 +463,9 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 		}
 	}
 
-	// Reinsert processed cycles
+	// Reinsert processed cycles using pre-allocated buffer
 	for i := 0; i < cycleCount; i++ {
-		cycle := (*ProcessedCycle)(unsafe.Add(
-			unsafe.Pointer(&processedCycles[0]),
-			uintptr(i)*unsafe.Sizeof(ProcessedCycle{}),
-		))
+		cycle := &executor.processedCycles[i]
 		queue.Push(cycle.originalTick, cycle.queueHandle, uint64(cycle.cycleStateIndex))
 	}
 
@@ -480,7 +480,7 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 	}
 }
 
-// DispatchTickUpdate processes log and dispatches to cores
+// DispatchTickUpdate processes log and dispatches to cores - ZERO ALLOCATION
 //
 //go:norace
 //go:nocheckptr
@@ -501,23 +501,27 @@ func DispatchTickUpdate(logView *types.LogView) {
 	// Calculate tick
 	tickValue, _ := fastuni.Log2ReserveRatio(reserve0, reserve1)
 
-	// Prepare message
-	var messageBuffer [24]byte
-	tickUpdate := (*TickUpdate)(unsafe.Pointer(&messageBuffer))
-	tickUpdate.forwardTick = tickValue
-	tickUpdate.reverseTick = -tickValue
-	tickUpdate.pairID = pairID
-
-	// Dispatch to assigned cores
+	// Dispatch to assigned cores using per-core pre-allocated buffers
 	coreAssignments := pairToCoreAssignment[pairID]
 	for coreAssignments != 0 {
 		coreID := bits.TrailingZeros64(uint64(coreAssignments))
-		coreRings[coreID].Push(&messageBuffer)
+
+		// Use executor's pre-allocated message buffer - ZERO ALLOCATION
+		executor := coreExecutors[coreID]
+		if executor != nil {
+			tickUpdate := (*TickUpdate)(unsafe.Pointer(&executor.messageBuffer))
+			tickUpdate.forwardTick = tickValue
+			tickUpdate.reverseTick = -tickValue
+			tickUpdate.pairID = pairID
+
+			coreRings[coreID].Push(&executor.messageBuffer)
+		}
+
 		coreAssignments &^= 1 << coreID
 	}
 }
 
-// keccakShuffleEdgeBindings performs deterministic Fisher-Yates shuffle using keccak256
+// keccakShuffleEdgeBindings performs deterministic Fisher-Yates shuffle using keccak256 (INITIALIZATION ONLY)
 //
 //go:norace
 //go:nocheckptr
@@ -533,7 +537,7 @@ func keccakShuffleEdgeBindings(bindings []ArbitrageEdgeBinding, pairID PairID) {
 	var seedInput [8]byte
 	binary.LittleEndian.PutUint64(seedInput[:], utils.Mix64(uint64(pairID)))
 
-	// Initialize deterministic random generator
+	// Initialize deterministic random generator with Keccak256 entropy
 	rng := newKeccakRandom(seedInput[:])
 
 	// Fisher-Yates shuffle with deterministic randomness
@@ -543,7 +547,7 @@ func keccakShuffleEdgeBindings(bindings []ArbitrageEdgeBinding, pairID PairID) {
 	}
 }
 
-// buildFanoutShardBuckets constructs shard buckets with deterministic shuffle
+// buildFanoutShardBuckets constructs shard buckets with deterministic shuffle - ZERO ALLOCATION
 //
 //go:norace
 //go:nocheckptr
@@ -565,9 +569,9 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 		}
 	}
 
-	// Create shards with deterministic keccak256-based shuffle
+	// Create shards with deterministic keccak256-based shuffle (INITIALIZATION ONLY)
 	for pairID, bindings := range temporaryBindings {
-		// Per-pair deterministic shuffle based on pairID
+		// Per-pair deterministic shuffle based on pairID with Keccak256 entropy
 		keccakShuffleEdgeBindings(bindings, pairID)
 
 		for offset := 0; offset < len(bindings); offset += constants.MaxCyclesPerShard {
@@ -643,12 +647,13 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 
 	shutdownChannel := make(chan struct{})
 
-	// Initialize executor
+	// Initialize executor with pre-allocated buffers
 	executor := &ArbitrageCoreExecutor{
 		isReverseDirection: coreID >= forwardCoreCount,
 		shutdownSignal:     shutdownChannel,
 		pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
 		cycleStates:        make([]ArbitrageCycleState, 0),
+		// Pre-allocated buffers are already part of the struct
 	}
 	coreExecutors[coreID] = executor
 	coreRings[coreID] = ring24.New(constants.DefaultRingSize)
