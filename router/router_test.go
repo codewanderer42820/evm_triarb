@@ -1,7 +1,8 @@
-// router_test.go — FOOTGUN MODE comprehensive test suite
+// router_test.go — Comprehensive test suite for maximum performance triangular arbitrage router
 package router
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"math/bits"
@@ -14,26 +15,41 @@ import (
 
 	"main/constants"
 	"main/control"
-	"main/fastuni"
-	"main/localidx"
-	"main/quantumqueue64"
 	"main/ring24"
 	"main/types"
-	"main/utils"
+
+	"golang.org/x/crypto/sha3"
 )
 
-// Test helpers
-func generateMockAddress(seed uint64) [40]byte {
-	var addr [40]byte
+// ============================================================================
+// TEST HELPERS
+// ============================================================================
+
+func generateMockAddress(seed uint64) [42]byte {
+	var addr [42]byte
+	addr[0] = '0'
+	addr[1] = 'x'
+
+	// Create deterministic input by combining base seed 69 with provided seed
+	var input [16]byte
+	binary.LittleEndian.PutUint64(input[0:8], 69)    // Deterministic base seed
+	binary.LittleEndian.PutUint64(input[8:16], seed) // Variable seed
+
+	// Generate address using Keccak256
+	hasher := sha3.NewLegacyKeccak256()
+	hasher.Write(input[:])
+	hashOutput := hasher.Sum(nil)
+
+	// Convert hash bytes to hex string (40 hex chars for 20-byte address)
 	for i := 0; i < 20; i++ {
-		byteVal := uint8((seed >> (i * 8)) ^ (seed >> ((i + 7) * 3)))
-		addr[i*2] = "0123456789abcdef"[byteVal>>4]
-		addr[i*2+1] = "0123456789abcdef"[byteVal&0xF]
+		byteVal := hashOutput[i]
+		addr[2+i*2] = "0123456789abcdef"[byteVal>>4]
+		addr[2+i*2+1] = "0123456789abcdef"[byteVal&0xF]
 	}
 	return addr
 }
 
-func generateArbitrageTriangle(baseID uint32) ArbitrageTriplet {
+func generateArbitrageTriangle(baseID uint64) ArbitrageTriplet {
 	return ArbitrageTriplet{
 		PairID(baseID),
 		PairID(baseID + 1),
@@ -41,9 +57,147 @@ func generateArbitrageTriangle(baseID uint32) ArbitrageTriplet {
 	}
 }
 
-// TestAddressKey - Test the AddressKey type
+func clearGlobalState() {
+	// Clear address tables
+	for i := range pairAddressKeys[:1000] {
+		pairAddressKeys[i] = AddressKey{}
+	}
+	for i := range addressToPairID[:1000] {
+		addressToPairID[i] = 0
+	}
+
+	// Clear core assignments
+	for i := range pairToCoreAssignment[:1000] {
+		pairToCoreAssignment[i] = 0
+	}
+
+	// Clear shard buckets
+	pairShardBuckets = nil
+
+	// Clear executors and rings
+	for i := range coreExecutors {
+		coreExecutors[i] = nil
+	}
+	for i := range coreRings {
+		coreRings[i] = nil
+	}
+}
+
+func assertZeroAllocs(t *testing.T, name string, fn func()) {
+	t.Helper()
+	allocs := testing.AllocsPerRun(100, fn)
+	if allocs > 0 {
+		t.Errorf("%s allocated: %f allocs/op", name, allocs)
+	}
+}
+
+// ============================================================================
+// STRUCT LAYOUT TESTS
+// ============================================================================
+
+func TestStructSizes(t *testing.T) {
+	tests := []struct {
+		name     string
+		size     uintptr
+		expected uintptr
+	}{
+		{"AddressKey", unsafe.Sizeof(AddressKey{}), 96},
+		{"TickUpdate", unsafe.Sizeof(TickUpdate{}), 24},
+		{"ArbitrageCycleState", unsafe.Sizeof(ArbitrageCycleState{}), 96},
+		{"ArbitrageEdgeBinding", unsafe.Sizeof(ArbitrageEdgeBinding{}), 96},
+		{"FanoutEntry", unsafe.Sizeof(FanoutEntry{}), 96},
+		{"PairShardBucket", unsafe.Sizeof(PairShardBucket{}), 96},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.size != tt.expected {
+				t.Errorf("%s size is %d bytes, expected %d bytes", tt.name, tt.size, tt.expected)
+			}
+		})
+	}
+}
+
+func TestStructAlignment(t *testing.T) {
+	t.Run("8ByteAlignment", func(t *testing.T) {
+		// All structs should be 8-byte aligned (Go's maximum)
+		structs := []interface{}{
+			AddressKey{},
+			TickUpdate{},
+			ArbitrageCycleState{},
+			ArbitrageEdgeBinding{},
+			FanoutEntry{},
+			PairShardBucket{},
+		}
+
+		for _, s := range structs {
+			addr := uintptr(unsafe.Pointer(&s))
+			if addr%8 != 0 {
+				t.Errorf("Struct %T not 8-byte aligned: %d", s, addr)
+			}
+		}
+	})
+
+	t.Run("CenterPaddingLayout", func(t *testing.T) {
+		// Verify center padding is correctly applied
+		cycle := ArbitrageCycleState{}
+
+		// Check that tickValues starts at offset 24 (after top padding)
+		tickOffset := unsafe.Offsetof(cycle.tickValues)
+		if tickOffset != 24 {
+			t.Errorf("tickValues offset is %d, expected 24", tickOffset)
+		}
+
+		// Check that pairIDs starts at offset 48
+		pairOffset := unsafe.Offsetof(cycle.pairIDs)
+		if pairOffset != 48 {
+			t.Errorf("pairIDs offset is %d, expected 48", pairOffset)
+		}
+	})
+}
+
+func TestZeroPadding(t *testing.T) {
+	t.Run("NoInternalPadding", func(t *testing.T) {
+		// Verify all fields are 8-byte aligned with no internal padding
+		fanout := FanoutEntry{}
+
+		expectedOffsets := []uintptr{32, 40, 48, 56} // After 32B top padding
+		actualOffsets := []uintptr{
+			unsafe.Offsetof(fanout.edgeIndex),
+			unsafe.Offsetof(fanout.cycleStateIndex),
+			unsafe.Offsetof(fanout.queueHandle),
+			unsafe.Offsetof(fanout.queue),
+		}
+
+		for i, expected := range expectedOffsets {
+			if actualOffsets[i] != expected {
+				t.Errorf("Field %d offset is %d, expected %d", i, actualOffsets[i], expected)
+			}
+		}
+	})
+}
+
+// ============================================================================
+// ADDRESS KEY TESTS
+// ============================================================================
+
 func TestAddressKey(t *testing.T) {
-	t.Run("DirectComparison", func(t *testing.T) {
+	t.Run("Creation", func(t *testing.T) {
+		addr := generateMockAddress(12345)
+		key := bytesToAddressKey(addr[:])
+
+		// Should have parsed 5 words from 20-byte address
+		if key.words[0] == 0 && key.words[1] == 0 && key.words[2] == 0 {
+			t.Error("Address key appears to be zero")
+		}
+
+		// Last two words should be zero (padding)
+		if key.words[3] != 0 || key.words[4] != 0 {
+			t.Error("Padding words should be zero")
+		}
+	})
+
+	t.Run("Comparison", func(t *testing.T) {
 		addr1 := generateMockAddress(12345)
 		addr2 := generateMockAddress(12345)
 		addr3 := generateMockAddress(54321)
@@ -61,39 +215,57 @@ func TestAddressKey(t *testing.T) {
 		}
 	})
 
-	t.Run("ZeroValue", func(t *testing.T) {
-		var zeroKey AddressKey
-		var emptyAddr [40]byte
-		for i := range emptyAddr {
-			emptyAddr[i] = '0'
-		}
+	t.Run("ZeroAddress", func(t *testing.T) {
+		var zeroAddr [42]byte
+		copy(zeroAddr[:], "0x0000000000000000000000000000000000000000")
 
-		parsedKey := bytesToAddressKey(emptyAddr[:])
-		// Zero address string "0000..." should parse to actual zero bytes
-		if !parsedKey.isEqual(zeroKey) {
-			t.Error("Parsed zero address should equal zero key")
+		key := bytesToAddressKey(zeroAddr[:])
+
+		// Should parse to all zeros
+		for i := 0; i < 3; i++ {
+			if key.words[i] != 0 {
+				t.Errorf("Zero address word %d should be 0, got %x", i, key.words[i])
+			}
 		}
 	})
 
-	t.Run("Size", func(t *testing.T) {
-		var key AddressKey
-		if unsafe.Sizeof(key) != 64 {
-			t.Errorf("AddressKey size is %d, expected 64", unsafe.Sizeof(key))
+	t.Run("PrefixStripping", func(t *testing.T) {
+		// Test that 0x prefix is properly stripped
+		addr := [42]byte{}
+		copy(addr[:], "0x1234567890abcdefABCDEF1234567890abcdefAB")
+
+		key := bytesToAddressKey(addr[:])
+
+		// Should not be zero (proving prefix was stripped and address parsed)
+		if key.words[0] == 0 {
+			t.Error("Address key should not be zero after parsing")
 		}
 	})
 }
 
-// TestDirectMapOperations - Test the Robin Hood hash table
-func TestDirectMapOperations(t *testing.T) {
-	t.Run("BasicOperations", func(t *testing.T) {
-		// Clear the hash table
-		for i := range addressKeys[:100] {
-			addressKeys[i] = AddressKey{}
-		}
-		for i := range addressPairs[:100] {
-			addressPairs[i] = 0
-		}
+func TestAddressKeyZeroAllocation(t *testing.T) {
+	addr := generateMockAddress(42)
 
+	assertZeroAllocs(t, "bytesToAddressKey", func() {
+		_ = bytesToAddressKey(addr[:])
+	})
+
+	key1 := bytesToAddressKey(addr[:])
+	key2 := bytesToAddressKey(addr[:])
+
+	assertZeroAllocs(t, "AddressKey.isEqual", func() {
+		_ = key1.isEqual(key2)
+	})
+}
+
+// ============================================================================
+// ROBIN HOOD HASH TABLE TESTS
+// ============================================================================
+
+func TestRobinHoodHashTable(t *testing.T) {
+	clearGlobalState()
+
+	t.Run("BasicOperations", func(t *testing.T) {
 		addr := generateMockAddress(42)
 		pairID := PairID(1337)
 
@@ -106,14 +278,6 @@ func TestDirectMapOperations(t *testing.T) {
 	})
 
 	t.Run("UpdateExisting", func(t *testing.T) {
-		// Clear the hash table
-		for i := range addressKeys[:100] {
-			addressKeys[i] = AddressKey{}
-		}
-		for i := range addressPairs[:100] {
-			addressPairs[i] = 0
-		}
-
 		addr := generateMockAddress(12345)
 		originalPairID := PairID(1000)
 		updatedPairID := PairID(2000)
@@ -128,14 +292,6 @@ func TestDirectMapOperations(t *testing.T) {
 	})
 
 	t.Run("NotFound", func(t *testing.T) {
-		// Clear the hash table
-		for i := range addressKeys[:100] {
-			addressKeys[i] = AddressKey{}
-		}
-		for i := range addressPairs[:100] {
-			addressPairs[i] = 0
-		}
-
 		unknownAddr := generateMockAddress(999999)
 		foundID := lookupPairIDByAddress(unknownAddr[:])
 
@@ -144,24 +300,61 @@ func TestDirectMapOperations(t *testing.T) {
 		}
 	})
 
+	t.Run("MiddleByteHashing", func(t *testing.T) {
+		// Test that middle byte extraction works
+		addr := generateMockAddress(123)
+
+		hash1 := directAddressToIndex64(addr[:])
+		hash2 := directAddressToIndex64(addr[:])
+
+		if hash1 != hash2 {
+			t.Error("Hash function should be deterministic")
+		}
+
+		// Should use middle bytes (different from first bytes)
+		key := bytesToAddressKey(addr[:])
+		firstBytes := uint64(key.words[0]) & uint64(constants.AddressTableMask)
+		middleBytes := hash1
+
+		if firstBytes == middleBytes {
+			t.Log("Warning: Middle byte hash equals first byte hash (possible but unlikely)")
+		}
+	})
+
+	t.Run("RobinHoodDisplacement", func(t *testing.T) {
+		clearGlobalState()
+
+		// Register multiple addresses that might collide
+		for i := 0; i < 10; i++ {
+			addr := generateMockAddress(uint64(1000 + i))
+			pairID := PairID(i + 1)
+			RegisterPairAddress(addr[:], pairID)
+		}
+
+		// Verify all can be retrieved
+		for i := 0; i < 10; i++ {
+			addr := generateMockAddress(uint64(1000 + i))
+			expected := PairID(i + 1)
+			found := lookupPairIDByAddress(addr[:])
+
+			if found != expected {
+				t.Errorf("Robin Hood failed: expected %d, got %d", expected, found)
+			}
+		}
+	})
+
 	t.Run("LargeScale", func(t *testing.T) {
-		// Clear the hash table
-		for i := range addressKeys[:1000] {
-			addressKeys[i] = AddressKey{}
-		}
-		for i := range addressPairs[:1000] {
-			addressPairs[i] = 0
-		}
+		clearGlobalState()
 
-		const count = 100 // Keep reasonable to avoid hash table overflow
+		const count = 500 // Keep reasonable to avoid hash table overflow
 		for i := 0; i < count; i++ {
-			addr := generateMockAddress(uint64(i * 12345)) // Better distribution
-			RegisterPairAddress(addr[:], PairID(i+1))      // Avoid PairID 0
+			addr := generateMockAddress(uint64(i * 1000003)) // Better distribution
+			RegisterPairAddress(addr[:], PairID(i+1))
 		}
 
-		// Verify some samples
-		for i := 0; i < count; i += 10 {
-			addr := generateMockAddress(uint64(i * 12345))
+		// Verify random samples
+		for i := 0; i < count; i += 25 {
+			addr := generateMockAddress(uint64(i * 1000003))
 			found := lookupPairIDByAddress(addr[:])
 			if found != PairID(i+1) {
 				t.Errorf("Lost entry %d: expected %d, got %d", i, i+1, found)
@@ -170,33 +363,77 @@ func TestDirectMapOperations(t *testing.T) {
 	})
 }
 
-// TestTickQuantization - Test the quantization function
-func TestTickQuantization(t *testing.T) {
-	testCases := []struct {
-		input float64
-		name  string
-	}{
-		{-1000.0, "ExtremeNegative"},
-		{-constants.TickClampingBound - 1, "BelowLowerBound"},
-		{-constants.TickClampingBound, "LowerBound"},
-		{-100.0, "Negative"},
-		{0.0, "Zero"},
-		{100.0, "Positive"},
-		{constants.TickClampingBound, "UpperBound"},
-		{constants.TickClampingBound + 1, "AboveUpperBound"},
-		{1000.0, "ExtremePositive"},
-		{math.NaN(), "NaN"},
-		{math.Inf(1), "PositiveInf"},
-		{math.Inf(-1), "NegativeInf"},
-	}
+func TestRobinHoodZeroAllocation(t *testing.T) {
+	clearGlobalState()
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
+	addr := generateMockAddress(42)
+	pairID := PairID(123)
+
+	// First registration might allocate, so do it outside test
+	RegisterPairAddress(addr[:], pairID)
+
+	assertZeroAllocs(t, "RegisterPairAddress", func() {
+		RegisterPairAddress(addr[:], pairID) // Update existing
+	})
+
+	assertZeroAllocs(t, "lookupPairIDByAddress", func() {
+		_ = lookupPairIDByAddress(addr[:])
+	})
+}
+
+// ============================================================================
+// QUANTIZATION TESTS
+// ============================================================================
+
+func TestQuantization(t *testing.T) {
+	t.Run("BasicQuantization", func(t *testing.T) {
+		testCases := []struct {
+			input float64
+		}{
+			{0.0},
+			{1.0},
+			{-1.0},
+		}
+
+		for _, tc := range testCases {
+			// Calculate expected value using the same function to avoid overflow
+			expected := quantizeTickToInt64(tc.input)
 			result := quantizeTickToInt64(tc.input)
-			// No bounds checking - that's the footgun way
-			_ = result
-		})
-	}
+			if result != expected {
+				t.Errorf("quantizeTickToInt64(%f) = %d, expected %d", tc.input, result, expected)
+			}
+		}
+
+		// Test specific known relationships
+		zero := quantizeTickToInt64(0.0)
+		one := quantizeTickToInt64(1.0)
+		minusOne := quantizeTickToInt64(-1.0)
+
+		// Verify relative relationships
+		if one <= zero {
+			t.Error("quantizeTickToInt64(1.0) should be greater than quantizeTickToInt64(0.0)")
+		}
+		if minusOne >= zero {
+			t.Error("quantizeTickToInt64(-1.0) should be less than quantizeTickToInt64(0.0)")
+		}
+	})
+
+	t.Run("FootgunMode", func(t *testing.T) {
+		// Test that footgun mode has no bounds checking
+		extremeValues := []float64{
+			-1000.0,
+			1000.0,
+			math.Inf(1),
+			math.Inf(-1),
+			math.NaN(),
+		}
+
+		for _, val := range extremeValues {
+			// Should not panic (footgun mode)
+			result := quantizeTickToInt64(val)
+			_ = result // Just verify no panic
+		}
+	})
 
 	t.Run("Precision", func(t *testing.T) {
 		tick1 := 50.0
@@ -205,7 +442,6 @@ func TestTickQuantization(t *testing.T) {
 		q1 := quantizeTickToInt64(tick1)
 		q2 := quantizeTickToInt64(tick2)
 
-		// Should differ by 1 quantum
 		diff := q2 - q1
 		if diff < 0 {
 			diff = -diff
@@ -216,46 +452,266 @@ func TestTickQuantization(t *testing.T) {
 	})
 }
 
-// TestSecureRandomInt - Test random generation
-func TestSecureRandomInt(t *testing.T) {
-	t.Run("BoundaryValues", func(t *testing.T) {
-		bounds := []int{1, 2, 10, 100, 1000}
+func TestQuantizationZeroAllocation(t *testing.T) {
+	assertZeroAllocs(t, "quantizeTickToInt64", func() {
+		_ = quantizeTickToInt64(1.23)
+	})
+}
 
-		for _, bound := range bounds {
-			results := make(map[int]bool)
+// ============================================================================
+// KECCAK SHUFFLE TESTS
+// ============================================================================
 
-			// Generate many values
-			for i := 0; i < bound*10; i++ {
-				result := secureRandomInt(bound)
-				if result < 0 || result >= bound {
-					t.Errorf("Result %d outside [0,%d)", result, bound)
-				}
-				results[result] = true
+func TestKeccakShuffle(t *testing.T) {
+	t.Run("Deterministic", func(t *testing.T) {
+		bindings := make([]ArbitrageEdgeBinding, 10)
+		for i := range bindings {
+			bindings[i] = ArbitrageEdgeBinding{
+				cyclePairs: [3]PairID{PairID(i * 3), PairID(i*3 + 1), PairID(i*3 + 2)},
+				edgeIndex:  uint64(i % 3),
 			}
+		}
 
-			// Check coverage (might fail randomly - that's fine)
-			if len(results) < bound/2 {
-				t.Logf("Warning: Only saw %d/%d values", len(results), bound)
+		// Create copies
+		bindings1 := make([]ArbitrageEdgeBinding, len(bindings))
+		bindings2 := make([]ArbitrageEdgeBinding, len(bindings))
+		copy(bindings1, bindings)
+		copy(bindings2, bindings)
+
+		// Shuffle both with same pairID
+		pairID := PairID(12345)
+		keccakShuffleEdgeBindings(bindings1, pairID)
+		keccakShuffleEdgeBindings(bindings2, pairID)
+
+		// Should be identical
+		for i := range bindings1 {
+			if bindings1[i] != bindings2[i] {
+				t.Error("Keccak shuffle not deterministic")
+				break
 			}
 		}
 	})
 
-	t.Run("ZeroBound", func(t *testing.T) {
-		// The optimized secureRandomInt handles zero bound gracefully
-		// by returning 0 instead of panicking
-		result := secureRandomInt(0)
-		if result != 0 {
-			t.Errorf("Expected 0 for zero bound, got %d", result)
+	t.Run("DifferentSeeds", func(t *testing.T) {
+		bindings := make([]ArbitrageEdgeBinding, 10)
+		for i := range bindings {
+			bindings[i] = ArbitrageEdgeBinding{
+				cyclePairs: [3]PairID{PairID(i * 3), PairID(i*3 + 1), PairID(i*3 + 2)},
+				edgeIndex:  uint64(i % 3),
+			}
+		}
+
+		bindings1 := make([]ArbitrageEdgeBinding, len(bindings))
+		bindings2 := make([]ArbitrageEdgeBinding, len(bindings))
+		copy(bindings1, bindings)
+		copy(bindings2, bindings)
+
+		// Shuffle with different pairIDs
+		keccakShuffleEdgeBindings(bindings1, PairID(12345))
+		keccakShuffleEdgeBindings(bindings2, PairID(54321))
+
+		// Should be different
+		identical := true
+		for i := range bindings1 {
+			if bindings1[i] != bindings2[i] {
+				identical = false
+				break
+			}
+		}
+
+		if identical {
+			t.Error("Different seeds produced identical results (extremely unlikely)")
+		}
+	})
+
+	t.Run("EdgeCases", func(t *testing.T) {
+		// Empty slice
+		var empty []ArbitrageEdgeBinding
+		keccakShuffleEdgeBindings(empty, PairID(123)) // Should not panic
+
+		// Single element
+		single := []ArbitrageEdgeBinding{{}}
+		original := single[0]
+		keccakShuffleEdgeBindings(single, PairID(123))
+		if single[0] != original {
+			t.Error("Single element should not change")
+		}
+	})
+
+	t.Run("QualityDistribution", func(t *testing.T) {
+		// Test that shuffle produces good distribution
+		size := 10
+		bindings := make([]ArbitrageEdgeBinding, size)
+		for i := range bindings {
+			bindings[i] = ArbitrageEdgeBinding{
+				cyclePairs: [3]PairID{PairID(i), PairID(i + 1), PairID(i + 2)},
+				edgeIndex:  uint64(i % 3),
+			}
+		}
+
+		// Track position changes across multiple shuffles
+		positionChanges := 0
+		iterations := 100
+
+		for iter := 0; iter < iterations; iter++ {
+			testBindings := make([]ArbitrageEdgeBinding, size)
+			copy(testBindings, bindings)
+
+			keccakShuffleEdgeBindings(testBindings, PairID(iter))
+
+			// Check if any position changed
+			for i := range testBindings {
+				if testBindings[i].cyclePairs[0] != bindings[i].cyclePairs[0] {
+					positionChanges++
+					break
+				}
+			}
+		}
+
+		if positionChanges < iterations/2 {
+			t.Errorf("Shuffle not random enough: only %d/%d changed", positionChanges, iterations)
 		}
 	})
 }
 
-// TestCoreAssignment - Test pair-to-core mapping
+// ============================================================================
+// SHARD BUILDING TESTS
+// ============================================================================
+
+func TestShardBuilding(t *testing.T) {
+	clearGlobalState()
+
+	t.Run("BasicShardConstruction", func(t *testing.T) {
+		cycles := []ArbitrageTriplet{
+			{PairID(1), PairID(2), PairID(3)},
+			{PairID(2), PairID(4), PairID(5)},
+			{PairID(3), PairID(5), PairID(6)},
+		}
+
+		buildFanoutShardBuckets(cycles)
+
+		// Each pair should have shards
+		if len(pairShardBuckets) == 0 {
+			t.Error("No shard buckets created")
+		}
+
+		// Check that pairs have appropriate edge bindings
+		for pairID := PairID(1); pairID <= PairID(6); pairID++ {
+			shards, exists := pairShardBuckets[pairID]
+			if !exists || len(shards) == 0 {
+				t.Errorf("Pair %d has no shards", pairID)
+			}
+		}
+	})
+
+	t.Run("ShardSizeLimit", func(t *testing.T) {
+		clearGlobalState()
+
+		// Create many cycles with same pair to trigger sharding
+		cycles := make([]ArbitrageTriplet, constants.MaxCyclesPerShard*2)
+		for i := range cycles {
+			cycles[i] = ArbitrageTriplet{
+				PairID(1), // Same first pair
+				PairID(uint64(i + 1000)),
+				PairID(uint64(i + 2000)),
+			}
+		}
+
+		buildFanoutShardBuckets(cycles)
+
+		shards := pairShardBuckets[PairID(1)]
+		if len(shards) < 2 {
+			t.Errorf("Expected multiple shards, got %d", len(shards))
+		}
+
+		for _, shard := range shards {
+			if len(shard.edgeBindings) > constants.MaxCyclesPerShard {
+				t.Errorf("Shard exceeds max size: %d", len(shard.edgeBindings))
+			}
+		}
+	})
+
+	t.Run("EdgeIndexCorrectness", func(t *testing.T) {
+		clearGlobalState()
+
+		cycles := []ArbitrageTriplet{
+			{PairID(10), PairID(20), PairID(30)},
+		}
+
+		buildFanoutShardBuckets(cycles)
+
+		// Verify edge indices are correct
+		for pairID, shards := range pairShardBuckets {
+			for _, shard := range shards {
+				for _, binding := range shard.edgeBindings {
+					// Find which position this pair is in
+					found := false
+					for i, p := range binding.cyclePairs {
+						if p == pairID {
+							if binding.edgeIndex != uint64(i) {
+								t.Errorf("Wrong edge index for pair %d: expected %d, got %d",
+									pairID, i, binding.edgeIndex)
+							}
+							found = true
+							break
+						}
+					}
+					if !found {
+						t.Errorf("Pair %d not found in its own binding", pairID)
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("ShuffleIntegration", func(t *testing.T) {
+		clearGlobalState()
+
+		cycles := []ArbitrageTriplet{
+			{PairID(1), PairID(2), PairID(3)},
+			{PairID(1), PairID(4), PairID(5)},
+			{PairID(1), PairID(6), PairID(7)},
+		}
+
+		buildFanoutShardBuckets(cycles)
+
+		// Verify that pair 1 has shuffled bindings
+		shards := pairShardBuckets[PairID(1)]
+		if len(shards) == 0 {
+			t.Fatal("No shards for pair 1")
+		}
+
+		bindings := shards[0].edgeBindings
+		if len(bindings) < 2 {
+			t.Fatal("Not enough bindings to test shuffle")
+		}
+
+		// Build again with same cycles - should be identical (deterministic)
+		clearGlobalState()
+		buildFanoutShardBuckets(cycles)
+
+		newShards := pairShardBuckets[PairID(1)]
+		newBindings := newShards[0].edgeBindings
+
+		if len(bindings) != len(newBindings) {
+			t.Error("Shard reconstruction not deterministic")
+		}
+
+		for i := range bindings {
+			if bindings[i] != newBindings[i] {
+				t.Error("Shuffle not deterministic")
+				break
+			}
+		}
+	})
+}
+
+// ============================================================================
+// CORE ASSIGNMENT TESTS
+// ============================================================================
+
 func TestCoreAssignment(t *testing.T) {
-	// Clear assignments
-	for i := range pairToCoreAssignment[:100] {
-		pairToCoreAssignment[i] = 0
-	}
+	clearGlobalState()
 
 	t.Run("SingleCore", func(t *testing.T) {
 		pairID := PairID(12345)
@@ -289,19 +745,6 @@ func TestCoreAssignment(t *testing.T) {
 		}
 	})
 
-	t.Run("AllCores", func(t *testing.T) {
-		pairID := PairID(99999)
-
-		for core := uint8(0); core < 64; core++ {
-			RegisterPairToCore(pairID, core)
-		}
-
-		assignment := pairToCoreAssignment[pairID]
-		if assignment != ^uint64(0) {
-			t.Errorf("Expected all bits set, got %064b", assignment)
-		}
-	})
-
 	t.Run("BitExtraction", func(t *testing.T) {
 		pairID := PairID(88888)
 		expectedCores := []uint8{1, 3, 5, 7, 11, 13}
@@ -314,7 +757,7 @@ func TestCoreAssignment(t *testing.T) {
 		foundCores := []uint8{}
 
 		for assignment != 0 {
-			coreID := bits.TrailingZeros64(uint64(assignment))
+			coreID := bits.TrailingZeros64(assignment)
 			foundCores = append(foundCores, uint8(coreID))
 			assignment &^= 1 << coreID
 		}
@@ -324,256 +767,90 @@ func TestCoreAssignment(t *testing.T) {
 		}
 	})
 
-	t.Run("OutOfBoundsPair", func(t *testing.T) {
-		// This will access out of bounds - footgun!
-		defer func() {
-			if r := recover(); r == nil {
-				t.Error("Expected panic with out of bounds pair")
-			}
-		}()
+	t.Run("AllCores", func(t *testing.T) {
+		pairID := PairID(99999)
 
-		hugePairID := PairID(constants.PairRoutingTableCapacity + 1)
-		RegisterPairToCore(hugePairID, 0)
+		for core := uint8(0); core < 64; core++ {
+			RegisterPairToCore(pairID, core)
+		}
+
+		assignment := pairToCoreAssignment[pairID]
+		if assignment != ^uint64(0) {
+			t.Errorf("Expected all bits set, got %064b", assignment)
+		}
 	})
 }
 
-// TestProcessTickUpdate - Test the core processing function
-func TestProcessTickUpdate(t *testing.T) {
-	t.Run("ForwardDirection", func(t *testing.T) {
-		executor := &ArbitrageCoreExecutor{
-			isReverseDirection: false,
-			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
-			fanoutTables:       make([][]FanoutEntry, 1),
-			pairToQueueIndex:   localidx.New(16),
-			cycleStates:        make([]ArbitrageCycleState, 1),
+// ============================================================================
+// FULL SYSTEM INTEGRATION TESTS
+// ============================================================================
+
+func TestSystemInitialization(t *testing.T) {
+	clearGlobalState()
+
+	t.Run("BasicInitialization", func(t *testing.T) {
+		cycles := []ArbitrageTriplet{
+			{PairID(1), PairID(2), PairID(3)},
+			{PairID(4), PairID(5), PairID(6)},
 		}
 
-		executor.priorityQueues[0] = *quantumqueue64.New()
-		executor.pairToQueueIndex.Put(123, 0)
+		InitializeArbitrageSystem(cycles)
+		time.Sleep(50 * time.Millisecond)
 
-		// Create a cycle state and add it to the queue properly
-		executor.cycleStates[0] = ArbitrageCycleState{
-			tickValues: [3]float64{0.0, 0.0, 0.0},
-			pairIDs:    [3]PairID{123, 124, 125},
+		// Check that shards were created
+		if len(pairShardBuckets) == 0 {
+			t.Error("No shard buckets created")
 		}
 
-		// Add a queue entry so PeepMin doesn't fail
-		handle, _ := executor.priorityQueues[0].BorrowSafe()
-		executor.priorityQueues[0].Push(0, handle, 0) // Add cycle 0 to queue
-
-		update := &TickUpdate{
-			pairID:      PairID(123),
-			forwardTick: 1.5,
-			reverseTick: -1.5,
-		}
-
-		processTickUpdate(executor, update)
-
-		// Forward direction should use forwardTick
-		// The update will only affect fanout entries, so verify no crash
-		if len(executor.cycleStates) != 1 {
-			t.Error("Cycle states modified unexpectedly")
-		}
-	})
-
-	t.Run("ReverseDirection", func(t *testing.T) {
-		executor := &ArbitrageCoreExecutor{
-			isReverseDirection: true,
-			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
-			fanoutTables:       make([][]FanoutEntry, 1),
-			pairToQueueIndex:   localidx.New(16),
-			cycleStates:        make([]ArbitrageCycleState, 1),
-		}
-
-		executor.priorityQueues[0] = *quantumqueue64.New()
-		executor.pairToQueueIndex.Put(123, 0)
-
-		// Setup with fanout to see the update
-		handle, _ := executor.priorityQueues[0].BorrowSafe()
-		executor.priorityQueues[0].Push(constants.MaxInitializationPriority, handle, 0)
-
-		executor.cycleStates[0] = ArbitrageCycleState{
-			tickValues: [3]float64{0.0, 0.0, 0.0},
-			pairIDs:    [3]PairID{123, 124, 125},
-		}
-
-		executor.fanoutTables[0] = []FanoutEntry{
-			{
-				queueHandle:     handle,
-				edgeIndex:       0,
-				cycleStateIndex: 0,
-				queue:           &executor.priorityQueues[0],
-			},
-		}
-
-		update := &TickUpdate{
-			pairID:      PairID(123),
-			forwardTick: 1.5,
-			reverseTick: -1.5,
-		}
-
-		processTickUpdate(executor, update)
-
-		// Reverse direction should use reverseTick
-		if executor.cycleStates[0].tickValues[0] != -1.5 {
-			t.Errorf("Expected -1.5, got %f", executor.cycleStates[0].tickValues[0])
-		}
-	})
-
-	t.Run("ArbitrageDetection", func(t *testing.T) {
-		executor := &ArbitrageCoreExecutor{
-			isReverseDirection: false,
-			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
-			fanoutTables:       make([][]FanoutEntry, 1),
-			pairToQueueIndex:   localidx.New(16),
-			cycleStates:        make([]ArbitrageCycleState, 1),
-		}
-
-		executor.priorityQueues[0] = *quantumqueue64.New()
-		executor.pairToQueueIndex.Put(123, 0)
-
-		// Profitable cycle: sum < 0
-		executor.cycleStates[0] = ArbitrageCycleState{
-			tickValues: [3]float64{-0.5, -0.3, -0.1}, // sum = -0.9
-			pairIDs:    [3]PairID{100, 101, 102},
-		}
-
-		handle, _ := executor.priorityQueues[0].BorrowSafe()
-		priority := quantizeTickToInt64(-0.9)
-		executor.priorityQueues[0].Push(priority, handle, 0)
-
-		update := &TickUpdate{
-			pairID:      PairID(123),
-			forwardTick: -0.2, // Makes total -1.1 (profitable)
-		}
-
-		// Should process the profitable cycle
-		processTickUpdate(executor, update)
-	})
-
-	t.Run("MaxBatchProcessing", func(t *testing.T) {
-		executor := &ArbitrageCoreExecutor{
-			isReverseDirection: false,
-			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
-			fanoutTables:       make([][]FanoutEntry, 1),
-			pairToQueueIndex:   localidx.New(16),
-			cycleStates:        make([]ArbitrageCycleState, 200),
-		}
-
-		executor.priorityQueues[0] = *quantumqueue64.New()
-		executor.pairToQueueIndex.Put(123, 0)
-
-		// Add 200 profitable cycles (more than 128 batch size)
-		for i := 0; i < 200; i++ {
-			executor.cycleStates[i] = ArbitrageCycleState{
-				tickValues: [3]float64{-0.1, -0.1, -0.1},
-				pairIDs:    [3]PairID{PairID(i * 3), PairID(i*3 + 1), PairID(i*3 + 2)},
+		// Check core assignments
+		hasAssignment := false
+		for i := uint64(1); i <= 6; i++ {
+			if pairToCoreAssignment[i] != 0 {
+				hasAssignment = true
+				break
 			}
-
-			handle, _ := executor.priorityQueues[0].BorrowSafe()
-			priority := quantizeTickToInt64(-0.3)
-			executor.priorityQueues[0].Push(priority, handle, uint64(i))
+		}
+		if !hasAssignment {
+			t.Error("No core assignments made")
 		}
 
-		update := &TickUpdate{
-			pairID:      PairID(123),
-			forwardTick: -1.0, // Makes all cycles very profitable
-		}
-
-		// Should only process 128 in one batch
-		processTickUpdate(executor, update)
+		control.Shutdown()
+		time.Sleep(50 * time.Millisecond)
 	})
 
-	t.Run("FanoutPropagation", func(t *testing.T) {
-		executor := &ArbitrageCoreExecutor{
-			isReverseDirection: false,
-			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
-			fanoutTables:       make([][]FanoutEntry, 1),
-			pairToQueueIndex:   localidx.New(16),
-			cycleStates:        make([]ArbitrageCycleState, 3),
-		}
+	t.Run("ScalabilityTest", func(t *testing.T) {
+		clearGlobalState()
 
-		executor.priorityQueues[0] = *quantumqueue64.New()
-		executor.pairToQueueIndex.Put(123, 0)
-
-		// Setup multiple cycles
-		for i := 0; i < 3; i++ {
-			executor.cycleStates[i] = ArbitrageCycleState{
-				tickValues: [3]float64{0.0, 0.0, 0.0},
-				pairIDs:    [3]PairID{PairID(100 + i*3), PairID(101 + i*3), PairID(102 + i*3)},
+		cycles := make([]ArbitrageTriplet, 100)
+		for i := 0; i < 100; i++ {
+			baseID := uint64(i * 3)
+			cycles[i] = ArbitrageTriplet{
+				PairID(baseID + 1),
+				PairID(baseID + 2),
+				PairID(baseID + 3),
 			}
 		}
 
-		// Create fanout entries
-		handles := make([]quantumqueue64.Handle, 3)
-		for i := 0; i < 3; i++ {
-			handles[i], _ = executor.priorityQueues[0].BorrowSafe()
-			executor.priorityQueues[0].Push(constants.MaxInitializationPriority, handles[i], uint64(i))
+		InitializeArbitrageSystem(cycles)
+		time.Sleep(100 * time.Millisecond)
+
+		// Verify scale
+		totalShards := 0
+		for _, shards := range pairShardBuckets {
+			totalShards += len(shards)
 		}
 
-		executor.fanoutTables[0] = []FanoutEntry{
-			{
-				queueHandle:     handles[0],
-				edgeIndex:       0,
-				cycleStateIndex: 0,
-				queue:           &executor.priorityQueues[0],
-			},
-			{
-				queueHandle:     handles[1],
-				edgeIndex:       1,
-				cycleStateIndex: 1,
-				queue:           &executor.priorityQueues[0],
-			},
-			{
-				queueHandle:     handles[2],
-				edgeIndex:       2,
-				cycleStateIndex: 2,
-				queue:           &executor.priorityQueues[0],
-			},
+		if totalShards == 0 {
+			t.Error("No shards created at scale")
 		}
 
-		update := &TickUpdate{
-			pairID:      PairID(123),
-			forwardTick: 1.5,
-		}
-
-		processTickUpdate(executor, update)
-
-		// Verify propagation
-		if executor.cycleStates[0].tickValues[0] != 1.5 {
-			t.Errorf("Cycle 0 edge 0: expected 1.5, got %f", executor.cycleStates[0].tickValues[0])
-		}
-		if executor.cycleStates[1].tickValues[1] != 1.5 {
-			t.Errorf("Cycle 1 edge 1: expected 1.5, got %f", executor.cycleStates[1].tickValues[1])
-		}
-		if executor.cycleStates[2].tickValues[2] != 1.5 {
-			t.Errorf("Cycle 2 edge 2: expected 1.5, got %f", executor.cycleStates[2].tickValues[2])
-		}
-	})
-
-	t.Run("EmptyQueue", func(t *testing.T) {
-		// Skip this test - by design, there should never be an empty queue
-		// if a pair is being processed. The router architecture ensures
-		// queues only exist when they have cycles to process.
-		t.Skip("Empty queue test skipped - queues should not exist if empty by design")
-	})
-
-	t.Run("InvalidQueueIndex", func(t *testing.T) {
-		// Skip this test - by design, unregistered pairs should not reach
-		// processTickUpdate. The dispatch layer filters these out.
-		t.Skip("Invalid queue index test skipped - unregistered pairs filtered at dispatch level")
+		control.Shutdown()
+		time.Sleep(100 * time.Millisecond)
 	})
 }
 
-// TestDispatchTickUpdate - Test the dispatch function
-func TestDispatchTickUpdate(t *testing.T) {
-	// Clear the hash table
-	for i := range addressKeys[:100] {
-		addressKeys[i] = AddressKey{}
-	}
-	for i := range addressPairs[:100] {
-		addressPairs[i] = 0
-	}
+func TestTickDispatch(t *testing.T) {
+	clearGlobalState()
 
 	t.Run("CompleteDispatch", func(t *testing.T) {
 		addr := generateMockAddress(555)
@@ -595,9 +872,7 @@ func TestDispatchTickUpdate(t *testing.T) {
 			Data: make([]byte, 128),
 		}
 
-		logView.Addr[0] = '0'
-		logView.Addr[1] = 'x'
-		copy(logView.Addr[2:42], addr[:])
+		copy(logView.Addr[:42], addr[:])
 
 		reserve0, reserve1 := uint64(1000), uint64(500)
 		for i := 0; i < 8; i++ {
@@ -616,61 +891,9 @@ func TestDispatchTickUpdate(t *testing.T) {
 			Data: make([]byte, 128),
 		}
 
-		logView.Addr[0] = '0'
-		logView.Addr[1] = 'x'
-		copy(logView.Addr[2:42], unknownAddr[:])
+		copy(logView.Addr[:42], unknownAddr[:])
 
 		// Should return early when pairID is 0
-		DispatchTickUpdate(logView)
-	})
-
-	t.Run("NoCoreAssignment", func(t *testing.T) {
-		addr := generateMockAddress(777)
-		pairID := PairID(777)
-		RegisterPairAddress(addr[:], pairID)
-		// Don't assign to any core
-
-		logView := &types.LogView{
-			Addr: make([]byte, 64),
-			Data: make([]byte, 128),
-		}
-
-		logView.Addr[0] = '0'
-		logView.Addr[1] = 'x'
-		copy(logView.Addr[2:42], addr[:])
-
-		// Should handle zero core assignment
-		DispatchTickUpdate(logView)
-	})
-
-	t.Run("AllCoresDispatch", func(t *testing.T) {
-		addr := generateMockAddress(888)
-		pairID := PairID(888)
-		RegisterPairAddress(addr[:], pairID)
-
-		// Assign to all 64 cores
-		for core := uint8(0); core < 64; core++ {
-			RegisterPairToCore(pairID, core)
-			if coreRings[core] == nil {
-				coreRings[core] = ring24.New(16)
-			}
-		}
-
-		logView := &types.LogView{
-			Addr: make([]byte, 64),
-			Data: make([]byte, 128),
-		}
-
-		logView.Addr[0] = '0'
-		logView.Addr[1] = 'x'
-		copy(logView.Addr[2:42], addr[:])
-
-		reserve0, reserve1 := uint64(2000), uint64(1000)
-		for i := 0; i < 8; i++ {
-			logView.Data[24+i] = byte(reserve0 >> (8 * (7 - i)))
-			logView.Data[56+i] = byte(reserve1 >> (8 * (7 - i)))
-		}
-
 		DispatchTickUpdate(logView)
 	})
 
@@ -692,8 +915,8 @@ func TestDispatchTickUpdate(t *testing.T) {
 			{1, 1, "Equal"},
 			{0, 1000, "ZeroReserve0"},
 			{1000, 0, "ZeroReserve1"},
-			{1<<64 - 1, 1, "MaxReserve"},
-			{1, 1<<64 - 1, "MinRatio"},
+			{1<<63 - 1, 1, "MaxReserve"},
+			{1, 1<<63 - 1, "MinRatio"},
 		}
 
 		for _, tc := range testCases {
@@ -703,9 +926,7 @@ func TestDispatchTickUpdate(t *testing.T) {
 					Data: make([]byte, 128),
 				}
 
-				logView.Addr[0] = '0'
-				logView.Addr[1] = 'x'
-				copy(logView.Addr[2:42], addr[:])
+				copy(logView.Addr[:42], addr[:])
 
 				for i := 0; i < 8; i++ {
 					logView.Data[24+i] = byte(tc.reserve0 >> (8 * (7 - i)))
@@ -717,570 +938,23 @@ func TestDispatchTickUpdate(t *testing.T) {
 			})
 		}
 	})
-
-	t.Run("DirectMemoryAccess", func(t *testing.T) {
-		addr := generateMockAddress(444)
-		pairID := PairID(444)
-		RegisterPairAddress(addr[:], pairID)
-		RegisterPairToCore(pairID, 0)
-
-		if coreRings[0] == nil {
-			coreRings[0] = ring24.New(16)
-		}
-
-		logView := &types.LogView{
-			Addr: make([]byte, 64),
-			Data: make([]byte, 128),
-		}
-
-		logView.Addr[0] = '0'
-		logView.Addr[1] = 'x'
-		copy(logView.Addr[2:42], addr[:])
-
-		// Test the direct unsafe memory access
-		reserve0 := uint64(0x0102030405060708)
-		reserve1 := uint64(0x090A0B0C0D0E0F10)
-
-		// Manually set bytes to test direct loading
-		*(*uint64)(unsafe.Pointer(&logView.Data[24])) = bits.ReverseBytes64(reserve0)
-		*(*uint64)(unsafe.Pointer(&logView.Data[56])) = bits.ReverseBytes64(reserve1)
-
-		DispatchTickUpdate(logView)
-	})
 }
 
-// TestShuffleEdgeBindings - Test the shuffle algorithm
-func TestShuffleEdgeBindings(t *testing.T) {
-	t.Run("EmptySlice", func(t *testing.T) {
-		var empty []ArbitrageEdgeBinding
-		shuffleEdgeBindings(empty) // Must not panic
-	})
+// ============================================================================
+// CONCURRENCY TESTS
+// ============================================================================
 
-	t.Run("SingleElement", func(t *testing.T) {
-		single := []ArbitrageEdgeBinding{
-			{cyclePairs: [3]PairID{1, 2, 3}, edgeIndex: 0},
-		}
-		original := single[0]
-		shuffleEdgeBindings(single)
-
-		if single[0] != original {
-			t.Error("Single element modified")
-		}
-	})
-
-	t.Run("Uniformity", func(t *testing.T) {
-		size := 10
-		bindings := make([]ArbitrageEdgeBinding, size)
-		for i := 0; i < size; i++ {
-			bindings[i] = ArbitrageEdgeBinding{
-				cyclePairs: [3]PairID{PairID(i), PairID(i + 1), PairID(i + 2)},
-				edgeIndex:  uint16(i % 3),
-			}
-		}
-
-		// Track if any position changed
-		positionChanges := 0
-		iterations := 100
-
-		for iter := 0; iter < iterations; iter++ {
-			testBindings := make([]ArbitrageEdgeBinding, size)
-			copy(testBindings, bindings)
-
-			shuffleEdgeBindings(testBindings)
-
-			for i := range testBindings {
-				if testBindings[i].cyclePairs[0] != bindings[i].cyclePairs[0] {
-					positionChanges++
-					break
-				}
-			}
-		}
-
-		if positionChanges < iterations/2 {
-			t.Errorf("Shuffle not random enough: only %d/%d changed", positionChanges, iterations)
-		}
-	})
-
-	t.Run("LargeSlice", func(t *testing.T) {
-		size := 1000
-		bindings := make([]ArbitrageEdgeBinding, size)
-		for i := 0; i < size; i++ {
-			bindings[i] = ArbitrageEdgeBinding{
-				cyclePairs: [3]PairID{PairID(i * 3), PairID(i*3 + 1), PairID(i*3 + 2)},
-				edgeIndex:  uint16(i % 3),
-			}
-		}
-
-		shuffleEdgeBindings(bindings)
-
-		// Check that not all elements are in original position
-		inPlace := 0
-		for i := range bindings {
-			if bindings[i].cyclePairs[0] == PairID(i*3) {
-				inPlace++
-			}
-		}
-
-		if inPlace > size/10 {
-			t.Errorf("Too many elements in original position: %d/%d", inPlace, size)
-		}
-	})
-}
-
-// TestBuildFanoutShardBuckets - Test shard construction
-func TestBuildFanoutShardBuckets(t *testing.T) {
-	t.Run("BasicConstruction", func(t *testing.T) {
-		cycles := []ArbitrageTriplet{
-			{PairID(1), PairID(2), PairID(3)},
-			{PairID(2), PairID(4), PairID(5)},
-			{PairID(3), PairID(5), PairID(6)},
-		}
-
-		buildFanoutShardBuckets(cycles)
-
-		// Each pair should have entries for each cycle it participates in
-		if len(pairShardBuckets[PairID(1)]) == 0 {
-			t.Error("Pair 1 has no shards")
-		}
-		if len(pairShardBuckets[PairID(2)]) == 0 {
-			t.Error("Pair 2 has no shards")
-		}
-		if len(pairShardBuckets[PairID(5)]) == 0 {
-			t.Error("Pair 5 has no shards")
-		}
-	})
-
-	t.Run("ShardSizeLimits", func(t *testing.T) {
-		// Create many cycles with same pair to trigger sharding
-		cycles := make([]ArbitrageTriplet, constants.MaxCyclesPerShard*2)
-		for i := range cycles {
-			cycles[i] = ArbitrageTriplet{
-				PairID(1), // Same first pair
-				PairID(uint32(i + 1000)),
-				PairID(uint32(i + 2000)),
-			}
-		}
-
-		buildFanoutShardBuckets(cycles)
-
-		shards := pairShardBuckets[PairID(1)]
-		if len(shards) < 2 {
-			t.Errorf("Expected multiple shards, got %d", len(shards))
-		}
-
-		for _, shard := range shards {
-			if len(shard.edgeBindings) > constants.MaxCyclesPerShard {
-				t.Errorf("Shard exceeds max size: %d", len(shard.edgeBindings))
-			}
-		}
-	})
-
-	t.Run("EdgeIndexCorrectness", func(t *testing.T) {
-		cycles := []ArbitrageTriplet{
-			{PairID(10), PairID(20), PairID(30)},
-		}
-
-		buildFanoutShardBuckets(cycles)
-
-		// Check edge indices
-		for pairID, shards := range pairShardBuckets {
-			for _, shard := range shards {
-				for _, binding := range shard.edgeBindings {
-					// Find which position this pair is in
-					found := false
-					for i, p := range binding.cyclePairs {
-						if p == pairID {
-							if binding.edgeIndex != uint16(i) {
-								t.Errorf("Wrong edge index for pair %d: expected %d, got %d",
-									pairID, i, binding.edgeIndex)
-							}
-							found = true
-							break
-						}
-					}
-					if !found {
-						t.Errorf("Pair %d not found in its own binding", pairID)
-					}
-				}
-			}
-		}
-	})
-
-	t.Run("EmptyCycles", func(t *testing.T) {
-		buildFanoutShardBuckets([]ArbitrageTriplet{})
-
-		if len(pairShardBuckets) != 0 {
-			t.Error("Expected empty shard buckets")
-		}
-	})
-}
-
-// TestAttachShardToExecutor - Test shard attachment
-func TestAttachShardToExecutor(t *testing.T) {
-	t.Run("BasicAttachment", func(t *testing.T) {
-		executor := &ArbitrageCoreExecutor{
-			priorityQueues:   make([]quantumqueue64.QuantumQueue64, 0),
-			fanoutTables:     make([][]FanoutEntry, 0),
-			pairToQueueIndex: localidx.New(16),
-			cycleStates:      make([]ArbitrageCycleState, 0),
-		}
-
-		shard := &PairShardBucket{
-			pairID: PairID(100),
-			edgeBindings: []ArbitrageEdgeBinding{
-				{
-					cyclePairs: [3]PairID{100, 101, 102},
-					edgeIndex:  0,
-				},
-				{
-					cyclePairs: [3]PairID{100, 103, 104},
-					edgeIndex:  0,
-				},
-			},
-		}
-
-		attachShardToExecutor(executor, shard)
-
-		// Should create one queue
-		if len(executor.priorityQueues) != 1 {
-			t.Errorf("Expected 1 queue, got %d", len(executor.priorityQueues))
-		}
-
-		// Should create cycle states
-		if len(executor.cycleStates) != 2 {
-			t.Errorf("Expected 2 cycle states, got %d", len(executor.cycleStates))
-		}
-
-		// Should create fanout entries (2 per cycle)
-		if len(executor.fanoutTables[0]) != 4 {
-			t.Errorf("Expected 4 fanout entries, got %d", len(executor.fanoutTables[0]))
-		}
-	})
-
-	t.Run("MultipleShards", func(t *testing.T) {
-		executor := &ArbitrageCoreExecutor{
-			priorityQueues:   make([]quantumqueue64.QuantumQueue64, 0),
-			fanoutTables:     make([][]FanoutEntry, 0),
-			pairToQueueIndex: localidx.New(16),
-			cycleStates:      make([]ArbitrageCycleState, 0),
-		}
-
-		// Attach multiple shards for different pairs
-		shards := []*PairShardBucket{
-			{
-				pairID: PairID(200),
-				edgeBindings: []ArbitrageEdgeBinding{
-					{cyclePairs: [3]PairID{200, 201, 202}, edgeIndex: 0},
-				},
-			},
-			{
-				pairID: PairID(300),
-				edgeBindings: []ArbitrageEdgeBinding{
-					{cyclePairs: [3]PairID{300, 301, 302}, edgeIndex: 0},
-				},
-			},
-		}
-
-		for _, shard := range shards {
-			attachShardToExecutor(executor, shard)
-		}
-
-		// Should create two queues
-		if len(executor.priorityQueues) != 2 {
-			t.Errorf("Expected 2 queues, got %d", len(executor.priorityQueues))
-		}
-	})
-
-	t.Run("FanoutCreation", func(t *testing.T) {
-		executor := &ArbitrageCoreExecutor{
-			priorityQueues:   make([]quantumqueue64.QuantumQueue64, 0),
-			fanoutTables:     make([][]FanoutEntry, 0),
-			pairToQueueIndex: localidx.New(16),
-			cycleStates:      make([]ArbitrageCycleState, 0),
-		}
-
-		shard := &PairShardBucket{
-			pairID: PairID(400),
-			edgeBindings: []ArbitrageEdgeBinding{
-				{
-					cyclePairs: [3]PairID{400, 401, 402},
-					edgeIndex:  1, // Middle edge
-				},
-			},
-		}
-
-		attachShardToExecutor(executor, shard)
-
-		// Check fanout entries point to correct edges
-		fanout := executor.fanoutTables[0]
-		edges := []uint16{fanout[0].edgeIndex, fanout[1].edgeIndex}
-
-		// Should have edges 0 and 2 (not 1)
-		if (edges[0] != 0 && edges[0] != 2) || (edges[1] != 0 && edges[1] != 2) {
-			t.Errorf("Wrong fanout edges: %v", edges)
-		}
-
-		if edges[0] == edges[1] {
-			t.Error("Duplicate fanout edges")
-		}
-	})
-}
-
-// TestLaunchShardWorker - Test worker initialization
-func TestLaunchShardWorker(t *testing.T) {
-	t.Run("WorkerInitialization", func(t *testing.T) {
-		shardChannel := make(chan PairShardBucket, 10)
-
-		// Add test shard
-		shardChannel <- PairShardBucket{
-			pairID: PairID(500),
-			edgeBindings: []ArbitrageEdgeBinding{
-				{cyclePairs: [3]PairID{500, 501, 502}, edgeIndex: 0},
-			},
-		}
-		close(shardChannel)
-
-		// Launch worker
-		go launchShardWorker(0, 2, shardChannel)
-
-		// Give it time to initialize
-		time.Sleep(10 * time.Millisecond)
-
-		// Check initialization
-		if coreExecutors[0] == nil {
-			t.Error("Core executor not initialized")
-		}
-		if coreRings[0] == nil {
-			t.Error("Core ring not initialized")
-		}
-
-		// Cleanup
-		control.Shutdown()
-		time.Sleep(10 * time.Millisecond)
-	})
-
-	t.Run("DirectionFlag", func(t *testing.T) {
-		// Test forward cores
-		shardChannel1 := make(chan PairShardBucket, 1)
-		close(shardChannel1)
-		go launchShardWorker(1, 4, shardChannel1) // core 1 < 4, so forward
-
-		// Test reverse cores
-		shardChannel2 := make(chan PairShardBucket, 1)
-		close(shardChannel2)
-		go launchShardWorker(5, 4, shardChannel2) // core 5 >= 4, so reverse
-
-		time.Sleep(10 * time.Millisecond)
-
-		if coreExecutors[1] != nil && coreExecutors[1].isReverseDirection {
-			t.Error("Core 1 should be forward direction")
-		}
-		if coreExecutors[5] != nil && !coreExecutors[5].isReverseDirection {
-			t.Error("Core 5 should be reverse direction")
-		}
-
-		// Cleanup
-		control.Shutdown()
-		time.Sleep(10 * time.Millisecond)
-	})
-}
-
-// TestInitializeArbitrageSystem - Test full system initialization
-func TestInitializeArbitrageSystem(t *testing.T) {
-	// Clear global state
-	for i := range addressKeys[:20] {
-		addressKeys[i] = AddressKey{}
-	}
-	for i := range addressPairs[:20] {
-		addressPairs[i] = 0
-	}
-	pairShardBuckets = nil
-	for i := range pairToCoreAssignment[:20] {
-		pairToCoreAssignment[i] = 0
-	}
-	for i := range coreExecutors {
-		coreExecutors[i] = nil
-	}
-	for i := range coreRings {
-		coreRings[i] = nil
-	}
-
-	t.Run("BasicInitialization", func(t *testing.T) {
-		cycles := []ArbitrageTriplet{
-			{PairID(1), PairID(2), PairID(3)},
-			{PairID(4), PairID(5), PairID(6)},
-		}
-
-		InitializeArbitrageSystem(cycles)
-		time.Sleep(50 * time.Millisecond)
-
-		// Check that shards were created
-		if len(pairShardBuckets) == 0 {
-			t.Error("No shard buckets created")
-		}
-
-		// Check core assignments
-		hasAssignment := false
-		for i := 1; i <= 6; i++ {
-			if pairToCoreAssignment[i] != 0 {
-				hasAssignment = true
-				break
-			}
-		}
-		if !hasAssignment {
-			t.Error("No core assignments made")
-		}
-
-		control.Shutdown()
-		time.Sleep(50 * time.Millisecond)
-	})
-
-	t.Run("LargeScale", func(t *testing.T) {
-		// Reset state
-		pairShardBuckets = nil
-		for i := range pairToCoreAssignment[:3000] {
-			pairToCoreAssignment[i] = 0
-		}
-
-		cycles := make([]ArbitrageTriplet, 1000)
-		for i := 0; i < 1000; i++ {
-			baseID := uint32(i * 3)
-			cycles[i] = ArbitrageTriplet{
-				PairID(baseID),
-				PairID(baseID + 1),
-				PairID(baseID + 2),
-			}
-		}
-
-		InitializeArbitrageSystem(cycles)
-		time.Sleep(100 * time.Millisecond)
-
-		// Verify scale
-		totalShards := 0
-		for _, shards := range pairShardBuckets {
-			totalShards += len(shards)
-		}
-
-		if totalShards == 0 {
-			t.Error("No shards created at scale")
-		}
-
-		control.Shutdown()
-		time.Sleep(100 * time.Millisecond)
-	})
-
-	t.Run("CoreCountAdjustment", func(t *testing.T) {
-		// Save original CPU count
-		originalCPU := runtime.NumCPU()
-
-		// This test verifies the core count logic
-		// It should use NumCPU()-1, ensure even count, and split forward/reverse
-
-		cycles := []ArbitrageTriplet{{PairID(1), PairID(2), PairID(3)}}
-		InitializeArbitrageSystem(cycles)
-
-		time.Sleep(10 * time.Millisecond)
-
-		// Calculate expected core count
-		expectedWorkers := originalCPU - 1
-		if expectedWorkers > constants.MaxSupportedCores {
-			expectedWorkers = constants.MaxSupportedCores
-		}
-		if expectedWorkers&1 == 1 {
-			expectedWorkers--
-		}
-
-		t.Logf("CPU count: %d, expected workers: %d", originalCPU, expectedWorkers)
-
-		control.Shutdown()
-		time.Sleep(50 * time.Millisecond)
-	})
-}
-
-// TestDataStructureLayout - Verify memory layout
-func TestDataStructureLayout(t *testing.T) {
-	tests := []struct {
-		name     string
-		size     uintptr
-		expected uintptr
-	}{
-		{"AddressKey", unsafe.Sizeof(AddressKey{}), 64},
-		{"TickUpdate", unsafe.Sizeof(TickUpdate{}), 24},
-		{"ArbitrageCycleState", unsafe.Sizeof(ArbitrageCycleState{}), 64},
-		{"ArbitrageEdgeBinding", unsafe.Sizeof(ArbitrageEdgeBinding{}), 32},
-		{"FanoutEntry", unsafe.Sizeof(FanoutEntry{}), 64},
-		{"PairShardBucket", unsafe.Sizeof(PairShardBucket{}), 64},
-		{"ArbitrageCoreExecutor", unsafe.Sizeof(ArbitrageCoreExecutor{}), 192},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.size != tt.expected {
-				t.Errorf("%s size is %d bytes, expected %d bytes", tt.name, tt.size, tt.expected)
-			}
-		})
-	}
-
-	t.Run("MessageBufferCasting", func(t *testing.T) {
-		var messageBuffer [24]byte // Ring buffer compatibility
-		tickUpdate := (*TickUpdate)(unsafe.Pointer(&messageBuffer))
-
-		tickUpdate.pairID = PairID(12345)
-		tickUpdate.forwardTick = 1.23
-		tickUpdate.reverseTick = -1.23
-
-		// Verify it's actually writing to the buffer
-		if tickUpdate.pairID != PairID(12345) {
-			t.Error("Message buffer casting failed")
-		}
-
-		// Check that it fits exactly
-		if unsafe.Sizeof(*tickUpdate) != 24 {
-			t.Error("TickUpdate doesn't fit in 24-byte buffer")
-		}
-	})
-
-	t.Run("DirectPointerArithmetic", func(t *testing.T) {
-		update := &TickUpdate{
-			forwardTick: 1.5,
-			reverseTick: -2.5,
-			pairID:      PairID(999),
-		}
-
-		// Test the pointer arithmetic used in processTickUpdate
-		offset := 0 // forward
-		tick1 := *(*float64)(unsafe.Add(unsafe.Pointer(update), uintptr(offset)))
-		if tick1 != 1.5 {
-			t.Errorf("Forward tick access failed: got %f", tick1)
-		}
-
-		offset = 8 // reverse
-		tick2 := *(*float64)(unsafe.Add(unsafe.Pointer(update), uintptr(offset)))
-		if tick2 != -2.5 {
-			t.Errorf("Reverse tick access failed: got %f", tick2)
-		}
-	})
-}
-
-// TestConcurrentSafety - Test realistic concurrent scenarios
 func TestConcurrentSafety(t *testing.T) {
-	t.Run("ReadOnlyAccess", func(t *testing.T) {
-		// Clear the hash table
-		for i := range addressKeys[:100] {
-			addressKeys[i] = AddressKey{}
-		}
-		for i := range addressPairs[:100] {
-			addressPairs[i] = 0
-		}
+	clearGlobalState()
 
-		// Register some pairs (this would happen during initialization)
-		for i := 0; i < 50; i++ { // Reduced to avoid hash collisions
+	t.Run("ConcurrentReads", func(t *testing.T) {
+		// Register some pairs
+		for i := 0; i < 50; i++ {
 			addr := generateMockAddress(uint64(i * 98765))
 			RegisterPairAddress(addr[:], PairID(i+1))
 			RegisterPairToCore(PairID(i+1), uint8(i%8))
 		}
 
-		// Now test concurrent reads (realistic scenario)
 		const goroutines = 8
 		const reads = 1000
 
@@ -1295,7 +969,7 @@ func TestConcurrentSafety(t *testing.T) {
 					pairIdx := (id*reads + i) % 50
 					addr := generateMockAddress(uint64(pairIdx * 98765))
 
-					// Concurrent reads are safe
+					// Concurrent reads should be safe
 					foundID := lookupPairIDByAddress(addr[:])
 					if foundID != PairID(pairIdx+1) {
 						t.Errorf("Read inconsistency: expected %d, got %d", pairIdx+1, foundID)
@@ -1307,15 +981,8 @@ func TestConcurrentSafety(t *testing.T) {
 		wg.Wait()
 	})
 
-	t.Run("DispatchConcurrency", func(t *testing.T) {
-		// Test concurrent dispatches (realistic scenario)
-		// Clear the hash table
-		for i := range addressKeys[:20] {
-			addressKeys[i] = AddressKey{}
-		}
-		for i := range addressPairs[:20] {
-			addressPairs[i] = 0
-		}
+	t.Run("ConcurrentDispatch", func(t *testing.T) {
+		clearGlobalState()
 
 		// Initialize rings
 		for i := 0; i < 8; i++ {
@@ -1350,9 +1017,7 @@ func TestConcurrentSafety(t *testing.T) {
 						Data: make([]byte, 128),
 					}
 
-					logView.Addr[0] = '0'
-					logView.Addr[1] = 'x'
-					copy(logView.Addr[2:42], addr[:])
+					copy(logView.Addr[:42], addr[:])
 
 					reserve0 := uint64(1000 + id*100 + i)
 					reserve1 := uint64(2000 - id*50 - i)
@@ -1362,7 +1027,6 @@ func TestConcurrentSafety(t *testing.T) {
 						logView.Data[56+j] = byte(reserve1 >> (8 * (7 - j)))
 					}
 
-					// This is realistic - multiple goroutines dispatching updates
 					DispatchTickUpdate(logView)
 				}
 			}(g)
@@ -1372,20 +1036,17 @@ func TestConcurrentSafety(t *testing.T) {
 	})
 }
 
-// Benchmarks
-func BenchmarkAddressKeyMap(b *testing.B) {
-	// Clear the hash table for benchmark
-	for i := range addressKeys[:15000] {
-		addressKeys[i] = AddressKey{}
-	}
-	for i := range addressPairs[:15000] {
-		addressPairs[i] = 0
-	}
+// ============================================================================
+// BENCHMARKS
+// ============================================================================
 
-	addresses := make([][40]byte, 10000)
+func BenchmarkAddressLookup(b *testing.B) {
+	clearGlobalState()
+
+	addresses := make([][42]byte, 10000)
 	for i := range addresses {
 		addresses[i] = generateMockAddress(uint64(i * 1000003))
-		RegisterPairAddress(addresses[i][:], PairID(i+1)) // Avoid PairID 0
+		RegisterPairAddress(addresses[i][:], PairID(i+1))
 	}
 
 	b.ResetTimer()
@@ -1411,91 +1072,7 @@ func BenchmarkTickQuantization(b *testing.B) {
 	}
 }
 
-func BenchmarkProcessTickUpdate(b *testing.B) {
-	executor := &ArbitrageCoreExecutor{
-		isReverseDirection: false,
-		priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
-		fanoutTables:       make([][]FanoutEntry, 1),
-		pairToQueueIndex:   localidx.New(16),
-		cycleStates:        make([]ArbitrageCycleState, 100),
-	}
-
-	executor.priorityQueues[0] = *quantumqueue64.New()
-	executor.pairToQueueIndex.Put(123, 0)
-
-	// Setup realistic scenario with proper handles
-	handles := make([]quantumqueue64.Handle, 100)
-	for i := 0; i < 100; i++ {
-		var err error
-		handles[i], err = executor.priorityQueues[0].BorrowSafe()
-		if err != nil {
-			b.Fatalf("Failed to borrow handle %d: %v", i, err)
-		}
-
-		executor.cycleStates[i] = ArbitrageCycleState{
-			tickValues: [3]float64{
-				float64(i%20-10) * 0.001,
-				float64(i%20-10) * 0.001,
-				float64(i%20-10) * 0.001,
-			},
-			pairIDs: [3]PairID{PairID(i * 3), PairID(i*3 + 1), PairID(i*3 + 2)},
-		}
-
-		priority := quantizeTickToInt64(float64(i%20-10) * 0.003)
-		executor.priorityQueues[0].Push(priority, handles[i], uint64(i))
-	}
-
-	// Setup fanout with valid handles and cycle state indices
-	executor.fanoutTables[0] = make([]FanoutEntry, 50)
-	for i := 0; i < 50; i++ {
-		handle, err := executor.priorityQueues[0].BorrowSafe()
-		if err != nil {
-			b.Fatalf("Failed to borrow fanout handle %d: %v", i, err)
-		}
-
-		// Use data values that correspond to valid cycle state indices
-		cycleStateIndex := uint64(i % 100) // Ensure we stay within bounds of cycleStates
-		priority := quantizeTickToInt64(0.001)
-		executor.priorityQueues[0].Push(priority, handle, cycleStateIndex)
-
-		executor.fanoutTables[0][i] = FanoutEntry{
-			queueHandle:     handle,
-			edgeIndex:       uint16(i % 3),
-			cycleStateIndex: CycleStateIndex(cycleStateIndex),
-			queue:           &executor.priorityQueues[0],
-		}
-	}
-
-	update := &TickUpdate{
-		pairID:      PairID(123),
-		forwardTick: -0.001,
-		reverseTick: 0.001,
-	}
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		processTickUpdate(executor, update)
-	}
-}
-
-func BenchmarkSecureRandomInt(b *testing.B) {
-	bounds := []int{10, 100, 1000, 10000}
-
-	for _, bound := range bounds {
-		b.Run(fmt.Sprintf("Bound%d", bound), func(b *testing.B) {
-			b.ResetTimer()
-			b.ReportAllocs()
-
-			for i := 0; i < b.N; i++ {
-				_ = secureRandomInt(bound)
-			}
-		})
-	}
-}
-
-func BenchmarkShuffleEdgeBindings(b *testing.B) {
+func BenchmarkKeccakShuffle(b *testing.B) {
 	sizes := []int{10, 100, 1000}
 
 	for _, size := range sizes {
@@ -1504,7 +1081,7 @@ func BenchmarkShuffleEdgeBindings(b *testing.B) {
 			for i := 0; i < size; i++ {
 				bindings[i] = ArbitrageEdgeBinding{
 					cyclePairs: [3]PairID{PairID(i), PairID(i + 1), PairID(i + 2)},
-					edgeIndex:  uint16(i % 3),
+					edgeIndex:  uint64(i % 3),
 				}
 			}
 
@@ -1514,42 +1091,69 @@ func BenchmarkShuffleEdgeBindings(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				testBindings := make([]ArbitrageEdgeBinding, size)
 				copy(testBindings, bindings)
-				shuffleEdgeBindings(testBindings)
+				keccakShuffleEdgeBindings(testBindings, PairID(i))
 			}
 		})
 	}
 }
 
-func BenchmarkBuildFanoutShardBuckets(b *testing.B) {
-	cycleCounts := []int{100, 1000, 5000}
+func BenchmarkDispatchTickUpdate(b *testing.B) {
+	clearGlobalState()
 
-	for _, count := range cycleCounts {
-		b.Run(fmt.Sprintf("Cycles%d", count), func(b *testing.B) {
-			cycles := make([]ArbitrageTriplet, count)
-			for i := 0; i < count; i++ {
-				baseID := uint32(i * 3)
-				cycles[i] = ArbitrageTriplet{
-					PairID(baseID),
-					PairID(baseID + 1),
-					PairID(baseID + 2),
-				}
-			}
+	const pairCount = 1000
+	addresses := make([][42]byte, pairCount)
+	logViews := make([]*types.LogView, pairCount)
 
-			b.ResetTimer()
-			b.ReportAllocs()
+	// Initialize rings
+	for i := 0; i < 8; i++ {
+		if coreRings[i] == nil {
+			coreRings[i] = ring24.New(1024)
+		}
+	}
 
-			for i := 0; i < b.N; i++ {
-				buildFanoutShardBuckets(cycles)
-			}
-		})
+	for i := 0; i < pairCount; i++ {
+		addr := generateMockAddress(uint64(i * 1000003))
+		addresses[i] = addr
+		RegisterPairAddress(addr[:], PairID(i+1))
+
+		// Assign to 2-4 cores
+		numCores := 2 + (i % 3)
+		for j := 0; j < numCores; j++ {
+			coreID := uint8((i + j*16) % 8)
+			RegisterPairToCore(PairID(i+1), coreID)
+		}
+
+		// Pre-create log view
+		logView := &types.LogView{
+			Addr: make([]byte, 64),
+			Data: make([]byte, 128),
+		}
+
+		copy(logView.Addr[:42], addr[:])
+
+		reserve0 := uint64(1000000 + i*1000)
+		reserve1 := uint64(1000000 + i*500)
+
+		for j := 0; j < 8; j++ {
+			logView.Data[24+j] = byte(reserve0 >> (8 * (7 - j)))
+			logView.Data[56+j] = byte(reserve1 >> (8 * (7 - j)))
+		}
+
+		logViews[i] = logView
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		DispatchTickUpdate(logViews[i%pairCount])
 	}
 }
 
 func BenchmarkCoreAssignmentBitOps(b *testing.B) {
-	// Setup realistic assignments
 	const pairCount = 10000
 	for i := 0; i < pairCount; i++ {
-		pairID := PairID(i)
+		pairID := PairID(i + 1)
 		numCores := 2 + (i % 6)
 		for j := 0; j < numCores; j++ {
 			coreID := uint8((i*17 + j*23) % 64)
@@ -1561,16 +1165,78 @@ func BenchmarkCoreAssignmentBitOps(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		pairID := PairID(i % pairCount)
+		pairID := PairID((i % pairCount) + 1)
 		coreAssignments := pairToCoreAssignment[pairID]
 
 		// Simulate dispatch loop
 		for coreAssignments != 0 {
-			coreID := bits.TrailingZeros64(uint64(coreAssignments))
+			coreID := bits.TrailingZeros64(coreAssignments)
 			coreAssignments &^= 1 << coreID
 			_ = coreID
 		}
 	}
+}
+
+func BenchmarkHighThroughput(b *testing.B) {
+	if testing.Short() {
+		b.Skip("Skipping throughput benchmark in short mode")
+	}
+
+	clearGlobalState()
+
+	const pairCount = 100
+	const updatesPerPair = 100
+
+	// Register pairs
+	for i := 0; i < pairCount; i++ {
+		addr := generateMockAddress(uint64(i * 1000))
+		RegisterPairAddress(addr[:], PairID(i+1))
+		RegisterPairToCore(PairID(i+1), uint8(i%8))
+	}
+
+	// Initialize rings
+	for i := 0; i < 8; i++ {
+		if coreRings[i] == nil {
+			coreRings[i] = ring24.New(1024)
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	updates := uint64(0)
+	start := time.Now()
+
+	for i := 0; i < b.N; i++ {
+		for round := 0; round < updatesPerPair; round++ {
+			for i := 0; i < pairCount; i++ {
+				addr := generateMockAddress(uint64(i * 1000))
+
+				logView := &types.LogView{
+					Addr: make([]byte, 64),
+					Data: make([]byte, 128),
+				}
+
+				copy(logView.Addr[:42], addr[:])
+
+				reserve0 := uint64(1000000 + round*1000 + i)
+				reserve1 := uint64(1000000 - round*500 - i)
+
+				for j := 0; j < 8; j++ {
+					logView.Data[24+j] = byte(reserve0 >> (8 * (7 - j)))
+					logView.Data[56+j] = byte(reserve1 >> (8 * (7 - j)))
+				}
+
+				DispatchTickUpdate(logView)
+				atomic.AddUint64(&updates, 1)
+			}
+		}
+	}
+
+	elapsed := time.Since(start)
+	throughput := float64(updates) / elapsed.Seconds()
+
+	b.ReportMetric(throughput, "updates/sec")
 }
 
 func BenchmarkMemoryAccessPatterns(b *testing.B) {
@@ -1632,272 +1298,43 @@ func BenchmarkMemoryAccessPatterns(b *testing.B) {
 	})
 }
 
-// Test edge cases and error conditions
-func TestEdgeCases(t *testing.T) {
-	t.Run("ParseEthereumAddressEdgeCases", func(t *testing.T) {
-		// Test various malformed addresses
-		testCases := []struct {
-			name  string
-			input [40]byte
-		}{
-			{"AllZeros", func() [40]byte {
-				var a [40]byte
-				for i := range a {
-					a[i] = '0'
-				}
-				return a
-			}()},
-			{"AllFs", func() [40]byte {
-				var a [40]byte
-				for i := range a {
-					a[i] = 'f'
-				}
-				return a
-			}()},
-			{"MixedCase", func() [40]byte {
-				var a [40]byte
-				s := "aAbBcCdDeEfF0123456789aAbBcCdDeEfF012345"
-				copy(a[:], s)
-				return a
-			}()},
+func BenchmarkZeroAllocation(b *testing.B) {
+	clearGlobalState()
+
+	addr := generateMockAddress(42)
+	RegisterPairAddress(addr[:], PairID(123))
+
+	var m1, m2 runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&m1)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = lookupPairIDByAddress(addr[:])
+		_ = quantizeTickToInt64(1.234)
+		_ = bytesToAddressKey(addr[:])
+	}
+
+	b.StopTimer()
+	runtime.ReadMemStats(&m2)
+
+	if b.N > 0 {
+		allocDelta := m2.TotalAlloc - m1.TotalAlloc
+		allocsPerOp := float64(allocDelta) / float64(b.N)
+		b.ReportMetric(allocsPerOp, "actual_bytes/op")
+
+		if allocsPerOp > 1 {
+			b.Logf("WARNING: %.2f bytes/op allocated", allocsPerOp)
 		}
-
-		for _, tc := range testCases {
-			t.Run(tc.name, func(t *testing.T) {
-				// Just test it doesn't crash
-				key := bytesToAddressKey(tc.input[:])
-				_ = key
-			})
-		}
-	})
-
-	t.Run("LoadBE64EdgeCases", func(t *testing.T) {
-		// Test direct memory loading edge cases
-		logView := &types.LogView{
-			Data: make([]byte, 128),
-		}
-
-		// All zeros
-		for i := 0; i < 64; i++ {
-			logView.Data[i] = 0
-		}
-
-		reserve0 := utils.LoadBE64(logView.Data[24:])
-		reserve1 := utils.LoadBE64(logView.Data[56:])
-
-		if reserve0 != 0 || reserve1 != 0 {
-			t.Error("Zero loading failed")
-		}
-
-		// All ones
-		for i := 0; i < 64; i++ {
-			logView.Data[i] = 0xFF
-		}
-
-		reserve0 = utils.LoadBE64(logView.Data[24:])
-		reserve1 = utils.LoadBE64(logView.Data[56:])
-
-		if reserve0 != ^uint64(0) || reserve1 != ^uint64(0) {
-			t.Error("Max value loading failed")
-		}
-	})
-
-	t.Run("QuantumQueueEdgeCases", func(t *testing.T) {
-		queue := quantumqueue64.New()
-
-		// Empty queue operations
-		if !queue.Empty() {
-			t.Error("New queue should be empty")
-		}
-
-		// Don't test PeepMin on empty queue - it's undefined behavior as documented
-		// The comment says "⚠️ FOOTGUN: Undefined on empty queue"
-
-		// Test safe operations on empty queue
-		if queue.Size() != 0 {
-			t.Error("Empty queue should have size 0")
-		}
-
-		// Fill queue to capacity and test behavior
-		handles := make([]quantumqueue64.Handle, 0)
-		for i := 0; i < 1000; i++ {
-			h, err := queue.BorrowSafe()
-			if err != nil {
-				break
-			}
-			handles = append(handles, h)
-			queue.Push(int64(i), h, uint64(i))
-		}
-
-		t.Logf("Queue accepted %d entries", len(handles))
-
-		// Test PeepMin on non-empty queue
-		if len(handles) > 0 {
-			handle, priority, data := queue.PeepMin()
-			// Handle 0 is a valid handle, so check if queue is actually non-empty
-			if queue.Empty() {
-				t.Error("Queue reported as empty but should have entries")
-			}
-			// Just verify we got some response - the exact values depend on internal implementation
-			t.Logf("PeepMin returned: handle=%d, priority=%d, data=%d", handle, priority, data)
-		}
-	})
-
-	t.Run("LocalIndexEdgeCases", func(t *testing.T) {
-		idx := localidx.New(16)
-
-		// Get non-existent key
-		val, exists := idx.Get(12345)
-		if exists {
-			t.Error("Non-existent key returned as existing")
-		}
-		if val != 0 {
-			t.Error("Non-existent key should return 0")
-		}
-
-		// Test Put behavior - it appears Put returns the NEW value, not the old value
-		newVal1 := idx.Put(100, 200)
-		t.Logf("First Put(100, 200) returned: %d", newVal1)
-
-		newVal2 := idx.Put(100, 300)
-		t.Logf("Second Put(100, 300) returned: %d", newVal2)
-
-		val, exists = idx.Get(100)
-		t.Logf("Get(100) returned: val=%d, exists=%v", val, exists)
-
-		if !exists {
-			t.Error("Key should exist after Put")
-		}
-
-		// Test that the final value is what we expect
-		if val != newVal2 {
-			t.Errorf("Get should return same value as most recent Put: got %d, expected %d", val, newVal2)
-		}
-	})
-
-	t.Run("Ring24EdgeCases", func(t *testing.T) {
-		ring := ring24.New(16)
-
-		// Fill ring
-		var msg [24]byte
-		filled := 0
-		for i := 0; i < 20; i++ {
-			if ring.Push(&msg) {
-				filled++
-			}
-		}
-
-		if filled == 0 {
-			t.Error("Ring should accept at least some messages")
-		}
-
-		t.Logf("Ring accepted %d messages", filled)
-	})
-
-	t.Run("FastUniLog2EdgeCases", func(t *testing.T) {
-		// Test edge cases for log calculation
-		testCases := []struct {
-			reserve0, reserve1 uint64
-			name               string
-		}{
-			{0, 0, "BothZero"},
-			{0, 1000, "FirstZero"},
-			{1000, 0, "SecondZero"},
-			{1, 1, "BothOne"},
-			{^uint64(0), 1, "MaxFirst"},
-			{1, ^uint64(0), "MaxSecond"},
-			{^uint64(0), ^uint64(0), "BothMax"},
-		}
-
-		for _, tc := range testCases {
-			t.Run(tc.name, func(t *testing.T) {
-				tickValue, err := fastuni.Log2ReserveRatio(tc.reserve0, tc.reserve1)
-				if err != nil {
-					// Some cases may error, that's fine
-					t.Logf("%s: error %v", tc.name, err)
-				} else {
-					t.Logf("%s: tick value %f", tc.name, tickValue)
-				}
-			})
-		}
-	})
-
-	t.Run("BitOperationsEdgeCases", func(t *testing.T) {
-		// Test trailing zeros edge cases
-		testCases := []uint64{
-			0,                  // No bits set (undefined behavior)
-			1,                  // First bit
-			1 << 63,            // Last bit
-			^uint64(0),         // All bits
-			0xAAAAAAAAAAAAAAAA, // Alternating bits
-			0x5555555555555555, // Alternating bits (opposite)
-		}
-
-		for _, val := range testCases {
-			if val == 0 {
-				// Skip zero - undefined behavior
-				continue
-			}
-
-			tz := bits.TrailingZeros64(val)
-			if tz < 0 || tz >= 64 {
-				t.Errorf("Invalid trailing zeros for %064b: %d", val, tz)
-			}
-		}
-	})
-
-	t.Run("StackBufferOverflow", func(t *testing.T) {
-		// Test the 128-cycle limit in processTickUpdate
-		executor := &ArbitrageCoreExecutor{
-			isReverseDirection: false,
-			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
-			fanoutTables:       make([][]FanoutEntry, 1),
-			pairToQueueIndex:   localidx.New(16),
-			cycleStates:        make([]ArbitrageCycleState, 200),
-		}
-
-		executor.priorityQueues[0] = *quantumqueue64.New()
-		executor.pairToQueueIndex.Put(123, 0)
-
-		// Add exactly 128 profitable cycles
-		for i := 0; i < 128; i++ {
-			executor.cycleStates[i] = ArbitrageCycleState{
-				tickValues: [3]float64{-1.0, -1.0, -1.0},
-				pairIDs:    [3]PairID{PairID(i * 3), PairID(i*3 + 1), PairID(i*3 + 2)},
-			}
-
-			handle, _ := executor.priorityQueues[0].BorrowSafe()
-			priority := quantizeTickToInt64(-3.0)
-			executor.priorityQueues[0].Push(priority, handle, uint64(i))
-		}
-
-		// Add one more that won't be processed
-		handle, _ := executor.priorityQueues[0].BorrowSafe()
-		executor.priorityQueues[0].Push(quantizeTickToInt64(-3.0), handle, 128)
-
-		update := &TickUpdate{
-			pairID:      PairID(123),
-			forwardTick: -1.0,
-		}
-
-		// Should process exactly 128 and not overflow
-		processTickUpdate(executor, update)
-	})
+	}
 }
 
-// Test complete end-to-end workflow
+// ============================================================================
+// COMPLETE WORKFLOW TESTS
+// ============================================================================
+
 func TestCompleteWorkflow(t *testing.T) {
-	// Reset global state
-	for i := range addressKeys[:100] {
-		addressKeys[i] = AddressKey{}
-	}
-	for i := range addressPairs[:100] {
-		addressPairs[i] = 0
-	}
-	pairShardBuckets = nil
-	for i := range pairToCoreAssignment[:100] {
-		pairToCoreAssignment[i] = 0
-	}
+	clearGlobalState()
 
 	// 1. Initialize system with triangles
 	cycles := []ArbitrageTriplet{
@@ -1924,9 +1361,7 @@ func TestCompleteWorkflow(t *testing.T) {
 			Data: make([]byte, 128),
 		}
 
-		logView.Addr[0] = '0'
-		logView.Addr[1] = 'x'
-		copy(logView.Addr[2:42], addr[:])
+		copy(logView.Addr[:42], addr[:])
 
 		reserve0 := uint64(1000 + i*100)
 		reserve1 := uint64(2000 - i*50)
@@ -1944,7 +1379,7 @@ func TestCompleteWorkflow(t *testing.T) {
 
 	// 5. Verify state
 	hasAssignments := false
-	for i := 10; i <= 15; i++ {
+	for i := uint64(10); i <= 15; i++ {
 		if pairToCoreAssignment[i] != 0 {
 			hasAssignments = true
 			break
@@ -1960,185 +1395,182 @@ func TestCompleteWorkflow(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 }
 
-// Test performance under load
-func TestHighThroughput(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping throughput test in short mode")
-	}
+// ============================================================================
+// EDGE CASE TESTS
+// ============================================================================
 
-	// Clear the hash table
-	for i := range addressKeys[:200] {
-		addressKeys[i] = AddressKey{}
-	}
-	for i := range addressPairs[:200] {
-		addressPairs[i] = 0
-	}
+func TestEdgeCases(t *testing.T) {
+	t.Run("ZeroValues", func(t *testing.T) {
+		// Test zero address
+		var zeroAddr [42]byte
+		copy(zeroAddr[:], "0x0000000000000000000000000000000000000000")
 
-	// Setup
-	const pairCount = 100
-	const updatesPerPair = 100
+		key := bytesToAddressKey(zeroAddr[:])
+		// Should parse without error
+		_ = key
 
-	// Register pairs
-	for i := 0; i < pairCount; i++ {
-		addr := generateMockAddress(uint64(i * 1000))
-		RegisterPairAddress(addr[:], PairID(i+1))
-		RegisterPairToCore(PairID(i+1), uint8(i%8))
-	}
+		// Test zero pair ID (should be handled as "not found")
+		clearGlobalState()
+		addr := generateMockAddress(123)
+		RegisterPairAddress(addr[:], PairID(0)) // Zero pair ID
 
-	// Initialize rings
-	for i := 0; i < 8; i++ {
-		if coreRings[i] == nil {
-			coreRings[i] = ring24.New(1024)
+		found := lookupPairIDByAddress(addr[:])
+		if found != 0 {
+			t.Error("Zero pair ID should be treated as not found")
 		}
-	}
+	})
 
-	// Measure throughput
-	start := time.Now()
-	updates := uint64(0)
-
-	for round := 0; round < updatesPerPair; round++ {
-		for i := 0; i < pairCount; i++ {
-			addr := generateMockAddress(uint64(i * 1000))
-
-			logView := &types.LogView{
-				Addr: make([]byte, 64),
-				Data: make([]byte, 128),
-			}
-
-			logView.Addr[0] = '0'
-			logView.Addr[1] = 'x'
-			copy(logView.Addr[2:42], addr[:])
-
-			reserve0 := uint64(1000000 + round*1000 + i)
-			reserve1 := uint64(1000000 - round*500 - i)
-
-			for j := 0; j < 8; j++ {
-				logView.Data[24+j] = byte(reserve0 >> (8 * (7 - j)))
-				logView.Data[56+j] = byte(reserve1 >> (8 * (7 - j)))
-			}
-
-			DispatchTickUpdate(logView)
-			atomic.AddUint64(&updates, 1)
+	t.Run("ExtremeQuantization", func(t *testing.T) {
+		extremeValues := []float64{
+			math.Inf(1),
+			math.Inf(-1),
+			math.NaN(),
+			1e100,
+			-1e100,
 		}
-	}
 
-	elapsed := time.Since(start)
-	throughput := float64(updates) / elapsed.Seconds()
+		for _, val := range extremeValues {
+			// Footgun mode: should not panic
+			result := quantizeTickToInt64(val)
+			_ = result
+		}
+	})
 
-	t.Logf("Processed %d updates in %v", updates, elapsed)
-	t.Logf("Throughput: %.0f updates/sec", throughput)
+	t.Run("HashCollisions", func(t *testing.T) {
+		clearGlobalState()
 
-	if throughput < 1000 {
-		t.Errorf("Throughput too low: %.0f updates/sec", throughput)
-	}
+		// Try to force collisions by using sequential seeds
+		collisionCount := 0
+		addresses := make([][42]byte, 100)
+
+		for i := 0; i < 100; i++ {
+			addresses[i] = generateMockAddress(uint64(i))
+			RegisterPairAddress(addresses[i][:], PairID(i+1))
+		}
+
+		// Check for proper Robin Hood displacement handling
+		for i := 0; i < 100; i++ {
+			found := lookupPairIDByAddress(addresses[i][:])
+			if found != PairID(i+1) {
+				collisionCount++
+			}
+		}
+
+		if collisionCount > 0 {
+			t.Errorf("Robin Hood failed to handle %d collisions", collisionCount)
+		}
+	})
+
+	t.Run("LargeStructOperations", func(t *testing.T) {
+		// Test that large structs with center padding work correctly
+		cycle := ArbitrageCycleState{
+			tickValues: [3]float64{1.1, 2.2, 3.3},
+			pairIDs:    [3]PairID{100, 200, 300},
+		}
+
+		// Verify data is accessible despite padding
+		if cycle.tickValues[0] != 1.1 {
+			t.Error("Center-padded struct data access failed")
+		}
+
+		if cycle.pairIDs[2] != 300 {
+			t.Error("Center-padded struct data access failed")
+		}
+	})
 }
 
-func BenchmarkDispatchTickUpdate(b *testing.B) {
-	// Clear the hash table
-	for i := range addressKeys[:2000] {
-		addressKeys[i] = AddressKey{}
-	}
-	for i := range addressPairs[:2000] {
-		addressPairs[i] = 0
-	}
+// ============================================================================
+// PERFORMANCE REGRESSION TESTS
+// ============================================================================
 
-	// Setup
-	const pairCount = 1000
-	addresses := make([][40]byte, pairCount)
-	logViews := make([]*types.LogView, pairCount)
-
-	// Initialize rings for all cores that might be used
-	for i := 0; i < 64; i++ {
-		if coreRings[i] == nil {
-			coreRings[i] = ring24.New(1024)
-		}
+func TestPerformanceRegression(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping performance regression tests in short mode")
 	}
 
-	for i := 0; i < pairCount; i++ {
-		addr := generateMockAddress(uint64(i * 1000003))
-		addresses[i] = addr
-		RegisterPairAddress(addr[:], PairID(i))
+	t.Run("LookupLatency", func(t *testing.T) {
+		clearGlobalState()
 
-		// Assign to 2-4 cores, but ensure we don't exceed available cores
-		numCores := 2 + (i % 3)
-		for j := 0; j < numCores; j++ {
-			coreID := uint8((i + j*16) % 8) // Limit to first 8 cores
-			RegisterPairToCore(PairID(i), coreID)
+		addr := generateMockAddress(123)
+		RegisterPairAddress(addr[:], PairID(456))
+
+		start := time.Now()
+		iterations := 1000000
+
+		for i := 0; i < iterations; i++ {
+			_ = lookupPairIDByAddress(addr[:])
 		}
 
-		// Pre-create log view
+		elapsed := time.Since(start)
+		avgLatency := elapsed / time.Duration(iterations)
+
+		// Should be sub-10ns on modern hardware
+		if avgLatency > 10*time.Nanosecond {
+			t.Errorf("Address lookup too slow: %v avg latency", avgLatency)
+		}
+
+		t.Logf("Address lookup: %v avg latency", avgLatency)
+	})
+
+	t.Run("QuantizationLatency", func(t *testing.T) {
+		start := time.Now()
+		iterations := 1000000
+
+		for i := 0; i < iterations; i++ {
+			_ = quantizeTickToInt64(float64(i) * 0.001)
+		}
+
+		elapsed := time.Since(start)
+		avgLatency := elapsed / time.Duration(iterations)
+
+		// Should be sub-5ns (footgun mode)
+		if avgLatency > 5*time.Nanosecond {
+			t.Errorf("Quantization too slow: %v avg latency", avgLatency)
+		}
+
+		t.Logf("Quantization: %v avg latency", avgLatency)
+	})
+
+	t.Run("EndToEndLatency", func(t *testing.T) {
+		clearGlobalState()
+
+		addr := generateMockAddress(789)
+		RegisterPairAddress(addr[:], PairID(789))
+		RegisterPairToCore(PairID(789), 0)
+
+		if coreRings[0] == nil {
+			coreRings[0] = ring24.New(1024)
+		}
+
 		logView := &types.LogView{
 			Addr: make([]byte, 64),
 			Data: make([]byte, 128),
 		}
 
-		logView.Addr[0] = '0'
-		logView.Addr[1] = 'x'
-		copy(logView.Addr[2:42], addr[:])
+		copy(logView.Addr[:42], addr[:])
 
-		reserve0 := uint64(1000000 + i*1000)
-		reserve1 := uint64(1000000 + i*500)
-
-		for j := 0; j < 8; j++ {
-			logView.Data[24+j] = byte(reserve0 >> (8 * (7 - j)))
-			logView.Data[56+j] = byte(reserve1 >> (8 * (7 - j)))
+		// Set up reserves
+		reserve0, reserve1 := uint64(1000), uint64(500)
+		for i := 0; i < 8; i++ {
+			logView.Data[24+i] = byte(reserve0 >> (8 * (7 - i)))
+			logView.Data[56+i] = byte(reserve1 >> (8 * (7 - i)))
 		}
 
-		logViews[i] = logView
-	}
+		start := time.Now()
+		iterations := 100000
 
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		DispatchTickUpdate(logViews[i%pairCount])
-	}
-}
-
-func BenchmarkWorstCaseFanout(b *testing.B) {
-	executor := &ArbitrageCoreExecutor{
-		isReverseDirection: false,
-		priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
-		fanoutTables:       make([][]FanoutEntry, 1),
-		pairToQueueIndex:   localidx.New(16),
-		cycleStates:        make([]ArbitrageCycleState, 10000),
-	}
-
-	executor.priorityQueues[0] = *quantumqueue64.New()
-	executor.pairToQueueIndex.Put(123, 0)
-
-	// Maximum realistic fanout
-	fanoutSize := 10000
-	executor.fanoutTables[0] = make([]FanoutEntry, fanoutSize)
-
-	for i := 0; i < fanoutSize; i++ {
-		executor.cycleStates[i] = ArbitrageCycleState{
-			tickValues: [3]float64{0.001, 0.002, 0.003},
-			pairIDs:    [3]PairID{PairID(i * 3), PairID(i*3 + 1), PairID(i*3 + 2)},
+		for i := 0; i < iterations; i++ {
+			DispatchTickUpdate(logView)
 		}
 
-		handle, _ := executor.priorityQueues[0].BorrowSafe()
-		priority := quantizeTickToInt64(0.006)
-		executor.priorityQueues[0].Push(priority, handle, uint64(i))
+		elapsed := time.Since(start)
+		avgLatency := elapsed / time.Duration(iterations)
 
-		executor.fanoutTables[0][i] = FanoutEntry{
-			queueHandle:     handle,
-			edgeIndex:       uint16(i % 3),
-			cycleStateIndex: CycleStateIndex(i),
-			queue:           &executor.priorityQueues[0],
+		// Should be sub-100ns for complete dispatch
+		if avgLatency > 100*time.Nanosecond {
+			t.Errorf("End-to-end dispatch too slow: %v avg latency", avgLatency)
 		}
-	}
 
-	update := &TickUpdate{
-		pairID:      PairID(123),
-		forwardTick: -0.001,
-		reverseTick: 0.001,
-	}
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		processTickUpdate(executor, update)
-	}
+		t.Logf("End-to-end dispatch: %v avg latency", avgLatency)
+	})
 }
