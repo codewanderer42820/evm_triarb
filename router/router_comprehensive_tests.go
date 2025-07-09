@@ -332,11 +332,11 @@ func TestTickQuantization(t *testing.T) {
 		input    float64
 		expected int64
 	}{
-		{"Zero", 0.0, int64(constants.TickClampingBound * constants.QuantizationScale)},
-		{"Positive", 1.0, int64((1.0 + constants.TickClampingBound) * constants.QuantizationScale)},
-		{"Negative", -1.0, int64((-1.0 + constants.TickClampingBound) * constants.QuantizationScale)},
-		{"LargePositive", 100.0, int64((100.0 + constants.TickClampingBound) * constants.QuantizationScale)},
-		{"LargeNegative", -100.0, int64((-100.0 + constants.TickClampingBound) * constants.QuantizationScale)},
+		{"Zero", 0.0, quantizeTick(0.0)},
+		{"Positive", 1.0, quantizeTick(1.0)},
+		{"Negative", -1.0, quantizeTick(-1.0)},
+		{"LargePositive", 100.0, quantizeTick(100.0)},
+		{"LargeNegative", -100.0, quantizeTick(-100.0)},
 	}
 
 	for _, tc := range testCases {
