@@ -167,6 +167,7 @@ func BenchmarkBorrowSafe(b *testing.B) {
 func BenchmarkPushUnique(b *testing.B) {
 	q := New()
 	handles := make([]Handle, benchSize)
+	data := makeBenchData(0x12345678) // Pre-allocate data outside timing loop
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
@@ -175,7 +176,6 @@ func BenchmarkPushUnique(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		h := handles[i%benchSize]
-		data := makeBenchData(uint64(i))
 		q.Push(int64(i%benchSize), h, data)
 	}
 }
@@ -191,18 +191,18 @@ func BenchmarkPushUnique(b *testing.B) {
 func BenchmarkPushUpdate(b *testing.B) {
 	q := New()
 	handles := make([]Handle, benchSize)
+	initData := makeBenchData(0x11111111)
+	updateData := makeBenchData(0x22222222)
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
-		data := makeBenchData(uint64(i))
-		q.Push(int64(i), h, data)
+		q.Push(int64(i), h, initData)
 	}
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
 		h := handles[i%benchSize]
-		data := makeBenchData(uint64(i + benchSize))
-		q.Push(int64(i%benchSize), h, data)
+		q.Push(int64(i%benchSize), h, updateData)
 	}
 }
 
@@ -217,10 +217,10 @@ func BenchmarkPushUpdate(b *testing.B) {
 func BenchmarkPushSameTickZero(b *testing.B) {
 	q := New()
 	h, _ := q.BorrowSafe()
+	data := makeBenchData(0x33333333)
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		data := makeBenchData(uint64(i))
 		q.Push(0, h, data)
 	}
 }
@@ -236,10 +236,10 @@ func BenchmarkPushSameTickMax(b *testing.B) {
 	q := New()
 	h, _ := q.BorrowSafe()
 	maxTick := int64(BucketCount - 1)
+	data := makeBenchData(0x44444444)
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		data := makeBenchData(uint64(i))
 		q.Push(maxTick, h, data)
 	}
 }
@@ -255,6 +255,7 @@ func BenchmarkPushSameTickMax(b *testing.B) {
 func BenchmarkPushRandom(b *testing.B) {
 	q := New()
 	handles := make([]Handle, benchSize)
+	data := makeBenchData(0x55555555)
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
@@ -271,7 +272,6 @@ func BenchmarkPushRandom(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		h := handles[i%benchSize]
-		data := makeBenchData(uint64(i))
 		q.Push(ticks[i%benchSize], h, data)
 	}
 }
@@ -287,6 +287,7 @@ func BenchmarkPushRandom(b *testing.B) {
 func BenchmarkPushBursty(b *testing.B) {
 	q := New()
 	handles := make([]Handle, benchSize)
+	data := makeBenchData(0x66666666)
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
@@ -314,7 +315,6 @@ func BenchmarkPushBursty(b *testing.B) {
 			tick = BucketCount - 1
 		}
 
-		data := makeBenchData(uint64(i))
 		q.Push(tick, h, data)
 
 		// Shift burst window occasionally
@@ -365,13 +365,13 @@ func BenchmarkPeepMin(b *testing.B) {
 func BenchmarkPeepMinSparse(b *testing.B) {
 	q := New()
 	handles := make([]Handle, 100) // Only 100 handles for sparsity
+	data := makeBenchData(0xAAAA)
 
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
 		// Spread entries across tick space for sparsity
 		tick := int64(i * (BucketCount / 100))
-		data := makeBenchData(uint64(i))
 		q.Push(tick, h, data)
 	}
 	b.ResetTimer()
@@ -392,13 +392,13 @@ func BenchmarkPeepMinSparse(b *testing.B) {
 func BenchmarkPeepMinDense(b *testing.B) {
 	q := New()
 	handles := make([]Handle, benchSize)
+	data := makeBenchData(0xBBBB)
 
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
 		// Pack entries densely
 		tick := int64(i % (BucketCount * 9 / 10))
-		data := makeBenchData(uint64(i))
 		q.Push(tick, h, data)
 	}
 	b.ResetTimer()
@@ -429,8 +429,7 @@ func BenchmarkUnlinkMin_StableBucket(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		q.UnlinkMin(h)
-		benchData := makeBenchData(uint64(i))
-		q.Push(2048, h, benchData)
+		q.Push(2048, h, data)
 	}
 }
 
@@ -445,9 +444,9 @@ func BenchmarkUnlinkMin_StableBucket(b *testing.B) {
 func BenchmarkUnlinkMin_DenseBucket(b *testing.B) {
 	q := New()
 	var hs [3]Handle
+	data := makeBenchData(0x7777)
 	for i := 0; i < 3; i++ {
 		hs[i], _ = q.BorrowSafe()
-		data := makeBenchData(uint64(i))
 		q.Push(1234, hs[i], data)
 	}
 	b.ResetTimer()
@@ -455,8 +454,7 @@ func BenchmarkUnlinkMin_DenseBucket(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		h := hs[i%3]
 		q.UnlinkMin(h)
-		benchData := makeBenchData(uint64(i))
-		q.Push(1234, h, benchData)
+		q.Push(1234, h, data)
 	}
 }
 
@@ -471,11 +469,11 @@ func BenchmarkUnlinkMin_DenseBucket(b *testing.B) {
 func BenchmarkUnlinkMin_BitmapCollapse(b *testing.B) {
 	q := New()
 	h, _ := q.BorrowSafe()
+	data := makeBenchData(0x8888)
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
 		tick := int64(i % BucketCount)
-		data := makeBenchData(uint64(i))
 		q.Push(tick, h, data)
 		q.UnlinkMin(h)
 	}
@@ -492,6 +490,7 @@ func BenchmarkUnlinkMin_BitmapCollapse(b *testing.B) {
 func BenchmarkUnlinkMin_ScatterCollapse(b *testing.B) {
 	q := New()
 	h, _ := q.BorrowSafe()
+	data := makeBenchData(0x9999)
 
 	// Pre-generate random tick sequence for reproducibility
 	rand.Seed(42)
@@ -503,7 +502,6 @@ func BenchmarkUnlinkMin_ScatterCollapse(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		tick := ticks[i]
-		data := makeBenchData(uint64(i))
 		q.Push(tick, h, data)
 		q.UnlinkMin(h)
 	}
@@ -521,10 +519,10 @@ func BenchmarkUnlinkMin_ReinsertAfterCollapse(b *testing.B) {
 	q := New()
 	h, _ := q.BorrowSafe()
 	const tick = 4095
+	data := makeBenchData(0xAAAA)
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		data := makeBenchData(uint64(i))
 		q.Push(tick, h, data)
 		q.UnlinkMin(h)
 	}
@@ -542,12 +540,12 @@ func BenchmarkUnlinkMin_ChainTraversal(b *testing.B) {
 	q := New()
 	const chainLength = 10
 	handles := make([]Handle, chainLength)
+	data := makeBenchData(0xBBBB)
 
 	// Setup chain
 	for i := 0; i < chainLength; i++ {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
-		data := makeBenchData(uint64(i))
 		q.Push(1000, h, data)
 	}
 
@@ -556,8 +554,7 @@ func BenchmarkUnlinkMin_ChainTraversal(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		h := handles[i%chainLength]
 		q.UnlinkMin(h)
-		benchData := makeBenchData(uint64(i))
-		q.Push(1000, h, benchData)
+		q.Push(1000, h, data)
 	}
 }
 
@@ -667,6 +664,7 @@ func BenchmarkMoveTickRandom(b *testing.B) {
 func BenchmarkMixedOperations(b *testing.B) {
 	q := New()
 	handles := make([]Handle, benchSize)
+	data := makeBenchData(0xCCCC)
 	for i := range handles {
 		h, _ := q.BorrowSafe()
 		handles[i] = h
@@ -675,7 +673,6 @@ func BenchmarkMixedOperations(b *testing.B) {
 	// Initialize some entries
 	for i := 0; i < benchSize/2; i++ {
 		h := handles[i]
-		data := makeBenchData(uint64(i))
 		q.Push(int64(i), h, data)
 	}
 
@@ -689,7 +686,6 @@ func BenchmarkMixedOperations(b *testing.B) {
 		case op < 0.4: // 40% Push
 			h := handles[i%benchSize]
 			tick := rand.Int63n(BucketCount)
-			data := makeBenchData(uint64(i))
 			q.Push(tick, h, data)
 
 		case op < 0.7: // 30% PeepMin
