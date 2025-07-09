@@ -5,6 +5,8 @@
 // Comprehensive stress testing framework validating QuantumQueue correctness
 // against a reference Go heap implementation under millions of random operations.
 //
+// ORIGINAL VERSION: Uses 48-byte data blocks instead of uint64 payloads.
+//
 // Validation methodology:
 //   - Stress-test QuantumQueue against reference Go container/heap
 //   - Apply 10M+ randomized operations: push, move, pop
@@ -82,6 +84,26 @@ func (h *stressHeap) Pop() interface{} {
 	return it
 }
 
+// Helper function to create test data from sequence number
+func makeStressData(seq int) *[48]byte {
+	data := &[48]byte{}
+	// Create deterministic pattern from sequence
+	val := uint64(seq) * 0x9E3779B97F4A7C15
+	for i := 0; i < 6; i++ {
+		offset := i * 8
+		data[offset] = byte(val)
+		data[offset+1] = byte(val >> 8)
+		data[offset+2] = byte(val >> 16)
+		data[offset+3] = byte(val >> 24)
+		data[offset+4] = byte(val >> 32)
+		data[offset+5] = byte(val >> 40)
+		data[offset+6] = byte(val >> 48)
+		data[offset+7] = byte(val >> 56)
+		val = val*0x9E3779B97F4A7C15 + uint64(i)
+	}
+	return data
+}
+
 // ============================================================================
 // COMPREHENSIVE STRESS TEST
 // ============================================================================
@@ -97,7 +119,7 @@ func (h *stressHeap) Pop() interface{} {
 //  5. Complete drain verification ensures no phantom state
 //
 // Operation patterns:
-//   - Push: Allocate new handle and insert at random tick
+//   - Push: Allocate new handle and insert at random tick with 48-byte payload
 //   - Move: Relocate existing entry to different random tick
 //   - Pop: Extract minimum and validate against reference
 //
@@ -127,16 +149,6 @@ func TestQueueStressRandomOperations(t *testing.T) {
 
 	seq := 0 // Global sequence counter for LIFO tiebreaking
 
-	// makeVal generates deterministic payload data for validation.
-	// Uses seed-based generation for reproducible test data.
-	makeVal := func(seed int64) *[48]byte {
-		var b [48]byte
-		for i := range b {
-			b[i] = byte((seed + int64(i)) & 0xFF)
-		}
-		return &b
-	}
-
 	// ────────────────────────────────────────────────────────────────────────
 	// MAIN STRESS LOOP: Random Operation Application
 	// ────────────────────────────────────────────────────────────────────────
@@ -160,7 +172,7 @@ func TestQueueStressRandomOperations(t *testing.T) {
 			free = free[:len(free)-1]
 
 			// Generate deterministic payload
-			val := makeVal(int64(seq))
+			val := makeStressData(seq)
 
 			// Parallel insertion into both implementations
 			q.Push(tick, h, val)
@@ -193,6 +205,7 @@ func TestQueueStressRandomOperations(t *testing.T) {
 			for j := len(*ref) - 1; j >= 0; j-- {
 				if (*ref)[j].h == h {
 					heap.Remove(ref, j)
+					break
 				}
 			}
 			heap.Push(ref, &stressItem{h: h, tick: tick, seq: seq})
