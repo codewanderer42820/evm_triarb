@@ -13,7 +13,6 @@ import (
 	"main/quantumqueue64"
 	"main/ring24"
 	"main/types"
-	"main/utils"
 )
 
 // Core types - optimized widths
@@ -22,18 +21,23 @@ type CoreID uint32
 type Triplet [3]PairID
 type CycleIdx uint32
 
-// PERFECTLY CACHE-ALIGNED DATA STRUCTURES WITH MAXIMUM COMPILER ABUSE
+// Hash table constants
+const (
+	MaxProbeDistance = 8 // Maximum probe distance for performance
+)
 
-// AddrKey - exactly 32 bytes, stores parsed address + original hash
+// ============================================================================
+// PERFECTLY CACHE-ALIGNED DATA STRUCTURES WITH MAXIMUM COMPILER ABUSE
+// ============================================================================
+
+// AddrKey - exactly 32 bytes, 8-byte aligned fields
 //
 //go:notinheap
 //go:align 32
 type AddrKey struct {
-	// Store the 20-byte parsed address directly
 	word0 uint64 // 8B - bytes 0-7
 	word1 uint64 // 8B - bytes 8-15
-	word2 uint32 // 4B - bytes 16-19
-	hash  uint32 // 4B - original hash (for Robin Hood)
+	word2 uint64 // 8B - bytes 16-23 (only 4 bytes used)
 	_     uint64 // 8B - padding to 32B
 }
 
@@ -137,7 +141,10 @@ type Executor struct {
 	_ [64]byte // 64B - reserved for future hot data
 }
 
-// GLOBAL STATE - perfectly aligned arrays
+// ============================================================================
+// GLOBAL STATE - PERFECTLY ALIGNED ARRAYS
+// ============================================================================
+
 var (
 	// Core arrays - 64-byte aligned
 	executors [constants.MaxSupportedCores]*Executor
@@ -159,7 +166,142 @@ var (
 	channels []chan Shard
 )
 
+// ============================================================================
+// ZERO-ALLOCATION HASH TABLE WITH PURE KECCAK256 ENTROPY
+// ============================================================================
+
+// Direct keccak256 entropy extraction - zero allocation
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func extractIndex(addressBytes []byte) uint32 {
+	// Direct use of keccak256 entropy from bytes 2-5 (4 bytes)
+	value := *(*uint32)(unsafe.Pointer(&addressBytes[2]))
+	return value & constants.AddressTableMask
+}
+
+// Probe step from different keccak256 entropy region - zero allocation
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func extractStep(addressBytes []byte) uint32 {
+	// Use different region of keccak256 entropy from bytes 6-9 (4 bytes)
+	value := *(*uint32)(unsafe.Pointer(&addressBytes[6]))
+	// Ensure step is odd (never 0) for good probing
+	return (value & constants.AddressTableMask) | 1
+}
+
+// Pure keccak256 entropy extraction - zero allocation
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func toAddrKey(addressBytes []byte) AddrKey {
+	// Direct use of keccak256 entropy - no allocation
+	return AddrKey{
+		word0: *(*uint64)(unsafe.Pointer(&addressBytes[2])),  // bytes 2-9
+		word1: *(*uint64)(unsafe.Pointer(&addressBytes[10])), // bytes 10-17
+		word2: *(*uint64)(unsafe.Pointer(&addressBytes[18])), // bytes 18-21 (padded)
+	}
+}
+
+// Optimized key comparison - zero allocation
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func (a AddrKey) isEqual(b AddrKey) bool {
+	// Order checks by likelihood of difference - zero allocation
+	return a.word1 == b.word1 && a.word0 == b.word0 && a.word2 == b.word2
+}
+
+// PURE ZERO-ALLOCATION REGISTRATION
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func RegisterPair(addressBytes []byte, pairID PairID) {
+	key := toAddrKey(addressBytes)
+	index := extractIndex(addressBytes)
+	step := extractStep(addressBytes)
+
+	// Pure round robin probe - zero allocation
+	for probe := uint32(0); probe < MaxProbeDistance; probe++ {
+		currentIndex := (index + probe*step) & constants.AddressTableMask
+
+		// Prefetch next location - zero allocation
+		if probe < MaxProbeDistance-1 {
+			nextIndex := (index + (probe+1)*step) & constants.AddressTableMask
+			_ = *(*byte)(unsafe.Add(unsafe.Pointer(&addrKeys[nextIndex]), 0))
+			_ = *(*byte)(unsafe.Add(unsafe.Pointer(&pairIDs[nextIndex]), 0))
+		}
+
+		// Check if slot is empty or same address - zero allocation
+		if pairIDs[currentIndex] == 0 || addrKeys[currentIndex].isEqual(key) {
+			addrKeys[currentIndex] = key
+			pairIDs[currentIndex] = pairID
+			return
+		}
+	}
+
+	// Fallback: use last probe location - zero allocation
+	finalIndex := (index + (MaxProbeDistance-1)*step) & constants.AddressTableMask
+	addrKeys[finalIndex] = key
+	pairIDs[finalIndex] = pairID
+}
+
+// PURE ZERO-ALLOCATION LOOKUP
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func LookupPair(addressBytes []byte) PairID {
+	key := toAddrKey(addressBytes)
+	index := extractIndex(addressBytes)
+	step := extractStep(addressBytes)
+
+	// Pure round robin probe - zero allocation
+	for probe := uint32(0); probe < MaxProbeDistance; probe++ {
+		currentIndex := (index + probe*step) & constants.AddressTableMask
+
+		// Prefetch next location - zero allocation
+		if probe < MaxProbeDistance-1 {
+			nextIndex := (index + (probe+1)*step) & constants.AddressTableMask
+			_ = *(*byte)(unsafe.Add(unsafe.Pointer(&addrKeys[nextIndex]), 0))
+			_ = *(*byte)(unsafe.Add(unsafe.Pointer(&pairIDs[nextIndex]), 0))
+		}
+
+		// Check if slot is empty (not found) - zero allocation
+		if pairIDs[currentIndex] == 0 {
+			return 0
+		}
+
+		// Check if key matches - zero allocation
+		if addrKeys[currentIndex].isEqual(key) {
+			return pairIDs[currentIndex]
+		}
+	}
+
+	return 0
+}
+
+// ============================================================================
 // ULTRA-OPTIMIZED CORE FUNCTIONS WITH MAXIMUM COMPILER ABUSE
+// ============================================================================
 
 // fastRandom - ultra-fast LCG
 //
@@ -184,175 +326,6 @@ func fastRandom(upperBound int) int {
 //go:registerparams
 func quantizeTick(tick float64) int64 {
 	return int64((tick + constants.TickClampingBound) * constants.QuantizationScale)
-}
-
-// fastHash - use full 20 bytes for better distribution
-// NOTE: parsedAddr comes from utils.ParseEthereumAddress() which converts
-// hex string to 20 raw bytes. This preserves the full keccak256 entropy
-// from the original Ethereum address generation process.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func fastHash(parsedAddr [20]byte) uint32 {
-	// Use XOR of all words for better distribution
-	// This combines all 160 bits of keccak256 entropy into final hash
-	hash := *(*uint64)(unsafe.Pointer(&parsedAddr[0])) ^
-		*(*uint64)(unsafe.Pointer(&parsedAddr[8])) ^
-		uint64(*(*uint32)(unsafe.Pointer(&parsedAddr[16])))
-	return uint32(hash) & constants.AddressTableMask
-}
-
-// parseAndHash - internal function for production use
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func parseAndHash(addressBytes []byte) (uint32, [20]byte, AddrKey) {
-	// Parse hex string to bytes ONCE
-	parsedAddr := utils.ParseEthereumAddress(addressBytes)
-	hash := fastHash(parsedAddr)
-
-	// Create key with hash stored
-	key := AddrKey{
-		word0: *(*uint64)(unsafe.Pointer(&parsedAddr[0])),
-		word1: *(*uint64)(unsafe.Pointer(&parsedAddr[8])),
-		word2: *(*uint32)(unsafe.Pointer(&parsedAddr[16])),
-		hash:  hash,
-	}
-
-	return hash, parsedAddr, key
-}
-
-// ParseAndHash - exported function for testing: parse once, return everything needed
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func ParseAndHash(addressBytes []byte) (uint32, [20]byte, AddrKey) {
-	return parseAndHash(addressBytes)
-}
-
-// isEqual - compare parsed addresses directly
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func (a AddrKey) isEqual(b AddrKey) bool {
-	// Compare the actual parsed address data
-	return a.word0 == b.word0 && a.word1 == b.word1 && a.word2 == b.word2
-}
-
-// RegisterPair - Optimized for 20% load factor
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func RegisterPair(addressBytes []byte, pairID PairID) {
-	// Parse once, get everything
-	hash, _, key := parseAndHash(addressBytes)
-
-	dist := uint32(0)
-	const maxProbes = 16 // Optimized for 20% load factor
-
-	for dist < maxProbes {
-		probeIndex := (hash + dist) & constants.AddressTableMask
-
-		// Prefetch next probe location (only for first few probes)
-		if dist < 4 {
-			nextProbeIndex := (hash + dist + 1) & constants.AddressTableMask
-			_ = *(*byte)(unsafe.Add(unsafe.Pointer(&addrKeys[nextProbeIndex]), 0))
-		}
-
-		// Empty slot or same key
-		stored := addrKeys[probeIndex]
-		if stored == (AddrKey{}) || stored.isEqual(key) {
-			addrKeys[probeIndex] = key
-			pairIDs[probeIndex] = pairID
-			return
-		}
-
-		// Robin Hood displacement using stored hash
-		storedDist := (probeIndex + constants.AddressTableCapacity - stored.hash) & constants.AddressTableMask
-
-		if storedDist < dist {
-			// Swap with resident
-			addrKeys[probeIndex] = key
-			pairIDs[probeIndex] = pairID
-			key = stored
-			pairID = pairIDs[probeIndex]
-			dist = storedDist
-		}
-
-		dist++
-	}
-	// Emergency fallback: linear search for empty slot
-	for i := uint32(0); i < constants.AddressTableCapacity; i++ {
-		probeIndex := (hash + maxProbes + i) & constants.AddressTableMask
-		if addrKeys[probeIndex] == (AddrKey{}) {
-			addrKeys[probeIndex] = key
-			pairIDs[probeIndex] = pairID
-			return
-		}
-	}
-}
-
-// LookupPair - Optimized for 20% load factor
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func LookupPair(addressBytes []byte) PairID {
-	// Parse once, get everything
-	hash, _, key := parseAndHash(addressBytes)
-
-	dist := uint32(0)
-	const maxProbes = 16 // Optimized for 20% load factor
-
-	for dist < maxProbes {
-		probeIndex := (hash + dist) & constants.AddressTableMask
-
-		// Prefetch next probe location (only for first few probes)
-		if dist < 4 {
-			nextProbeIndex := (hash + dist + 1) & constants.AddressTableMask
-			_ = *(*byte)(unsafe.Add(unsafe.Pointer(&addrKeys[nextProbeIndex]), 0))
-		}
-
-		// Prefetch both the key and pairID locations
-		_ = *(*byte)(unsafe.Add(unsafe.Pointer(&addrKeys[probeIndex]), 0))
-		_ = *(*byte)(unsafe.Add(unsafe.Pointer(&pairIDs[probeIndex]), 0))
-
-		stored := addrKeys[probeIndex]
-		if stored == (AddrKey{}) {
-			return 0 // Empty slot, not found
-		}
-
-		if stored.isEqual(key) {
-			return pairIDs[probeIndex]
-		}
-
-		// Robin Hood early termination using stored hash
-		storedDist := (probeIndex + constants.AddressTableCapacity - stored.hash) & constants.AddressTableMask
-
-		if storedDist < dist {
-			return 0 // Would have been found earlier
-		}
-
-		dist++
-	}
-	return 0
 }
 
 // RegisterCore - direct bit manipulation
@@ -485,7 +458,7 @@ func processTick(exec *Executor, tick *Tick) {
 	}
 }
 
-// Dispatch - ULTRA-OPTIMIZED dispatch with single address parse
+// Dispatch - ULTRA-OPTIMIZED dispatch with memory prefetching
 //
 //go:norace
 //go:nocheckptr
@@ -493,17 +466,17 @@ func processTick(exec *Executor, tick *Tick) {
 //go:inline
 //go:registerparams
 func Dispatch(logView *types.LogView) {
-	// Extract address slice - no allocation
-	addressBytes := logView.Addr[constants.AddressHexStart:constants.AddressHexEnd]
+	// Direct slice to fixed-size array conversion
+	addressBytes := (*[constants.AddressHexEnd - constants.AddressHexStart]byte)(
+		unsafe.Pointer(&logView.Addr[constants.AddressHexStart]))
 
-	// Parse address once and get pair ID
-	pairID := LookupPair(addressBytes)
+	// Prefetch the data section while processing address
+	_ = *(*byte)(unsafe.Add(unsafe.Pointer(&logView.Data[0]), 0))
+
+	pairID := LookupPair(addressBytes[:])
 	if pairID == 0 {
 		return
 	}
-
-	// Prefetch data section while processing address
-	_ = *(*byte)(unsafe.Add(unsafe.Pointer(&logView.Data[0]), 0))
 
 	// Direct memory access for reserve values with prefetching
 	dataPtr := uintptr(unsafe.Pointer(&logView.Data[0]))
@@ -597,7 +570,9 @@ func Dispatch(logView *types.LogView) {
 	}
 }
 
+// ============================================================================
 // INITIALIZATION FUNCTIONS WITH MAXIMUM COMPILER ABUSE
+// ============================================================================
 
 // shuffle - optimized Fisher-Yates
 //
@@ -662,7 +637,7 @@ func buildShards(cycles []Triplet) {
 	}
 }
 
-// attachShard - optimized shard attachment with proper queue expansion
+// attachShard - optimized shard attachment with bounds checking
 //
 //go:norace
 //go:nocheckptr
@@ -670,28 +645,34 @@ func buildShards(cycles []Triplet) {
 //go:inline
 //go:registerparams
 func attachShard(exec *Executor, shard *Shard) {
+	// Skip empty shards
+	if shard.count == 0 {
+		return
+	}
+
 	index := (*localidx.Hash)(unsafe.Pointer(exec.indexPtr))
 	queueIdx := index.Put(uint32(shard.pairID), exec.queueCount)
 
 	// Expand arrays if needed
 	if queueIdx == exec.queueCount {
-		// Expand queues slice
-		queues := (*[]quantumqueue64.QuantumQueue64)(unsafe.Pointer(exec.queuesPtr))
-		*queues = append(*queues, *quantumqueue64.New())
-
-		// Expand fanout tables
-		fanouts := (*[][]Fanout)(unsafe.Pointer(exec.fanoutPtr))
-		*fanouts = append(*fanouts, make([]Fanout, 0, 64))
-
 		exec.queueCount++
 		exec.fanoutCount++
 	}
 
-	// Process bindings
+	// Process bindings with bounds check
 	edgesPtr := (*[constants.MaxCyclesPerShard]Edge)(unsafe.Pointer(shard.edgesPtr))
 	edges := edgesPtr[:shard.count]
 
 	queues := (*[]quantumqueue64.QuantumQueue64)(unsafe.Pointer(exec.queuesPtr))
+
+	// Ensure queues slice is large enough
+	if int(queueIdx) >= len(*queues) {
+		// Resize queues slice
+		newQueues := make([]quantumqueue64.QuantumQueue64, queueIdx+1)
+		copy(newQueues, *queues)
+		*queues = newQueues
+	}
+
 	queue := &(*queues)[queueIdx]
 
 	for _, edge := range edges {
@@ -706,7 +687,7 @@ func attachShard(exec *Executor, shard *Shard) {
 		exec.cycleCount++
 
 		// Allocate queue handle
-		handle, _ := queue.Borrow()
+		handle, _ := queue.BorrowSafe()
 		queue.Push(constants.MaxInitializationPriority, handle, uint64(cycleIdx))
 
 		// Create fanout entries for other edges
