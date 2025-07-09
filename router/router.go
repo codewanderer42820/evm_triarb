@@ -1,840 +1,685 @@
+// router.go — High-performance triangular arbitrage fan-out router (64 cores)
 package router
 
 import (
+	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"math/bits"
 	"runtime"
 	"unsafe"
 
 	"main/constants"
 	"main/control"
+	"main/debug"
 	"main/fastuni"
 	"main/localidx"
 	"main/quantumqueue64"
 	"main/ring24"
 	"main/types"
+	"main/utils"
 )
 
-// Core types - optimized widths
+// Core type definitions
 type PairID uint32
-type CoreID uint32
-type Triplet [3]PairID
-type CycleIdx uint32
+type ArbitrageTriplet [3]PairID
+type CycleStateIndex uint64
 
-// Hash table constants
-const (
-	MaxProbeDistance = 8 // Maximum probe distance for performance
-)
-
-// ============================================================================
-// PERFECTLY CACHE-ALIGNED DATA STRUCTURES WITH MAXIMUM COMPILER ABUSE
-// ============================================================================
-
-// AddrKey - exactly 32 bytes, 8-byte aligned fields
-//
-//go:notinheap
-//go:align 32
-type AddrKey struct {
-	word0 uint64 // 8B - bytes 0-7
-	word1 uint64 // 8B - bytes 8-15
-	word2 uint64 // 8B - bytes 16-23 (only 4 bytes used)
-	_     uint64 // 8B - padding to 32B
-}
-
-// Tick - exactly 32 bytes for optimal cache alignment
-//
-//go:notinheap
-//go:align 32
-type Tick struct {
-	forward float64 // 8B - hot: used every time
-	reverse float64 // 8B - hot: used every time
-	pairID  PairID  // 4B - hot: used every time
-	_       uint32  // 4B - padding to 8B boundary
-	_       uint64  // 8B - padding to 32B total
-}
-
-// Cycle - exactly 64 bytes, hottest to coldest
+// AddressKey - 64-byte aligned for zero-copy address comparison
 //
 //go:notinheap
 //go:align 64
-type Cycle struct {
-	// Hottest: accessed every tick update (24 bytes)
-	tick0 float64 // 8B - most frequently accessed
-	tick1 float64 // 8B - most frequently accessed
-	tick2 float64 // 8B - most frequently accessed
-
-	// Warm: accessed occasionally (16 bytes)
-	pair0 PairID // 4B - moderate access
-	pair1 PairID // 4B - moderate access
-	pair2 PairID // 4B - moderate access
-	_     uint32 // 4B - padding to 8B boundary
-
-	// Cold: padding (24 bytes)
-	_ [24]byte // 24B - pad to 64B cache line
+type AddressKey struct {
+	words [5]uint64 // 40B Ethereum address as 5×8-byte words
+	_     [24]byte  // 24B padding to 64 bytes
 }
 
-// Fanout - exactly 32 bytes, hottest to coldest
+// TickUpdate - Price tick message (24 bytes for ring buffer)
 //
 //go:notinheap
-//go:align 32
-type Fanout struct {
-	// Hottest: used in every MoveTick call (8 bytes)
-	handle  quantumqueue64.Handle // 4B - ultra-hot
-	edgeIdx uint16                // 2B - ultra-hot
-	_       uint16                // 2B - padding to 8B boundary
-
-	// Hot: used in every lookup (8 bytes)
-	cycleIdx CycleIdx // 4B - hot
-	_        uint32   // 4B - padding to 8B boundary
-
-	// Warm: cached pointer (8 bytes)
-	queuePtr uintptr // 8B - pointer as uintptr for better alignment
-
-	// Cold: padding (8 bytes)
-	_ uint64 // 8B - pad to 32B total
+type TickUpdate struct {
+	forwardTick float64 // 8B - Forward direction price
+	reverseTick float64 // 8B - Reverse direction price
+	pairID      PairID  // 4B - Pair identifier
+	_           [4]byte // 4B - Padding to 24 bytes
 }
 
-// Edge - exactly 16 bytes
+// ArbitrageCycleState - Cycle state with hot data first
+//
+//go:notinheap
+//go:align 64
+type ArbitrageCycleState struct {
+	// Hot fields (24 bytes) - accessed every calculation
+	tickValues [3]float64 // 24B - Price ticks for each edge
+
+	// Warm fields (12 bytes)
+	pairIDs [3]PairID // 12B - Pair identifiers
+
+	// Padding to 64 bytes
+	_ [28]byte // 28B - Padding to 64-byte cache line boundary
+}
+
+// ArbitrageEdgeBinding - Edge within arbitrage cycle
 //
 //go:notinheap
 //go:align 16
-type Edge struct {
-	pair0   PairID // 4B - hot
-	pair1   PairID // 4B - hot
-	pair2   PairID // 4B - hot
-	edgeIdx uint16 // 2B - hot
-	_       uint16 // 2B - padding to 16B
+type ArbitrageEdgeBinding struct {
+	cyclePairs [3]PairID // 12B - Complete triplet
+	edgeIndex  uint16    // 2B - Edge index (0-2)
+	_          [2]byte   // 2B - Padding to 16 bytes
 }
 
-// Shard - exactly 32 bytes
+// FanoutEntry - Edge reference in fanout table
 //
 //go:notinheap
 //go:align 32
-type Shard struct {
-	// Hot data (8 bytes)
-	pairID PairID // 4B - hot
-	count  uint32 // 4B - hot: binding count
+type FanoutEntry struct {
+	// Hot fields (8 bytes)
+	queueHandle quantumqueue64.Handle // 4B - Used in MoveTick
+	edgeIndex   uint16                // 2B - Tick selection
+	_           [2]byte               // 2B - Padding
 
-	// Warm data (24 bytes) - slice header
-	edgesPtr uintptr // 8B - pointer to bindings
-	edgesCap uint64  // 8B - capacity
-	_        uint64  // 8B - padding to 32B
+	// Warm fields (8 bytes)
+	cycleStateIndex CycleStateIndex // 8B - State lookup
+
+	// Cold fields (16 bytes)
+	queue *quantumqueue64.QuantumQueue64 // 8B - Queue pointer
+	_     [8]byte                        // 8B - Padding to 32 bytes
 }
 
-// Executor - exactly 128 bytes (2 cache lines), hottest to coldest
+// PairShardBucket - Cycle grouping by common pair
+//
+//go:notinheap
+//go:align 32
+type PairShardBucket struct {
+	// Hot fields (8 bytes)
+	pairID PairID  // 4B - Queue lookup
+	_      [4]byte // 4B - Padding
+
+	// Cold fields (24 bytes)
+	edgeBindings []ArbitrageEdgeBinding // 24B - Slice header (ptr,len,cap)
+}
+
+// ArbitrageCoreExecutor - Per-core queue and fanout owner
 //
 //go:notinheap
 //go:align 64
-type Executor struct {
-	// Cache line 1: Ultra-hot data (64 bytes)
-	queuesPtr   uintptr  // 8B - pointer to priority queues
-	fanoutPtr   uintptr  // 8B - pointer to fanout tables
-	cyclesPtr   uintptr  // 8B - pointer to cycle states
-	indexPtr    uintptr  // 8B - pointer to pair->queue index
-	queueCount  uint32   // 4B - queue count
-	isReverse   uint32   // 4B - reverse direction flag (0/1)
-	cycleCount  uint32   // 4B - cycle count
-	fanoutCount uint32   // 4B - fanout count
-	_           [16]byte // 16B - pad to 64B
+type ArbitrageCoreExecutor struct {
+	// Cache line 1: Hot fields (64 bytes)
+	priorityQueues     []quantumqueue64.QuantumQueue64 // 24B - Owned queues
+	fanoutTables       [][]FanoutEntry                 // 24B - Fanout mappings
+	shutdownSignal     <-chan struct{}                 // 8B - Shutdown channel
+	isReverseDirection bool                            // 1B - Direction flag
+	_                  [7]byte                         // 7B - Padding to 64 bytes
 
-	// Cache line 2: Warm data (64 bytes)
-	_ [64]byte // 64B - reserved for future hot data
+	// Cache line 2: Local index (64 bytes)
+	pairToQueueIndex localidx.Hash // 64B - O(1) pair→queue mapping
+
+	// Cache line 3: Canonical storage (64 bytes)
+	cycleStates []ArbitrageCycleState // 24B - Direct storage
+	_           [40]byte              // 40B - Padding to 64 bytes
 }
 
-// ============================================================================
-// GLOBAL STATE - PERFECTLY ALIGNED ARRAYS
-// ============================================================================
-
+// Global state
 var (
-	// Core arrays - 64-byte aligned
-	executors [constants.MaxSupportedCores]*Executor
-	rings     [constants.MaxSupportedCores]*ring24.Ring
-
-	// Lookup tables - cache-line aligned
-	coreAssignments [constants.PairRoutingTableCapacity]uint64
-	addrKeys        [constants.AddressTableCapacity]AddrKey
-	pairIDs         [constants.AddressTableCapacity]PairID
-
-	// Padding to ensure next vars are cache-aligned
-	_ [7]PairID // Pad to 8-byte boundary
+	coreExecutors        [constants.MaxSupportedCores]*ArbitrageCoreExecutor
+	coreRings            [constants.MaxSupportedCores]*ring24.Ring
+	pairToCoreAssignment [constants.PairRoutingTableCapacity]uint64
+	pairShardBuckets     map[PairID][]PairShardBucket
 )
 
-// Initialization data (gets nuked) - consolidated
+// Direct address indexing - leverages keccak256 uniformity
 var (
-	shards   map[PairID][]Shard
-	bindings map[PairID][]Edge
-	channels []chan Shard
+	pairAddressKeys [constants.AddressTableCapacity]AddressKey
+	addressToPairID [constants.AddressTableCapacity]PairID
 )
 
-// ============================================================================
-// ZERO-ALLOCATION HASH TABLE WITH PURE KECCAK256 ENTROPY
-// ============================================================================
-
-// Direct keccak256 entropy extraction - zero allocation
+// quantizeTickToInt64 converts float tick to queue priority
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func extractIndex(addressBytes []byte) uint32 {
-	// Direct use of keccak256 entropy from bytes 2-5 (4 bytes)
-	value := *(*uint32)(unsafe.Pointer(&addressBytes[2]))
-	return value & constants.AddressTableMask
-}
-
-// Probe step from different keccak256 entropy region - zero allocation
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func extractStep(addressBytes []byte) uint32 {
-	// Use different region of keccak256 entropy from bytes 6-9 (4 bytes)
-	value := *(*uint32)(unsafe.Pointer(&addressBytes[6]))
-	// Ensure step is odd (never 0) for good probing
-	return (value & constants.AddressTableMask) | 1
-}
-
-// Pure keccak256 entropy extraction - zero allocation
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func toAddrKey(addressBytes []byte) AddrKey {
-	// Direct use of keccak256 entropy - no allocation
-	return AddrKey{
-		word0: *(*uint64)(unsafe.Pointer(&addressBytes[2])),  // bytes 2-9
-		word1: *(*uint64)(unsafe.Pointer(&addressBytes[10])), // bytes 10-17
-		word2: *(*uint64)(unsafe.Pointer(&addressBytes[18])), // bytes 18-21 (padded)
+func quantizeTickToInt64(tickValue float64) int64 {
+	switch {
+	case tickValue <= -constants.TickClampingBound:
+		return 0
+	case tickValue >= constants.TickClampingBound:
+		return constants.MaxQuantizedTick
+	default:
+		return int64((tickValue + constants.TickClampingBound) * constants.QuantizationScale)
 	}
 }
 
-// Optimized key comparison - zero allocation
+// secureRandomInt generates crypto-secure random for shuffling
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func (a AddrKey) isEqual(b AddrKey) bool {
-	// Order checks by likelihood of difference - zero allocation
-	return a.word1 == b.word1 && a.word0 == b.word0 && a.word2 == b.word2
+func secureRandomInt(upperBound int) int {
+	var randomBytes [8]byte
+	_, _ = rand.Read(randomBytes[:])
+	randomValue := binary.LittleEndian.Uint64(randomBytes[:])
+
+	// Power-of-2 optimization
+	if upperBound&(upperBound-1) == 0 {
+		return int(randomValue & uint64(upperBound-1))
+	}
+
+	// Unbiased modular reduction
+	high64, _ := bits.Mul64(randomValue, uint64(upperBound))
+	return int(high64)
 }
 
-// PURE ZERO-ALLOCATION REGISTRATION
+// directAddressToIndex64 extracts index from Ethereum address
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func RegisterPair(addressBytes []byte, pairID PairID) {
-	key := toAddrKey(addressBytes)
-	index := extractIndex(addressBytes)
-	step := extractStep(addressBytes)
+func directAddressToIndex64(address40Bytes []byte) uint32 {
+	// Parse to get 2x density (40 hex chars → 20 bytes)
+	addressBytes := utils.ParseEthereumAddress(address40Bytes)
 
-	// Pure round robin probe - zero allocation
-	for probe := uint32(0); probe < MaxProbeDistance; probe++ {
-		currentIndex := (index + probe*step) & constants.AddressTableMask
+	// Use 8 bytes (64 bits) for maximum entropy without mixing
+	hash64 := *(*uint64)(unsafe.Pointer(&addressBytes[0]))
 
-		// Prefetch next location - zero allocation
-		if probe < MaxProbeDistance-1 {
-			nextIndex := (index + (probe+1)*step) & constants.AddressTableMask
-			_ = *(*byte)(unsafe.Add(unsafe.Pointer(&addrKeys[nextIndex]), 0))
-			_ = *(*byte)(unsafe.Add(unsafe.Pointer(&pairIDs[nextIndex]), 0))
-		}
+	return uint32(hash64) & constants.AddressTableMask
+}
 
-		// Check if slot is empty or same address - zero allocation
-		if pairIDs[currentIndex] == 0 || addrKeys[currentIndex].isEqual(key) {
-			addrKeys[currentIndex] = key
-			pairIDs[currentIndex] = pairID
+// bytesToAddressKey converts address bytes to AddressKey
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func bytesToAddressKey(addressBytes []byte) AddressKey {
+	// Parse hex string to 20-byte address
+	parsedAddress := utils.ParseEthereumAddress(addressBytes)
+
+	// Pack all 20 bytes efficiently: 8+8+4 = 20 bytes exactly
+	return AddressKey{
+		words: [5]uint64{
+			*(*uint64)(unsafe.Pointer(&parsedAddress[0])),          // Bytes 0-7
+			*(*uint64)(unsafe.Pointer(&parsedAddress[8])),          // Bytes 8-15
+			uint64(*(*uint32)(unsafe.Pointer(&parsedAddress[16]))), // Bytes 16-19
+			0, // Unused
+			0, // Unused
+		},
+	}
+}
+
+// isEqual performs SIMD-optimized address comparison
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func (a AddressKey) isEqual(b AddressKey) bool {
+	// Compare all 5 words to detect any modifications
+	return a.words[0] == b.words[0] &&
+		a.words[1] == b.words[1] &&
+		a.words[2] == b.words[2] &&
+		a.words[3] == b.words[3] &&
+		a.words[4] == b.words[4]
+}
+
+// RegisterPairAddress inserts address→pair mapping with Robin Hood
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func RegisterPairAddress(address40HexBytes []byte, pairID PairID) {
+	key := bytesToAddressKey(address40HexBytes)
+	hashIndex := directAddressToIndex64(address40HexBytes)
+	dist := uint32(0)
+
+	for {
+		currentPairID := addressToPairID[hashIndex]
+
+		// Empty slot
+		if currentPairID == 0 {
+			pairAddressKeys[hashIndex] = key
+			addressToPairID[hashIndex] = pairID
 			return
 		}
-	}
 
-	// Fallback: use last probe location - zero allocation
-	finalIndex := (index + (MaxProbeDistance-1)*step) & constants.AddressTableMask
-	addrKeys[finalIndex] = key
-	pairIDs[finalIndex] = pairID
+		// Key exists
+		if pairAddressKeys[hashIndex].isEqual(key) {
+			addressToPairID[hashIndex] = pairID
+			return
+		}
+
+		// Robin Hood displacement
+		currentKey := pairAddressKeys[hashIndex]
+		// Use same hash calculation as directAddressToIndex64
+		currentKeyHash := uint32(currentKey.words[0]) & constants.AddressTableMask
+		currentDist := (hashIndex + constants.AddressTableCapacity - currentKeyHash) & constants.AddressTableMask
+
+		if currentDist < dist {
+			// Swap with resident
+			pairAddressKeys[hashIndex] = key
+			addressToPairID[hashIndex] = pairID
+			key = currentKey
+			pairID = currentPairID
+			dist = currentDist
+		}
+
+		hashIndex = (hashIndex + 1) & constants.AddressTableMask
+		dist++
+
+		if dist > constants.AddressTableCapacity {
+			panic("Robin Hood hash table full")
+		}
+	}
 }
 
-// PURE ZERO-ALLOCATION LOOKUP
+// lookupPairIDByAddress performs O(1) address lookup
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func LookupPair(addressBytes []byte) PairID {
-	key := toAddrKey(addressBytes)
-	index := extractIndex(addressBytes)
-	step := extractStep(addressBytes)
+func lookupPairIDByAddress(address40HexBytes []byte) PairID {
+	key := bytesToAddressKey(address40HexBytes)
+	hashIndex := directAddressToIndex64(address40HexBytes)
+	dist := uint32(0)
 
-	// Pure round robin probe - zero allocation
-	for probe := uint32(0); probe < MaxProbeDistance; probe++ {
-		currentIndex := (index + probe*step) & constants.AddressTableMask
+	for {
+		currentPairID := addressToPairID[hashIndex]
 
-		// Prefetch next location - zero allocation
-		if probe < MaxProbeDistance-1 {
-			nextIndex := (index + (probe+1)*step) & constants.AddressTableMask
-			_ = *(*byte)(unsafe.Add(unsafe.Pointer(&addrKeys[nextIndex]), 0))
-			_ = *(*byte)(unsafe.Add(unsafe.Pointer(&pairIDs[nextIndex]), 0))
-		}
-
-		// Check if slot is empty (not found) - zero allocation
-		if pairIDs[currentIndex] == 0 {
+		// Empty slot
+		if currentPairID == 0 {
 			return 0
 		}
 
-		// Check if key matches - zero allocation
-		if addrKeys[currentIndex].isEqual(key) {
-			return pairIDs[currentIndex]
+		// Key found
+		if pairAddressKeys[hashIndex].isEqual(key) {
+			return currentPairID
+		}
+
+		// Robin Hood early termination
+		currentKey := pairAddressKeys[hashIndex]
+		// Use same hash calculation as directAddressToIndex64
+		currentKeyHash := uint32(currentKey.words[0]) & constants.AddressTableMask
+		currentDist := (hashIndex + constants.AddressTableCapacity - currentKeyHash) & constants.AddressTableMask
+
+		if currentDist < dist {
+			return 0
+		}
+
+		hashIndex = (hashIndex + 1) & constants.AddressTableMask
+		dist++
+
+		if dist > constants.AddressTableCapacity {
+			return 0
 		}
 	}
-
-	return 0
 }
 
-// ============================================================================
-// ULTRA-OPTIMIZED CORE FUNCTIONS WITH MAXIMUM COMPILER ABUSE
-// ============================================================================
-
-// fastRandom - ultra-fast LCG
+// RegisterPairToCore assigns pair to specific core
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func fastRandom(upperBound int) int {
-	var seed uintptr
-	seed = uintptr(unsafe.Pointer(&seed))
-	seed = seed*1103515245 + 12345
-	return int(seed) % upperBound
+func RegisterPairToCore(pairID PairID, coreID uint8) {
+	pairToCoreAssignment[pairID] |= 1 << coreID
 }
 
-// quantizeTick - single operation, no branches
+// emitArbitrageOpportunity logs profitable arbitrage
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func quantizeTick(tick float64) int64 {
-	return int64((tick + constants.TickClampingBound) * constants.QuantizationScale)
+func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
+	debug.DropMessage("[ARBITRAGE_OPPORTUNITY]", "")
+
+	// Log pair IDs
+	debug.DropMessage("  pair0", utils.Itoa(int(cycle.pairIDs[0])))
+	debug.DropMessage("  pair1", utils.Itoa(int(cycle.pairIDs[1])))
+	debug.DropMessage("  pair2", utils.Itoa(int(cycle.pairIDs[2])))
+
+	// Log tick values
+	tick0Str := fmt.Sprintf("%.6f", cycle.tickValues[0])
+	tick1Str := fmt.Sprintf("%.6f", cycle.tickValues[1])
+	tick2Str := fmt.Sprintf("%.6f", cycle.tickValues[2])
+	newTickStr := fmt.Sprintf("%.6f", newTick)
+	totalProfitStr := fmt.Sprintf("%.6f", newTick+cycle.tickValues[0]+cycle.tickValues[1]+cycle.tickValues[2])
+
+	debug.DropMessage("  tick0", tick0Str)
+	debug.DropMessage("  tick1", tick1Str)
+	debug.DropMessage("  tick2", tick2Str)
+	debug.DropMessage("  newTick", newTickStr)
+	debug.DropMessage("  totalProfit", totalProfitStr)
 }
 
-// RegisterCore - direct bit manipulation
+// processTickUpdate handles price updates with arbitrage detection
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
-func RegisterCore(pairID PairID, coreID CoreID) {
-	coreAssignments[pairID] |= 1 << coreID
-}
+func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
+	// Select tick based on direction
+	var currentTick float64
+	if !executor.isReverseDirection {
+		currentTick = update.forwardTick
+	} else {
+		currentTick = update.reverseTick
+	}
 
-// processTick - ULTRA-OPTIMIZED hot path with memory prefetching
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func processTick(exec *Executor, tick *Tick) {
-	// Branch-free tick selection using bit manipulation
-	reverseMask := uint64(-(uint64(exec.isReverse) & 1))
-	forwardBits := *(*uint64)(unsafe.Pointer(&tick.forward))
-	reverseBits := *(*uint64)(unsafe.Pointer(&tick.reverse))
-	currentTickBits := (forwardBits &^ reverseMask) | (reverseBits & reverseMask)
-	currentTick := *(*float64)(unsafe.Pointer(&currentTickBits))
+	// Get queue for pair
+	queueIndex, _ := executor.pairToQueueIndex.Get(uint32(update.pairID))
+	queue := &executor.priorityQueues[queueIndex]
 
-	// Direct pointer arithmetic for queue access
-	queues := (*[]quantumqueue64.QuantumQueue64)(unsafe.Pointer(exec.queuesPtr))
-	index := (*localidx.Hash)(unsafe.Pointer(exec.indexPtr))
+	// Process profitable cycles
+	type ProcessedCycle struct {
+		queueHandle     quantumqueue64.Handle // 4B
+		_               [4]byte               // 4B - Padding
+		originalTick    int64                 // 8B
+		cycleStateIndex CycleStateIndex       // 8B
+		_               [8]byte               // 8B - Padding to 32B
+	}
 
-	queueIdx, _ := index.Get(uint32(tick.pairID))
-	queue := &(*queues)[queueIdx]
+	var processedCycles [128]ProcessedCycle
+	cycleCount := 0
 
-	// Stack-allocated arrays - 64 entries for optimal cache usage
-	var handles [64]quantumqueue64.Handle
-	var priorities [64]int64
-	var cycleIdxs [64]CycleIdx
-	cycleCount := uint32(0)
-
-	// Process profitable cycles with early termination
-	cycles := (*[]Cycle)(unsafe.Pointer(exec.cyclesPtr))
-
-	for cycleCount < 64 && !queue.Empty() {
+	// Extract profitable cycles
+	for {
 		handle, queueTick, cycleData := queue.PeepMin()
-		cycleIdx := CycleIdx(cycleData)
+		cycleIndex := CycleStateIndex(cycleData)
+		cycle := &executor.cycleStates[cycleIndex]
 
-		// Direct array access - no bounds checking
-		cycle := &(*cycles)[cycleIdx]
+		// Check profitability
+		totalProfitability := currentTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
+		isProfitable := totalProfitability < 0
 
-		// Prefetch next cache line for the next cycle
-		if cycleCount < 63 {
-			_ = *(*byte)(unsafe.Add(unsafe.Pointer(cycle), 64))
+		if isProfitable {
+			//emitArbitrageOpportunity(cycle, currentTick)
 		}
 
-		// Profitability check with direct field access
-		totalProfit := currentTick + cycle.tick0 + cycle.tick1 + cycle.tick2
-
-		if totalProfit >= 0 {
+		if !isProfitable || cycleCount == len(processedCycles) {
 			break
 		}
 
-		handles[cycleCount] = handle
-		priorities[cycleCount] = queueTick
-		cycleIdxs[cycleCount] = cycleIdx
+		// Store for reprocessing
+		*(*ProcessedCycle)(unsafe.Add(
+			unsafe.Pointer(&processedCycles[0]),
+			uintptr(cycleCount)*unsafe.Sizeof(ProcessedCycle{}),
+		)) = ProcessedCycle{
+			queueHandle:     handle,
+			originalTick:    queueTick,
+			cycleStateIndex: cycleIndex,
+		}
 		cycleCount++
 
 		queue.UnlinkMin(handle)
-	}
 
-	// Reinsert cycles - unrolled for common small counts
-	switch cycleCount {
-	case 0:
-		// No cycles processed
-	case 1:
-		queue.Push(priorities[0], handles[0], uint64(cycleIdxs[0]))
-	case 2:
-		queue.Push(priorities[0], handles[0], uint64(cycleIdxs[0]))
-		queue.Push(priorities[1], handles[1], uint64(cycleIdxs[1]))
-	case 3:
-		queue.Push(priorities[0], handles[0], uint64(cycleIdxs[0]))
-		queue.Push(priorities[1], handles[1], uint64(cycleIdxs[1]))
-		queue.Push(priorities[2], handles[2], uint64(cycleIdxs[2]))
-	case 4:
-		queue.Push(priorities[0], handles[0], uint64(cycleIdxs[0]))
-		queue.Push(priorities[1], handles[1], uint64(cycleIdxs[1]))
-		queue.Push(priorities[2], handles[2], uint64(cycleIdxs[2]))
-		queue.Push(priorities[3], handles[3], uint64(cycleIdxs[3]))
-	default:
-		// General case for larger counts
-		for i := uint32(0); i < cycleCount; i++ {
-			queue.Push(priorities[i], handles[i], uint64(cycleIdxs[i]))
+		if queue.Empty() {
+			break
 		}
 	}
 
-	// Fanout processing - optimized for cache locality with prefetching
-	fanouts := (*[][]Fanout)(unsafe.Pointer(exec.fanoutPtr))
-	fanoutList := (*fanouts)[queueIdx]
+	// Reinsert processed cycles
+	for i := 0; i < cycleCount; i++ {
+		cycle := (*ProcessedCycle)(unsafe.Add(
+			unsafe.Pointer(&processedCycles[0]),
+			uintptr(i)*unsafe.Sizeof(ProcessedCycle{}),
+		))
+		queue.Push(cycle.originalTick, cycle.queueHandle, uint64(cycle.cycleStateIndex))
+	}
 
-	// Process fanout entries with direct field access
-	for i := range fanoutList {
-		fanout := &fanoutList[i]
-		cycle := &(*cycles)[fanout.cycleIdx]
+	// Update fanout entries
+	for _, fanoutEntry := range executor.fanoutTables[queueIndex] {
+		cycle := &executor.cycleStates[fanoutEntry.cycleStateIndex]
+		cycle.tickValues[fanoutEntry.edgeIndex] = currentTick
 
-		// Prefetch next fanout entry
-		if i < len(fanoutList)-1 {
-			nextFanout := &fanoutList[i+1]
-			_ = *(*byte)(unsafe.Add(unsafe.Pointer(nextFanout), 0))
-			// Prefetch next cycle state
-			nextCycle := &(*cycles)[nextFanout.cycleIdx]
-			_ = *(*byte)(unsafe.Add(unsafe.Pointer(nextCycle), 0))
-		}
-
-		// Direct field assignment based on edge index
-		switch fanout.edgeIdx {
-		case 0:
-			cycle.tick0 = currentTick
-		case 1:
-			cycle.tick1 = currentTick
-		case 2:
-			cycle.tick2 = currentTick
-		}
-
-		// Recalculate priority with direct field access
-		newPriority := quantizeTick(cycle.tick0 + cycle.tick1 + cycle.tick2)
-
-		// Direct queue access via cached pointer
-		queuePtr := (*quantumqueue64.QuantumQueue64)(unsafe.Pointer(fanout.queuePtr))
-		queuePtr.MoveTick(fanout.handle, newPriority)
+		// Recalculate priority
+		newPriority := quantizeTickToInt64(cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2])
+		fanoutEntry.queue.MoveTick(fanoutEntry.queueHandle, newPriority)
 	}
 }
 
-// Dispatch - ULTRA-OPTIMIZED dispatch with memory prefetching
+// DispatchTickUpdate processes log and dispatches to cores
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func Dispatch(logView *types.LogView) {
-	// Direct slice to fixed-size array conversion
-	addressBytes := (*[constants.AddressHexEnd - constants.AddressHexStart]byte)(
-		unsafe.Pointer(&logView.Addr[constants.AddressHexStart]))
-
-	// Prefetch the data section while processing address
-	_ = *(*byte)(unsafe.Add(unsafe.Pointer(&logView.Data[0]), 0))
-
-	pairID := LookupPair(addressBytes[:])
+func DispatchTickUpdate(logView *types.LogView) {
+	// Resolve address to pair ID
+	pairID := lookupPairIDByAddress(logView.Addr[constants.AddressHexStart:constants.AddressHexEnd])
 	if pairID == 0 {
 		return
 	}
 
-	// Direct memory access for reserve values with prefetching
-	dataPtr := uintptr(unsafe.Pointer(&logView.Data[0]))
+	// Extract reserves
+	reserve0 := utils.LoadBE64(logView.Data[24:])
+	reserve1 := utils.LoadBE64(logView.Data[56:])
 
-	// Prefetch both reserve locations
-	_ = *(*byte)(unsafe.Pointer(dataPtr + 24))
-	_ = *(*byte)(unsafe.Pointer(dataPtr + 56))
-
-	reserve0 := binary.BigEndian.Uint64((*[8]byte)(unsafe.Pointer(dataPtr + 24))[:])
-	reserve1 := binary.BigEndian.Uint64((*[8]byte)(unsafe.Pointer(dataPtr + 56))[:])
-
-	// Early return using bitwise OR
-	if (reserve0 | reserve1) == 0 {
-		return
-	}
-
-	// Calculate tick value
+	// Calculate tick
 	tickValue, _ := fastuni.Log2ReserveRatio(reserve0, reserve1)
 
-	// Stack-allocated message buffer - 32 bytes for cache alignment
-	var msgBuf [32]byte
-	tick := (*Tick)(unsafe.Pointer(&msgBuf))
-	tick.forward = tickValue
-	tick.reverse = -tickValue
-	tick.pairID = pairID
+	// Prepare message
+	var messageBuffer [24]byte
+	tickUpdate := (*TickUpdate)(unsafe.Pointer(&messageBuffer))
+	tickUpdate.forwardTick = tickValue
+	tickUpdate.reverseTick = -tickValue
+	tickUpdate.pairID = pairID
 
-	// Optimized core dispatch with prefetching
-	assignments := coreAssignments[pairID]
-	coreCount := bits.OnesCount64(assignments)
-
-	// Prefetch the ring buffer for the first core
-	if assignments != 0 {
-		firstCore := bits.TrailingZeros64(assignments)
-		_ = *(*byte)(unsafe.Add(unsafe.Pointer(rings[firstCore]), 0))
-	}
-
-	// Unroll for common small core counts
-	switch coreCount {
-	case 1:
-		coreID := bits.TrailingZeros64(assignments)
-		rings[coreID].Push((*[24]byte)(unsafe.Pointer(&msgBuf)))
-	case 2:
-		coreID := bits.TrailingZeros64(assignments)
-		rings[coreID].Push((*[24]byte)(unsafe.Pointer(&msgBuf)))
-		assignments &^= 1 << coreID
-		coreID = bits.TrailingZeros64(assignments)
-		// Prefetch next ring while processing current
-		_ = *(*byte)(unsafe.Add(unsafe.Pointer(rings[coreID]), 0))
-		rings[coreID].Push((*[24]byte)(unsafe.Pointer(&msgBuf)))
-	case 3:
-		for i := 0; i < 3; i++ {
-			coreID := bits.TrailingZeros64(assignments)
-			// Prefetch next ring if not last iteration
-			if i < 2 {
-				nextAssignments := assignments &^ (1 << coreID)
-				if nextAssignments != 0 {
-					nextCore := bits.TrailingZeros64(nextAssignments)
-					_ = *(*byte)(unsafe.Add(unsafe.Pointer(rings[nextCore]), 0))
-				}
-			}
-			rings[coreID].Push((*[24]byte)(unsafe.Pointer(&msgBuf)))
-			assignments &^= 1 << coreID
-		}
-	case 4:
-		for i := 0; i < 4; i++ {
-			coreID := bits.TrailingZeros64(assignments)
-			// Prefetch next ring if not last iteration
-			if i < 3 {
-				nextAssignments := assignments &^ (1 << coreID)
-				if nextAssignments != 0 {
-					nextCore := bits.TrailingZeros64(nextAssignments)
-					_ = *(*byte)(unsafe.Add(unsafe.Pointer(rings[nextCore]), 0))
-				}
-			}
-			rings[coreID].Push((*[24]byte)(unsafe.Pointer(&msgBuf)))
-			assignments &^= 1 << coreID
-		}
-	default:
-		// General case for many cores with prefetching
-		for assignments != 0 {
-			coreID := bits.TrailingZeros64(assignments)
-			// Prefetch next ring buffer
-			nextAssignments := assignments &^ (1 << coreID)
-			if nextAssignments != 0 {
-				nextCore := bits.TrailingZeros64(nextAssignments)
-				_ = *(*byte)(unsafe.Add(unsafe.Pointer(rings[nextCore]), 0))
-			}
-			rings[coreID].Push((*[24]byte)(unsafe.Pointer(&msgBuf)))
-			assignments &^= 1 << coreID
-		}
+	// Dispatch to assigned cores
+	coreAssignments := pairToCoreAssignment[pairID]
+	for coreAssignments != 0 {
+		coreID := bits.TrailingZeros64(uint64(coreAssignments))
+		coreRings[coreID].Push(&messageBuffer)
+		coreAssignments &^= 1 << coreID
 	}
 }
 
-// ============================================================================
-// INITIALIZATION FUNCTIONS WITH MAXIMUM COMPILER ABUSE
-// ============================================================================
-
-// shuffle - optimized Fisher-Yates
+// shuffleEdgeBindings performs Fisher-Yates shuffle
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func shuffle(edges []Edge) {
-	for i := len(edges) - 1; i > 0; i-- {
-		j := fastRandom(i + 1)
-		edges[i], edges[j] = edges[j], edges[i]
+func shuffleEdgeBindings(bindings []ArbitrageEdgeBinding) {
+	for i := len(bindings) - 1; i > 0; i-- {
+		j := secureRandomInt(i + 1)
+		bindings[i], bindings[j] = bindings[j], bindings[i]
 	}
 }
 
-// buildShards - optimized shard construction
+// buildFanoutShardBuckets constructs shard buckets
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
-func buildShards(cycles []Triplet) {
-	shards = make(map[PairID][]Shard, len(cycles)*3)
-	bindings = make(map[PairID][]Edge, len(cycles)*3)
+func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
+	pairShardBuckets = make(map[PairID][]PairShardBucket)
+	temporaryBindings := make(map[PairID][]ArbitrageEdgeBinding, len(cycles)*3)
 
+	// Group by pairs
 	for _, triplet := range cycles {
 		for i := 0; i < 3; i++ {
-			edge := Edge{
-				pair0:   triplet[0],
-				pair1:   triplet[1],
-				pair2:   triplet[2],
-				edgeIdx: uint16(i),
-			}
-			bindings[triplet[i]] = append(bindings[triplet[i]], edge)
+			temporaryBindings[triplet[i]] = append(temporaryBindings[triplet[i]],
+				ArbitrageEdgeBinding{
+					cyclePairs: triplet,
+					edgeIndex:  uint16(i),
+				})
 		}
 	}
 
-	for pairID, edges := range bindings {
-		shuffle(edges)
+	// Create shards
+	for pairID, bindings := range temporaryBindings {
+		shuffleEdgeBindings(bindings)
 
-		shardSize := constants.MaxCyclesPerShard
-		if len(edges) < shardSize {
-			shardSize = len(edges)
-		}
-
-		for offset := 0; offset < len(edges); offset += shardSize {
-			endOffset := offset + shardSize
-			if endOffset > len(edges) {
-				endOffset = len(edges)
+		for offset := 0; offset < len(bindings); offset += constants.MaxCyclesPerShard {
+			endOffset := offset + constants.MaxCyclesPerShard
+			if endOffset > len(bindings) {
+				endOffset = len(bindings)
 			}
 
-			shard := Shard{
-				pairID:   pairID,
-				count:    uint32(endOffset - offset),
-				edgesPtr: uintptr(unsafe.Pointer(&edges[offset])),
-				edgesCap: uint64(endOffset - offset),
-			}
-
-			shards[pairID] = append(shards[pairID], shard)
+			pairShardBuckets[pairID] = append(pairShardBuckets[pairID],
+				PairShardBucket{
+					pairID:       pairID,
+					edgeBindings: bindings[offset:endOffset],
+				})
 		}
 	}
 }
 
-// attachShard - optimized shard attachment with bounds checking
+// attachShardToExecutor integrates shard into executor
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
-func attachShard(exec *Executor, shard *Shard) {
-	// Skip empty shards
-	if shard.count == 0 {
-		return
+func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBucket) {
+	// Get/create queue index
+	queueIndex := executor.pairToQueueIndex.Put(uint32(shard.pairID), uint32(len(executor.priorityQueues)))
+
+	if int(queueIndex) == len(executor.priorityQueues) {
+		executor.priorityQueues = append(executor.priorityQueues, *quantumqueue64.New())
+		executor.fanoutTables = append(executor.fanoutTables, nil)
 	}
 
-	index := (*localidx.Hash)(unsafe.Pointer(exec.indexPtr))
-	queueIdx := index.Put(uint32(shard.pairID), exec.queueCount)
+	queue := &executor.priorityQueues[queueIndex]
 
-	// Expand arrays if needed
-	if queueIdx == exec.queueCount {
-		exec.queueCount++
-		exec.fanoutCount++
-	}
-
-	// Process bindings with bounds check
-	edgesPtr := (*[constants.MaxCyclesPerShard]Edge)(unsafe.Pointer(shard.edgesPtr))
-	edges := edgesPtr[:shard.count]
-
-	queues := (*[]quantumqueue64.QuantumQueue64)(unsafe.Pointer(exec.queuesPtr))
-
-	// Ensure queues slice is large enough
-	if int(queueIdx) >= len(*queues) {
-		// Resize queues slice
-		newQueues := make([]quantumqueue64.QuantumQueue64, queueIdx+1)
-		copy(newQueues, *queues)
-		*queues = newQueues
-	}
-
-	queue := &(*queues)[queueIdx]
-
-	for _, edge := range edges {
-		// Add cycle state
-		cycles := (*[]Cycle)(unsafe.Pointer(exec.cyclesPtr))
-		*cycles = append(*cycles, Cycle{
-			pair0: edge.pair0,
-			pair1: edge.pair1,
-			pair2: edge.pair2,
+	// Process cycles
+	for _, edgeBinding := range shard.edgeBindings {
+		// Add to canonical storage
+		executor.cycleStates = append(executor.cycleStates, ArbitrageCycleState{
+			pairIDs: edgeBinding.cyclePairs,
 		})
-		cycleIdx := CycleIdx(len(*cycles) - 1)
-		exec.cycleCount++
+		cycleIndex := CycleStateIndex(len(executor.cycleStates) - 1)
 
 		// Allocate queue handle
-		handle, _ := queue.BorrowSafe()
-		queue.Push(constants.MaxInitializationPriority, handle, uint64(cycleIdx))
+		queueHandle, _ := queue.BorrowSafe()
+		queue.Push(constants.MaxInitializationPriority, queueHandle, uint64(cycleIndex))
 
-		// Create fanout entries for other edges
-		fanouts := (*[][]Fanout)(unsafe.Pointer(exec.fanoutPtr))
+		// Create fanout entries
+		otherEdge1 := (edgeBinding.edgeIndex + 1) % 3
+		otherEdge2 := (edgeBinding.edgeIndex + 2) % 3
 
-		for edgeIdx := uint16(0); edgeIdx < 3; edgeIdx++ {
-			if edgeIdx != edge.edgeIdx {
-				fanout := Fanout{
-					handle:   handle,
-					edgeIdx:  edgeIdx,
-					cycleIdx: cycleIdx,
-					queuePtr: uintptr(unsafe.Pointer(queue)),
-				}
-				(*fanouts)[queueIdx] = append((*fanouts)[queueIdx], fanout)
-			}
+		for _, edgeIdx := range [...]uint16{otherEdge1, otherEdge2} {
+			executor.fanoutTables[queueIndex] = append(executor.fanoutTables[queueIndex],
+				FanoutEntry{
+					queueHandle:     queueHandle,
+					edgeIndex:       edgeIdx,
+					cycleStateIndex: cycleIndex,
+					queue:           queue,
+				})
 		}
 	}
 }
 
-// launchWorker - optimized worker launch
+// launchShardWorker initializes core executor
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
-func launchWorker(coreID, forwardCoreCount int, input <-chan Shard) {
+func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShardBucket) {
 	runtime.LockOSThread()
 
-	// Pre-allocate with optimal sizes
-	queues := make([]quantumqueue64.QuantumQueue64, 0, 256)
-	fanouts := make([][]Fanout, 0, 256)
-	cycles := make([]Cycle, 0, 2048)
-	index := localidx.New(constants.DefaultLocalIdxSize)
+	shutdownChannel := make(chan struct{})
 
-	exec := &Executor{
-		queuesPtr:   uintptr(unsafe.Pointer(&queues)),
-		fanoutPtr:   uintptr(unsafe.Pointer(&fanouts)),
-		cyclesPtr:   uintptr(unsafe.Pointer(&cycles)),
-		indexPtr:    uintptr(unsafe.Pointer(&index)),
-		queueCount:  0,
-		isReverse:   0,
-		cycleCount:  0,
-		fanoutCount: 0,
+	// Initialize executor
+	executor := &ArbitrageCoreExecutor{
+		isReverseDirection: coreID >= forwardCoreCount,
+		shutdownSignal:     shutdownChannel,
+		pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
+		cycleStates:        make([]ArbitrageCycleState, 0),
 	}
+	coreExecutors[coreID] = executor
+	coreRings[coreID] = ring24.New(constants.DefaultRingSize)
 
-	if coreID >= forwardCoreCount {
-		exec.isReverse = 1
-	}
-
-	executors[coreID] = exec
-	rings[coreID] = ring24.New(constants.DefaultRingSize)
-
-	for shard := range input {
-		attachShard(exec, &shard)
+	// Process shards
+	for shard := range shardInput {
+		attachShardToExecutor(executor, &shard)
 	}
 
 	stopFlag, hotFlag := control.Flags()
 
+	// Launch consumer
 	if coreID == 0 {
-		ring24.PinnedConsumerWithCooldown(coreID, rings[coreID], stopFlag, hotFlag,
-			func(msgPtr *[24]byte) {
-				processTick(exec, (*Tick)(unsafe.Pointer(msgPtr)))
-			}, make(chan struct{}))
+		ring24.PinnedConsumerWithCooldown(coreID, coreRings[coreID], stopFlag, hotFlag,
+			func(messagePtr *[24]byte) {
+				processTickUpdate(executor, (*TickUpdate)(unsafe.Pointer(messagePtr)))
+			}, shutdownChannel)
 	} else {
-		ring24.PinnedConsumer(coreID, rings[coreID], stopFlag, hotFlag,
-			func(msgPtr *[24]byte) {
-				processTick(exec, (*Tick)(unsafe.Pointer(msgPtr)))
-			}, make(chan struct{}))
+		ring24.PinnedConsumer(coreID, coreRings[coreID], stopFlag, hotFlag,
+			func(messagePtr *[24]byte) {
+				processTickUpdate(executor, (*TickUpdate)(unsafe.Pointer(messagePtr)))
+			}, shutdownChannel)
 	}
 }
 
-// Init - optimized system initialization
+// InitializeArbitrageSystem bootstraps the complete system
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
-func Init(cycles []Triplet) {
-	coreCount := runtime.NumCPU()
-	if coreCount > 1 {
-		coreCount--
-	}
+func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
+	coreCount := runtime.NumCPU() - 1
 	if coreCount > constants.MaxSupportedCores {
 		coreCount = constants.MaxSupportedCores
 	}
 	if coreCount&1 == 1 {
-		coreCount--
-	}
-	if coreCount < 2 {
-		coreCount = 2
+		coreCount-- // Ensure even
 	}
 	forwardCoreCount := coreCount / 2
 
-	buildShards(cycles)
+	// Build shards
+	buildFanoutShardBuckets(arbitrageCycles)
 
-	channels = make([]chan Shard, coreCount)
-	for i := 0; i < coreCount; i++ {
-		channels[i] = make(chan Shard, constants.ShardChannelBufferSize)
-		go launchWorker(i, forwardCoreCount, channels[i])
+	// Create workers
+	shardChannels := make([]chan PairShardBucket, coreCount)
+	for i := range shardChannels {
+		shardChannels[i] = make(chan PairShardBucket, constants.ShardChannelBufferSize)
+		go launchShardWorker(i, forwardCoreCount, shardChannels[i])
 	}
 
+	// Distribute shards
 	currentCore := 0
-	for _, shardList := range shards {
-		for _, shard := range shardList {
+	for _, shardBuckets := range pairShardBuckets {
+		for _, shard := range shardBuckets {
 			forwardCore := currentCore % forwardCoreCount
 			reverseCore := forwardCore + forwardCoreCount
 
-			channels[forwardCore] <- shard
-			channels[reverseCore] <- shard
+			// Send to both directions
+			shardChannels[forwardCore] <- shard
+			shardChannels[reverseCore] <- shard
 
-			// Update core assignments
-			edgesPtr := (*[constants.MaxCyclesPerShard]Edge)(unsafe.Pointer(shard.edgesPtr))
-			edges := edgesPtr[:shard.count]
-
-			for _, edge := range edges {
-				pairs := [3]PairID{edge.pair0, edge.pair1, edge.pair2}
-				for _, pairID := range pairs {
-					coreAssignments[pairID] |= 1<<CoreID(forwardCore) | 1<<CoreID(reverseCore)
+			// Update routing
+			for _, edgeBinding := range shard.edgeBindings {
+				for _, pairID := range edgeBinding.cyclePairs {
+					pairToCoreAssignment[pairID] |= 1<<forwardCore | 1<<reverseCore
 				}
 			}
 			currentCore++
 		}
 	}
 
-	for _, channel := range channels {
+	// Close channels
+	for _, channel := range shardChannels {
 		close(channel)
 	}
-
-	cleanup()
-}
-
-// cleanup - aggressive cleanup with compiler abuse
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func cleanup() {
-	runtime.GC()
-
-	// Nil everything
-	shards = nil
-	bindings = nil
-	channels = nil
-
-	runtime.GC()
-	runtime.GC()
-	runtime.KeepAlive(nil)
 }
