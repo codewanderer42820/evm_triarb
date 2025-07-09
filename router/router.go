@@ -13,6 +13,7 @@ import (
 	"main/quantumqueue64"
 	"main/ring24"
 	"main/types"
+	"main/utils"
 )
 
 // Core types - optimized widths
@@ -23,14 +24,16 @@ type CycleIdx uint32
 
 // PERFECTLY CACHE-ALIGNED DATA STRUCTURES WITH MAXIMUM COMPILER ABUSE
 
-// AddrKey - exactly 32 bytes, 8-byte aligned fields
+// AddrKey - exactly 32 bytes, stores parsed address + original hash
 //
 //go:notinheap
 //go:align 32
 type AddrKey struct {
+	// Store the 20-byte parsed address directly
 	word0 uint64 // 8B - bytes 0-7
 	word1 uint64 // 8B - bytes 8-15
-	word2 uint64 // 8B - bytes 16-23 (only 4 bytes used)
+	word2 uint32 // 4B - bytes 16-19
+	hash  uint32 // 4B - original hash (for Robin Hood)
 	_     uint64 // 8B - padding to 32B
 }
 
@@ -183,46 +186,56 @@ func quantizeTick(tick float64) int64 {
 	return int64((tick + constants.TickClampingBound) * constants.QuantizationScale)
 }
 
-// fastHash - optimized hash with single multiply
+// fastHash - use full 20 bytes for better distribution
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func fastHash(value uint64) uint32 {
-	// Fibonacci hash - single multiply + shift
-	return uint32((value*0x9e3779b97f4a7c15)>>32) & constants.AddressTableMask
+func fastHash(parsedAddr [20]byte) uint32 {
+	// Use XOR of all words for better distribution
+	hash := *(*uint64)(unsafe.Pointer(&parsedAddr[0])) ^
+		*(*uint64)(unsafe.Pointer(&parsedAddr[8])) ^
+		uint64(*(*uint32)(unsafe.Pointer(&parsedAddr[16])))
+	return uint32(hash) & constants.AddressTableMask
 }
 
-// addrIndex - direct memory access
+// parseAndHash - internal function for production use
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func addrIndex(addressBytes []byte) uint32 {
-	return fastHash(*(*uint64)(unsafe.Pointer(&addressBytes[2])))
-}
+func parseAndHash(addressBytes []byte) (uint32, [20]byte, AddrKey) {
+	// Parse hex string to bytes ONCE
+	parsedAddr := utils.ParseEthereumAddress(addressBytes)
+	hash := fastHash(parsedAddr)
 
-// toAddrKey - direct memory copy, 8-byte aligned
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func toAddrKey(addressBytes []byte) AddrKey {
-	return AddrKey{
-		word0: *(*uint64)(unsafe.Pointer(&addressBytes[2])),
-		word1: *(*uint64)(unsafe.Pointer(&addressBytes[10])),
-		word2: *(*uint64)(unsafe.Pointer(&addressBytes[18])),
-		// word3 is padding
+	// Create key with hash stored
+	key := AddrKey{
+		word0: *(*uint64)(unsafe.Pointer(&parsedAddr[0])),
+		word1: *(*uint64)(unsafe.Pointer(&parsedAddr[8])),
+		word2: *(*uint32)(unsafe.Pointer(&parsedAddr[16])),
+		hash:  hash,
 	}
+
+	return hash, parsedAddr, key
 }
 
-// isEqual - vectorized comparison
+// ParseAndHash - exported function for testing: parse once, return everything needed
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func ParseAndHash(addressBytes []byte) (uint32, [20]byte, AddrKey) {
+	return parseAndHash(addressBytes)
+}
+
+// isEqual - compare parsed addresses directly
 //
 //go:norace
 //go:nocheckptr
@@ -230,11 +243,11 @@ func toAddrKey(addressBytes []byte) AddrKey {
 //go:inline
 //go:registerparams
 func (a AddrKey) isEqual(b AddrKey) bool {
-	// Compare first 3 words only (4th is padding)
+	// Compare the actual parsed address data
 	return a.word0 == b.word0 && a.word1 == b.word1 && a.word2 == b.word2
 }
 
-// RegisterPair - single probe, direct write
+// RegisterPair - Peak optimized Robin Hood hashing
 //
 //go:norace
 //go:nocheckptr
@@ -242,14 +255,46 @@ func (a AddrKey) isEqual(b AddrKey) bool {
 //go:inline
 //go:registerparams
 func RegisterPair(addressBytes []byte, pairID PairID) {
-	key := toAddrKey(addressBytes)
-	index := addrIndex(addressBytes)
+	// Parse once, get everything
+	hash, _, key := parseAndHash(addressBytes)
 
-	addrKeys[index] = key
-	pairIDs[index] = pairID
+	dist := uint32(0)
+	const maxProbes = 8 // Reduced for better performance
+
+	for dist < maxProbes {
+		probeIndex := (hash + dist) & constants.AddressTableMask
+
+		// Prefetch next probe location
+		if dist < maxProbes-1 {
+			nextProbeIndex := (hash + dist + 1) & constants.AddressTableMask
+			_ = *(*byte)(unsafe.Add(unsafe.Pointer(&addrKeys[nextProbeIndex]), 0))
+		}
+
+		// Empty slot or same key
+		stored := addrKeys[probeIndex]
+		if stored == (AddrKey{}) || stored.isEqual(key) {
+			addrKeys[probeIndex] = key
+			pairIDs[probeIndex] = pairID
+			return
+		}
+
+		// Robin Hood displacement using stored hash
+		storedDist := (probeIndex + constants.AddressTableCapacity - stored.hash) & constants.AddressTableMask
+
+		if storedDist < dist {
+			// Swap with resident
+			addrKeys[probeIndex] = key
+			pairIDs[probeIndex] = pairID
+			key = stored
+			pairID = pairIDs[probeIndex]
+			dist = storedDist
+		}
+
+		dist++
+	}
 }
 
-// LookupPair - single probe, branch-optimized with prefetching
+// LookupPair - Peak optimized Robin Hood lookup
 //
 //go:norace
 //go:nocheckptr
@@ -257,16 +302,42 @@ func RegisterPair(addressBytes []byte, pairID PairID) {
 //go:inline
 //go:registerparams
 func LookupPair(addressBytes []byte) PairID {
-	key := toAddrKey(addressBytes)
-	index := addrIndex(addressBytes)
+	// Parse once, get everything
+	hash, _, key := parseAndHash(addressBytes)
 
-	// Prefetch both the key and pairID locations
-	_ = *(*byte)(unsafe.Add(unsafe.Pointer(&addrKeys[index]), 0))
-	_ = *(*byte)(unsafe.Add(unsafe.Pointer(&pairIDs[index]), 0))
+	dist := uint32(0)
+	const maxProbes = 8 // Reduced for better performance
 
-	stored := addrKeys[index]
-	if stored.isEqual(key) {
-		return pairIDs[index]
+	for dist < maxProbes {
+		probeIndex := (hash + dist) & constants.AddressTableMask
+
+		// Prefetch next probe location
+		if dist < maxProbes-1 {
+			nextProbeIndex := (hash + dist + 1) & constants.AddressTableMask
+			_ = *(*byte)(unsafe.Add(unsafe.Pointer(&addrKeys[nextProbeIndex]), 0))
+		}
+
+		// Prefetch both the key and pairID locations
+		_ = *(*byte)(unsafe.Add(unsafe.Pointer(&addrKeys[probeIndex]), 0))
+		_ = *(*byte)(unsafe.Add(unsafe.Pointer(&pairIDs[probeIndex]), 0))
+
+		stored := addrKeys[probeIndex]
+		if stored == (AddrKey{}) {
+			return 0 // Empty slot, not found
+		}
+
+		if stored.isEqual(key) {
+			return pairIDs[probeIndex]
+		}
+
+		// Robin Hood early termination using stored hash
+		storedDist := (probeIndex + constants.AddressTableCapacity - stored.hash) & constants.AddressTableMask
+
+		if storedDist < dist {
+			return 0 // Would have been found earlier
+		}
+
+		dist++
 	}
 	return 0
 }
@@ -401,7 +472,7 @@ func processTick(exec *Executor, tick *Tick) {
 	}
 }
 
-// Dispatch - ULTRA-OPTIMIZED dispatch with memory prefetching
+// Dispatch - ULTRA-OPTIMIZED dispatch with single address parse
 //
 //go:norace
 //go:nocheckptr
@@ -409,17 +480,17 @@ func processTick(exec *Executor, tick *Tick) {
 //go:inline
 //go:registerparams
 func Dispatch(logView *types.LogView) {
-	// Direct slice to fixed-size array conversion
-	addressBytes := (*[constants.AddressHexEnd - constants.AddressHexStart]byte)(
-		unsafe.Pointer(&logView.Addr[constants.AddressHexStart]))
+	// Extract address slice - no allocation
+	addressBytes := logView.Addr[constants.AddressHexStart:constants.AddressHexEnd]
 
-	// Prefetch the data section while processing address
-	_ = *(*byte)(unsafe.Add(unsafe.Pointer(&logView.Data[0]), 0))
-
-	pairID := LookupPair(addressBytes[:])
+	// Parse address once and get pair ID
+	pairID := LookupPair(addressBytes)
 	if pairID == 0 {
 		return
 	}
+
+	// Prefetch data section while processing address
+	_ = *(*byte)(unsafe.Add(unsafe.Pointer(&logView.Data[0]), 0))
 
 	// Direct memory access for reserve values with prefetching
 	dataPtr := uintptr(unsafe.Pointer(&logView.Data[0]))
@@ -578,7 +649,7 @@ func buildShards(cycles []Triplet) {
 	}
 }
 
-// attachShard - optimized shard attachment
+// attachShard - optimized shard attachment with proper queue expansion
 //
 //go:norace
 //go:nocheckptr
@@ -591,7 +662,14 @@ func attachShard(exec *Executor, shard *Shard) {
 
 	// Expand arrays if needed
 	if queueIdx == exec.queueCount {
-		// Resize queues and fanout tables
+		// Expand queues slice
+		queues := (*[]quantumqueue64.QuantumQueue64)(unsafe.Pointer(exec.queuesPtr))
+		*queues = append(*queues, *quantumqueue64.New())
+
+		// Expand fanout tables
+		fanouts := (*[][]Fanout)(unsafe.Pointer(exec.fanoutPtr))
+		*fanouts = append(*fanouts, make([]Fanout, 0, 64))
+
 		exec.queueCount++
 		exec.fanoutCount++
 	}
@@ -615,7 +693,7 @@ func attachShard(exec *Executor, shard *Shard) {
 		exec.cycleCount++
 
 		// Allocate queue handle
-		handle, _ := queue.BorrowSafe()
+		handle, _ := queue.Borrow()
 		queue.Push(constants.MaxInitializationPriority, handle, uint64(cycleIdx))
 
 		// Create fanout entries for other edges
