@@ -180,7 +180,6 @@ var (
 
 // Initialization data (gets nuked) - consolidated into single bucket
 var (
-	initBucket            InitializationBucket
 	initPairShardBuckets  map[PairID][]PairShardBucket
 	initTemporaryBindings map[PairID][]ArbitrageEdgeBinding
 	initShardChannels     []chan PairShardBucket
@@ -302,7 +301,8 @@ func RegisterPairToCore(pairID PairID, coreID CoreID) {
 //
 //go:norace
 //go:nocheckptr
-//go:noinline
+//go:nosplit
+//go:inline
 //go:registerparams
 func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 	// Branch-free tick selection using bit manipulation
@@ -563,7 +563,8 @@ func shuffleEdgeBindings(bindings []ArbitrageEdgeBinding) {
 //
 //go:norace
 //go:nocheckptr
-//go:noinline
+//go:nosplit
+//go:inline
 //go:registerparams
 func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 	initPairShardBuckets = make(map[PairID][]PairShardBucket, len(cycles)*3)
@@ -611,7 +612,8 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 //
 //go:norace
 //go:nocheckptr
-//go:noinline
+//go:nosplit
+//go:inline
 //go:registerparams
 func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBucket) {
 	pairIndexPtr := (*localidx.Hash)(unsafe.Pointer(executor.pairIndexPtr))
@@ -667,7 +669,8 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 //
 //go:norace
 //go:nocheckptr
-//go:noinline
+//go:nosplit
+//go:inline
 //go:registerparams
 func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShardBucket) {
 	runtime.LockOSThread()
@@ -719,7 +722,8 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 //
 //go:norace
 //go:nocheckptr
-//go:noinline
+//go:nosplit
+//go:inline
 //go:registerparams
 func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 	coreCount := runtime.NumCPU()
@@ -779,7 +783,8 @@ func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 //
 //go:norace
 //go:nocheckptr
-//go:noinline
+//go:nosplit
+//go:inline
 //go:registerparams
 func cleanupInitializationData() {
 	runtime.GC()
