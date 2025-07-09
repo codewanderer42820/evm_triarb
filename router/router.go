@@ -653,7 +653,6 @@ func buildShards(cycles []Triplet) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func attachShard(exec *Executor, shard *Shard) {
