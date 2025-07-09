@@ -134,35 +134,6 @@ type Executor struct {
 	_ [64]byte // 64B - reserved for future hot data
 }
 
-// ProcessedCycle - exactly 32 bytes for stack allocation
-//
-//go:notinheap
-//go:align 32
-type ProcessedCycle struct {
-	handle   quantumqueue64.Handle // 4B
-	_        uint32                // 4B - padding to 8B boundary
-	priority int64                 // 8B
-	cycleIdx CycleIdx              // 4B
-	_        uint32                // 4B - padding to 8B boundary
-	_        uint64                // 8B - padding to 32B total
-}
-
-// InitBucket - exactly 64 bytes for initialization data
-//
-//go:notinheap
-//go:align 64
-type InitBucket struct {
-	shardsPtr   uintptr // 8B - pointer to map
-	bindingsPtr uintptr // 8B - pointer to map
-	channelsPtr uintptr // 8B - pointer to slice
-	cyclesBuf   uintptr // 8B - pointer to buffer
-	addrBuf     uintptr // 8B - pointer to buffer
-	tempSlices  uintptr // 8B - pointer to slices
-	tempExecs   uintptr // 8B - pointer to executors
-	initialized uint32  // 4B - flag
-	_           uint32  // 4B - padding to 8B boundary
-}
-
 // GLOBAL STATE - perfectly aligned arrays
 var (
 	// Core arrays - 64-byte aligned
@@ -178,12 +149,11 @@ var (
 	_ [7]PairID // Pad to 8-byte boundary
 )
 
-// Initialization data (gets nuked) - consolidated into single bucket
+// Initialization data (gets nuked) - consolidated
 var (
-	initBucket InitBucket
-	shards     map[PairID][]Shard
-	bindings   map[PairID][]Edge
-	channels   []chan Shard
+	shards   map[PairID][]Shard
+	bindings map[PairID][]Edge
+	channels []chan Shard
 )
 
 // ULTRA-OPTIMIZED CORE FUNCTIONS WITH MAXIMUM COMPILER ABUSE
@@ -784,8 +754,7 @@ func Init(cycles []Triplet) {
 func cleanup() {
 	runtime.GC()
 
-	// Nil everything in the init bucket
-	initBucket = InitBucket{}
+	// Nil everything
 	shards = nil
 	bindings = nil
 	channels = nil
