@@ -286,7 +286,8 @@ func RegisterCore(pairID PairID, coreID CoreID) {
 //
 //go:norace
 //go:nocheckptr
-//go:noinline
+//go:nosplit
+//go:inline
 //go:registerparams
 func processTick(exec *Executor, tick *Tick) {
 	// Branch-free tick selection using bit manipulation
@@ -533,7 +534,8 @@ func shuffle(edges []Edge) {
 //
 //go:norace
 //go:nocheckptr
-//go:noinline
+//go:nosplit
+//go:inline
 //go:registerparams
 func buildShards(cycles []Triplet) {
 	shards = make(map[PairID][]Shard, len(cycles)*3)
@@ -581,7 +583,8 @@ func buildShards(cycles []Triplet) {
 //
 //go:norace
 //go:nocheckptr
-//go:noinline
+//go:nosplit
+//go:inline
 //go:registerparams
 func attachShard(exec *Executor, shard *Shard) {
 	index := (*localidx.Hash)(unsafe.Pointer(exec.indexPtr))
@@ -637,7 +640,8 @@ func attachShard(exec *Executor, shard *Shard) {
 //
 //go:norace
 //go:nocheckptr
-//go:noinline
+//go:nosplit
+//go:inline
 //go:registerparams
 func launchWorker(coreID, forwardCoreCount int, input <-chan Shard) {
 	runtime.LockOSThread()
@@ -689,7 +693,8 @@ func launchWorker(coreID, forwardCoreCount int, input <-chan Shard) {
 //
 //go:norace
 //go:nocheckptr
-//go:noinline
+//go:nosplit
+//go:inline
 //go:registerparams
 func Init(cycles []Triplet) {
 	coreCount := runtime.NumCPU()
@@ -749,7 +754,8 @@ func Init(cycles []Triplet) {
 //
 //go:norace
 //go:nocheckptr
-//go:noinline
+//go:nosplit
+//go:inline
 //go:registerparams
 func cleanup() {
 	runtime.GC()
