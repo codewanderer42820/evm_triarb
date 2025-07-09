@@ -187,6 +187,9 @@ func quantizeTick(tick float64) int64 {
 }
 
 // fastHash - use full 20 bytes for better distribution
+// NOTE: parsedAddr comes from utils.ParseEthereumAddress() which converts
+// hex string to 20 raw bytes. This preserves the full keccak256 entropy
+// from the original Ethereum address generation process.
 //
 //go:norace
 //go:nocheckptr
@@ -195,6 +198,7 @@ func quantizeTick(tick float64) int64 {
 //go:registerparams
 func fastHash(parsedAddr [20]byte) uint32 {
 	// Use XOR of all words for better distribution
+	// This combines all 160 bits of keccak256 entropy into final hash
 	hash := *(*uint64)(unsafe.Pointer(&parsedAddr[0])) ^
 		*(*uint64)(unsafe.Pointer(&parsedAddr[8])) ^
 		uint64(*(*uint32)(unsafe.Pointer(&parsedAddr[16])))
@@ -247,7 +251,7 @@ func (a AddrKey) isEqual(b AddrKey) bool {
 	return a.word0 == b.word0 && a.word1 == b.word1 && a.word2 == b.word2
 }
 
-// RegisterPair - Peak optimized Robin Hood hashing
+// RegisterPair - Optimized for 20% load factor
 //
 //go:norace
 //go:nocheckptr
@@ -259,13 +263,13 @@ func RegisterPair(addressBytes []byte, pairID PairID) {
 	hash, _, key := parseAndHash(addressBytes)
 
 	dist := uint32(0)
-	const maxProbes = 8 // Reduced for better performance
+	const maxProbes = 16 // Optimized for 20% load factor
 
 	for dist < maxProbes {
 		probeIndex := (hash + dist) & constants.AddressTableMask
 
-		// Prefetch next probe location
-		if dist < maxProbes-1 {
+		// Prefetch next probe location (only for first few probes)
+		if dist < 4 {
 			nextProbeIndex := (hash + dist + 1) & constants.AddressTableMask
 			_ = *(*byte)(unsafe.Add(unsafe.Pointer(&addrKeys[nextProbeIndex]), 0))
 		}
@@ -292,9 +296,18 @@ func RegisterPair(addressBytes []byte, pairID PairID) {
 
 		dist++
 	}
+	// Emergency fallback: linear search for empty slot
+	for i := uint32(0); i < constants.AddressTableCapacity; i++ {
+		probeIndex := (hash + maxProbes + i) & constants.AddressTableMask
+		if addrKeys[probeIndex] == (AddrKey{}) {
+			addrKeys[probeIndex] = key
+			pairIDs[probeIndex] = pairID
+			return
+		}
+	}
 }
 
-// LookupPair - Peak optimized Robin Hood lookup
+// LookupPair - Optimized for 20% load factor
 //
 //go:norace
 //go:nocheckptr
@@ -306,13 +319,13 @@ func LookupPair(addressBytes []byte) PairID {
 	hash, _, key := parseAndHash(addressBytes)
 
 	dist := uint32(0)
-	const maxProbes = 8 // Reduced for better performance
+	const maxProbes = 16 // Optimized for 20% load factor
 
 	for dist < maxProbes {
 		probeIndex := (hash + dist) & constants.AddressTableMask
 
-		// Prefetch next probe location
-		if dist < maxProbes-1 {
+		// Prefetch next probe location (only for first few probes)
+		if dist < 4 {
 			nextProbeIndex := (hash + dist + 1) & constants.AddressTableMask
 			_ = *(*byte)(unsafe.Add(unsafe.Pointer(&addrKeys[nextProbeIndex]), 0))
 		}
@@ -653,6 +666,7 @@ func buildShards(cycles []Triplet) {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func attachShard(exec *Executor, shard *Shard) {
