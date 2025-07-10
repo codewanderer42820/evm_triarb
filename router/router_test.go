@@ -1,4 +1,3 @@
-// router_test.go — Comprehensive test suite for maximum performance triangular arbitrage router
 package router
 
 import (

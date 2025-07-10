@@ -1,4 +1,3 @@
-// router.go — High-performance triangular arbitrage fan-out router (64 cores)
 package router
 
 import (
