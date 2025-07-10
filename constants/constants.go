@@ -22,8 +22,8 @@ const (
 	AddressTableCapacity     = 1 << 20 // 1M entries for addresses
 	AddressTableMask         = AddressTableCapacity - 1
 	PairRoutingTableCapacity = 1 << 20 // 1M entries for routing
-	AddressHexStart          = 3       // Address parsing start
-	AddressHexEnd            = 43      // Address parsing end
+	AddressHexStart          = 2       // Address parsing start
+	AddressHexEnd            = 42      // Address parsing end
 )
 
 // Arbitrage tick quantization
