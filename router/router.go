@@ -212,24 +212,6 @@ func (k *keccakRandomState) nextInt(upperBound int) int {
 	return int(high64)
 }
 
-// directAddressToIndex64 extracts index from Ethereum address (strips 0x prefix)
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func directAddressToIndex64(address42HexBytes []byte) uint64 {
-	// Strip 0x prefix: input is "0x1234..." → parse "1234..." (40 chars)
-	addressBytes := utils.ParseEthereumAddress(address42HexBytes[2:])
-
-	// Use middle 8 bytes (6-13) to avoid vanity address patterns
-	// Vanity addresses target the beginning, middle has better entropy
-	hash64 := utils.Load64(addressBytes[6:14])
-
-	return hash64 & uint64(constants.AddressTableMask)
-}
-
 // directAddressToIndex64Stored extracts hash from stored AddressKey (for Robin Hood distance calculation)
 //
 //go:norace
@@ -242,27 +224,6 @@ func directAddressToIndex64Stored(key AddressKey) uint64 {
 	// This matches directAddressToIndex64 but works on stored AddressKey format
 	hash64 := (key.words[0] >> 48) | (key.words[1] << 16)
 	return hash64 & uint64(constants.AddressTableMask)
-}
-
-// bytesToAddressKey converts address bytes to AddressKey (strips 0x prefix)
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func bytesToAddressKey(address42HexBytes []byte) AddressKey {
-	// Strip 0x prefix: input is "0x1234..." → parse "1234..." (40 chars)
-	parsedAddress := utils.ParseEthereumAddress(address42HexBytes[2:])
-
-	// Pack all 20 bytes efficiently: 8+8+4 = 20 bytes exactly
-	return AddressKey{
-		words: [3]uint64{
-			utils.Load64(parsedAddress[0:8]),                 // Bytes 0-7
-			utils.Load64(parsedAddress[8:16]),                // Bytes 8-15
-			uint64(utils.Load64(parsedAddress[16:20]) >> 32), // Bytes 16-19 (only use lower 4 bytes)
-		},
-	}
 }
 
 // isEqual performs optimized address comparison (only compare actual address data)
@@ -727,4 +688,29 @@ func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 	for _, channel := range shardChannels {
 		close(channel)
 	}
+}
+
+func bytesToAddressKey(address40HexChars []byte) AddressKey {
+	// FULL FOOTGUN MODE: No validation, assume caller is correct
+	parsedAddress := utils.ParseEthereumAddress(address40HexChars)
+
+	// Pack all 20 bytes efficiently: 8+8+4 = 20 bytes exactly
+	var lastWordBytes [8]byte
+	copy(lastWordBytes[:4], parsedAddress[16:20])
+	lastWord := utils.Load64(lastWordBytes[:]) >> 32
+
+	return AddressKey{
+		words: [3]uint64{
+			utils.Load64(parsedAddress[0:8]),  // Bytes 0-7
+			utils.Load64(parsedAddress[8:16]), // Bytes 8-15
+			lastWord,                          // Bytes 16-19
+		},
+	}
+}
+
+func directAddressToIndex64(address40HexChars []byte) uint64 {
+	// FULL FOOTGUN MODE: No validation
+	addressBytes := utils.ParseEthereumAddress(address40HexChars)
+	hash64 := utils.Load64(addressBytes[6:14])
+	return hash64 & uint64(constants.AddressTableMask)
 }
