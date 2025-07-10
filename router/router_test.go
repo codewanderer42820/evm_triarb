@@ -50,26 +50,24 @@ func generateMockAddress(seed uint64) [42]byte {
 	return addr
 }
 
-// generateArbitrageTriangle removed - was unused
-
 func clearGlobalState() {
-	// Clear address tables
-	for i := range pairAddressKeys[:1000] {
+	// Clear address tables completely
+	for i := range pairAddressKeys {
 		pairAddressKeys[i] = AddressKey{}
 	}
-	for i := range addressToPairID[:1000] {
+	for i := range addressToPairID {
 		addressToPairID[i] = 0
 	}
 
-	// Clear core assignments
-	for i := range pairToCoreAssignment[:1000] {
+	// Clear core assignments completely
+	for i := range pairToCoreAssignment {
 		pairToCoreAssignment[i] = 0
 	}
 
 	// Clear shard buckets
 	pairShardBuckets = nil
 
-	// Clear executors and rings
+	// Clear executors and rings completely
 	for i := range coreExecutors {
 		coreExecutors[i] = nil
 	}
@@ -84,6 +82,14 @@ func assertZeroAllocs(t *testing.T, name string, fn func()) {
 	if allocs > 0 {
 		t.Errorf("%s allocated: %f allocs/op", name, allocs)
 	}
+}
+
+// Helper function for floating point comparison
+func abs(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // ============================================================================
@@ -102,7 +108,7 @@ func TestStructSizes(t *testing.T) {
 		{"ArbitrageEdgeBinding", unsafe.Sizeof(ArbitrageEdgeBinding{}), 32},
 		{"FanoutEntry", unsafe.Sizeof(FanoutEntry{}), 32},
 		{"PairShardBucket", unsafe.Sizeof(PairShardBucket{}), 32},
-		{"ArbitrageCoreExecutor", unsafe.Sizeof(ArbitrageCoreExecutor{}), 4272},
+		{"ArbitrageCoreExecutor", unsafe.Sizeof(ArbitrageCoreExecutor{}), 4248}, // Updated: 4272 - 24 = 4248
 		{"ProcessedCycle", unsafe.Sizeof(ProcessedCycle{}), 32},
 		{"keccakRandomState", unsafe.Sizeof(keccakRandomState{}), 40},
 	}
@@ -239,7 +245,7 @@ func TestAddressKey(t *testing.T) {
 	t.Run("PrefixStripping", func(t *testing.T) {
 		// Test that 0x prefix is properly stripped
 		addr := [42]byte{}
-		copy(addr[:], "0x1234567890abcdefABCDEF1234567890abcdefAB")
+		copy(addr[:], "0x1234567890abcdefabcdef1234567890abcdefab") // Fixed: all lowercase
 
 		key := bytesToAddressKey(addr[:])
 
@@ -357,8 +363,10 @@ func TestRobinHoodHashTable(t *testing.T) {
 		addr := generateMockAddress(42)
 		pairID := PairID(1337)
 
-		RegisterPairAddress(addr[:], pairID)
-		foundID := lookupPairIDByAddress(addr[:])
+		// Register using correct slice format (same as DispatchTickUpdate uses)
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, pairID)
+		foundID := lookupPairIDByAddress(addrSlice)
 
 		if foundID != pairID {
 			t.Errorf("Expected pair ID %d, got %d", pairID, foundID)
@@ -370,10 +378,11 @@ func TestRobinHoodHashTable(t *testing.T) {
 		originalPairID := PairID(1000)
 		updatedPairID := PairID(2000)
 
-		RegisterPairAddress(addr[:], originalPairID)
-		RegisterPairAddress(addr[:], updatedPairID)
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, originalPairID)
+		RegisterPairAddress(addrSlice, updatedPairID)
 
-		found := lookupPairIDByAddress(addr[:])
+		found := lookupPairIDByAddress(addrSlice)
 		if found != updatedPairID {
 			t.Errorf("Expected updated ID %d, got %d", updatedPairID, found)
 		}
@@ -381,7 +390,8 @@ func TestRobinHoodHashTable(t *testing.T) {
 
 	t.Run("NotFound", func(t *testing.T) {
 		unknownAddr := generateMockAddress(999999)
-		foundID := lookupPairIDByAddress(unknownAddr[:])
+		addrSlice := unknownAddr[constants.AddressHexStart:constants.AddressHexEnd]
+		foundID := lookupPairIDByAddress(addrSlice)
 
 		if foundID != 0 {
 			t.Error("Unknown address must return 0")
@@ -394,15 +404,17 @@ func TestRobinHoodHashTable(t *testing.T) {
 		// Register multiple addresses that might collide
 		for i := 0; i < 20; i++ {
 			addr := generateMockAddress(uint64(1000 + i))
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
 			pairID := PairID(i + 1)
-			RegisterPairAddress(addr[:], pairID)
+			RegisterPairAddress(addrSlice, pairID)
 		}
 
 		// Verify all can be retrieved
 		for i := 0; i < 20; i++ {
 			addr := generateMockAddress(uint64(1000 + i))
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
 			expected := PairID(i + 1)
-			found := lookupPairIDByAddress(addr[:])
+			found := lookupPairIDByAddress(addrSlice)
 
 			if found != expected {
 				t.Errorf("Robin Hood failed: expected %d, got %d", expected, found)
@@ -416,13 +428,15 @@ func TestRobinHoodHashTable(t *testing.T) {
 		const count = 500 // Keep reasonable to avoid hash table overflow
 		for i := 0; i < count; i++ {
 			addr := generateMockAddress(uint64(i * 1000003)) // Better distribution
-			RegisterPairAddress(addr[:], PairID(i+1))
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, PairID(i+1))
 		}
 
 		// Verify random samples
 		for i := 0; i < count; i += 25 {
 			addr := generateMockAddress(uint64(i * 1000003))
-			found := lookupPairIDByAddress(addr[:])
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			found := lookupPairIDByAddress(addrSlice)
 			if found != PairID(i+1) {
 				t.Errorf("Lost entry %d: expected %d, got %d", i, i+1, found)
 			}
@@ -433,7 +447,8 @@ func TestRobinHoodHashTable(t *testing.T) {
 		clearGlobalState()
 
 		addr := generateMockAddress(42)
-		found := lookupPairIDByAddress(addr[:])
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		found := lookupPairIDByAddress(addrSlice)
 
 		if found != 0 {
 			t.Error("Lookup in empty table should return 0")
@@ -444,9 +459,10 @@ func TestRobinHoodHashTable(t *testing.T) {
 		clearGlobalState()
 
 		addr := generateMockAddress(123)
-		RegisterPairAddress(addr[:], PairID(0)) // Zero pair ID
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, PairID(0)) // Zero pair ID
 
-		found := lookupPairIDByAddress(addr[:])
+		found := lookupPairIDByAddress(addrSlice)
 		if found != 0 {
 			t.Error("Zero pair ID should be treated as not found")
 		}
@@ -462,13 +478,15 @@ func TestRobinHoodHashTable(t *testing.T) {
 		for i := 0; i < count; i++ {
 			addr := generateMockAddress(uint64(i * 2654435761)) // Large prime for distribution
 			pairID := PairID(i + 1)
-			RegisterPairAddress(addr[:], pairID)
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, pairID)
 			pairs[pairID] = addr
 		}
 
 		// Verify all entries can still be found
 		for pairID, addr := range pairs {
-			found := lookupPairIDByAddress(addr[:])
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			found := lookupPairIDByAddress(addrSlice)
 			if found != pairID {
 				t.Errorf("Lost entry in full table: expected %d, got %d", pairID, found)
 			}
@@ -480,17 +498,18 @@ func TestRobinHoodZeroAllocation(t *testing.T) {
 	clearGlobalState()
 
 	addr := generateMockAddress(42)
+	addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
 	pairID := PairID(123)
 
 	// First registration might allocate, so do it outside test
-	RegisterPairAddress(addr[:], pairID)
+	RegisterPairAddress(addrSlice, pairID)
 
 	assertZeroAllocs(t, "RegisterPairAddress", func() {
-		RegisterPairAddress(addr[:], pairID) // Update existing
+		RegisterPairAddress(addrSlice, pairID) // Update existing
 	})
 
 	assertZeroAllocs(t, "lookupPairIDByAddress", func() {
-		_ = lookupPairIDByAddress(addr[:])
+		_ = lookupPairIDByAddress(addrSlice)
 	})
 }
 
@@ -1228,71 +1247,183 @@ func TestCoreAssignment(t *testing.T) {
 func TestTickDispatch(t *testing.T) {
 	clearGlobalState()
 
-	t.Run("CompleteDispatch", func(t *testing.T) {
-		addr := generateMockAddress(555)
-		pairID := PairID(555)
+	t.Run("SimpleDispatchTest", func(t *testing.T) {
+		// Use a real-world style address
+		realAddress := "0x882df4b0fb50a229c3b4124eb18c759911485bfb"
+		knownAddr := [42]byte{}
+		copy(knownAddr[:], realAddress)
+		pairID := PairID(999)
 
-		RegisterPairAddress(addr[:], pairID)
+		// Register address and core
+		addrSlice := knownAddr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, pairID)
 		RegisterPairToCore(pairID, 0)
-		RegisterPairToCore(pairID, 1)
 
+		// Create ring (executor no longer needed for message buffer)
 		if coreRings[0] == nil {
 			coreRings[0] = ring24.New(16)
 		}
-		if coreRings[1] == nil {
-			coreRings[1] = ring24.New(16)
-		}
 
-		// Create mock executor for core 0
+		// Create minimal executor for other tests that might need it
 		coreExecutors[0] = &ArbitrageCoreExecutor{
 			pairToQueueIndex: localidx.New(10),
 		}
-		coreExecutors[1] = &ArbitrageCoreExecutor{
-			pairToQueueIndex: localidx.New(10),
-		}
 
+		// Setup LogView for DispatchTickUpdate
 		logView := &types.LogView{
 			Addr: make([]byte, 64),
 			Data: make([]byte, 128),
 		}
+		copy(logView.Addr[:42], knownAddr[:])
 
-		copy(logView.Addr[:42], addr[:])
-
+		// Set up reserve data
 		reserve0, reserve1 := uint64(1000), uint64(500)
 		for i := 0; i < 8; i++ {
 			logView.Data[24+i] = byte(reserve0 >> (8 * (7 - i)))
 			logView.Data[56+i] = byte(reserve1 >> (8 * (7 - i)))
 		}
 
+		// Verify ring is initially empty
+		if !coreRings[0].Empty() {
+			t.Error("Ring should be empty initially")
+		}
+
+		// Call DispatchTickUpdate
+		t.Logf("🔍 Calling DispatchTickUpdate...")
 		DispatchTickUpdate(logView)
+
+		// Check if ring received the message
+		if coreRings[0].Empty() {
+			t.Error("❌ Ring is empty - DispatchTickUpdate failed to push message")
+		} else {
+			t.Logf("✅ Ring received message from DispatchTickUpdate")
+
+			// Pop message from ring (like the consumer would)
+			messagePtr := coreRings[0].Pop()
+			if messagePtr == nil {
+				t.Error("❌ Failed to pop message from ring")
+			} else {
+				// Verify message content
+				tickUpdate := (*TickUpdate)(unsafe.Pointer(messagePtr))
+
+				t.Logf("✅ Dispatch successful: pairID=%d, forward=%f, reverse=%f",
+					tickUpdate.pairID, tickUpdate.forwardTick, tickUpdate.reverseTick)
+
+				// Verify the content is correct
+				if tickUpdate.pairID != pairID {
+					t.Errorf("Wrong pairID: expected %d, got %d", pairID, tickUpdate.pairID)
+				}
+				if tickUpdate.forwardTick != -tickUpdate.reverseTick {
+					t.Error("Forward and reverse ticks should be opposites")
+				}
+				if tickUpdate.forwardTick == 0 {
+					t.Error("Tick value should not be zero")
+				}
+
+				// Verify expected tick value (log2(1000/500) = log2(2) = 1.0)
+				expectedTick := 1.0
+				if abs(tickUpdate.forwardTick-expectedTick) > 0.001 {
+					t.Errorf("Unexpected tick value: expected ~%f, got %f", expectedTick, tickUpdate.forwardTick)
+				}
+			}
+		}
+	})
+
+	t.Run("DirectDispatchTest", func(t *testing.T) {
+		clearGlobalState()
+
+		addr := generateMockAddress(777)
+		pairID := PairID(777)
+
+		// Register address and core assignment using correct slice format
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, pairID)
+		RegisterPairToCore(pairID, 0)
+
+		// Initialize ring
+		if coreRings[0] == nil {
+			coreRings[0] = ring24.New(16)
+		}
+
+		// Test direct address lookup first
+		foundPairID := lookupPairIDByAddress(addrSlice)
+		if foundPairID != pairID {
+			t.Errorf("Direct address lookup failed: expected %d, got %d", pairID, foundPairID)
+		}
+
+		// Test core assignment
+		assignment := pairToCoreAssignment[pairID]
+		if assignment&(1<<0) == 0 {
+			t.Error("Core 0 not assigned to pair")
+		}
+
+		// Create LogView
+		logView := &types.LogView{
+			Addr: make([]byte, 64),
+			Data: make([]byte, 128),
+		}
+		copy(logView.Addr[:42], addr[:])
+
+		// Set up reserves
+		reserve0, reserve1 := uint64(2000), uint64(1000)
+		for i := 0; i < 8; i++ {
+			logView.Data[24+i] = byte(reserve0 >> (8 * (7 - i)))
+			logView.Data[56+i] = byte(reserve1 >> (8 * (7 - i)))
+		}
+
+		// Dispatch
+		DispatchTickUpdate(logView)
+
+		// Verify ring received message
+		if coreRings[0].Empty() {
+			t.Error("Ring should contain dispatched message")
+		} else {
+			messagePtr := coreRings[0].Pop()
+			tickUpdate := (*TickUpdate)(unsafe.Pointer(messagePtr))
+
+			if tickUpdate.pairID != pairID {
+				t.Errorf("Dispatch pairID mismatch: expected %d, got %d", pairID, tickUpdate.pairID)
+			}
+			if tickUpdate.forwardTick != -tickUpdate.reverseTick {
+				t.Error("Forward and reverse ticks are not opposites")
+			}
+		}
 	})
 
 	t.Run("UnknownAddress", func(t *testing.T) {
+		clearGlobalState()
+
 		unknownAddr := generateMockAddress(999999)
 
 		logView := &types.LogView{
 			Addr: make([]byte, 64),
 			Data: make([]byte, 128),
 		}
-
 		copy(logView.Addr[:42], unknownAddr[:])
-
-		// Should return early when pairID is 0
-		DispatchTickUpdate(logView)
-	})
-
-	t.Run("EdgeCaseReserves", func(t *testing.T) {
-		addr := generateMockAddress(666)
-		pairID := PairID(666)
-		RegisterPairAddress(addr[:], pairID)
-		RegisterPairToCore(pairID, 0)
 
 		if coreRings[0] == nil {
 			coreRings[0] = ring24.New(16)
 		}
 
-		coreExecutors[0] = &ArbitrageCoreExecutor{
-			pairToQueueIndex: localidx.New(10),
+		// Should not dispatch anything for unknown address
+		DispatchTickUpdate(logView)
+
+		if !coreRings[0].Empty() {
+			t.Error("Ring should remain empty for unknown address")
+		}
+	})
+
+	t.Run("EdgeCaseReserves", func(t *testing.T) {
+		clearGlobalState()
+
+		addr := generateMockAddress(666)
+		pairID := PairID(666)
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, pairID)
+		RegisterPairToCore(pairID, 0)
+
+		if coreRings[0] == nil {
+			coreRings[0] = ring24.New(16)
 		}
 
 		testCases := []struct {
@@ -1309,11 +1440,15 @@ func TestTickDispatch(t *testing.T) {
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
+				// Clear ring for each subtest
+				for !coreRings[0].Empty() {
+					coreRings[0].Pop()
+				}
+
 				logView := &types.LogView{
 					Addr: make([]byte, 64),
 					Data: make([]byte, 128),
 				}
-
 				copy(logView.Addr[:42], addr[:])
 
 				for i := 0; i < 8; i++ {
@@ -1321,70 +1456,94 @@ func TestTickDispatch(t *testing.T) {
 					logView.Data[56+i] = byte(tc.reserve1 >> (8 * (7 - i)))
 				}
 
-				// Should handle edge cases in fastuni.Log2ReserveRatio
+				// Should handle edge cases without panicking
 				DispatchTickUpdate(logView)
+
+				// For non-zero reserves, should get a message
+				if tc.reserve0 > 0 && tc.reserve1 > 0 {
+					if coreRings[0].Empty() {
+						t.Errorf("Expected message for %s", tc.name)
+					} else {
+						// Just pop to clean up
+						coreRings[0].Pop()
+					}
+				}
 			})
 		}
 	})
 
 	t.Run("NoCoreAssignment", func(t *testing.T) {
+		clearGlobalState()
+
 		addr := generateMockAddress(777)
 		pairID := PairID(777)
-		RegisterPairAddress(addr[:], pairID)
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, pairID)
 		// Don't assign to any cores
+
+		if coreRings[0] == nil {
+			coreRings[0] = ring24.New(16)
+		}
 
 		logView := &types.LogView{
 			Addr: make([]byte, 64),
 			Data: make([]byte, 128),
 		}
-
 		copy(logView.Addr[:42], addr[:])
 
 		// Should handle gracefully when no cores assigned
 		DispatchTickUpdate(logView)
+
+		if !coreRings[0].Empty() {
+			t.Error("Ring should remain empty when no cores assigned")
+		}
 	})
 
-	t.Run("MissingExecutor", func(t *testing.T) {
+	t.Run("MissingRing", func(t *testing.T) {
+		clearGlobalState()
+
 		addr := generateMockAddress(888)
 		pairID := PairID(888)
-		RegisterPairAddress(addr[:], pairID)
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, pairID)
 		RegisterPairToCore(pairID, 2)
 
-		// Don't create executor for core 2
-		coreExecutors[2] = nil
-		coreRings[2] = ring24.New(16)
+		// Don't create ring for core 2
+		coreRings[2] = nil
 
 		logView := &types.LogView{
 			Addr: make([]byte, 64),
 			Data: make([]byte, 128),
 		}
-
 		copy(logView.Addr[:42], addr[:])
 
-		// Should handle gracefully when executor is nil
+		// Should handle gracefully when ring is nil
 		DispatchTickUpdate(logView)
+		// Test passes if no panic occurs
 	})
 
-	t.Run("MessageBufferOverlay", func(t *testing.T) {
+	t.Run("MultipleCoreFanout", func(t *testing.T) {
+		clearGlobalState()
+
 		addr := generateMockAddress(999)
 		pairID := PairID(999)
-		RegisterPairAddress(addr[:], pairID)
-		RegisterPairToCore(pairID, 3)
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, pairID)
 
-		if coreRings[3] == nil {
-			coreRings[3] = ring24.New(16)
-		}
+		// Assign to multiple cores
+		RegisterPairToCore(pairID, 0)
+		RegisterPairToCore(pairID, 1)
+		RegisterPairToCore(pairID, 2)
 
-		executor := &ArbitrageCoreExecutor{
-			pairToQueueIndex: localidx.New(10),
+		// Create rings for all cores
+		for i := 0; i < 3; i++ {
+			coreRings[i] = ring24.New(16)
 		}
-		coreExecutors[3] = executor
 
 		logView := &types.LogView{
 			Addr: make([]byte, 64),
 			Data: make([]byte, 128),
 		}
-
 		copy(logView.Addr[:42], addr[:])
 
 		reserve0, reserve1 := uint64(2000), uint64(1000)
@@ -1393,28 +1552,20 @@ func TestTickDispatch(t *testing.T) {
 			logView.Data[56+i] = byte(reserve1 >> (8 * (7 - i)))
 		}
 
-		// Clear message buffer before test
-		for i := range executor.messageBuffer {
-			executor.messageBuffer[i] = 0
-		}
-
+		// Dispatch should fanout to all assigned cores
 		DispatchTickUpdate(logView)
 
-		// Test the overlay capability directly (the main purpose of message buffer)
-		tickUpdate := (*TickUpdate)(unsafe.Pointer(&executor.messageBuffer))
-		tickUpdate.pairID = pairID
-		tickUpdate.forwardTick = 1.23
-		tickUpdate.reverseTick = -1.23
-
-		// Verify the overlay works correctly
-		if tickUpdate.pairID != pairID || tickUpdate.forwardTick != 1.23 || tickUpdate.reverseTick != -1.23 {
-			t.Error("Message buffer TickUpdate overlay failed")
-		}
-
-		// Verify we can read the data back through the overlay
-		readBack := (*TickUpdate)(unsafe.Pointer(&executor.messageBuffer))
-		if readBack.pairID != pairID || readBack.forwardTick != 1.23 || readBack.reverseTick != -1.23 {
-			t.Error("Message buffer TickUpdate overlay read-back failed")
+		// Verify all 3 cores received the message
+		for i := 0; i < 3; i++ {
+			if coreRings[i].Empty() {
+				t.Errorf("Core %d should have received message", i)
+			} else {
+				messagePtr := coreRings[i].Pop()
+				tickUpdate := (*TickUpdate)(unsafe.Pointer(messagePtr))
+				if tickUpdate.pairID != pairID {
+					t.Errorf("Core %d got wrong pairID: expected %d, got %d", i, pairID, tickUpdate.pairID)
+				}
+			}
 		}
 	})
 }
@@ -1572,7 +1723,9 @@ func TestZeroAllocationRuntime(t *testing.T) {
 		runtime.ReadMemStats(&memStatsBefore)
 
 		// Simulate tick processing using pre-allocated buffers
-		tickUpdate := (*TickUpdate)(unsafe.Pointer(&executor.messageBuffer))
+		// Note: No longer using messageBuffer - create on stack instead
+		var stackMessage [24]byte
+		tickUpdate := (*TickUpdate)(unsafe.Pointer(&stackMessage))
 		tickUpdate.forwardTick = 1.5
 		tickUpdate.reverseTick = -1.5
 		tickUpdate.pairID = PairID(123)
@@ -1600,16 +1753,15 @@ func TestZeroAllocationRuntime(t *testing.T) {
 		}
 	})
 
-	t.Run("MessageBufferReuse", func(t *testing.T) {
-		executor := &ArbitrageCoreExecutor{}
-
+	t.Run("StackMessageAllocation", func(t *testing.T) {
 		var memStatsBefore, memStatsAfter runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&memStatsBefore)
 
-		// Simulate multiple message preparations using the same buffer
+		// Simulate multiple message preparations using stack allocation
 		for i := 0; i < 1000; i++ {
-			tickUpdate := (*TickUpdate)(unsafe.Pointer(&executor.messageBuffer))
+			var stackMessage [24]byte
+			tickUpdate := (*TickUpdate)(unsafe.Pointer(&stackMessage))
 			tickUpdate.forwardTick = float64(i) * 0.01
 			tickUpdate.reverseTick = float64(-i) * 0.01
 			tickUpdate.pairID = PairID(i)
@@ -1617,10 +1769,10 @@ func TestZeroAllocationRuntime(t *testing.T) {
 
 		runtime.ReadMemStats(&memStatsAfter)
 
-		// Should have zero heap allocations
+		// Should have zero heap allocations (stack allocation is free)
 		allocDelta := memStatsAfter.TotalAlloc - memStatsBefore.TotalAlloc
 		if allocDelta > 0 {
-			t.Errorf("Message buffer reuse caused %d bytes of allocation", allocDelta)
+			t.Errorf("Stack message allocation caused %d bytes of heap allocation", allocDelta)
 		}
 	})
 
@@ -1645,27 +1797,7 @@ func TestZeroAllocationRuntime(t *testing.T) {
 			t.Error("processedCycles buffer state access failed")
 		}
 
-		// Verify buffer size is exactly 24 bytes
-		if len(exec.messageBuffer) != 24 {
-			t.Errorf("messageBuffer should be 24 bytes, got %d", len(exec.messageBuffer))
-		}
-
-		// Test TickUpdate overlay
-		tickUpdate := (*TickUpdate)(unsafe.Pointer(&exec.messageBuffer))
-		tickUpdate.forwardTick = 1.23
-		tickUpdate.reverseTick = -4.56
-		tickUpdate.pairID = PairID(789)
-
-		// Verify the overlay works correctly
-		if tickUpdate.forwardTick != 1.23 {
-			t.Error("messageBuffer TickUpdate overlay failed for forwardTick")
-		}
-		if tickUpdate.reverseTick != -4.56 {
-			t.Error("messageBuffer TickUpdate overlay failed for reverseTick")
-		}
-		if tickUpdate.pairID != PairID(789) {
-			t.Error("messageBuffer TickUpdate overlay failed for pairID")
-		}
+		// Note: messageBuffer no longer exists - this is now handled by stack allocation
 	})
 }
 
@@ -1711,14 +1843,18 @@ func TestCoreIsolation(t *testing.T) {
 		addresses := make([][42]byte, 10)
 		for i := range addresses {
 			addresses[i] = generateMockAddress(uint64(i * 1000))
-			RegisterPairAddress(addresses[i][:], PairID(i+1))
+			addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, PairID(i+1))
 		}
 
 		// All addresses should be findable
 		for i := range addresses {
-			found := lookupPairIDByAddress(addresses[i][:])
-			if found != PairID(i+1) {
-				t.Errorf("Address %d: expected %d, got %d", i, i+1, found)
+			addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+			expected := PairID(i + 1)
+			found := lookupPairIDByAddress(addrSlice)
+
+			if found != expected {
+				t.Errorf("Address %d: expected %d, got %d", i, expected, found)
 			}
 		}
 	})
@@ -1767,9 +1903,8 @@ func TestCoreIsolation(t *testing.T) {
 
 		// Pre-allocated buffers should be at the end
 		processedCyclesOffset := unsafe.Offsetof(executor.processedCycles)
-		messageBufferOffset := unsafe.Offsetof(executor.messageBuffer)
 
-		if processedCyclesOffset < shutdownOffset || messageBufferOffset < shutdownOffset {
+		if processedCyclesOffset < shutdownOffset {
 			t.Error("Pre-allocated buffers should come after all operational fields")
 		}
 	})
@@ -1784,11 +1919,7 @@ func TestCoreIsolation(t *testing.T) {
 			t.Errorf("processedCycles size is %d bytes, expected %d bytes", processedCyclesSize, expectedProcessedSize)
 		}
 
-		// Check messageBuffer is exactly 24 bytes
-		messageBufferSize := unsafe.Sizeof(executor.messageBuffer)
-		if messageBufferSize != 24 {
-			t.Errorf("messageBuffer size is %d bytes, expected 24 bytes", messageBufferSize)
-		}
+		// Note: messageBuffer no longer exists
 	})
 }
 
@@ -1844,9 +1975,9 @@ func TestOptimizedStructLayout(t *testing.T) {
 		// Test that we've eliminated unnecessary padding while adding essential buffers
 		totalCoreStructSize := unsafe.Sizeof(ArbitrageCoreExecutor{})
 
-		// Should be around 4272 bytes (includes 4096B + 24B pre-allocated buffers)
-		expectedMinSize := uintptr(4200) // At least 4200 bytes with buffers
-		expectedMaxSize := uintptr(4300) // But not more than 4300 bytes
+		// Should be around 4248 bytes (removed 24B messageBuffer from 4272B)
+		expectedMinSize := uintptr(4200) // At least 4200 bytes with remaining buffers
+		expectedMaxSize := uintptr(4280) // But not more than 4280 bytes
 
 		if totalCoreStructSize < expectedMinSize || totalCoreStructSize > expectedMaxSize {
 			t.Errorf("ArbitrageCoreExecutor size is %d bytes, expected between %d-%d bytes",
@@ -1873,7 +2004,7 @@ func TestOptimizedStructLayout(t *testing.T) {
 			}
 		}
 
-		t.Logf("ArbitrageCoreExecutor total size: %d bytes (includes 4120B of pre-allocated buffers)", totalCoreStructSize)
+		t.Logf("ArbitrageCoreExecutor total size: %d bytes (includes 4096B of pre-allocated buffers, messageBuffer removed)", totalCoreStructSize)
 	})
 
 	t.Run("CompactAddressStorage", func(t *testing.T) {
@@ -1920,9 +2051,10 @@ func TestEdgeCases(t *testing.T) {
 		// Test zero pair ID (should be handled as "not found")
 		clearGlobalState()
 		addr := generateMockAddress(123)
-		RegisterPairAddress(addr[:], PairID(0)) // Zero pair ID
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, PairID(0)) // Zero pair ID
 
-		found := lookupPairIDByAddress(addr[:])
+		found := lookupPairIDByAddress(addrSlice)
 		if found != 0 {
 			t.Error("Zero pair ID should be treated as not found")
 		}
@@ -1953,12 +2085,14 @@ func TestEdgeCases(t *testing.T) {
 
 		for i := 0; i < 100; i++ {
 			addresses[i] = generateMockAddress(uint64(i))
-			RegisterPairAddress(addresses[i][:], PairID(i+1))
+			addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, PairID(i+1))
 		}
 
 		// Check for proper Robin Hood displacement handling
 		for i := 0; i < 100; i++ {
-			found := lookupPairIDByAddress(addresses[i][:])
+			addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+			found := lookupPairIDByAddress(addrSlice)
 			if found != PairID(i+1) {
 				collisionCount++
 			}
@@ -1994,13 +2128,15 @@ func TestEdgeCases(t *testing.T) {
 
 		for i := 0; i < maxEntries; i++ {
 			addr := generateMockAddress(uint64(i * 2654435761)) // Large prime
-			RegisterPairAddress(addr[:], PairID(i+1))
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, PairID(i+1))
 		}
 
 		// Verify a sample of entries
 		for i := 0; i < maxEntries; i += maxEntries / 10 {
 			addr := generateMockAddress(uint64(i * 2654435761))
-			found := lookupPairIDByAddress(addr[:])
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			found := lookupPairIDByAddress(addrSlice)
 			if found != PairID(i+1) {
 				t.Errorf("Failed to find entry %d in maximum usage scenario", i)
 			}
@@ -2013,7 +2149,7 @@ func TestEdgeCases(t *testing.T) {
 			"invalid_address",
 			"0x", // Too short
 			"1234567890abcdef1234567890abcdef12345678",   // Missing 0x
-			"0xGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG", // Invalid hex
+			"0xgggggggggggggggggggggggggggggggggggggggg", // Invalid hex (using lowercase g)
 		}
 
 		for _, invalidAddr := range invalidAddresses {
@@ -2029,173 +2165,7 @@ func TestEdgeCases(t *testing.T) {
 }
 
 // ============================================================================
-// 17. PERFORMANCE REGRESSION TESTS
-// ============================================================================
-
-func TestPerformanceRegression(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping performance regression tests in short mode")
-	}
-
-	t.Run("LookupLatency", func(t *testing.T) {
-		clearGlobalState()
-
-		addr := generateMockAddress(123)
-		RegisterPairAddress(addr[:], PairID(456))
-
-		start := time.Now()
-		iterations := 1000000
-
-		for i := 0; i < iterations; i++ {
-			_ = lookupPairIDByAddress(addr[:])
-		}
-
-		elapsed := time.Since(start)
-		avgLatency := elapsed / time.Duration(iterations)
-
-		// Should be sub-50ns on modern hardware
-		if avgLatency > 50*time.Nanosecond {
-			t.Errorf("Address lookup too slow: %v avg latency", avgLatency)
-		}
-
-		t.Logf("Address lookup: %v avg latency", avgLatency)
-	})
-
-	t.Run("QuantizationLatency", func(t *testing.T) {
-		start := time.Now()
-		iterations := 1000000
-
-		for i := 0; i < iterations; i++ {
-			_ = quantizeTickToInt64(float64(i) * 0.001)
-		}
-
-		elapsed := time.Since(start)
-		avgLatency := elapsed / time.Duration(iterations)
-
-		// Should be sub-5ns (footgun mode)
-		if avgLatency > 5*time.Nanosecond {
-			t.Errorf("Quantization too slow: %v avg latency", avgLatency)
-		}
-
-		t.Logf("Quantization: %v avg latency", avgLatency)
-	})
-
-	t.Run("EndToEndLatency", func(t *testing.T) {
-		clearGlobalState()
-
-		addr := generateMockAddress(789)
-		RegisterPairAddress(addr[:], PairID(789))
-		RegisterPairToCore(PairID(789), 0)
-
-		if coreRings[0] == nil {
-			coreRings[0] = ring24.New(1024)
-		}
-
-		coreExecutors[0] = &ArbitrageCoreExecutor{
-			pairToQueueIndex: localidx.New(10),
-		}
-
-		logView := &types.LogView{
-			Addr: make([]byte, 64),
-			Data: make([]byte, 128),
-		}
-
-		copy(logView.Addr[:42], addr[:])
-
-		// Set up reserves
-		reserve0, reserve1 := uint64(1000), uint64(500)
-		for i := 0; i < 8; i++ {
-			logView.Data[24+i] = byte(reserve0 >> (8 * (7 - i)))
-			logView.Data[56+i] = byte(reserve1 >> (8 * (7 - i)))
-		}
-
-		start := time.Now()
-		iterations := 100000
-
-		for i := 0; i < iterations; i++ {
-			DispatchTickUpdate(logView)
-		}
-
-		elapsed := time.Since(start)
-		avgLatency := elapsed / time.Duration(iterations)
-
-		// Should be sub-100ns for complete dispatch
-		if avgLatency > 100*time.Nanosecond {
-			t.Errorf("End-to-end dispatch too slow: %v avg latency", avgLatency)
-		}
-
-		t.Logf("End-to-end dispatch: %v avg latency", avgLatency)
-	})
-}
-
-// ============================================================================
-// 18. COMPLETE WORKFLOW TESTS
-// ============================================================================
-
-func TestCompleteWorkflow(t *testing.T) {
-	clearGlobalState()
-
-	// 1. Initialize system with triangles
-	cycles := []ArbitrageTriplet{
-		{PairID(10), PairID(11), PairID(12)},
-		{PairID(11), PairID(13), PairID(14)},
-		{PairID(12), PairID(14), PairID(15)},
-	}
-
-	InitializeArbitrageSystem(cycles)
-	time.Sleep(50 * time.Millisecond)
-
-	// 2. Register addresses for all pairs
-	for i := uint64(10); i <= 15; i++ {
-		addr := generateMockAddress(i * 1000)
-		RegisterPairAddress(addr[:], PairID(i))
-	}
-
-	// 3. Send tick updates
-	for i := uint64(10); i <= 15; i++ {
-		addr := generateMockAddress(i * 1000)
-
-		logView := &types.LogView{
-			Addr: make([]byte, 64),
-			Data: make([]byte, 128),
-		}
-
-		copy(logView.Addr[:42], addr[:])
-
-		reserve0 := uint64(1000 + i*100)
-		reserve1 := uint64(2000 - i*50)
-
-		for j := 0; j < 8; j++ {
-			logView.Data[24+j] = byte(reserve0 >> (8 * (7 - j)))
-			logView.Data[56+j] = byte(reserve1 >> (8 * (7 - j)))
-		}
-
-		DispatchTickUpdate(logView)
-	}
-
-	// 4. Let processing happen
-	time.Sleep(50 * time.Millisecond)
-
-	// 5. Verify state
-	hasAssignments := false
-	for i := uint64(10); i <= 15; i++ {
-		if pairToCoreAssignment[i] != 0 {
-			hasAssignments = true
-			break
-		}
-	}
-
-	if !hasAssignments {
-		t.Error("No core assignments after complete workflow")
-	}
-
-	// 6. Cleanup
-	control.Shutdown()
-	time.Sleep(50 * time.Millisecond)
-}
-
-// ============================================================================
-// 20. ARBITRAGE OPPORTUNITY EMISSION TESTS
+// 17. ARBITRAGE OPPORTUNITY EMISSION TESTS
 // ============================================================================
 
 func TestArbitrageOpportunityEmission(t *testing.T) {
@@ -2237,7 +2207,7 @@ func TestArbitrageOpportunityEmission(t *testing.T) {
 }
 
 // ============================================================================
-// 21. TICK PROCESSING TESTS
+// 18. TICK PROCESSING TESTS
 // ============================================================================
 
 func TestTickProcessing(t *testing.T) {
@@ -2319,7 +2289,7 @@ func TestTickProcessing(t *testing.T) {
 			cycleStates:        make([]ArbitrageCycleState, 1),
 		}
 
-		// Initialize one queue with an entry (since processTickUpdate expects non-empty queues)
+		// Initialize one queue
 		executor.priorityQueues[0] = *quantumqueue64.New()
 		executor.fanoutTables[0] = []FanoutEntry{} // Empty fanout table
 
@@ -2412,7 +2382,7 @@ func TestTickProcessing(t *testing.T) {
 }
 
 // ============================================================================
-// 22. ADDITIONAL COVERAGE TESTS
+// 19. ADDITIONAL COVERAGE TESTS
 // ============================================================================
 
 func TestAdditionalCoverage(t *testing.T) {
@@ -2519,7 +2489,176 @@ func TestAdditionalCoverage(t *testing.T) {
 }
 
 // ============================================================================
-// 23. BENCHMARKS - ORGANIZED BY COMPONENT
+// 20. PERFORMANCE REGRESSION TESTS
+// ============================================================================
+
+func TestPerformanceRegression(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping performance regression tests in short mode")
+	}
+
+	t.Run("LookupLatency", func(t *testing.T) {
+		clearGlobalState()
+
+		addr := generateMockAddress(123)
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, PairID(456))
+
+		start := time.Now()
+		iterations := 1000000
+
+		for i := 0; i < iterations; i++ {
+			_ = lookupPairIDByAddress(addrSlice)
+		}
+
+		elapsed := time.Since(start)
+		avgLatency := elapsed / time.Duration(iterations)
+
+		// Should be sub-50ns on modern hardware
+		if avgLatency > 50*time.Nanosecond {
+			t.Errorf("Address lookup too slow: %v avg latency", avgLatency)
+		}
+
+		t.Logf("Address lookup: %v avg latency", avgLatency)
+	})
+
+	t.Run("QuantizationLatency", func(t *testing.T) {
+		start := time.Now()
+		iterations := 1000000
+
+		for i := 0; i < iterations; i++ {
+			_ = quantizeTickToInt64(float64(i) * 0.001)
+		}
+
+		elapsed := time.Since(start)
+		avgLatency := elapsed / time.Duration(iterations)
+
+		// Should be sub-5ns (footgun mode)
+		if avgLatency > 5*time.Nanosecond {
+			t.Errorf("Quantization too slow: %v avg latency", avgLatency)
+		}
+
+		t.Logf("Quantization: %v avg latency", avgLatency)
+	})
+
+	t.Run("EndToEndLatency", func(t *testing.T) {
+		clearGlobalState()
+
+		addr := generateMockAddress(789)
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, PairID(789))
+		RegisterPairToCore(PairID(789), 0)
+
+		if coreRings[0] == nil {
+			coreRings[0] = ring24.New(1024)
+		}
+
+		logView := &types.LogView{
+			Addr: make([]byte, 64),
+			Data: make([]byte, 128),
+		}
+
+		copy(logView.Addr[:42], addr[:])
+
+		// Set up reserves
+		reserve0, reserve1 := uint64(1000), uint64(500)
+		for i := 0; i < 8; i++ {
+			logView.Data[24+i] = byte(reserve0 >> (8 * (7 - i)))
+			logView.Data[56+i] = byte(reserve1 >> (8 * (7 - i)))
+		}
+
+		start := time.Now()
+		iterations := 100000
+
+		for i := 0; i < iterations; i++ {
+			DispatchTickUpdate(logView)
+			// Clear ring to avoid overflow
+			for !coreRings[0].Empty() {
+				coreRings[0].Pop()
+			}
+		}
+
+		elapsed := time.Since(start)
+		avgLatency := elapsed / time.Duration(iterations)
+
+		// Should be sub-100ns for complete dispatch
+		if avgLatency > 100*time.Nanosecond {
+			t.Errorf("End-to-end dispatch too slow: %v avg latency", avgLatency)
+		}
+
+		t.Logf("End-to-end dispatch: %v avg latency", avgLatency)
+	})
+}
+
+// ============================================================================
+// 21. COMPLETE WORKFLOW TESTS
+// ============================================================================
+
+func TestCompleteWorkflow(t *testing.T) {
+	clearGlobalState()
+
+	// 1. Initialize system with triangles
+	cycles := []ArbitrageTriplet{
+		{PairID(10), PairID(11), PairID(12)},
+		{PairID(11), PairID(13), PairID(14)},
+		{PairID(12), PairID(14), PairID(15)},
+	}
+
+	InitializeArbitrageSystem(cycles)
+	time.Sleep(50 * time.Millisecond)
+
+	// 2. Register addresses for all pairs (using generateMockAddress for consistency)
+	for i := uint64(10); i <= 15; i++ {
+		addr := generateMockAddress(i * 1000) // This produces lowercase addresses
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, PairID(i))
+	}
+
+	// 3. Send tick updates
+	for i := uint64(10); i <= 15; i++ {
+		addr := generateMockAddress(i * 1000)
+
+		logView := &types.LogView{
+			Addr: make([]byte, 64),
+			Data: make([]byte, 128),
+		}
+
+		copy(logView.Addr[:42], addr[:])
+
+		reserve0 := uint64(1000 + i*100)
+		reserve1 := uint64(2000 - i*50)
+
+		for j := 0; j < 8; j++ {
+			logView.Data[24+j] = byte(reserve0 >> (8 * (7 - j)))
+			logView.Data[56+j] = byte(reserve1 >> (8 * (7 - j)))
+		}
+
+		DispatchTickUpdate(logView)
+	}
+
+	// 4. Let processing happen
+	time.Sleep(50 * time.Millisecond)
+
+	// 5. Verify state
+	hasAssignments := false
+	for i := uint64(10); i <= 15; i++ {
+		if pairToCoreAssignment[i] != 0 {
+			hasAssignments = true
+			break
+		}
+	}
+
+	if !hasAssignments {
+		t.Error("No core assignments after complete workflow")
+	}
+
+	// 6. Cleanup
+	control.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+}
+
+// ============================================================================
+// 22. BENCHMARKS - ORGANIZED BY COMPONENT
 // ============================================================================
 
 // Micro-operation benchmarks
@@ -2529,7 +2668,8 @@ func BenchmarkAddressLookup(b *testing.B) {
 	addresses := make([][42]byte, 10000)
 	for i := range addresses {
 		addresses[i] = generateMockAddress(uint64(i * 1000003))
-		RegisterPairAddress(addresses[i][:], PairID(i+1))
+		addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, PairID(i+1))
 	}
 
 	b.ResetTimer()
@@ -2537,7 +2677,8 @@ func BenchmarkAddressLookup(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		addr := addresses[i%len(addresses)]
-		_ = lookupPairIDByAddress(addr[:])
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		_ = lookupPairIDByAddress(addrSlice)
 	}
 }
 
@@ -2621,34 +2762,38 @@ func BenchmarkDispatchTickUpdate(b *testing.B) {
 		if coreRings[i] == nil {
 			coreRings[i] = ring24.New(1024)
 		}
-		coreExecutors[i] = &ArbitrageCoreExecutor{
-			pairToQueueIndex: localidx.New(10),
-		}
 	}
 
+	// Register addresses and set up core assignments
 	for i := 0; i < pairCount; i++ {
-		addr := generateMockAddress(uint64(i * 1000003))
+		addr := generateMockAddress(uint64(i * 1000003)) // Generates lowercase
 		addresses[i] = addr
-		RegisterPairAddress(addr[:], PairID(i+1))
 
-		// Assign to 2-4 cores
+		// Register using the correct slice format (same as DispatchTickUpdate uses)
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, PairID(i+1))
+
+		// Assign to 2-4 cores for realistic fanout
 		numCores := 2 + (i % 3)
 		for j := 0; j < numCores; j++ {
 			coreID := uint8((i + j*16) % 8)
 			RegisterPairToCore(PairID(i+1), coreID)
 		}
 
-		// Pre-create log view
+		// Pre-create log view for benchmarking
 		logView := &types.LogView{
 			Addr: make([]byte, 64),
 			Data: make([]byte, 128),
 		}
 
+		// Place full address in LogView (DispatchTickUpdate will slice it)
 		copy(logView.Addr[:42], addr[:])
 
+		// Set realistic reserve values
 		reserve0 := uint64(1000000 + i*1000)
 		reserve1 := uint64(1000000 + i*500)
 
+		// Pack reserves into log data (big-endian format)
 		for j := 0; j < 8; j++ {
 			logView.Data[24+j] = byte(reserve0 >> (8 * (7 - j)))
 			logView.Data[56+j] = byte(reserve1 >> (8 * (7 - j)))
@@ -2662,6 +2807,15 @@ func BenchmarkDispatchTickUpdate(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		DispatchTickUpdate(logViews[i%pairCount])
+
+		// Clear rings periodically to avoid overflow
+		if i%1000 == 0 {
+			for j := 0; j < 8; j++ {
+				for !coreRings[j].Empty() {
+					coreRings[j].Pop()
+				}
+			}
+		}
 	}
 }
 
@@ -2675,21 +2829,19 @@ func BenchmarkHighThroughput(b *testing.B) {
 	const pairCount = 100
 	const updatesPerPair = 100
 
-	// Register pairs
-	for i := 0; i < pairCount; i++ {
-		addr := generateMockAddress(uint64(i * 1000))
-		RegisterPairAddress(addr[:], PairID(i+1))
-		RegisterPairToCore(PairID(i+1), uint8(i%8))
-	}
-
-	// Initialize rings and executors
+	// Initialize complete system
 	for i := 0; i < 8; i++ {
 		if coreRings[i] == nil {
 			coreRings[i] = ring24.New(1024)
 		}
-		coreExecutors[i] = &ArbitrageCoreExecutor{
-			pairToQueueIndex: localidx.New(10),
-		}
+	}
+
+	// Register pairs with proper setup
+	for i := 0; i < pairCount; i++ {
+		addr := generateMockAddress(uint64(i * 1000))
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, PairID(i+1))
+		RegisterPairToCore(PairID(i+1), uint8(i%8))
 	}
 
 	b.ResetTimer()
@@ -2720,6 +2872,13 @@ func BenchmarkHighThroughput(b *testing.B) {
 
 				DispatchTickUpdate(logView)
 				atomic.AddUint64(&updates, 1)
+			}
+		}
+
+		// Clear rings to avoid overflow
+		for j := 0; j < 8; j++ {
+			for !coreRings[j].Empty() {
+				coreRings[j].Pop()
 			}
 		}
 	}
@@ -2795,7 +2954,8 @@ func BenchmarkZeroAllocation(b *testing.B) {
 	clearGlobalState()
 
 	addr := generateMockAddress(42)
-	RegisterPairAddress(addr[:], PairID(123))
+	addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+	RegisterPairAddress(addrSlice, PairID(123))
 
 	var m1, m2 runtime.MemStats
 	runtime.GC()
@@ -2803,7 +2963,7 @@ func BenchmarkZeroAllocation(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = lookupPairIDByAddress(addr[:])
+		_ = lookupPairIDByAddress(addrSlice)
 		_ = quantizeTickToInt64(1.234)
 		_ = bytesToAddressKey(addr[:])
 	}

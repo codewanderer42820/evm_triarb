@@ -107,7 +107,7 @@ type ArbitrageCoreExecutor struct {
 
 	// PRE-ALLOCATED BUFFERS: Zero-alloc working memory (RUNTIME ONLY)
 	processedCycles [128]ProcessedCycle // 4096B - Pre-allocated cycle buffer
-	messageBuffer   [24]byte            // 24B - Pre-allocated message buffer
+	// messageBuffer removed - ring24 handles message storage internally
 }
 
 // keccakRandomState maintains deterministic random state for shuffling (INITIALIZATION ONLY)
@@ -487,6 +487,8 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 //go:inline
 //go:registerparams
 func DispatchTickUpdate(logView *types.LogView) {
+	//log.Println(utils.B2s(logView.Addr[constants.AddressHexStart:constants.AddressHexEnd]))
+
 	// Resolve address to pair ID
 	pairID := lookupPairIDByAddress(logView.Addr[constants.AddressHexStart:constants.AddressHexEnd])
 	if pairID == 0 {
@@ -500,20 +502,21 @@ func DispatchTickUpdate(logView *types.LogView) {
 	// Calculate tick
 	tickValue, _ := fastuni.Log2ReserveRatio(reserve0, reserve1)
 
-	// Dispatch to assigned cores using per-core pre-allocated buffers
+	// Dispatch to assigned cores using stack-allocated message buffer
 	coreAssignments := pairToCoreAssignment[pairID]
 	for coreAssignments != 0 {
 		coreID := bits.TrailingZeros64(uint64(coreAssignments))
 
-		// Use executor's pre-allocated message buffer - ZERO ALLOCATION
-		executor := coreExecutors[coreID]
-		if executor != nil {
-			tickUpdate := (*TickUpdate)(unsafe.Pointer(&executor.messageBuffer))
+		// Create message on stack - ZERO ALLOCATION
+		if coreRings[coreID] != nil {
+			var message [24]byte
+			tickUpdate := (*TickUpdate)(unsafe.Pointer(&message))
 			tickUpdate.forwardTick = tickValue
 			tickUpdate.reverseTick = -tickValue
 			tickUpdate.pairID = pairID
 
-			coreRings[coreID].Push(&executor.messageBuffer)
+			// Ring copies the data internally
+			coreRings[coreID].Push(&message)
 		}
 
 		coreAssignments &^= 1 << coreID
