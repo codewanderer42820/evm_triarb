@@ -50,13 +50,7 @@ func generateMockAddress(seed uint64) [42]byte {
 	return addr
 }
 
-func generateArbitrageTriangle(baseID uint64) ArbitrageTriplet {
-	return ArbitrageTriplet{
-		PairID(baseID),
-		PairID(baseID + 1),
-		PairID(baseID + 2),
-	}
-}
+// generateArbitrageTriangle removed - was unused
 
 func clearGlobalState() {
 	// Clear address tables
@@ -170,7 +164,7 @@ func TestStructAlignment(t *testing.T) {
 
 	t.Run("FieldOffsets", func(t *testing.T) {
 		// Verify FanoutEntry has optimal field ordering without padding
-		fanout := FanoutEntry{}
+		var fanout FanoutEntry
 
 		expectedOffsets := []uintptr{0, 8, 16, 24} // Sequential 8-byte fields
 		actualOffsets := []uintptr{
@@ -1631,33 +1625,33 @@ func TestZeroAllocationRuntime(t *testing.T) {
 	})
 
 	t.Run("PreAllocatedBuffers", func(t *testing.T) {
-		executor := ArbitrageCoreExecutor{}
+		exec := ArbitrageCoreExecutor{}
 
 		// Verify buffer size is exactly 128 elements
-		if len(executor.processedCycles) != 128 {
-			t.Errorf("processedCycles buffer should have 128 elements, got %d", len(executor.processedCycles))
+		if len(exec.processedCycles) != 128 {
+			t.Errorf("processedCycles buffer should have 128 elements, got %d", len(exec.processedCycles))
 		}
 
 		// Test buffer accessibility
-		executor.processedCycles[0] = ProcessedCycle{
+		exec.processedCycles[0] = ProcessedCycle{
 			originalTick:    12345,
 			cycleStateIndex: CycleStateIndex(67890),
 		}
 
-		if executor.processedCycles[0].originalTick != 12345 {
+		if exec.processedCycles[0].originalTick != 12345 {
 			t.Error("processedCycles buffer access failed")
 		}
-		if executor.processedCycles[0].cycleStateIndex != CycleStateIndex(67890) {
+		if exec.processedCycles[0].cycleStateIndex != CycleStateIndex(67890) {
 			t.Error("processedCycles buffer state access failed")
 		}
 
 		// Verify buffer size is exactly 24 bytes
-		if len(executor.messageBuffer) != 24 {
-			t.Errorf("messageBuffer should be 24 bytes, got %d", len(executor.messageBuffer))
+		if len(exec.messageBuffer) != 24 {
+			t.Errorf("messageBuffer should be 24 bytes, got %d", len(exec.messageBuffer))
 		}
 
 		// Test TickUpdate overlay
-		tickUpdate := (*TickUpdate)(unsafe.Pointer(&executor.messageBuffer))
+		tickUpdate := (*TickUpdate)(unsafe.Pointer(&exec.messageBuffer))
 		tickUpdate.forwardTick = 1.23
 		tickUpdate.reverseTick = -4.56
 		tickUpdate.pairID = PairID(789)
@@ -1755,7 +1749,7 @@ func TestCoreIsolation(t *testing.T) {
 	})
 
 	t.Run("ExecutorHotnessOrdering", func(t *testing.T) {
-		executor := ArbitrageCoreExecutor{}
+		var executor ArbitrageCoreExecutor
 
 		// isReverseDirection should be at offset 0 (hottest field)
 		isReverseOffset := unsafe.Offsetof(executor.isReverseDirection)
@@ -1781,7 +1775,7 @@ func TestCoreIsolation(t *testing.T) {
 	})
 
 	t.Run("BufferSizes", func(t *testing.T) {
-		executor := ArbitrageCoreExecutor{}
+		var executor ArbitrageCoreExecutor
 
 		// Check processedCycles is exactly 128 * 32 bytes = 4096 bytes
 		processedCyclesSize := unsafe.Sizeof(executor.processedCycles)
@@ -2455,7 +2449,7 @@ func TestAdditionalCoverage(t *testing.T) {
 	})
 
 	t.Run("EmptyShardAttachment", func(t *testing.T) {
-		executor := &ArbitrageCoreExecutor{
+		exec := &ArbitrageCoreExecutor{
 			pairToQueueIndex: localidx.New(10),
 			priorityQueues:   make([]quantumqueue64.QuantumQueue64, 0),
 			fanoutTables:     make([][]FanoutEntry, 0),
@@ -2468,7 +2462,7 @@ func TestAdditionalCoverage(t *testing.T) {
 		}
 
 		// Should handle empty shard gracefully
-		attachShardToExecutor(executor, shard)
+		attachShardToExecutor(exec, shard)
 	})
 
 	t.Run("ShardWorkerLaunch", func(t *testing.T) {
@@ -2494,6 +2488,10 @@ func TestAdditionalCoverage(t *testing.T) {
 
 		// Give it time to process
 		time.Sleep(10 * time.Millisecond)
+
+		// Verify the shard was processed (worker function ran without panic)
+		// This is mainly testing that the function signature is correct
+		// and basic execution path works
 	})
 
 	t.Run("CoreCountEdgeCases", func(t *testing.T) {
