@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"math"
 	"math/bits"
+	"math/rand"
 	"runtime"
 	"sync"
 	"testing"
@@ -2348,51 +2349,6 @@ func BenchmarkDirectAddressToIndex64(b *testing.B) {
 	}
 }
 
-func BenchmarkSystemIntegration(b *testing.B) {
-	if testing.Short() {
-		b.Skip("Skipping integration benchmark in short mode")
-	}
-
-	clearGlobalState()
-
-	// Setup complete system
-	const pairCount = 50
-	addresses := make([][42]byte, pairCount)
-	logViews := make([]*types.LogView, pairCount)
-
-	for i := 0; i < 8; i++ {
-		coreRings[i] = ring24.New(1024)
-	}
-
-	for i := 0; i < pairCount; i++ {
-		addresses[i] = generateMockAddress(uint64(i * 1000))
-		addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
-		RegisterPairAddress(addrSlice, PairID(i+1))
-		RegisterPairToCore(PairID(i+1), uint8(i%8))
-
-		reserve0 := uint64(1000 * (1 << (i % 4)))
-		reserve1 := uint64(1000)
-		logViews[i] = createValidLogView(addresses[i], reserve0, reserve1)
-	}
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		// Full cycle: lookup, dispatch, process
-		for j := 0; j < pairCount; j++ {
-			DispatchTickUpdate(logViews[j])
-		}
-
-		// Cleanup
-		for j := 0; j < 8; j++ {
-			for !coreRings[j].Empty() {
-				coreRings[j].Pop()
-			}
-		}
-	}
-}
-
 func BenchmarkMemoryAccess(b *testing.B) {
 	const structCount = 10000
 
@@ -2643,5 +2599,1262 @@ func TestAdditionalCoverage(t *testing.T) {
 		if len(expectedEdges) != 0 {
 			t.Errorf("Missing expected edge indices: %v", expectedEdges)
 		}
+	})
+}
+
+// ============================================================================
+// ENHANCED TEST UTILITIES
+// ============================================================================
+
+func generateMockAddressWithPattern(seed uint64, pattern string) [42]byte {
+	var addr [42]byte
+	addr[0] = '0'
+	addr[1] = 'x'
+
+	var input [16]byte
+	binary.LittleEndian.PutUint64(input[0:8], 69)
+	binary.LittleEndian.PutUint64(input[8:16], seed)
+
+	hasher := sha3.NewLegacyKeccak256()
+	hasher.Write(input[:])
+	hashOutput := hasher.Sum(nil)
+
+	// Apply pattern to force collisions or specific distributions
+	switch pattern {
+	case "collision":
+		// Force same prefix for collision testing
+		for i := 0; i < 8; i++ {
+			hashOutput[i] = byte(seed % 256)
+		}
+	case "sparse":
+		// Create sparse distribution
+		for i := 0; i < 20; i += 4 {
+			hashOutput[i] = 0
+		}
+	case "dense":
+		// Create dense clustering
+		hashOutput[0] = 0xaa
+		hashOutput[1] = 0xbb
+	}
+
+	for i := 0; i < 20; i++ {
+		byteVal := hashOutput[i]
+		addr[2+i*2] = "0123456789abcdef"[byteVal>>4]
+		addr[2+i*2+1] = "0123456789abcdef"[byteVal&0xF]
+	}
+	return addr
+}
+
+func createValidLogViewWithPattern(addr [42]byte, reserve0, reserve1 uint64, pattern string) *types.LogView {
+	logView := &types.LogView{
+		Addr: make([]byte, 64),
+		Data: make([]byte, 128),
+	}
+
+	copy(logView.Addr[:42], addr[:])
+	for i := 42; i < len(logView.Addr); i++ {
+		logView.Addr[i] = 0
+	}
+
+	// Apply reserve patterns for testing edge cases
+	switch pattern {
+	case "extreme_ratio":
+		reserve0 = math.MaxUint64
+		reserve1 = 1
+	case "tiny_reserves":
+		reserve0 = 1
+		reserve1 = 1
+	case "zero_reserve":
+		reserve0 = 0
+		reserve1 = 1000
+	}
+
+	// Set reserves in big-endian format
+	for i := 0; i < 8; i++ {
+		logView.Data[24+i] = byte(reserve0 >> (8 * (7 - i)))
+		logView.Data[56+i] = byte(reserve1 >> (8 * (7 - i)))
+	}
+
+	return logView
+}
+
+func measureAllocations(t *testing.T, name string, fn func()) float64 {
+	t.Helper()
+	allocs := testing.AllocsPerRun(100, fn)
+	t.Logf("%s: %.2f allocs/op", name, allocs)
+	return allocs
+}
+
+func verifyZeroAllocs(t *testing.T, name string, fn func()) {
+	t.Helper()
+	allocs := measureAllocations(t, name, fn)
+	if allocs > 0.1 { // Allow tiny floating point errors
+		t.Errorf("%s should have zero allocations, got %.2f", name, allocs)
+	}
+}
+
+// ============================================================================
+// STRESS TESTS
+// ============================================================================
+
+func TestStressHashTable(t *testing.T) {
+	clearGlobalState()
+
+	t.Run("MassiveInsertionWithCollisions", func(t *testing.T) {
+		const iterations = 50000
+		addresses := make([][42]byte, iterations)
+		pairIDs := make([]PairID, iterations)
+
+		// Generate addresses with forced collision patterns
+		for i := 0; i < iterations; i++ {
+			if i%100 == 0 {
+				addresses[i] = generateMockAddressWithPattern(uint64(i), "collision")
+			} else {
+				addresses[i] = generateMockAddress(uint64(i * 1000003))
+			}
+			pairIDs[i] = PairID(i + 1)
+
+			addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, pairIDs[i])
+		}
+
+		// Verify all insertions
+		successCount := 0
+		for i := 0; i < iterations; i++ {
+			addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+			found := lookupPairIDByAddress(addrSlice)
+			if found == pairIDs[i] {
+				successCount++
+			}
+		}
+
+		successRate := float64(successCount) / float64(iterations)
+		t.Logf("Success rate: %.2f%% (%d/%d)", successRate*100, successCount, iterations)
+
+		if successRate < 0.85 {
+			t.Errorf("Hash table success rate too low: %.2f%%", successRate*100)
+		}
+	})
+
+	t.Run("UpdateExistingUnderLoad", func(t *testing.T) {
+		const pairs = 10000
+		addresses := make([][42]byte, pairs)
+
+		// Initial insertion
+		for i := 0; i < pairs; i++ {
+			addresses[i] = generateMockAddress(uint64(i * 2654435761))
+			addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, PairID(i+1))
+		}
+
+		// Multiple updates
+		for round := 0; round < 5; round++ {
+			for i := 0; i < pairs; i++ {
+				newPairID := PairID((round+1)*1000000 + i + 1)
+				addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+				RegisterPairAddress(addrSlice, newPairID)
+			}
+
+			// Verify updates
+			for i := 0; i < pairs; i++ {
+				expectedPairID := PairID((round+1)*1000000 + i + 1)
+				addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+				found := lookupPairIDByAddress(addrSlice)
+				if found != expectedPairID {
+					t.Errorf("Round %d, entry %d: expected %d, got %d", round, i, expectedPairID, found)
+				}
+			}
+		}
+	})
+
+	t.Run("HashDistributionAnalysis", func(t *testing.T) {
+		const samples = 100000
+		bucketCounts := make([]int, constants.AddressTableCapacity)
+
+		for i := 0; i < samples; i++ {
+			addr := generateMockAddress(uint64(i * 1000003))
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			hash := directAddressToIndex64(addrSlice)
+			bucketCounts[hash]++
+		}
+
+		// Calculate distribution statistics
+		mean := float64(samples) / float64(constants.AddressTableCapacity)
+		variance := 0.0
+		nonEmptyBuckets := 0
+		maxBucketSize := 0
+
+		for _, count := range bucketCounts {
+			if count > 0 {
+				nonEmptyBuckets++
+			}
+			if count > maxBucketSize {
+				maxBucketSize = count
+			}
+			diff := float64(count) - mean
+			variance += diff * diff
+		}
+		variance /= float64(constants.AddressTableCapacity)
+		stdDev := math.Sqrt(variance)
+
+		t.Logf("Hash distribution analysis:")
+		t.Logf("  Mean: %.2f", mean)
+		t.Logf("  Std dev: %.2f", stdDev)
+		t.Logf("  Max bucket size: %d", maxBucketSize)
+		t.Logf("  Non-empty buckets: %d/%d (%.2f%%)",
+			nonEmptyBuckets, constants.AddressTableCapacity,
+			float64(nonEmptyBuckets)*100.0/float64(constants.AddressTableCapacity))
+
+		// For sparse distributions (low fill rate), check that we don't have excessive clustering
+		// With 100k samples in ~1M buckets, we expect most buckets to be empty
+		// Key metric: ensure no bucket has excessively many collisions
+		if maxBucketSize > 10 {
+			t.Errorf("Hash clustering too high: max bucket size %d > 10", maxBucketSize)
+		}
+
+		// Ensure we're using a reasonable portion of the hash space
+		fillRate := float64(nonEmptyBuckets) / float64(constants.AddressTableCapacity)
+		expectedFillRate := float64(samples) / float64(constants.AddressTableCapacity)
+
+		// With good distribution, fill rate should be close to 1 - (1-1/n)^samples
+		// For practical purposes, just ensure we're using a reasonable portion
+		if fillRate < expectedFillRate*0.5 {
+			t.Errorf("Hash distribution too clustered: fill rate %.4f < %.4f",
+				fillRate, expectedFillRate*0.5)
+		}
+	})
+}
+
+func TestStressCoreAssignment(t *testing.T) {
+	clearGlobalState()
+
+	t.Run("AllCorePatterns", func(t *testing.T) {
+		const pairCount = 1000
+
+		// Test various assignment patterns
+		patterns := []struct {
+			name string
+			fn   func(pairID PairID) []uint8
+		}{
+			{"SingleCore", func(pairID PairID) []uint8 { return []uint8{0} }},
+			{"TwoCores", func(pairID PairID) []uint8 { return []uint8{0, 1} }},
+			{"AllCores", func(pairID PairID) []uint8 {
+				cores := make([]uint8, 64)
+				for i := range cores {
+					cores[i] = uint8(i)
+				}
+				return cores
+			}},
+			{"RandomCores", func(pairID PairID) []uint8 {
+				numCores := 2 + int(pairID)%6
+				cores := make([]uint8, numCores)
+				for i := range cores {
+					cores[i] = uint8((int(pairID)*17 + i*23) % 64)
+				}
+				return cores
+			}},
+			{"EvenCores", func(pairID PairID) []uint8 {
+				cores := make([]uint8, 32)
+				for i := range cores {
+					cores[i] = uint8(i * 2)
+				}
+				return cores
+			}},
+		}
+
+		for _, pattern := range patterns {
+			t.Run(pattern.name, func(t *testing.T) {
+				clearGlobalState()
+
+				// Assign cores
+				for i := 0; i < pairCount; i++ {
+					pairID := PairID(i + 1)
+					cores := pattern.fn(pairID)
+					for _, coreID := range cores {
+						RegisterPairToCore(pairID, coreID)
+					}
+				}
+
+				// Verify assignments
+				for i := 0; i < pairCount; i++ {
+					pairID := PairID(i + 1)
+					expectedCores := pattern.fn(pairID)
+					assignment := pairToCoreAssignment[pairID]
+
+					for _, expectedCore := range expectedCores {
+						expectedBit := uint64(1) << expectedCore
+						if assignment&expectedBit == 0 {
+							t.Errorf("Pair %d missing assignment to core %d", pairID, expectedCore)
+						}
+					}
+
+					// Count total assigned cores
+					assignedCount := bits.OnesCount64(assignment)
+					if assignedCount != len(expectedCores) {
+						t.Errorf("Pair %d: expected %d cores, got %d", pairID, len(expectedCores), assignedCount)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("CoreEnumerationPerformance", func(t *testing.T) {
+		clearGlobalState()
+
+		// Setup pairs with many core assignments
+		const pairCount = 1000
+		for i := 0; i < pairCount; i++ {
+			pairID := PairID(i + 1)
+			// Assign to 8 cores with gaps
+			for j := 0; j < 8; j++ {
+				coreID := uint8(j*8 + (i % 3))
+				RegisterPairToCore(pairID, coreID)
+			}
+		}
+
+		start := time.Now()
+		totalCores := 0
+
+		for iteration := 0; iteration < 10000; iteration++ {
+			pairID := PairID((iteration % pairCount) + 1)
+			assignment := pairToCoreAssignment[pairID]
+
+			// Enumerate cores
+			coreCount := 0
+			for assignment != 0 {
+				coreID := bits.TrailingZeros64(assignment)
+				assignment &^= 1 << coreID
+				coreCount++
+			}
+			totalCores += coreCount
+		}
+
+		elapsed := time.Since(start)
+		t.Logf("Core enumeration: %v total, %v per operation, %d cores processed",
+			elapsed, elapsed/10000, totalCores)
+	})
+}
+
+func TestStressQuantization(t *testing.T) {
+	t.Run("ExtremeValues", func(t *testing.T) {
+		extremeValues := []float64{
+			0.0,
+			math.SmallestNonzeroFloat64,
+			-math.SmallestNonzeroFloat64,
+			math.MaxFloat64,
+			-math.MaxFloat64,
+			math.Inf(1),
+			math.Inf(-1),
+			math.NaN(),
+			1e-308,
+			1e308,
+			math.Nextafter(0, 1),
+			math.Nextafter(0, -1),
+		}
+
+		for i, val := range extremeValues {
+			result := quantizeTickToInt64(val)
+			t.Logf("Extreme value %d: %g -> %d", i, val, result)
+			// Should not panic or return obviously wrong values
+		}
+	})
+
+	t.Run("MonotonicityCheck", func(t *testing.T) {
+		const steps = 10000
+		const range_ = 1000.0
+
+		results := make([]int64, steps)
+		for i := 0; i < steps; i++ {
+			val := -range_ + (float64(i)/float64(steps-1))*2*range_
+			results[i] = quantizeTickToInt64(val)
+		}
+
+		// Check monotonicity
+		violations := 0
+		for i := 1; i < steps; i++ {
+			if results[i] < results[i-1] {
+				violations++
+			}
+		}
+
+		if violations > steps/1000 { // Allow some floating point errors
+			t.Errorf("Too many monotonicity violations: %d/%d", violations, steps)
+		}
+	})
+
+	t.Run("PrecisionAnalysis", func(t *testing.T) {
+		// Test precision around zero
+		smallValues := []float64{
+			0.000001, -0.000001,
+			0.0001, -0.0001,
+			0.01, -0.01,
+			1.0, -1.0,
+		}
+
+		for _, val := range smallValues {
+			q1 := quantizeTickToInt64(val)
+			q2 := quantizeTickToInt64(val + val*1e-10)
+
+			// Small changes should produce small quantization differences
+			diff := q2 - q1
+			if diff < -1 || diff > 1 {
+				t.Errorf("Large quantization jump for small input change: %g -> %d, %g -> %d",
+					val, q1, val+val*1e-10, q2)
+			}
+		}
+	})
+}
+
+// ============================================================================
+// CONCURRENT STRESS TESTS
+// ============================================================================
+
+func TestConcurrentStress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping stress tests in short mode")
+	}
+
+	t.Run("ConcurrentHashTableOperations", func(t *testing.T) {
+		clearGlobalState()
+
+		const goroutines = 50
+		const operationsPerGoroutine = 1000
+		var wg sync.WaitGroup
+
+		// Concurrent insertions
+		wg.Add(goroutines)
+		for g := 0; g < goroutines; g++ {
+			go func(goroutineID int) {
+				defer wg.Done()
+				for i := 0; i < operationsPerGoroutine; i++ {
+					addr := generateMockAddress(uint64(goroutineID*10000 + i))
+					pairID := PairID(goroutineID*10000 + i + 1)
+					addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+					RegisterPairAddress(addrSlice, pairID)
+				}
+			}(g)
+		}
+		wg.Wait()
+
+		// Concurrent lookups
+		wg.Add(goroutines)
+		successCounts := make([]int, goroutines)
+		for g := 0; g < goroutines; g++ {
+			go func(goroutineID int) {
+				defer wg.Done()
+				for i := 0; i < operationsPerGoroutine; i++ {
+					addr := generateMockAddress(uint64(goroutineID*10000 + i))
+					expectedPairID := PairID(goroutineID*10000 + i + 1)
+					addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+					found := lookupPairIDByAddress(addrSlice)
+					if found == expectedPairID {
+						successCounts[goroutineID]++
+					}
+				}
+			}(g)
+		}
+		wg.Wait()
+
+		totalSuccess := 0
+		for _, count := range successCounts {
+			totalSuccess += count
+		}
+		totalExpected := goroutines * operationsPerGoroutine
+		successRate := float64(totalSuccess) / float64(totalExpected)
+
+		t.Logf("Concurrent hash table success rate: %.2f%% (%d/%d)",
+			successRate*100, totalSuccess, totalExpected)
+
+		if successRate < 0.80 {
+			t.Errorf("Concurrent success rate too low: %.2f%%", successRate*100)
+		}
+	})
+
+	t.Run("ConcurrentDispatchStorm", func(t *testing.T) {
+		clearGlobalState()
+
+		const pairCount = 100
+		const goroutines = 20
+		const dispatchesPerGoroutine = 500
+
+		// Setup
+		addresses := make([][42]byte, pairCount)
+		logViews := make([]*types.LogView, pairCount)
+
+		for i := 0; i < 8; i++ {
+			coreRings[i] = ring24.New(8192) // Large ring for stress test
+		}
+
+		for i := 0; i < pairCount; i++ {
+			addresses[i] = generateMockAddress(uint64(i * 1000))
+			addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, PairID(i+1))
+			RegisterPairToCore(PairID(i+1), uint8(i%8))
+
+			reserve0 := uint64(1000 * (1 << (i % 4)))
+			reserve1 := uint64(1000)
+			logViews[i] = createValidLogView(addresses[i], reserve0, reserve1)
+		}
+
+		// Dispatch storm
+		var wg sync.WaitGroup
+		start := time.Now()
+
+		wg.Add(goroutines)
+		for g := 0; g < goroutines; g++ {
+			go func() {
+				defer wg.Done()
+				for i := 0; i < dispatchesPerGoroutine; i++ {
+					logView := logViews[i%pairCount]
+					DispatchTickUpdate(logView)
+				}
+			}()
+		}
+		wg.Wait()
+
+		elapsed := time.Since(start)
+		totalDispatches := goroutines * dispatchesPerGoroutine
+		throughput := float64(totalDispatches) / elapsed.Seconds()
+
+		t.Logf("Dispatch storm: %d dispatches in %v (%.0f ops/sec)",
+			totalDispatches, elapsed, throughput)
+
+		// Count messages in rings
+		totalMessages := 0
+		for i := 0; i < 8; i++ {
+			for !coreRings[i].Empty() {
+				coreRings[i].Pop()
+				totalMessages++
+			}
+		}
+
+		t.Logf("Messages dispatched: %d", totalMessages)
+	})
+}
+
+// ============================================================================
+// MEMORY LAYOUT AND CACHE TESTS
+// ============================================================================
+
+func TestMemoryLayout(t *testing.T) {
+	t.Run("StructPacking", func(t *testing.T) {
+		layouts := []struct {
+			name     string
+			size     uintptr
+			expected uintptr
+		}{
+			{"AddressKey", unsafe.Sizeof(AddressKey{}), 24},
+			{"TickUpdate", unsafe.Sizeof(TickUpdate{}), 24},
+			{"ArbitrageCycleState", unsafe.Sizeof(ArbitrageCycleState{}), 48},
+			{"ArbitrageEdgeBinding", unsafe.Sizeof(ArbitrageEdgeBinding{}), 32},
+			{"FanoutEntry", unsafe.Sizeof(FanoutEntry{}), 32},
+			{"PairShardBucket", unsafe.Sizeof(PairShardBucket{}), 32},
+			{"ProcessedCycle", unsafe.Sizeof(ProcessedCycle{}), 32},
+		}
+
+		for _, layout := range layouts {
+			t.Run(layout.name, func(t *testing.T) {
+				if layout.size != layout.expected {
+					t.Errorf("%s size is %d bytes, expected %d bytes",
+						layout.name, layout.size, layout.expected)
+				}
+
+				// Check alignment
+				if layout.size%8 != 0 {
+					t.Errorf("%s size %d is not 8-byte aligned", layout.name, layout.size)
+				}
+			})
+		}
+	})
+
+	t.Run("CacheLineOptimization", func(t *testing.T) {
+		// Test that hot data fits in cache lines
+		const cacheLineSize = 64
+
+		hotStructs := []struct {
+			name string
+			size uintptr
+		}{
+			{"TickUpdate", unsafe.Sizeof(TickUpdate{})},
+			{"FanoutEntry", unsafe.Sizeof(FanoutEntry{})},
+		}
+
+		for _, s := range hotStructs {
+			t.Run(s.name, func(t *testing.T) {
+				if s.size > cacheLineSize {
+					t.Errorf("%s size %d exceeds cache line size %d",
+						s.name, s.size, cacheLineSize)
+				}
+
+				itemsPerCacheLine := cacheLineSize / s.size
+				t.Logf("%s: %d items per cache line", s.name, itemsPerCacheLine)
+			})
+		}
+	})
+
+	t.Run("MemoryAccessPatterns", func(t *testing.T) {
+		// Test sequential vs random access performance
+		const arraySize = 10000
+
+		cycles := make([]ArbitrageCycleState, arraySize)
+		for i := range cycles {
+			cycles[i] = ArbitrageCycleState{
+				tickValues: [3]float64{float64(i), float64(i + 1), float64(i + 2)},
+				pairIDs:    [3]PairID{PairID(i), PairID(i + 1), PairID(i + 2)},
+			}
+		}
+
+		// Sequential access
+		start := time.Now()
+		sum := 0.0
+		for iteration := 0; iteration < 1000; iteration++ {
+			for i := 0; i < arraySize; i++ {
+				sum += cycles[i].tickValues[0]
+			}
+		}
+		sequentialTime := time.Since(start)
+
+		// Random access
+		indices := make([]int, arraySize)
+		for i := range indices {
+			indices[i] = rand.Intn(arraySize)
+		}
+
+		start = time.Now()
+		sum = 0.0
+		for iteration := 0; iteration < 1000; iteration++ {
+			for i := 0; i < arraySize; i++ {
+				sum += cycles[indices[i]].tickValues[0]
+			}
+		}
+		randomTime := time.Since(start)
+
+		ratio := float64(randomTime) / float64(sequentialTime)
+		t.Logf("Memory access: sequential=%v, random=%v, ratio=%.2f",
+			sequentialTime, randomTime, ratio)
+
+		// Random should be slower but not excessively so
+		if ratio > 10.0 {
+			t.Errorf("Random access too slow: %.2fx slower than sequential", ratio)
+		}
+	})
+}
+
+// ============================================================================
+// COMPREHENSIVE BENCHMARKS
+// ============================================================================
+
+func BenchmarkHashTableOperations(b *testing.B) {
+	clearGlobalState()
+
+	b.Run("Registration", func(b *testing.B) {
+		addresses := make([][42]byte, 10000)
+		for i := range addresses {
+			addresses[i] = generateMockAddress(uint64(i * 1000003))
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			addr := addresses[i%len(addresses)]
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, PairID(i+1))
+		}
+	})
+
+	b.Run("Lookup_Hit", func(b *testing.B) {
+		addresses := make([][42]byte, 10000)
+		for i := range addresses {
+			addresses[i] = generateMockAddress(uint64(i * 1000003))
+			addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, PairID(i+1))
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			addr := addresses[i%len(addresses)]
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			_ = lookupPairIDByAddress(addrSlice)
+		}
+	})
+
+	b.Run("Lookup_Miss", func(b *testing.B) {
+		// Register some addresses
+		for i := 0; i < 1000; i++ {
+			addr := generateMockAddress(uint64(i * 1000003))
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, PairID(i+1))
+		}
+
+		// Create different addresses for misses
+		missAddresses := make([][42]byte, 10000)
+		for i := range missAddresses {
+			missAddresses[i] = generateMockAddress(uint64(i*1000003 + 500000))
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			addr := missAddresses[i%len(missAddresses)]
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			_ = lookupPairIDByAddress(addrSlice)
+		}
+	})
+
+	b.Run("Collision_Heavy", func(b *testing.B) {
+		clearGlobalState()
+
+		// Force collisions
+		addresses := make([][42]byte, 1000)
+		for i := range addresses {
+			addresses[i] = generateMockAddressWithPattern(uint64(i), "collision")
+			addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, PairID(i+1))
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			addr := addresses[i%len(addresses)]
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			_ = lookupPairIDByAddress(addrSlice)
+		}
+	})
+}
+
+func BenchmarkTickProcessing(b *testing.B) {
+	b.Run("Quantization", func(b *testing.B) {
+		values := make([]float64, 10000)
+		for i := range values {
+			values[i] = (rand.Float64() - 0.5) * 1000
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			_ = quantizeTickToInt64(values[i%len(values)])
+		}
+	})
+
+	b.Run("DispatchToSingleCore", func(b *testing.B) {
+		clearGlobalState()
+
+		addr := generateMockAddress(123)
+		pairID := PairID(123)
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, pairID)
+		RegisterPairToCore(pairID, 0)
+
+		coreRings[0] = ring24.New(16384)
+		logView := createValidLogView(addr, 2000, 1000)
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			DispatchTickUpdate(logView)
+
+			// Periodic cleanup
+			if i%1000 == 0 {
+				for !coreRings[0].Empty() {
+					coreRings[0].Pop()
+				}
+			}
+		}
+	})
+
+	b.Run("DispatchToMultipleCores", func(b *testing.B) {
+		clearGlobalState()
+
+		addr := generateMockAddress(456)
+		pairID := PairID(456)
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		RegisterPairAddress(addrSlice, pairID)
+
+		// Assign to 8 cores
+		for i := uint8(0); i < 8; i++ {
+			RegisterPairToCore(pairID, i)
+			coreRings[i] = ring24.New(16384)
+		}
+
+		logView := createValidLogView(addr, 3000, 1500)
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			DispatchTickUpdate(logView)
+
+			// Periodic cleanup
+			if i%1000 == 0 {
+				for j := 0; j < 8; j++ {
+					for !coreRings[j].Empty() {
+						coreRings[j].Pop()
+					}
+				}
+			}
+		}
+	})
+
+	b.Run("ExtremeThroughput", func(b *testing.B) {
+		clearGlobalState()
+
+		const pairCount = 100
+		addresses := make([][42]byte, pairCount)
+		logViews := make([]*types.LogView, pairCount)
+
+		for i := 0; i < 8; i++ {
+			coreRings[i] = ring24.New(32768)
+		}
+
+		for i := 0; i < pairCount; i++ {
+			addresses[i] = generateMockAddress(uint64(i * 1000))
+			addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, PairID(i+1))
+			RegisterPairToCore(PairID(i+1), uint8(i%8))
+
+			reserve0 := uint64(1000 * (1 << (i % 4)))
+			reserve1 := uint64(1000)
+			logViews[i] = createValidLogView(addresses[i], reserve0, reserve1)
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			DispatchTickUpdate(logViews[i%pairCount])
+		}
+
+		// Cleanup at end
+		for j := 0; j < 8; j++ {
+			for !coreRings[j].Empty() {
+				coreRings[j].Pop()
+			}
+		}
+	})
+}
+
+func BenchmarkCoreOperations(b *testing.B) {
+	b.Run("CoreAssignmentBitOps", func(b *testing.B) {
+		clearGlobalState()
+
+		const pairCount = 10000
+		for i := 0; i < pairCount; i++ {
+			pairID := PairID(i + 1)
+			numCores := 2 + (i % 6)
+			for j := 0; j < numCores; j++ {
+				coreID := uint8((i*17 + j*23) % 64)
+				RegisterPairToCore(pairID, coreID)
+			}
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			pairID := PairID((i % pairCount) + 1)
+			assignment := pairToCoreAssignment[pairID]
+
+			coreCount := 0
+			for assignment != 0 {
+				coreID := bits.TrailingZeros64(assignment)
+				assignment &^= 1 << coreID
+				coreCount++
+			}
+			_ = coreCount
+		}
+	})
+
+	b.Run("SingleCoreEnumeration", func(b *testing.B) {
+		clearGlobalState()
+
+		pairID := PairID(123)
+		RegisterPairToCore(pairID, 5)
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			assignment := pairToCoreAssignment[pairID]
+			for assignment != 0 {
+				coreID := bits.TrailingZeros64(assignment)
+				assignment &^= 1 << coreID
+				_ = coreID
+			}
+		}
+	})
+
+	b.Run("AllCoresEnumeration", func(b *testing.B) {
+		clearGlobalState()
+
+		pairID := PairID(456)
+		for i := uint8(0); i < 64; i++ {
+			RegisterPairToCore(pairID, i)
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			assignment := pairToCoreAssignment[pairID]
+			coreCount := 0
+			for assignment != 0 {
+				coreID := bits.TrailingZeros64(assignment)
+				assignment &^= 1 << coreID
+				coreCount++
+			}
+			_ = coreCount
+		}
+	})
+}
+
+func BenchmarkRandomGeneration(b *testing.B) {
+	b.Run("KeccakRandom_NextUint64", func(b *testing.B) {
+		rng := newKeccakRandom([]byte("benchmark seed"))
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			_ = rng.nextUint64()
+		}
+	})
+
+	b.Run("KeccakRandom_NextInt_PowerOf2", func(b *testing.B) {
+		rng := newKeccakRandom([]byte("benchmark seed"))
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			_ = rng.nextInt(1024) // 2^10
+		}
+	})
+
+	b.Run("KeccakRandom_NextInt_NonPowerOf2", func(b *testing.B) {
+		rng := newKeccakRandom([]byte("benchmark seed"))
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			_ = rng.nextInt(1000)
+		}
+	})
+
+	b.Run("ShuffleSmall", func(b *testing.B) {
+		bindings := make([]ArbitrageEdgeBinding, 10)
+		for i := range bindings {
+			bindings[i] = ArbitrageEdgeBinding{
+				cyclePairs: [3]PairID{PairID(i), PairID(i + 1), PairID(i + 2)},
+				edgeIndex:  uint64(i),
+			}
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			keccakShuffleEdgeBindings(bindings, PairID(i))
+		}
+	})
+
+	b.Run("ShuffleLarge", func(b *testing.B) {
+		bindings := make([]ArbitrageEdgeBinding, 1000)
+		for i := range bindings {
+			bindings[i] = ArbitrageEdgeBinding{
+				cyclePairs: [3]PairID{PairID(i), PairID(i + 1), PairID(i + 2)},
+				edgeIndex:  uint64(i),
+			}
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			keccakShuffleEdgeBindings(bindings, PairID(i))
+		}
+	})
+}
+
+func BenchmarkAddressOperations(b *testing.B) {
+	b.Run("BytesToAddressKey", func(b *testing.B) {
+		addresses := make([][42]byte, 1000)
+		for i := range addresses {
+			addresses[i] = generateMockAddress(uint64(i * 1000003))
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			addr := addresses[i%len(addresses)]
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			_ = bytesToAddressKey(addrSlice)
+		}
+	})
+
+	b.Run("DirectAddressToIndex64", func(b *testing.B) {
+		addresses := make([][42]byte, 1000)
+		for i := range addresses {
+			addresses[i] = generateMockAddress(uint64(i * 1000003))
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			addr := addresses[i%len(addresses)]
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			_ = directAddressToIndex64(addrSlice)
+		}
+	})
+
+	b.Run("AddressKeyEqual", func(b *testing.B) {
+		addr := generateMockAddress(42)
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		key1 := bytesToAddressKey(addrSlice)
+		key2 := bytesToAddressKey(addrSlice)
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			_ = key1.isEqual(key2)
+		}
+	})
+
+	b.Run("DirectAddressToIndex64Stored", func(b *testing.B) {
+		addr := generateMockAddress(42)
+		addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+		key := bytesToAddressKey(addrSlice)
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			_ = directAddressToIndex64Stored(key)
+		}
+	})
+}
+
+// ============================================================================
+// SYSTEM-LEVEL BENCHMARKS
+// ============================================================================
+
+func BenchmarkSystemIntegration(b *testing.B) {
+	if testing.Short() {
+		b.Skip("Skipping integration benchmarks in short mode")
+	}
+
+	b.Run("CompleteWorkflow", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			clearGlobalState()
+
+			// Initialize system
+			cycles := []ArbitrageTriplet{
+				{PairID(1), PairID(2), PairID(3)},
+				{PairID(4), PairID(5), PairID(6)},
+				{PairID(7), PairID(8), PairID(9)},
+			}
+
+			InitializeArbitrageSystem(cycles)
+			time.Sleep(1 * time.Millisecond) // Allow initialization
+
+			// Register addresses
+			for j := uint64(1); j <= 9; j++ {
+				addr := generateMockAddress(j * 1000)
+				addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+				RegisterPairAddress(addrSlice, PairID(j))
+			}
+
+			// Send tick updates
+			for j := uint64(1); j <= 9; j++ {
+				addr := generateMockAddress(j * 1000)
+				logView := createValidLogView(addr, 1000+j*100, 500+j*50)
+				DispatchTickUpdate(logView)
+			}
+
+			control.Shutdown()
+			time.Sleep(1 * time.Millisecond) // Allow cleanup
+		}
+	})
+
+	b.Run("HighLoadSimulation", func(b *testing.B) {
+		clearGlobalState()
+
+		const pairCount = 50
+		addresses := make([][42]byte, pairCount)
+		logViews := make([]*types.LogView, pairCount)
+
+		for i := 0; i < 8; i++ {
+			coreRings[i] = ring24.New(65536)
+		}
+
+		for i := 0; i < pairCount; i++ {
+			addresses[i] = generateMockAddress(uint64(i * 1000))
+			addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, PairID(i+1))
+			RegisterPairToCore(PairID(i+1), uint8(i%8))
+
+			reserve0 := uint64(1000 * (1 << (i % 4)))
+			reserve1 := uint64(1000)
+			logViews[i] = createValidLogView(addresses[i], reserve0, reserve1)
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			// Simulate burst of activity
+			for j := 0; j < pairCount; j++ {
+				DispatchTickUpdate(logViews[j])
+			}
+
+			// Periodic cleanup
+			if i%100 == 0 {
+				for j := 0; j < 8; j++ {
+					for !coreRings[j].Empty() {
+						coreRings[j].Pop()
+					}
+				}
+			}
+		}
+	})
+
+	b.Run("LegacyPerformance", func(b *testing.B) {
+		clearGlobalState()
+
+		// Setup complete system
+		const pairCount = 50
+		addresses := make([][42]byte, pairCount)
+		logViews := make([]*types.LogView, pairCount)
+
+		for i := 0; i < 8; i++ {
+			coreRings[i] = ring24.New(1024)
+		}
+
+		for i := 0; i < pairCount; i++ {
+			addresses[i] = generateMockAddress(uint64(i * 1000))
+			addrSlice := addresses[i][constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, PairID(i+1))
+			RegisterPairToCore(PairID(i+1), uint8(i%8))
+
+			reserve0 := uint64(1000 * (1 << (i % 4)))
+			reserve1 := uint64(1000)
+			logViews[i] = createValidLogView(addresses[i], reserve0, reserve1)
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			// Full cycle: lookup, dispatch, process
+			for j := 0; j < pairCount; j++ {
+				DispatchTickUpdate(logViews[j])
+			}
+
+			// Cleanup
+			for j := 0; j < 8; j++ {
+				for !coreRings[j].Empty() {
+					coreRings[j].Pop()
+				}
+			}
+		}
+	})
+}
+
+// ============================================================================
+// MEMORY PRESSURE TESTS
+// ============================================================================
+
+func TestMemoryPressure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping memory pressure tests in short mode")
+	}
+
+	t.Run("LargeHashTable", func(t *testing.T) {
+		clearGlobalState()
+
+		// Fill a significant portion of the hash table
+		targetEntries := constants.AddressTableCapacity * 7 / 10 // 70% capacity
+
+		t.Logf("Filling hash table to 70%% capacity (%d entries)", targetEntries)
+
+		start := time.Now()
+		successCount := 0
+
+		for i := 0; i < targetEntries; i++ {
+			addr := generateMockAddress(uint64(i * 2654435761))
+			addrSlice := addr[constants.AddressHexStart:constants.AddressHexEnd]
+			RegisterPairAddress(addrSlice, PairID(i+1))
+
+			// Verify insertion
+			found := lookupPairIDByAddress(addrSlice)
+			if found == PairID(i+1) {
+				successCount++
+			}
+
+			if i%10000 == 0 {
+				t.Logf("Progress: %d/%d (%.1f%%)", i, targetEntries, float64(i)*100/float64(targetEntries))
+			}
+		}
+
+		elapsed := time.Since(start)
+		successRate := float64(successCount) / float64(targetEntries)
+
+		t.Logf("Hash table stress test completed:")
+		t.Logf("  Time: %v", elapsed)
+		t.Logf("  Success rate: %.2f%% (%d/%d)", successRate*100, successCount, targetEntries)
+		t.Logf("  Operations per second: %.0f", float64(targetEntries)/elapsed.Seconds())
+
+		if successRate < 0.95 {
+			t.Errorf("Success rate too low under memory pressure: %.2f%%", successRate*100)
+		}
+	})
+
+	t.Run("MassiveCoreAssignments", func(t *testing.T) {
+		clearGlobalState()
+
+		const maxPairs = 100000
+		const assignmentsPerPair = 32
+
+		t.Logf("Creating %d pairs with %d core assignments each", maxPairs, assignmentsPerPair)
+
+		start := time.Now()
+		for i := 0; i < maxPairs; i++ {
+			pairID := PairID(i + 1)
+			for j := 0; j < assignmentsPerPair; j++ {
+				coreID := uint8((i*17 + j*23) % 64)
+				RegisterPairToCore(pairID, coreID)
+			}
+
+			if i%10000 == 0 {
+				t.Logf("Progress: %d/%d pairs", i, maxPairs)
+			}
+		}
+		elapsed := time.Since(start)
+
+		// Verify assignments
+		start = time.Now()
+		totalCores := 0
+		for i := 0; i < maxPairs; i++ {
+			pairID := PairID(i + 1)
+			assignment := pairToCoreAssignment[pairID]
+			coreCount := bits.OnesCount64(assignment)
+			totalCores += coreCount
+		}
+		verifyTime := time.Since(start)
+
+		t.Logf("Core assignment stress test:")
+		t.Logf("  Assignment time: %v", elapsed)
+		t.Logf("  Verification time: %v", verifyTime)
+		t.Logf("  Total cores assigned: %d", totalCores)
 	})
 }
