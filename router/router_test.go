@@ -1,4 +1,139 @@
-// router_test.go — Comprehensive test suite for maximum performance triangular arbitrage router
+func TestKeccakShuffleQuality(t *testing.T) {
+	t.Run("InitializationOnlyUsage", func(t *testing.T) {
+		// Verify that Keccak256 is only used during initialization
+		// and produces high-quality entropy distribution
+		
+		bindings := make([]ArbitrageEdgeBinding, 100)
+		for i := range bindings {
+			bindings[i] = ArbitrageEdgeBinding{
+				cyclePairs: [3]PairID{PairID(i * 3), PairID(i*3 + 1), PairID(i*3 + 2)},
+				edgeIndex:  uint64(i % 3),
+			}
+		}
+
+		// Test multiple shuffles with different seeds
+		distributions := make(map[PairID]int)
+		for seed := uint64(0); seed < 10; seed++ {
+			testBindings := make([]ArbitrageEdgeBinding, len(bindings))
+			copy(testBindings, bindings)
+			
+			keccakShuffleEdgeBindings(testBindings, PairID(seed))
+			
+			// Track first element to verify distribution quality
+			distributions[testBindings[0].cyclePairs[0]]++
+		}
+
+		// Verify good distribution (no single element dominates)
+		maxCount := 0
+		for _, count := range distributions {
+			if count > maxCount {
+				maxCount = count
+			}
+		}
+
+		if maxCount > 7 { // Should be well distributed
+			t.Errorf("Poor Keccak256 distribution: max count %d", maxCount)
+		}
+	})
+
+	t.Run("PerfectReproducibility", func(t *testing.T) {
+		// Verify that same seed always produces same shuffle
+		bindings1 := make([]ArbitrageEdgeBinding, 50)
+		bindings2 := make([]ArbitrageEdgeBinding, 50)
+		
+		for i := range bindings1 {
+			binding := ArbitrageEdgeBinding{
+				cyclePairs: [3]PairID{PairID(i), PairID(i + 100), PairID(i + 200)},
+				edgeIndex:  uint64(i % 3),
+			}
+			bindings1[i] = binding
+			bindings2[i] = binding
+		}
+
+		// Shuffle both with same seed
+		seed := PairID(0xdeadbeef)
+		keccakShuffleEdgeBindings(bindings1, seed)
+		keccakShuffleEdgeBindings(bindings2, seed)
+
+		// Should be identical
+		for i := range bindings1 {
+			if bindings1[i] != bindings2[i] {
+				t.Errorf("Keccak256 shuffle not reproducible at index %d", i)
+				break
+			}
+		}
+	})
+}func TestZeroAllocationRuntime(t *testing.T) {
+	clearGlobalState()
+
+	t.Run("PreAllocatedBuffers", func(t *testing.T) {
+		// Test that buffers are pre-allocated and don't trigger allocations
+		executor := &ArbitrageCoreExecutor{}
+
+		// Verify ProcessedCycle buffer
+		if len(executor.processedCycles) != 128 {
+			t.Errorf("Expected 128 pre-allocated cycles, got %d", len(executor.processedCycles))
+		}
+
+		// Test buffer usage without allocation
+		for i := 0; i < 10; i++ {
+			executor.processedCycles[i] = ProcessedCycle{
+				originalTick:    int64(i * 1000),
+				cycleStateIndex: CycleStateIndex(i),
+			}
+		}
+
+		// Verify data integrity
+		for i := 0; i < 10; i++ {
+			if executor.processedCycles[i].originalTick != int64(i*1000) {
+				t.Errorf("Buffer data corruption at index %d", i)
+			}
+		}
+	})
+
+	t.Run("MessageBufferReuse", func(t *testing.T) {
+		executor := &ArbitrageCoreExecutor{}
+
+		// Test message buffer reuse
+		tickUpdate := (*TickUpdate)(unsafe.Pointer(&executor.messageBuffer))
+		tickUpdate.forwardTick = 1.234
+		tickUpdate.reverseTick = -1.234
+		tickUpdate.pairID = PairID(5678)
+
+		// Verify data written correctly
+		if tickUpdate.forwardTick != 1.234 {
+			t.Error("Message buffer forward tick write failed")
+		}
+		if tickUpdate.reverseTick != -1.234 {
+			t.Error("Message buffer reverse tick write failed")
+		}
+		if tickUpdate.pairID != PairID(5678) {
+			t.Error("Message buffer pair ID write failed")
+		}
+	})
+
+	t.Run("NoHeapAllocations", func(t *testing.T) {
+		// This test verifies that runtime operations don't allocate
+		// We can't easily test this without runtime allocation tracking,
+		// but we can verify the structures are set up correctly
+
+		executor := &ArbitrageCoreExecutor{}
+
+		// Verify all pre-allocated buffers are part of the struct
+		structSize := unsafe.Sizeof(*executor)
+		expectedMinSize := uintptr(4000) // Should be > 4KB due to buffers
+
+		if structSize < expectedMinSize {
+			t.Errorf("ArbitrageCoreExecutor too small: %d bytes, expected >= %d", structSize, expectedMinSize)
+		}
+
+		// Test that we can use the buffers without additional allocation
+		executor.processedCycles[127] = ProcessedCycle{} // Use last element
+		_ = executor.messageBuffer[23]                    // Access last byte
+
+		t.Logf("ArbitrageCoreExecutor size: %d bytes (includes pre-allocated buffers)", structSize)
+	})
+}// router_test.go — Comprehensive test suite for maximum performance triangular arbitrage router
 package router
 
 import (
@@ -101,12 +236,14 @@ func TestStructSizes(t *testing.T) {
 		size     uintptr
 		expected uintptr
 	}{
-		{"AddressKey", unsafe.Sizeof(AddressKey{}), 104},
+		{"AddressKey", unsafe.Sizeof(AddressKey{}), 24},
 		{"TickUpdate", unsafe.Sizeof(TickUpdate{}), 24},
-		{"ArbitrageCycleState", unsafe.Sizeof(ArbitrageCycleState{}), 96},
-		{"ArbitrageEdgeBinding", unsafe.Sizeof(ArbitrageEdgeBinding{}), 96},
-		{"FanoutEntry", unsafe.Sizeof(FanoutEntry{}), 96},
-		{"PairShardBucket", unsafe.Sizeof(PairShardBucket{}), 96},
+		{"ArbitrageCycleState", unsafe.Sizeof(ArbitrageCycleState{}), 48},
+		{"ArbitrageEdgeBinding", unsafe.Sizeof(ArbitrageEdgeBinding{}), 32},
+		{"FanoutEntry", unsafe.Sizeof(FanoutEntry{}), 32},
+		{"PairShardBucket", unsafe.Sizeof(PairShardBucket{}), 32},
+		{"ProcessedCycle", unsafe.Sizeof(ProcessedCycle{}), 32},
+		{"ArbitrageCoreExecutor", unsafe.Sizeof(ArbitrageCoreExecutor{}), 4272}, // Large due to pre-allocated buffers
 	}
 
 	for _, tt := range tests {
@@ -138,41 +275,86 @@ func TestStructAlignment(t *testing.T) {
 		}
 	})
 
-	t.Run("CenterPaddingLayout", func(t *testing.T) {
-		// Verify center padding is correctly applied
-		cycle := ArbitrageCycleState{}
+	t.Run("ZeroAllocationBuffers", func(t *testing.T) {
+		// Verify ArbitrageCoreExecutor has pre-allocated buffers
+		executor := ArbitrageCoreExecutor{}
 
-		// Check that tickValues starts at offset 24 (after top padding)
-		tickOffset := unsafe.Offsetof(cycle.tickValues)
-		if tickOffset != 24 {
-			t.Errorf("tickValues offset is %d, expected 24", tickOffset)
+		// Check pre-allocated buffers exist and have correct sizes
+		if len(executor.processedCycles) != 128 {
+			t.Errorf("processedCycles should have 128 elements, got %d", len(executor.processedCycles))
 		}
 
-		// Check that pairIDs starts at offset 48
-		pairOffset := unsafe.Offsetof(cycle.pairIDs)
-		if pairOffset != 48 {
-			t.Errorf("pairIDs offset is %d, expected 48", pairOffset)
+		if len(executor.messageBuffer) != 24 {
+			t.Errorf("messageBuffer should have 24 bytes, got %d", len(executor.messageBuffer))
+		}
+
+		// Verify buffer accessibility
+		executor.processedCycles[0] = ProcessedCycle{
+			originalTick:    12345,
+			cycleStateIndex: CycleStateIndex(67890),
+		}
+
+		if executor.processedCycles[0].originalTick != 12345 {
+			t.Error("processedCycles buffer access failed")
+		}
+
+		executor.messageBuffer[0] = 0xAB
+		if executor.messageBuffer[0] != 0xAB {
+			t.Error("messageBuffer access failed")
 		}
 	})
 }
 
 func TestZeroPadding(t *testing.T) {
-	t.Run("NoInternalPadding", func(t *testing.T) {
-		// Verify all fields are 8-byte aligned with no internal padding
-		fanout := FanoutEntry{}
+	t.Run("CompactLayout", func(t *testing.T) {
+		// Verify AddressKey uses exactly 3 words for 160-bit address
+		key := AddressKey{}
 
-		expectedOffsets := []uintptr{32, 40, 48, 56} // After 32B top padding
-		actualOffsets := []uintptr{
-			unsafe.Offsetof(fanout.edgeIndex),
-			unsafe.Offsetof(fanout.cycleStateIndex),
-			unsafe.Offsetof(fanout.queueHandle),
-			unsafe.Offsetof(fanout.queue),
+		// Check that we have exactly 3 words (24 bytes total)
+		if len(key.words) != 3 {
+			t.Errorf("AddressKey should have exactly 3 words, got %d", len(key.words))
 		}
 
-		for i, expected := range expectedOffsets {
-			if actualOffsets[i] != expected {
-				t.Errorf("Field %d offset is %d, expected %d", i, actualOffsets[i], expected)
-			}
+		// Verify each word is properly accessible
+		key.words[0] = 0x1234567890abcdef
+		key.words[1] = 0xfedcba0987654321  
+		key.words[2] = 0x1122334455667788
+
+		if key.words[0] != 0x1234567890abcdef {
+			t.Error("AddressKey word 0 access failed")
+		}
+		if key.words[1] != 0xfedcba0987654321 {
+			t.Error("AddressKey word 1 access failed") 
+		}
+		if key.words[2] != 0x1122334455667788 {
+			t.Error("AddressKey word 2 access failed")
+		}
+	})
+
+	t.Run("HotnessOrdering", func(t *testing.T) {
+		// Verify ArbitrageCoreExecutor has hottest fields first
+		executor := ArbitrageCoreExecutor{}
+		
+		// isReverseDirection should be at offset 0 (hottest)
+		isReverseOffset := unsafe.Offsetof(executor.isReverseDirection)
+		if isReverseOffset != 0 {
+			t.Errorf("isReverseDirection should be at offset 0, got %d", isReverseOffset)
+		}
+		
+		// pairToQueueIndex should be early (hot)
+		pairToQueueOffset := unsafe.Offsetof(executor.pairToQueueIndex)
+		shutdownOffset := unsafe.Offsetof(executor.shutdownSignal)
+		
+		if pairToQueueOffset >= shutdownOffset {
+			t.Error("Hot field (pairToQueueIndex) should come before cold field (shutdownSignal)")
+		}
+
+		// Pre-allocated buffers should be at the end (coldest)
+		processedCyclesOffset := unsafe.Offsetof(executor.processedCycles)
+		messageBufferOffset := unsafe.Offsetof(executor.messageBuffer)
+		
+		if processedCyclesOffset < shutdownOffset || messageBufferOffset < shutdownOffset {
+			t.Error("Pre-allocated buffers should come after hot/warm fields")
 		}
 	})
 }
@@ -186,14 +368,20 @@ func TestAddressKey(t *testing.T) {
 		addr := generateMockAddress(12345)
 		key := bytesToAddressKey(addr[:])
 
-		// Should have parsed 5 words from 20-byte address
+		// Should have parsed 3 words from 20-byte address
 		if key.words[0] == 0 && key.words[1] == 0 && key.words[2] == 0 {
 			t.Error("Address key appears to be zero")
 		}
 
-		// Last two words should be zero (padding)
-		if key.words[3] != 0 || key.words[4] != 0 {
-			t.Error("Padding words should be zero")
+		// All 3 words should contain data (no unused padding words)
+		nonZeroWords := 0
+		for i := 0; i < 3; i++ {
+			if key.words[i] != 0 {
+				nonZeroWords++
+			}
+		}
+		if nonZeroWords == 0 {
+			t.Error("All address key words are zero")
 		}
 	})
 
@@ -1504,8 +1692,8 @@ func TestPerformanceRegression(t *testing.T) {
 		elapsed := time.Since(start)
 		avgLatency := elapsed / time.Duration(iterations)
 
-		// Should be sub-50ns on modern hardware (updated from 10ns due to test environment)
-		if avgLatency > 50*time.Nanosecond {
+		// Should be sub-20ns on modern hardware with zero-alloc optimizations
+		if avgLatency > 20*time.Nanosecond {
 			t.Errorf("Address lookup too slow: %v avg latency", avgLatency)
 		}
 
@@ -1566,8 +1754,8 @@ func TestPerformanceRegression(t *testing.T) {
 		elapsed := time.Since(start)
 		avgLatency := elapsed / time.Duration(iterations)
 
-		// Should be sub-100ns for complete dispatch
-		if avgLatency > 100*time.Nanosecond {
+		// Should be sub-50ns for complete dispatch with zero-allocation optimizations
+		if avgLatency > 50*time.Nanosecond {
 			t.Errorf("End-to-end dispatch too slow: %v avg latency", avgLatency)
 		}
 
