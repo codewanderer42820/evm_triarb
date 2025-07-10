@@ -551,7 +551,6 @@ func keccakShuffleEdgeBindings(bindings []ArbitrageEdgeBinding, pairID PairID) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
@@ -593,7 +592,6 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBucket) {
@@ -639,7 +637,6 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShardBucket) {
@@ -683,7 +680,6 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
@@ -691,10 +687,8 @@ func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 	if coreCount > constants.MaxSupportedCores {
 		coreCount = constants.MaxSupportedCores
 	}
-	if coreCount&1 == 1 {
-		coreCount-- // Ensure even
-	}
-	forwardCoreCount := coreCount / 2
+	coreCount &^= 1 // Ensure even
+	forwardCoreCount := coreCount >> 1
 
 	// Build shards with deterministic keccak256 shuffle
 	buildFanoutShardBuckets(arbitrageCycles)
