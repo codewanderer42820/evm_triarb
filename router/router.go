@@ -1723,7 +1723,7 @@ func (k *keccakRandomState) nextUint64() uint64 {
 	// unique input for each random value generation.
 	var input [40]byte
 	copy(input[:32], k.seed[:])
-	binary.LittleEndian.PutUint64(input[32:], k.counter)
+	*(*uint64)(unsafe.Pointer(&input[32])) = k.counter
 
 	// CRYPTOGRAPHIC HASH GENERATION
 	//
