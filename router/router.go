@@ -299,28 +299,21 @@ var (
 // This is the ultra-hot path that processes every Uniswap V2 Sync event.
 // Every microsecond of latency here affects arbitrage profitability.
 
-// DispatchTickUpdate is the main entry point for processing Uniswap V2 Sync events.
-// This function extracts reserve values, computes price ratios, and dispatches
-// updates to all cores that handle cycles containing the updated pair.
+// DispatchTickUpdate processes Uniswap V2 Sync events and broadcasts price updates.
+// Extracts reserve values, computes log2 price ratios, and sends updates to all
+// cores handling cycles that contain the updated pair.
 //
-// PERFORMANCE CHARACTERISTICS:
-// - Target: 6-10 CPU cycles total execution time
-// - Completely branchless except for essential business logic
-// - Zero allocations (all data on stack or in pre-allocated buffers)
-// - Optimized for modern CPU instruction pipelines
+// PERFORMANCE TARGET: 6-10 CPU cycles total execution time
 //
-// INPUT FORMAT:
-// logView.Data contains: "0x" + 128 hex characters
-// - First 64 chars:  Reserve A (uint112 padded to 32 bytes)
-// - Second 64 chars: Reserve B (uint112 padded to 32 bytes)
+// INPUT: LogView.Data = "0x" + 128 hex chars (64 per reserve, uint112 + padding)
 //
-// ALGORITHM OVERVIEW:
-// 1. Look up pair ID from contract address (Robin Hood hashing)
-// 2. Extract leading zero counts from both reserves (uint112 optimization)
-// 3. Calculate optimal extraction offsets (preserve magnitude ratios)
-// 4. Parse hex values to uint64 (SIMD-optimized)
-// 5. Compute log2 price ratio (3.5ns math library)
-// 6. Broadcast to all cores handling this pair (lock-free ring buffers)
+// ALGORITHM:
+// 1. Look up pair ID from contract address
+// 2. Extract leading zeros from both reserves
+// 3. Calculate extraction offsets to preserve ratio accuracy
+// 4. Parse hex values to uint64
+// 5. Compute log2 price ratio
+// 6. Broadcast to assigned cores via lock-free ring buffers
 //
 //go:norace
 //go:nocheckptr
@@ -328,105 +321,79 @@ var (
 //go:inline
 //go:registerparams
 func DispatchTickUpdate(logView *types.LogView) {
-	// STEP 1: Address Lookup (Robin Hood hashing - ~20-30 cycles)
-	// Convert contract address to pair ID using O(1) hash table lookup.
-	// Early return if this address isn't a registered trading pair.
+	// STEP 1: Address Lookup (~20-30 cycles)
+	// Convert contract address to pair ID using hash table lookup.
 	pairID := lookupPairIDByAddress(logView.Addr[constants.AddressHexStart:constants.AddressHexEnd])
 	if pairID == 0 {
-		return // Not a registered pair - ignore this event
+		return // Not a registered pair
 	}
 
-	// STEP 2: Reserve Data Extraction Setup (~2 cycles)
-	// Skip "0x" prefix and work with raw hex data.
-	// Total: 128 hex chars = 64 chars per reserve (uint112 + padding)
+	// STEP 2: Reserve Data Setup (~2 cycles)
+	// Skip "0x" prefix. Total: 128 hex chars = 64 chars per reserve
 	hexData := logView.Data[2:130]
 
-	// STEP 3: Leading Zero Analysis (~15-20 cycles total)
-	// uint112 reserves are padded to 32 bytes (64 hex chars) by Ethereum ABI.
-	// We skip the guaranteed 32 leading zeros and scan only the meaningful 32 chars.
-	// This optimization balances scanning efficiency with natural boundaries.
-	lzcntA := countLeadingZeros(hexData[32:64])  // Reserve A: scan chars 32-63
-	lzcntB := countLeadingZeros(hexData[96:128]) // Reserve B: scan chars 96-127
+	// STEP 3: Leading Zero Analysis (~15-20 cycles)
+	// uint112 reserves are padded to 32 bytes (64 hex chars).
+	// Skip guaranteed 32 leading zeros and scan meaningful 32 chars.
+	lzcntA := countLeadingZeros(hexData[32:64])  // Reserve A
+	lzcntB := countLeadingZeros(hexData[96:128]) // Reserve B
 
 	// STEP 4: Magnitude Preservation (~3-4 cycles)
-	// Extract both reserves at the same relative magnitude to preserve ratio accuracy.
-	// Use branchless min to avoid unpredictable branch (50-50 split between reserves).
-	cond := lzcntA - lzcntB                         // Negative if lzcntA < lzcntB
-	mask := cond >> 31                              // Arithmetic right shift: -1 if negative, 0 if positive
-	minZeros := lzcntB ^ ((lzcntA ^ lzcntB) & mask) // Branchless min(lzcntA, lzcntB)
+	// Extract both reserves at same magnitude to preserve ratio accuracy.
+	// Branchless min to avoid unpredictable branches.
+	cond := lzcntA - lzcntB
+	mask := cond >> 31
+	minZeros := lzcntB ^ ((lzcntA ^ lzcntB) & mask) // min(lzcntA, lzcntB)
 
 	// STEP 5: Offset Calculation (~2 cycles)
-	// Calculate absolute positions in the original hex string.
-	// Add 2 for "0x", add ABI padding skip, add leading zeros skip.
-	offsetA := 2 + 32 + minZeros // Position for reserve A extraction
-	offsetB := offsetA + 64      // Reserve B is exactly 64 chars later
+	// Calculate positions: "0x" + ABI padding + leading zeros
+	offsetA := 2 + 32 + minZeros
+	offsetB := offsetA + 64 // Reserve B is 64 chars after A
 
 	// STEP 6: Bounds Calculation (~3-4 cycles)
-	// Calculate how many hex characters are available for extraction.
-	// Both reserves have identical structure, so calculate once and reuse.
-	available := 32 - minZeros // Available chars in both reserves
-
-	// Branchless min(16, available) - same for both reserves
+	available := 32 - minZeros
+	// Branchless min(16, available)
 	cond = 16 - available
 	mask = cond >> 31
 	remaining := available ^ ((16 ^ available) & mask)
 
 	// STEP 7: Hex Parsing (~10-15 cycles)
-	// Extract the actual reserve values as uint64 integers.
-	// ParseHexU64 uses SIMD-style optimizations for maximum speed.
 	reserve0 := utils.ParseHexU64(logView.Data[offsetA : offsetA+remaining])
 	reserve1 := utils.ParseHexU64(logView.Data[offsetB : offsetB+remaining])
 
 	// STEP 8: Price Ratio Calculation (~10-15 cycles)
-	// Compute log2(reserve0/reserve1) using ultra-fast logarithm library.
-	// The 3.5ns performance here is critical for overall system latency.
-	// Handle edge cases (zero reserves) by setting randomized extreme tick value.
+	// Compute log2(reserve0/reserve1). Handle zero reserves with fallback.
 	tickValue, err := fastuni.Log2ReserveRatio(reserve0, reserve1)
 	if err != nil {
-		// Fast randomization using reserve values and pair ID: 51.2 to 64.0 range
-		// Prevents hash collisions in priority queues (Pareto 80/20 distribution)
-		addrHash := uint64(pairID) ^ reserve0 ^ reserve1 // Combine available entropy
-		randBits := addrHash & 0x1FFF                    // Extract 13 bits (0-8191)
-		tickValue = 51.2 + float64(randBits)*0.0015625   // Scale to [51.2, 64.0]
+		// Fallback: combine available entropy for range [51.2, 64.0]
+		addrHash := uint64(pairID) ^ reserve0 ^ reserve1
+		randBits := addrHash & 0x1FFF // Extract 13 bits (0-8191)
+		tickValue = 51.2 + float64(randBits)*0.0015625
 	}
 
 	// STEP 9: Message Construction (~3-4 cycles)
-	// Build the tick update message on the stack (zero allocation).
-	// TickUpdate must be exactly 24 bytes for ring buffer compatibility.
+	// Build 24-byte message on stack (zero allocation)
 	var message [24]byte
 	tickUpdate := (*TickUpdate)(unsafe.Pointer(&message))
-	tickUpdate.forwardTick = tickValue  // Positive for reserve0/reserve1 ratio
-	tickUpdate.reverseTick = -tickValue // Negative for reserve1/reserve0 ratio
+	tickUpdate.forwardTick = tickValue
+	tickUpdate.reverseTick = -tickValue
 	tickUpdate.pairID = pairID
 
 	// STEP 10: Core Broadcasting (~5-10 cycles)
-	// Send the update to all CPU cores that handle cycles containing this pair.
-	// Use bit manipulation to iterate through assigned cores efficiently.
+	// Send to all cores handling this pair using bit manipulation
 	coreAssignments := pairToCoreAssignment[pairID]
 	for coreAssignments != 0 {
 		coreID := bits.TrailingZeros64(uint64(coreAssignments))
-		coreRings[coreID].Push(&message) // Lock-free ring buffer push
-		coreAssignments &^= 1 << coreID  // Clear this bit and continue
+		coreRings[coreID].Push(&message)
+		coreAssignments &^= 1 << coreID
 	}
 }
 
 // countLeadingZeros counts leading ASCII '0' characters in hex data.
-// This function is critical for determining where significant digits begin
-// in Ethereum ABI-encoded uint112 values.
+// Used to find where significant digits begin in ABI-encoded uint112 values.
 //
-// ALGORITHM:
-// 1. Load 8-byte chunks and XOR with ASCII '0' pattern (0x3030303030303030)
-// 2. Create bitmask indicating which chunks contain non-zero data
-// 3. Use TrailingZeros to find first significant chunk
-// 4. Use TrailingZeros again to find first significant byte within chunk
-//
-// PERFORMANCE:
-// - Processes 32 hex characters in ~12-15 cycles
-// - Uses SIMD-style parallel processing
-// - Completely branchless execution
-//
-// INPUT: 32-byte hex segment (uint112 significant range)
-// OUTPUT: Count of leading ASCII '0' characters (0-32)
+// ALGORITHM: Process 4 chunks of 8 bytes, XOR with '0' pattern, find first non-zero.
+// INPUT: 32-byte hex segment  OUTPUT: Count of leading '0' chars (0-32)
 //
 //go:norace
 //go:nocheckptr
@@ -459,26 +426,13 @@ func countLeadingZeros(segment []byte) int {
 	return (firstChunk << 3) + firstByte // Multiply by 8 using left shift
 }
 
-// lookupPairIDByAddress performs O(1) address lookup using Robin Hood hashing.
-// This function is called for every incoming event to determine if we should
-// process it (registered trading pair) or ignore it (unknown contract).
+// lookupPairIDByAddress performs address lookup using Robin Hood hashing.
+// Returns pair ID if address is registered, 0 if not found.
 //
-// ROBIN HOOD HASHING:
+// ROBIN HOOD FEATURES:
 // - Linear probing with distance tracking
-// - Backward shift deletion (not used here, lookup only)
 // - Early termination when probe distance exceeds stored distance
-// - Excellent worst-case performance (low variance)
-//
-// PERFORMANCE CHARACTERISTICS:
-// - Average case: 1-2 probes (~15-20 cycles)
-// - Worst case: <10 probes (~60-80 cycles)
-// - Cache-friendly linear access pattern
-// - Branchless key comparison eliminates function call overhead
-//
-// OPTIMIZATION NOTES:
-// - Uses branchless XOR-based key comparison instead of method calls
-// - Combines 3 word comparisons into single conditional check
-// - Maintains Robin Hood early termination for optimal performance
+// - Branchless key comparison for speed
 //
 //go:norace
 //go:nocheckptr
@@ -498,29 +452,26 @@ func lookupPairIDByAddress(address42HexBytes []byte) PairID {
 		currentKey := pairAddressKeys[i]
 
 		// Branchless key comparison: XOR all words, OR results
-		// Result is 0 if keys are identical, non-zero if different
-		// This eliminates function call overhead and reduces branches
+		// Result is 0 if identical, non-zero if different
 		keyDiff := (key.words[0] ^ currentKey.words[0]) |
 			(key.words[1] ^ currentKey.words[1]) |
 			(key.words[2] ^ currentKey.words[2])
 
-		// Early return conditions (essential branches for hash table efficiency)
+		// Check for empty slot or key match
 		if currentPairID == 0 {
-			return 0 // Empty slot found - address not registered
+			return 0 // Empty slot - address not registered
 		}
-
 		if keyDiff == 0 {
-			return currentPairID // Keys match - found the pair ID
+			return currentPairID // Key match - found pair ID
 		}
 
-		// Robin Hood early termination optimization:
-		// If the stored key has traveled less distance than our probe,
-		// then our key cannot be in the table (would have displaced the stored key)
+		// Robin Hood early termination:
+		// If stored key traveled less distance than our probe,
+		// our key cannot be in the table
 		currentKeyHash := directAddressToIndex64Stored(currentKey)
 		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & uint64(constants.AddressTableMask)
-
 		if currentDist < dist {
-			return 0 // Early termination - key not in table
+			return 0 // Early termination
 		}
 
 		// Continue probing
@@ -537,23 +488,15 @@ func lookupPairIDByAddress(address42HexBytes []byte) PairID {
 // arbitrage opportunities. Each core operates independently on its assigned
 // subset of trading pairs and arbitrage cycles.
 
-// processTickUpdate handles incoming tick updates on a specific CPU core.
-// This is where the actual arbitrage detection logic runs.
+// processTickUpdate handles incoming tick updates on a CPU core.
+// Extracts profitable cycles, updates states, and performs fanout updates.
 //
-// ALGORITHM OVERVIEW:
-// 1. Extract current tick value based on core direction (forward/reverse)
-// 2. Find priority queue for the updated pair
-// 3. Extract all profitable cycles from the queue
-// 4. Update cycle states with new tick value
-// 5. Recompute priorities and reinsert cycles
-// 6. Update all other cycles that include this pair (fanout)
-//
-// ZERO-ALLOCATION DESIGN:
-// - Uses pre-allocated buffer for cycle extraction
-// - No heap allocations during processing
-// - All data structures are sized at initialization
-//
-// PERFORMANCE TARGET: ~40-60 cycles per tick update
+// ALGORITHM:
+// 1. Select tick direction (forward/reverse)
+// 2. Find priority queue for updated pair
+// 3. Extract profitable cycles to pre-allocated buffer
+// 4. Reinsert cycles with original priorities
+// 5. Update other cycles containing this pair (fanout)
 //
 //go:norace
 //go:nocheckptr
@@ -562,48 +505,43 @@ func lookupPairIDByAddress(address42HexBytes []byte) PairID {
 //go:registerparams
 func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 	// STEP 1: Direction Selection
-	// Each core processes either forward (A→B) or reverse (B→A) direction.
-	// This doubles the processing capacity and handles bidirectional arbitrage.
+	// Each core handles either forward (A→B) or reverse (B→A) direction
 	var currentTick float64
 	if !executor.isReverseDirection {
-		currentTick = update.forwardTick // Use positive tick value
+		currentTick = update.forwardTick
 	} else {
-		currentTick = update.reverseTick // Use negative tick value
+		currentTick = update.reverseTick
 	}
 
 	// STEP 2: Queue Lookup
-	// Find the priority queue responsible for this pair.
-	// Each pair has its own queue containing all cycles that include that pair.
+	// Find priority queue for this pair
 	queueIndex, _ := executor.pairToQueueIndex.Get(uint32(update.pairID))
 	queue := &executor.priorityQueues[queueIndex]
 
 	// STEP 3: Profitable Cycle Extraction
-	// Extract all cycles that become profitable with the new tick value.
-	// Use pre-allocated buffer to avoid heap allocations.
+	// Extract cycles that become profitable with new tick value
 	cycleCount := 0
-
 	for {
-		// Peek at the most profitable cycle (lowest total tick sum)
 		handle, queueTick, cycleData := queue.PeepMin()
 		cycleIndex := CycleStateIndex(cycleData)
 		cycle := &executor.cycleStates[cycleIndex]
 
 		// Calculate total profitability: sum of all three edge ticks
-		// Negative sum indicates profitable arbitrage opportunity
+		// Negative sum = profitable arbitrage opportunity
 		totalProfitability := currentTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
 		isProfitable := totalProfitability < 0
 
-		// Optional: Emit arbitrage opportunity for execution
+		// Optional: Emit arbitrage opportunity
 		if isProfitable {
 			//emitArbitrageOpportunity(cycle, currentTick)
 		}
 
-		// Stop extraction if not profitable or buffer full
+		// Stop if not profitable or buffer full
 		if !isProfitable || cycleCount == len(executor.processedCycles) {
 			break
 		}
 
-		// Store cycle in pre-allocated buffer for later reinsertion
+		// Store in pre-allocated buffer for reinsertion
 		executor.processedCycles[cycleCount] = ProcessedCycle{
 			queueHandle:     handle,
 			originalTick:    queueTick,
@@ -611,33 +549,26 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 		}
 		cycleCount++
 
-		// Remove cycle from queue (it will be reinserted with updated priority)
 		queue.UnlinkMin(handle)
-
-		// Stop if queue is empty
 		if queue.Empty() {
 			break
 		}
 	}
 
 	// STEP 4: Cycle Reinsertion
-	// Reinsert all extracted cycles with their original priorities.
-	// This maintains queue invariants while allowing state updates.
+	// Reinsert cycles with original priorities
 	for i := 0; i < cycleCount; i++ {
 		cycle := &executor.processedCycles[i]
 		queue.Push(cycle.originalTick, cycle.queueHandle, uint64(cycle.cycleStateIndex))
 	}
 
 	// STEP 5: Fanout Updates
-	// Update all other cycles that include this pair.
-	// Each pair can be part of many triangular arbitrage cycles.
+	// Update other cycles containing this pair
 	for _, fanoutEntry := range executor.fanoutTables[queueIndex] {
 		cycle := &executor.cycleStates[fanoutEntry.cycleStateIndex]
-
-		// Update the tick value for this edge of the cycle
 		cycle.tickValues[fanoutEntry.edgeIndex] = currentTick
 
-		// Recalculate cycle priority and update queue position
+		// Recalculate priority and update queue position
 		newPriority := quantizeTickToInt64(cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2])
 		fanoutEntry.queue.MoveTick(quantumqueue64.Handle(fanoutEntry.queueHandle), newPriority)
 	}
@@ -668,16 +599,8 @@ func quantizeTickToInt64(tickValue float64) int64 {
 // These functions handle the conversion between hex addresses and internal
 // representations used by the hash table system.
 
-// bytesToAddressKey converts a 40-character hex address to internal AddressKey format.
-// Ethereum addresses are 20 bytes (160 bits) represented as 40 hex characters.
-//
-// OPTIMIZATION:
-// Pack the 20-byte address into exactly 3 uint64 words:
-// - Word 0: bytes 0-7   (64 bits)
-// - Word 1: bytes 8-15  (64 bits)
-// - Word 2: bytes 16-19 (32 bits in lower part of word)
-//
-// This alignment enables efficient 64-bit comparisons during hash table lookup.
+// bytesToAddressKey converts 40-char hex address to internal AddressKey format.
+// Packs 20-byte address into 3 uint64 words for efficient comparison.
 //
 //go:norace
 //go:nocheckptr
@@ -688,14 +611,11 @@ func bytesToAddressKey(address40HexChars []byte) AddressKey {
 	// Parse hex string to 20-byte address using SIMD-optimized parser
 	parsedAddress := utils.ParseEthereumAddress(address40HexChars)
 
-	// Optimized: Use utils.Load64 for all memory operations
+	// Use utils.Load64 for memory operations
 	word0 := utils.Load64(parsedAddress[0:8])  // Bytes 0-7
 	word1 := utils.Load64(parsedAddress[8:16]) // Bytes 8-15
-
-	// Load last 8 bytes and mask to get only the 4 bytes we need
-	// This eliminates the copy + array allocation completely
+	// Load bytes 12-19, mask to get bytes 16-19
 	word2 := utils.Load64(parsedAddress[12:20]) & 0xFFFFFFFF
-	//                    ^^^^^^^^^^ Load bytes 12-19, mask to get bytes 16-19
 
 	return AddressKey{
 		words: [3]uint64{word0, word1, word2},
@@ -703,16 +623,7 @@ func bytesToAddressKey(address40HexChars []byte) AddressKey {
 }
 
 // directAddressToIndex64 computes hash table index from raw hex address.
-// Extracts hash directly from hex characters without full address parsing.
-//
-// HASH FUNCTION CHOICE:
-// Ethereum addresses have good entropy in the middle bytes due to keccak256.
-// Using hex chars 12-27 (bytes 6-13) provides excellent hash distribution
-// while avoiding common prefixes and checksums that might have patterns.
-//
-// OPTIMIZATION:
-// Directly parses 16 hex characters (64 bits) instead of parsing full
-// 40-character address then extracting middle portion.
+// Uses middle bytes for good entropy while avoiding full address parsing.
 //
 //go:norace
 //go:nocheckptr
@@ -720,18 +631,14 @@ func bytesToAddressKey(address40HexChars []byte) AddressKey {
 //go:inline
 //go:registerparams
 func directAddressToIndex64(address40HexChars []byte) uint64 {
-	// Extract middle 16 hex characters (chars 12-27) and parse directly
-	// This corresponds to bytes 6-13 of the final address
+	// Extract middle 16 hex characters (chars 12-27) → bytes 6-13
+	// Avoids 8ns ParseEthereumAddress cost, accepts slightly more collisions
 	hash64 := utils.ParseHexU64(address40HexChars[12:28])
 	return hash64 & uint64(constants.AddressTableMask)
 }
 
 // directAddressToIndex64Stored computes hash from stored AddressKey.
-// This is used during Robin Hood probing to calculate distances.
-//
-// CONSISTENCY REQUIREMENT:
-// Must produce the same hash value as directAddressToIndex64 for the same address.
-// Used to determine how far each stored key has traveled from its ideal position.
+// Extracts same middle bytes as directAddressToIndex64 for consistency.
 //
 //go:norace
 //go:nocheckptr
@@ -739,24 +646,22 @@ func directAddressToIndex64(address40HexChars []byte) uint64 {
 //go:inline
 //go:registerparams
 func directAddressToIndex64Stored(key AddressKey) uint64 {
-	// Extract maximum entropy using overlapping and XOR for avalanche effect
-	// Combine parts from all three words to use all available entropy
+	// Extract bytes 6-13 to match directAddressToIndex64
+	// word0=bytes0-7, word1=bytes8-15, word2=bytes16-19
 
-	// Use overlapping portions to extract both high and low nibbles
-	hash := (key.words[0] >> 16) ^ // Upper portion of word 0
-		(key.words[1] << 8) ^ // Shifted word 1 for overlap
-		(key.words[2] << 32) ^ // Last word in upper bits
-		(key.words[0] & 0xFFFFFFFF) ^ // Lower portion of word 0
-		(key.words[1] >> 32) // Upper portion of word 1
+	// Bytes 6-7 from word0 (upper 16 bits)
+	bytes67 := key.words[0] >> 48
 
-	return hash & uint64(constants.AddressTableMask)
+	// Bytes 8-13 from word1 (lower 48 bits)
+	bytes813 := key.words[1] & 0x0000FFFFFFFFFFFF
+
+	// Combine to form 64-bit hash
+	hash64 := (bytes67 << 48) | bytes813
+
+	return hash64 & uint64(constants.AddressTableMask)
 }
 
-// isEqual performs fast comparison between two AddressKey values.
-// Compares all three 64-bit words to verify complete address match.
-//
-// OPTIMIZATION:
-// Modern CPUs can compare 64-bit values in a single instruction.
+// isEqual compares two AddressKey values.
 // Three 64-bit comparisons are faster than twenty 8-bit comparisons.
 //
 //go:norace
@@ -777,18 +682,8 @@ func (a AddressKey) isEqual(b AddressKey) bool {
 // These functions provide observability into the arbitrage detection system.
 // They are typically disabled in production for maximum performance.
 
-// emitArbitrageOpportunity logs details of a profitable arbitrage cycle.
-// This function is normally commented out to avoid I/O overhead in the hot path.
-//
-// DEBUG OUTPUT FORMAT:
-// - Pair IDs involved in the cycle
-// - Individual tick values for each edge
-// - Total profitability calculation
-// - Timestamp and other metadata
-//
-// PERFORMANCE IMPACT:
-// When enabled, adds ~100-200 cycles per opportunity due to string formatting.
-// Only use for debugging or low-frequency monitoring.
+// emitArbitrageOpportunity logs profitable arbitrage cycle details.
+// Normally disabled to avoid I/O overhead in hot path.
 //
 //go:norace
 //go:nocheckptr
@@ -825,19 +720,7 @@ func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
 // data structures. They are not performance-critical since they run only once.
 
 // RegisterPairAddress adds a trading pair to the address lookup system.
-// This function populates the Robin Hood hash table during initialization.
-//
-// REGISTRATION PROCESS:
-// 1. Parse hex address to internal key format
-// 2. Calculate hash table index
-// 3. Probe for empty slot or existing key
-// 4. Handle Robin Hood displacement if necessary
-// 5. Insert or update the pair mapping
-//
-// ROBIN HOOD INSERTION:
-// If a probe encounters a key that has traveled less distance,
-// displace that key and continue inserting it further down.
-// This minimizes variance in lookup times.
+// Populates Robin Hood hash table during initialization using displacement.
 //
 //go:norace
 //go:nocheckptr
@@ -884,13 +767,7 @@ func RegisterPairAddress(address42HexBytes []byte, pairID PairID) {
 }
 
 // RegisterPairToCore assigns a trading pair to specific CPU cores.
-// Each pair can be processed by multiple cores for redundancy and load balancing.
-//
-// CORE ASSIGNMENT STRATEGY:
-// - Forward cores handle positive price movements
-// - Reverse cores handle negative price movements
-// - Multiple cores per pair provide fault tolerance
-// - Bit mask enables efficient core iteration
+// Uses bit mask for efficient core iteration during message dispatch.
 //
 //go:norace
 //go:nocheckptr
@@ -901,14 +778,8 @@ func RegisterPairToCore(pairID PairID, coreID uint8) {
 	pairToCoreAssignment[pairID] |= 1 << coreID
 }
 
-// newKeccakRandom creates a deterministic random number generator.
-// Used for reproducible load balancing during system initialization.
-//
-// DETERMINISTIC RANDOMNESS:
-// - Same input always produces same output sequence
-// - Enables reproducible performance testing
-// - Prevents adversarial inputs from creating bad distributions
-// - Uses cryptographically strong Keccak-256 for quality
+// newKeccakRandom creates deterministic random number generator.
+// Uses Keccak-256 for reproducible load balancing during initialization.
 //
 //go:norace
 //go:nocheckptr
@@ -982,12 +853,7 @@ func (k *keccakRandomState) nextInt(upperBound int) int {
 }
 
 // keccakShuffleEdgeBindings performs Fisher-Yates shuffle with deterministic randomness.
-// This distributes arbitrage cycles evenly across CPU cores for load balancing.
-//
-// WHY SHUFFLE:
-// - Prevents pathological cases where one core gets all the work
-// - Ensures reproducible load distribution for testing
-// - Balances memory access patterns across NUMA domains
+// Distributes arbitrage cycles evenly across CPU cores for load balancing.
 //
 //go:norace
 //go:nocheckptr
@@ -1012,18 +878,8 @@ func keccakShuffleEdgeBindings(bindings []ArbitrageEdgeBinding, pairID PairID) {
 	}
 }
 
-// buildFanoutShardBuckets constructs the fanout mapping from pairs to arbitrage cycles.
-// This is the core data structure that enables efficient cycle updates.
-//
-// FANOUT CONSTRUCTION ALGORITHM:
-// 1. Group all arbitrage cycles by the pairs they contain
-// 2. Create edge bindings showing which position each pair occupies
-// 3. Shuffle bindings deterministically for load balancing
-// 4. Partition into shards that fit in CPU cache
-//
-// PERFORMANCE IMPACT:
-// The quality of this fanout structure directly affects runtime performance.
-// Well-balanced shards reduce cache misses and improve parallelization.
+// buildFanoutShardBuckets constructs fanout mapping from pairs to arbitrage cycles.
+// Groups cycles by pairs, shuffles for load balancing, partitions into cache-sized shards.
 //
 //go:norace
 //go:nocheckptr
@@ -1066,14 +922,8 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 	}
 }
 
-// attachShardToExecutor integrates a shard of arbitrage cycles into a core executor.
-// This builds the runtime data structures needed for arbitrage processing.
-//
-// INTEGRATION PROCESS:
-// 1. Create or reuse priority queue for this pair
-// 2. Add cycle states to the executor's storage
-// 3. Create fanout entries linking pair updates to cycle updates
-// 4. Initialize priority queue with maximum priority (least favorable)
+// attachShardToExecutor integrates arbitrage cycles into a core executor.
+// Creates priority queues, adds cycle states, builds fanout entries.
 //
 //go:norace
 //go:nocheckptr
@@ -1121,20 +971,8 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 	}
 }
 
-// launchShardWorker initializes and runs the main processing loop for one CPU core.
-// This function sets up the core executor and begins processing tick updates.
-//
-// CORE WORKER RESPONSIBILITIES:
-// 1. Pin to specific CPU core for NUMA optimization
-// 2. Initialize executor with assigned arbitrage cycles
-// 3. Set up lock-free ring buffer for inter-core communication
-// 4. Run main processing loop until shutdown
-//
-// THREADING MODEL:
-// - One worker per CPU core
-// - OS thread pinning for predictable performance
-// - Lock-free communication between cores
-// - Graceful shutdown coordination
+// launchShardWorker initializes and runs main processing loop for one CPU core.
+// Pins to specific core, sets up executor and ring buffer, processes tick updates.
 //
 //go:norace
 //go:nocheckptr
@@ -1181,19 +1019,7 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 }
 
 // InitializeArbitrageSystem bootstraps the complete arbitrage detection system.
-// This is the main entry point for system initialization.
-//
-// INITIALIZATION SEQUENCE:
-// 1. Determine optimal core count (leave one core for OS/networking)
-// 2. Build fanout mapping from arbitrage cycle definitions
-// 3. Launch worker threads on each CPU core
-// 4. Distribute arbitrage cycles evenly across cores
-// 5. Set up routing tables for efficient message dispatch
-//
-// CORE ALLOCATION STRATEGY:
-// - Use all available cores except one (for OS and networking)
-// - Ensure even number of cores (half forward, half reverse)
-// - Pin workers to specific cores for NUMA optimization
+// Determines core count, builds fanout mapping, launches workers, distributes shards.
 //
 //go:norace
 //go:nocheckptr
