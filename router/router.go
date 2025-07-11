@@ -739,10 +739,17 @@ func directAddressToIndex64(address40HexChars []byte) uint64 {
 //go:inline
 //go:registerparams
 func directAddressToIndex64Stored(key AddressKey) uint64 {
-	// Reconstruct the middle 8 bytes from stored key format
-	// Extract bytes 6-13 from the original 20-byte address
-	hash64 := (key.words[0] >> 48) | (key.words[1] << 16)
-	return hash64 & uint64(constants.AddressTableMask)
+	// Extract maximum entropy using overlapping and XOR for avalanche effect
+	// Combine parts from all three words to use all available entropy
+
+	// Use overlapping portions to extract both high and low nibbles
+	hash := (key.words[0] >> 16) ^ // Upper portion of word 0
+		(key.words[1] << 8) ^ // Shifted word 1 for overlap
+		(key.words[2] << 32) ^ // Last word in upper bits
+		(key.words[0] & 0xFFFFFFFF) ^ // Lower portion of word 0
+		(key.words[1] >> 32) // Upper portion of word 1
+
+	return hash & uint64(constants.AddressTableMask)
 }
 
 // isEqual performs fast comparison between two AddressKey values.
