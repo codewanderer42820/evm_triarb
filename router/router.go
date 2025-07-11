@@ -20,57 +20,34 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-// Core type definitions - All 64-bit aligned for perfect cache utilization
+// Core types
 type PairID uint64
 type ArbitrageTriplet [3]PairID
 type CycleStateIndex uint64
 
-// ProcessedCycle - Pre-allocated cycle processing structure
-//
-//go:notinheap
-type ProcessedCycle struct {
-	queueHandle     quantumqueue64.Handle // 4B
-	_               uint32                // 4B - Padding
-	originalTick    int64                 // 8B
-	cycleStateIndex CycleStateIndex       // 8B
-	_               uint64                // 8B - Padding to 32B
-}
-
-// AddressKey - Optimized for address storage and comparison
-//
-//go:notinheap
-type AddressKey struct {
-	words [3]uint64 // 24B - Ethereum address as 3×8-byte words (160 bits = 20 bytes)
-}
-
-// TickUpdate - Perfect 24-byte message with zero padding waste
+// TickUpdate - Message passing structure (MUST STAY 24B EXACT)
 //
 //go:notinheap
 type TickUpdate struct {
-	forwardTick float64 // 8B - Forward direction price
-	reverseTick float64 // 8B - Reverse direction price
-	pairID      PairID  // 8B - Pair identifier (perfect 24B total)
+	forwardTick float64 // 8B - HOT: Forward price
+	reverseTick float64 // 8B - HOT: Reverse price
+	pairID      PairID  // 8B - HOT: Pair identifier
 }
 
-// ArbitrageCycleState - Optimized for single-core access
+// ArbitrageCycleState - Hot processing structure
 //
 //go:notinheap
+//go:align 64
 type ArbitrageCycleState struct {
-	tickValues [3]float64 // 24B - Hot: Price ticks for each edge
-	pairIDs    [3]PairID  // 24B - Warm: Pair identifiers
+	tickValues [3]float64 // 24B - HOTTEST: Price ticks
+	pairIDs    [3]PairID  // 24B - WARM: Pair identifiers
+	_          [16]byte   // 16B - Padding to 64B
 }
 
-// ArbitrageEdgeBinding - Compact initialization-only structure
+// FanoutEntry - Core processing structure
 //
 //go:notinheap
-type ArbitrageEdgeBinding struct {
-	cyclePairs [3]PairID // 24B - Complete triplet
-	edgeIndex  uint64    // 8B - Edge index
-}
-
-// FanoutEntry - Optimized for single-core fanout operations
-//
-//go:notinheap
+//go:align 32
 type FanoutEntry struct {
 	edgeIndex       uint64                         // 8B - HOTTEST: Array indexing
 	cycleStateIndex uint64                         // 8B - HOTTEST: Pointer chasing
@@ -78,42 +55,63 @@ type FanoutEntry struct {
 	queue           *quantumqueue64.QuantumQueue64 // 8B - WARM: Queue pointer
 }
 
-// PairShardBucket - Compact initialization-only structure
+// ProcessedCycle - Buffer structure
 //
 //go:notinheap
-type PairShardBucket struct {
-	pairID       PairID                 // 8B - Queue lookup
-	edgeBindings []ArbitrageEdgeBinding // 24B - Slice header (ptr,len,cap)
+//go:align 32
+type ProcessedCycle struct {
+	originalTick    int64                 // 8B - HOT: Tick value
+	cycleStateIndex CycleStateIndex       // 8B - HOT: State index
+	queueHandle     quantumqueue64.Handle // 4B - WARM: Queue handle
+	_               uint32                // 4B - Padding
+	_               [8]byte               // 8B - Padding to 32B
 }
 
-// ArbitrageCoreExecutor - Optimized single-core executor layout with pre-allocated buffers
+// AddressKey - Hash table key
+//
+//go:notinheap
+//go:align 32
+type AddressKey struct {
+	words [3]uint64 // 24B - Address data
+	_     [8]byte   // 8B - Padding to 32B
+}
+
+// ArbitrageEdgeBinding - Initialization structure
+//
+//go:notinheap
+//go:align 32
+type ArbitrageEdgeBinding struct {
+	cyclePairs [3]PairID // 24B - Triplet data
+	edgeIndex  uint64    // 8B - Edge index
+}
+
+// PairShardBucket - Initialization structure
+//
+//go:notinheap
+//go:align 32
+type PairShardBucket struct {
+	pairID       PairID                 // 8B - Pair ID
+	edgeBindings []ArbitrageEdgeBinding // 24B - Slice header
+}
+
+// ArbitrageCoreExecutor - Core executor state
 //
 //go:notinheap
 type ArbitrageCoreExecutor struct {
-	// HOTTEST: Accessed every single tick update
-	isReverseDirection bool    // 1B - Direction flag (checked every tick)
-	_                  [7]byte // 7B - Padding for 8-byte alignment
-
-	// HOT: Accessed frequently during tick processing
-	pairToQueueIndex localidx.Hash         // 64B - O(1) pair→queue mapping
-	fanoutTables     [][]FanoutEntry       // 24B - Fanout mappings
-	cycleStates      []ArbitrageCycleState // 24B - Direct storage
-
-	// WARM: Accessed during processing but less frequently
-	priorityQueues []quantumqueue64.QuantumQueue64 // 24B - Owned queues
-
-	// COLD: Rarely accessed after initialization
-	shutdownSignal <-chan struct{} // 8B - Shutdown channel
-
-	// PRE-ALLOCATED BUFFERS: Zero-alloc working memory (RUNTIME ONLY)
-	processedCycles [128]ProcessedCycle // 4096B - Pre-allocated cycle buffer
-	// messageBuffer removed - ring24 handles message storage internally
+	pairToQueueIndex   localidx.Hash                   // 64B - HOTTEST: O(1) mapping
+	fanoutTables       [][]FanoutEntry                 // 24B - HOT: Fanout mappings
+	cycleStates        []ArbitrageCycleState           // 24B - HOT: Direct storage
+	priorityQueues     []quantumqueue64.QuantumQueue64 // 24B - WARM: Owned queues
+	processedCycles    [128]ProcessedCycle             // 4096B - WARM: Pre-allocated buffer
+	shutdownSignal     <-chan struct{}                 // 8B - COLD: Shutdown channel
+	isReverseDirection bool                            // 1B - COLD: Direction flag
+	_                  [7]byte                         // 7B - Padding
 }
 
-// keccakRandomState maintains deterministic random state for shuffling (INITIALIZATION ONLY)
+// keccakRandomState - Initialization only
 type keccakRandomState struct {
-	seed    [32]byte // Current seed
-	counter uint64   // Nonce counter
+	seed    [32]byte // 32B - Seed data
+	counter uint64   // 8B - Counter
 }
 
 // Global state
@@ -122,125 +120,66 @@ var (
 	coreRings            [constants.MaxSupportedCores]*ring24.Ring
 	pairToCoreAssignment [constants.PairRoutingTableCapacity]uint64
 	pairShardBuckets     map[PairID][]PairShardBucket
+	pairAddressKeys      [constants.AddressTableCapacity]AddressKey
+	addressToPairID      [constants.AddressTableCapacity]PairID
 )
 
-// Direct address indexing - leverages keccak256 uniformity
-var (
-	pairAddressKeys [constants.AddressTableCapacity]AddressKey
-	addressToPairID [constants.AddressTableCapacity]PairID
-)
-
-// quantizeTickToInt64 converts float tick to queue priority
-// ⚠️ FOOTGUN: No bounds checking - assumes input within valid range
+// Address handling functions
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func quantizeTickToInt64(tickValue float64) int64 {
-	return int64((tickValue + constants.TickClampingBound) * constants.QuantizationScale)
-}
+func bytesToAddressKey(address40HexChars []byte) AddressKey {
+	parsedAddress := utils.ParseEthereumAddress(address40HexChars)
 
-// newKeccakRandom creates seeded deterministic random generator (INITIALIZATION ONLY)
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func newKeccakRandom(initialSeed []byte) *keccakRandomState {
-	var seed [32]byte
+	var lastWordBytes [8]byte
+	copy(lastWordBytes[:4], parsedAddress[16:20])
+	lastWord := utils.Load64(lastWordBytes[:]) >> 32
 
-	// Hash provided seed to normalize length
-	hasher := sha3.NewLegacyKeccak256()
-	hasher.Write(initialSeed)
-	copy(seed[:], hasher.Sum(nil))
-
-	return &keccakRandomState{
-		seed:    seed,
-		counter: 0,
+	return AddressKey{
+		words: [3]uint64{
+			utils.Load64(parsedAddress[0:8]),
+			utils.Load64(parsedAddress[8:16]),
+			lastWord,
+		},
 	}
 }
 
-// nextUint64 generates next deterministic random uint64 (INITIALIZATION ONLY)
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func (k *keccakRandomState) nextUint64() uint64 {
-	// Create input: seed || counter
-	var input [40]byte
-	copy(input[:32], k.seed[:])
-	binary.LittleEndian.PutUint64(input[32:], k.counter)
-
-	// Hash to get random bytes
-	hasher := sha3.NewLegacyKeccak256()
-	hasher.Write(input[:])
-	output := hasher.Sum(nil)
-
-	// Increment counter for next call
-	k.counter++
-
-	// Return first 8 bytes as uint64 using utils
-	return utils.Load64(output[:8])
+func directAddressToIndex64(address40HexChars []byte) uint64 {
+	addressBytes := utils.ParseEthereumAddress(address40HexChars)
+	hash64 := utils.Load64(addressBytes[6:14])
+	return hash64 & uint64(constants.AddressTableMask)
 }
 
-// nextInt generates random int in range [0, upperBound) (INITIALIZATION ONLY)
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func (k *keccakRandomState) nextInt(upperBound int) int {
-	if upperBound <= 0 {
-		return 0
-	}
-
-	randomValue := k.nextUint64()
-
-	// Power-of-2 optimization
-	if upperBound&(upperBound-1) == 0 {
-		return int(randomValue & uint64(upperBound-1))
-	}
-
-	// Unbiased modular reduction using multiplication method
-	high64, _ := bits.Mul64(randomValue, uint64(upperBound))
-	return int(high64)
-}
-
-// directAddressToIndex64Stored extracts hash from stored AddressKey (for Robin Hood distance calculation)
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
 func directAddressToIndex64Stored(key AddressKey) uint64 {
-	// Extract middle 8 bytes from stored AddressKey (bytes 6-13 of original address)
-	// This matches directAddressToIndex64 but works on stored AddressKey format
 	hash64 := (key.words[0] >> 48) | (key.words[1] << 16)
 	return hash64 & uint64(constants.AddressTableMask)
 }
 
-// isEqual performs optimized address comparison (only compare actual address data)
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
 func (a AddressKey) isEqual(b AddressKey) bool {
-	// Compare all 3 words containing the complete 160-bit address
 	return a.words[0] == b.words[0] &&
 		a.words[1] == b.words[1] &&
 		a.words[2] == b.words[2]
 }
 
-// Robin Hood hashing with native 64-bit operations
+// Pair registration functions
 //
 //go:norace
 //go:nocheckptr
@@ -255,39 +194,32 @@ func RegisterPairAddress(address42HexBytes []byte, pairID PairID) {
 	for {
 		currentPairID := addressToPairID[i]
 
-		// Empty slot - insert
 		if currentPairID == 0 {
 			pairAddressKeys[i] = key
 			addressToPairID[i] = pairID
 			return
 		}
 
-		// Key exists - update
 		if pairAddressKeys[i].isEqual(key) {
 			addressToPairID[i] = pairID
 			return
 		}
 
-		// Robin Hood displacement check (64-bit native operations)
 		currentKey := pairAddressKeys[i]
 		currentKeyHash := directAddressToIndex64Stored(currentKey)
 		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & uint64(constants.AddressTableMask)
 
-		// Swap if incoming traveled farther
 		if currentDist < dist {
 			key, pairAddressKeys[i] = pairAddressKeys[i], key
 			pairID, addressToPairID[i] = addressToPairID[i], pairID
 			dist = currentDist
 		}
 
-		// Advance
 		i = (i + 1) & uint64(constants.AddressTableMask)
 		dist++
 	}
 }
 
-// lookupPairIDByAddress retrieves value with Robin Hood early termination
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -301,17 +233,14 @@ func lookupPairIDByAddress(address42HexBytes []byte) PairID {
 	for {
 		currentPairID := addressToPairID[i]
 
-		// Empty slot - not found
 		if currentPairID == 0 {
 			return 0
 		}
 
-		// Key found
 		if pairAddressKeys[i].isEqual(key) {
 			return currentPairID
 		}
 
-		// Robin Hood early termination (64-bit native operations)
 		currentKey := pairAddressKeys[i]
 		currentKeyHash := directAddressToIndex64Stored(currentKey)
 		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & uint64(constants.AddressTableMask)
@@ -320,14 +249,11 @@ func lookupPairIDByAddress(address42HexBytes []byte) PairID {
 			return 0
 		}
 
-		// Advance
 		i = (i + 1) & uint64(constants.AddressTableMask)
 		dist++
 	}
 }
 
-// RegisterPairToCore assigns pair to specific core
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -337,44 +263,103 @@ func RegisterPairToCore(pairID PairID, coreID uint8) {
 	pairToCoreAssignment[pairID] |= 1 << coreID
 }
 
-// emitArbitrageOpportunity logs profitable arbitrage
+// Reserve processing functions
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
-	debug.DropMessage("[ARBITRAGE_OPPORTUNITY]", "")
+func ultraFastZeroCount(segment []byte) int {
+	const ZERO_PATTERN = 0x3030303030303030
 
-	// Log pair IDs
-	debug.DropMessage("  pair0", utils.Itoa(int(cycle.pairIDs[0])))
-	debug.DropMessage("  pair1", utils.Itoa(int(cycle.pairIDs[1])))
-	debug.DropMessage("  pair2", utils.Itoa(int(cycle.pairIDs[2])))
+	c0 := utils.Load64(segment[0:8]) ^ ZERO_PATTERN
+	c1 := utils.Load64(segment[8:16]) ^ ZERO_PATTERN
+	c2 := utils.Load64(segment[16:24]) ^ ZERO_PATTERN
+	c3 := utils.Load64(segment[24:28]) ^ ZERO_PATTERN
 
-	// Log tick values
-	tick0Str := fmt.Sprintf("%.6f", cycle.tickValues[0])
-	tick1Str := fmt.Sprintf("%.6f", cycle.tickValues[1])
-	tick2Str := fmt.Sprintf("%.6f", cycle.tickValues[2])
-	newTickStr := fmt.Sprintf("%.6f", newTick)
-	totalProfitStr := fmt.Sprintf("%.6f", newTick+cycle.tickValues[0]+cycle.tickValues[1]+cycle.tickValues[2])
+	mask := ((c0|(^c0+1))>>63)<<0 | ((c1|(^c1+1))>>63)<<1 |
+		((c2|(^c2+1))>>63)<<2 | ((c3|(^c3+1))>>63)<<3
 
-	debug.DropMessage("  tick0", tick0Str)
-	debug.DropMessage("  tick1", tick1Str)
-	debug.DropMessage("  tick2", tick2Str)
-	debug.DropMessage("  newTick", newTickStr)
-	debug.DropMessage("  totalProfit", totalProfitStr)
+	firstChunk := bits.TrailingZeros64(mask)
+	chunks := [4]uint64{c0, c1, c2, c3}
+	firstByte := bits.TrailingZeros64(chunks[firstChunk]) >> 3
+
+	return (firstChunk << 3) + firstByte
 }
 
-// processTickUpdate handles price updates with arbitrage detection - ZERO ALLOCATION
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func DispatchTickUpdate(logView *types.LogView) {
+	pairID := lookupPairIDByAddress(logView.Addr[constants.AddressHexStart:constants.AddressHexEnd])
+	if pairID == 0 {
+		return
+	}
+
+	hexData := logView.Data[2:130]
+
+	lzcntA := ultraFastZeroCount(hexData[36:64])
+	lzcntB := ultraFastZeroCount(hexData[100:128])
+
+	// Branchless min: convert bool to mask, then use XOR trick
+	cond := lzcntA - lzcntB // Negative if lzcntA < lzcntB
+	mask := cond >> 31      // Arithmetic right shift: -1 if negative, 0 if positive
+	minZeros := lzcntB ^ ((lzcntA ^ lzcntB) & mask)
+
+	offsetA := 2 + 36 + minZeros
+	offsetB := 2 + 100 + minZeros
+
+	availableA := 64 - 36 - minZeros   // 28 - minZeros
+	availableB := 128 - 100 - minZeros // 28 - minZeros
+
+	// Branchless min(16, availableA) and min(16, availableB)
+	condA := 16 - availableA
+	maskA := condA >> 31
+	remainingA := availableA ^ ((16 ^ availableA) & maskA)
+
+	condB := 16 - availableB
+	maskB := condB >> 31
+	remainingB := availableB ^ ((16 ^ availableB) & maskB)
+
+	reserve0 := utils.ParseHexU64(logView.Data[offsetA : offsetA+remainingA])
+	reserve1 := utils.ParseHexU64(logView.Data[offsetB : offsetB+remainingB])
+
+	tickValue, _ := fastuni.Log2ReserveRatio(reserve0, reserve1)
+
+	var message [24]byte
+	tickUpdate := (*TickUpdate)(unsafe.Pointer(&message))
+	tickUpdate.forwardTick = tickValue
+	tickUpdate.reverseTick = -tickValue
+	tickUpdate.pairID = pairID
+
+	coreAssignments := pairToCoreAssignment[pairID]
+	for coreAssignments != 0 {
+		coreID := bits.TrailingZeros64(uint64(coreAssignments))
+		coreRings[coreID].Push(&message)
+		coreAssignments &^= 1 << coreID
+	}
+}
+
+// Arbitrage processing functions
 //
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func quantizeTickToInt64(tickValue float64) int64 {
+	return int64((tickValue + constants.TickClampingBound) * constants.QuantizationScale)
+}
+
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
 func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
-	// Select tick based on direction (no branch hints - let CPU predict naturally)
 	var currentTick float64
 	if !executor.isReverseDirection {
 		currentTick = update.forwardTick
@@ -382,20 +367,16 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 		currentTick = update.reverseTick
 	}
 
-	// Get queue for pair
 	queueIndex, _ := executor.pairToQueueIndex.Get(uint32(update.pairID))
 	queue := &executor.priorityQueues[queueIndex]
 
-	// Use pre-allocated buffer - ZERO ALLOCATION
 	cycleCount := 0
 
-	// Extract profitable cycles (no branch hints)
 	for {
 		handle, queueTick, cycleData := queue.PeepMin()
 		cycleIndex := CycleStateIndex(cycleData)
 		cycle := &executor.cycleStates[cycleIndex]
 
-		// Check profitability
 		totalProfitability := currentTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
 		isProfitable := totalProfitability < 0
 
@@ -403,12 +384,10 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 			//emitArbitrageOpportunity(cycle, currentTick)
 		}
 
-		// Break conditions (no branch hints - natural prediction)
 		if !isProfitable || cycleCount == len(executor.processedCycles) {
 			break
 		}
 
-		// Store for reprocessing using pre-allocated buffer
 		executor.processedCycles[cycleCount] = ProcessedCycle{
 			queueHandle:     handle,
 			originalTick:    queueTick,
@@ -423,69 +402,104 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 		}
 	}
 
-	// Reinsert processed cycles using pre-allocated buffer
 	for i := 0; i < cycleCount; i++ {
 		cycle := &executor.processedCycles[i]
 		queue.Push(cycle.originalTick, cycle.queueHandle, uint64(cycle.cycleStateIndex))
 	}
 
-	// Update fanout entries (with handle conversion for quantumqueue64)
 	for _, fanoutEntry := range executor.fanoutTables[queueIndex] {
 		cycle := &executor.cycleStates[fanoutEntry.cycleStateIndex]
 		cycle.tickValues[fanoutEntry.edgeIndex] = currentTick
 
-		// Recalculate priority
 		newPriority := quantizeTickToInt64(cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2])
 		fanoutEntry.queue.MoveTick(quantumqueue64.Handle(fanoutEntry.queueHandle), newPriority)
 	}
 }
 
-// DispatchTickUpdate processes log and dispatches to cores - ZERO ALLOCATION
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
+	debug.DropMessage("[ARBITRAGE_OPPORTUNITY]", "")
+
+	debug.DropMessage("  pair0", utils.Itoa(int(cycle.pairIDs[0])))
+	debug.DropMessage("  pair1", utils.Itoa(int(cycle.pairIDs[1])))
+	debug.DropMessage("  pair2", utils.Itoa(int(cycle.pairIDs[2])))
+
+	tick0Str := fmt.Sprintf("%.6f", cycle.tickValues[0])
+	tick1Str := fmt.Sprintf("%.6f", cycle.tickValues[1])
+	tick2Str := fmt.Sprintf("%.6f", cycle.tickValues[2])
+	newTickStr := fmt.Sprintf("%.6f", newTick)
+	totalProfitStr := fmt.Sprintf("%.6f", newTick+cycle.tickValues[0]+cycle.tickValues[1]+cycle.tickValues[2])
+
+	debug.DropMessage("  tick0", tick0Str)
+	debug.DropMessage("  tick1", tick1Str)
+	debug.DropMessage("  tick2", tick2Str)
+	debug.DropMessage("  newTick", newTickStr)
+	debug.DropMessage("  totalProfit", totalProfitStr)
+}
+
+// Random number generation functions
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func DispatchTickUpdate(logView *types.LogView) {
-	//log.Println(utils.B2s(logView.Addr[constants.AddressHexStart:constants.AddressHexEnd]))
+func newKeccakRandom(initialSeed []byte) *keccakRandomState {
+	var seed [32]byte
 
-	// Resolve address to pair ID
-	pairID := lookupPairIDByAddress(logView.Addr[constants.AddressHexStart:constants.AddressHexEnd])
-	if pairID == 0 {
-		return
-	}
+	hasher := sha3.NewLegacyKeccak256()
+	hasher.Write(initialSeed)
+	copy(seed[:], hasher.Sum(nil))
 
-	// Extract reserves
-	reserve0 := utils.LoadBE64(logView.Data[24:])
-	reserve1 := utils.LoadBE64(logView.Data[56:])
-
-	// Calculate tick
-	tickValue, _ := fastuni.Log2ReserveRatio(reserve0, reserve1)
-
-	// Dispatch to assigned cores using stack-allocated message buffer
-	coreAssignments := pairToCoreAssignment[pairID]
-	for coreAssignments != 0 {
-		coreID := bits.TrailingZeros64(uint64(coreAssignments))
-
-		// Create message on stack - ZERO ALLOCATION
-		if coreRings[coreID] != nil {
-			var message [24]byte
-			tickUpdate := (*TickUpdate)(unsafe.Pointer(&message))
-			tickUpdate.forwardTick = tickValue
-			tickUpdate.reverseTick = -tickValue
-			tickUpdate.pairID = pairID
-
-			// Ring copies the data internally
-			coreRings[coreID].Push(&message)
-		}
-
-		coreAssignments &^= 1 << coreID
+	return &keccakRandomState{
+		seed:    seed,
+		counter: 0,
 	}
 }
 
-// keccakShuffleEdgeBindings performs deterministic Fisher-Yates shuffle using keccak256 (INITIALIZATION ONLY)
-//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func (k *keccakRandomState) nextUint64() uint64 {
+	var input [40]byte
+	copy(input[:32], k.seed[:])
+	binary.LittleEndian.PutUint64(input[32:], k.counter)
+
+	hasher := sha3.NewLegacyKeccak256()
+	hasher.Write(input[:])
+	output := hasher.Sum(nil)
+
+	k.counter++
+
+	return utils.Load64(output[:8])
+}
+
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func (k *keccakRandomState) nextInt(upperBound int) int {
+	if upperBound <= 0 {
+		return 0
+	}
+
+	randomValue := k.nextUint64()
+
+	if upperBound&(upperBound-1) == 0 {
+		return int(randomValue & uint64(upperBound-1))
+	}
+
+	high64, _ := bits.Mul64(randomValue, uint64(upperBound))
+	return int(high64)
+}
+
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -496,21 +510,18 @@ func keccakShuffleEdgeBindings(bindings []ArbitrageEdgeBinding, pairID PairID) {
 		return
 	}
 
-	// Create deterministic seed from pairID (now 64-bit)
 	var seedInput [8]byte
 	binary.LittleEndian.PutUint64(seedInput[:], utils.Mix64(uint64(pairID)))
 
-	// Initialize deterministic random generator with Keccak256 entropy
 	rng := newKeccakRandom(seedInput[:])
 
-	// Fisher-Yates shuffle with deterministic randomness
 	for i := len(bindings) - 1; i > 0; i-- {
 		j := rng.nextInt(i + 1)
 		bindings[i], bindings[j] = bindings[j], bindings[i]
 	}
 }
 
-// buildFanoutShardBuckets constructs shard buckets with deterministic shuffle - ZERO ALLOCATION
+// System initialization functions
 //
 //go:norace
 //go:nocheckptr
@@ -520,7 +531,6 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 	pairShardBuckets = make(map[PairID][]PairShardBucket)
 	temporaryBindings := make(map[PairID][]ArbitrageEdgeBinding, len(cycles)*3)
 
-	// Group by pairs
 	for _, triplet := range cycles {
 		for i := 0; i < 3; i++ {
 			temporaryBindings[triplet[i]] = append(temporaryBindings[triplet[i]],
@@ -531,9 +541,7 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 		}
 	}
 
-	// Create shards with deterministic keccak256-based shuffle (INITIALIZATION ONLY)
 	for pairID, bindings := range temporaryBindings {
-		// Per-pair deterministic shuffle based on pairID with Keccak256 entropy
 		keccakShuffleEdgeBindings(bindings, pairID)
 
 		for offset := 0; offset < len(bindings); offset += constants.MaxCyclesPerShard {
@@ -551,14 +559,11 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 	}
 }
 
-// attachShardToExecutor integrates shard into executor
-//
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
 func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBucket) {
-	// Get/create queue index
 	queueIndex := executor.pairToQueueIndex.Put(uint32(shard.pairID), uint32(len(executor.priorityQueues)))
 
 	if int(queueIndex) == len(executor.priorityQueues) {
@@ -568,19 +573,15 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 
 	queue := &executor.priorityQueues[queueIndex]
 
-	// Process cycles
 	for _, edgeBinding := range shard.edgeBindings {
-		// Add to canonical storage
 		executor.cycleStates = append(executor.cycleStates, ArbitrageCycleState{
 			pairIDs: edgeBinding.cyclePairs,
 		})
 		cycleIndex := CycleStateIndex(len(executor.cycleStates) - 1)
 
-		// Allocate queue handle
 		queueHandle, _ := queue.BorrowSafe()
 		queue.Push(constants.MaxInitializationPriority, queueHandle, uint64(cycleIndex))
 
-		// Create fanout entries (handle conversion for quantumqueue64 compatibility)
 		otherEdge1 := (edgeBinding.edgeIndex + 1) % 3
 		otherEdge2 := (edgeBinding.edgeIndex + 2) % 3
 
@@ -588,16 +589,14 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 			executor.fanoutTables[queueIndex] = append(executor.fanoutTables[queueIndex],
 				FanoutEntry{
 					edgeIndex:       edgeIdx,
-					cycleStateIndex: uint64(cycleIndex),  // Convert CycleStateIndex to uint64
-					queueHandle:     uint64(queueHandle), // Convert Handle to uint64
+					cycleStateIndex: uint64(cycleIndex),
+					queueHandle:     uint64(queueHandle),
 					queue:           queue,
 				})
 		}
 	}
 }
 
-// launchShardWorker initializes core executor
-//
 //go:norace
 //go:nocheckptr
 //go:inline
@@ -607,25 +606,21 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 
 	shutdownChannel := make(chan struct{})
 
-	// Initialize executor with pre-allocated buffers
 	executor := &ArbitrageCoreExecutor{
 		isReverseDirection: coreID >= forwardCoreCount,
 		shutdownSignal:     shutdownChannel,
 		pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
 		cycleStates:        make([]ArbitrageCycleState, 0),
-		// Pre-allocated buffers are already part of the struct
 	}
 	coreExecutors[coreID] = executor
 	coreRings[coreID] = ring24.New(constants.DefaultRingSize)
 
-	// Process shards
 	for shard := range shardInput {
 		attachShardToExecutor(executor, &shard)
 	}
 
 	stopFlag, hotFlag := control.Flags()
 
-	// Launch consumer
 	if coreID == 0 {
 		ring24.PinnedConsumerWithCooldown(coreID, coreRings[coreID], stopFlag, hotFlag,
 			func(messagePtr *[24]byte) {
@@ -639,8 +634,6 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 	}
 }
 
-// InitializeArbitrageSystem bootstraps the complete system
-//
 //go:norace
 //go:nocheckptr
 //go:inline
@@ -650,31 +643,26 @@ func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 	if coreCount > constants.MaxSupportedCores {
 		coreCount = constants.MaxSupportedCores
 	}
-	coreCount &^= 1 // Ensure even
+	coreCount &^= 1
 	forwardCoreCount := coreCount >> 1
 
-	// Build shards with deterministic keccak256 shuffle
 	buildFanoutShardBuckets(arbitrageCycles)
 
-	// Create workers
 	shardChannels := make([]chan PairShardBucket, coreCount)
 	for i := range shardChannels {
 		shardChannels[i] = make(chan PairShardBucket, constants.ShardChannelBufferSize)
 		go launchShardWorker(i, forwardCoreCount, shardChannels[i])
 	}
 
-	// Distribute shards
 	currentCore := 0
 	for _, shardBuckets := range pairShardBuckets {
 		for _, shard := range shardBuckets {
 			forwardCore := currentCore % forwardCoreCount
 			reverseCore := forwardCore + forwardCoreCount
 
-			// Send to both directions
 			shardChannels[forwardCore] <- shard
 			shardChannels[reverseCore] <- shard
 
-			// Update routing
 			for _, edgeBinding := range shard.edgeBindings {
 				for _, pairID := range edgeBinding.cyclePairs {
 					pairToCoreAssignment[pairID] |= 1<<forwardCore | 1<<reverseCore
@@ -684,33 +672,7 @@ func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 		}
 	}
 
-	// Close channels
 	for _, channel := range shardChannels {
 		close(channel)
 	}
-}
-
-func bytesToAddressKey(address40HexChars []byte) AddressKey {
-	// FULL FOOTGUN MODE: No validation, assume caller is correct
-	parsedAddress := utils.ParseEthereumAddress(address40HexChars)
-
-	// Pack all 20 bytes efficiently: 8+8+4 = 20 bytes exactly
-	var lastWordBytes [8]byte
-	copy(lastWordBytes[:4], parsedAddress[16:20])
-	lastWord := utils.Load64(lastWordBytes[:]) >> 32
-
-	return AddressKey{
-		words: [3]uint64{
-			utils.Load64(parsedAddress[0:8]),  // Bytes 0-7
-			utils.Load64(parsedAddress[8:16]), // Bytes 8-15
-			lastWord,                          // Bytes 16-19
-		},
-	}
-}
-
-func directAddressToIndex64(address40HexChars []byte) uint64 {
-	// FULL FOOTGUN MODE: No validation
-	addressBytes := utils.ParseEthereumAddress(address40HexChars)
-	hash64 := utils.Load64(addressBytes[6:14])
-	return hash64 & uint64(constants.AddressTableMask)
 }
