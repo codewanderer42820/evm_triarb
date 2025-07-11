@@ -237,7 +237,6 @@
 package router
 
 import (
-	"encoding/binary"
 	"fmt"
 	"hash"
 	"math/bits"
@@ -1814,7 +1813,7 @@ func keccakShuffleEdgeBindings(bindings []ArbitrageEdgeBinding, pairID PairID) {
 	// Create a unique seed based on the pair ID to ensure consistent shuffling
 	// for the same pair across different system runs.
 	var seedInput [8]byte
-	binary.LittleEndian.PutUint64(seedInput[:], utils.Mix64(uint64(pairID)))
+	*(*uint64)(unsafe.Pointer(&seedInput[0])) = utils.Mix64(uint64(pairID))
 
 	rng := newKeccakRandom(seedInput[:])
 
