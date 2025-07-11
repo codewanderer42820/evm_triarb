@@ -703,12 +703,16 @@ func bytesToAddressKey(address40HexChars []byte) AddressKey {
 }
 
 // directAddressToIndex64 computes hash table index from raw hex address.
-// Uses the middle 8 bytes of the address as hash value for good distribution.
+// Extracts hash directly from hex characters without full address parsing.
 //
 // HASH FUNCTION CHOICE:
 // Ethereum addresses have good entropy in the middle bytes due to keccak256.
-// Using bytes 6-13 provides excellent hash distribution while avoiding
-// common prefixes (0x00) and checksums that might have patterns.
+// Using hex chars 12-27 (bytes 6-13) provides excellent hash distribution
+// while avoiding common prefixes and checksums that might have patterns.
+//
+// OPTIMIZATION:
+// Directly parses 16 hex characters (64 bits) instead of parsing full
+// 40-character address then extracting middle portion.
 //
 //go:norace
 //go:nocheckptr
@@ -716,8 +720,9 @@ func bytesToAddressKey(address40HexChars []byte) AddressKey {
 //go:inline
 //go:registerparams
 func directAddressToIndex64(address40HexChars []byte) uint64 {
-	addressBytes := utils.ParseEthereumAddress(address40HexChars)
-	hash64 := utils.Load64(addressBytes[6:14]) // Use middle 8 bytes as hash
+	// Extract middle 16 hex characters (chars 12-27) and parse directly
+	// This corresponds to bytes 6-13 of the final address
+	hash64 := utils.ParseHexU64(address40HexChars[12:28])
 	return hash64 & uint64(constants.AddressTableMask)
 }
 
