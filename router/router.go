@@ -343,10 +343,10 @@ func DispatchTickUpdate(logView *types.LogView) {
 
 	// STEP 3: Leading Zero Analysis (~15-20 cycles total)
 	// uint112 reserves are padded to 32 bytes (64 hex chars) by Ethereum ABI.
-	// We skip the guaranteed 36 leading zeros and scan only the meaningful 28 chars.
-	// This optimization cuts the scanning work in half.
-	lzcntA := ultraFastZeroCount(hexData[36:64])   // Reserve A: scan chars 36-63
-	lzcntB := ultraFastZeroCount(hexData[100:128]) // Reserve B: scan chars 100-127
+	// We skip the guaranteed 32 leading zeros and scan only the meaningful 32 chars.
+	// This optimization balances scanning efficiency with natural boundaries.
+	lzcntA := countLeadingZeros(hexData[32:64])  // Reserve A: scan chars 32-63
+	lzcntB := countLeadingZeros(hexData[96:128]) // Reserve B: scan chars 96-127
 
 	// STEP 4: Magnitude Preservation (~3-4 cycles)
 	// Extract both reserves at the same relative magnitude to preserve ratio accuracy.
@@ -358,14 +358,14 @@ func DispatchTickUpdate(logView *types.LogView) {
 	// STEP 5: Offset Calculation (~2 cycles)
 	// Calculate absolute positions in the original hex string.
 	// Add 2 for "0x", add ABI padding skip, add leading zeros skip.
-	offsetA := 2 + 36 + minZeros  // Position for reserve A extraction
-	offsetB := 2 + 100 + minZeros // Position for reserve B extraction
+	offsetA := 2 + 32 + minZeros // Position for reserve A extraction
+	offsetB := 2 + 96 + minZeros // Position for reserve B extraction
 
 	// STEP 6: Bounds Calculation (~6-8 cycles)
 	// Calculate how many hex characters are available for extraction.
 	// Use branchless min to clamp to maximum extraction length (16 chars = uint64).
-	availableA := 64 - 36 - minZeros   // Available chars in reserve A (28 - minZeros)
-	availableB := 128 - 100 - minZeros // Available chars in reserve B (28 - minZeros)
+	availableA := 64 - 32 - minZeros  // Available chars in reserve A (32 - minZeros)
+	availableB := 128 - 96 - minZeros // Available chars in reserve B (32 - minZeros)
 
 	// Branchless min(16, available) for both reserves
 	condA := 16 - availableA
@@ -407,7 +407,7 @@ func DispatchTickUpdate(logView *types.LogView) {
 	}
 }
 
-// ultraFastZeroCount counts leading ASCII '0' characters in hex data.
+// countLeadingZeros counts leading ASCII '0' characters in hex data.
 // This function is critical for determining where significant digits begin
 // in Ethereum ABI-encoded uint112 values.
 //
@@ -418,26 +418,26 @@ func DispatchTickUpdate(logView *types.LogView) {
 // 4. Use TrailingZeros again to find first significant byte within chunk
 //
 // PERFORMANCE:
-// - Processes 28 hex characters in ~12-15 cycles
+// - Processes 32 hex characters in ~12-15 cycles
 // - Uses SIMD-style parallel processing
 // - Completely branchless execution
 //
-// INPUT: 28-byte hex segment (uint112 significant range)
-// OUTPUT: Count of leading ASCII '0' characters (0-28)
+// INPUT: 32-byte hex segment (uint112 significant range)
+// OUTPUT: Count of leading ASCII '0' characters (0-32)
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func ultraFastZeroCount(segment []byte) int {
+func countLeadingZeros(segment []byte) int {
 	const ZERO_PATTERN = 0x3030303030303030 // Eight ASCII '0' characters
 
-	// Load and process 4 chunks (32 bytes total, but only 28 are valid)
+	// Load and process 4 chunks (32 bytes total)
 	c0 := utils.Load64(segment[0:8]) ^ ZERO_PATTERN   // Chunk 0: bytes 0-7
 	c1 := utils.Load64(segment[8:16]) ^ ZERO_PATTERN  // Chunk 1: bytes 8-15
 	c2 := utils.Load64(segment[16:24]) ^ ZERO_PATTERN // Chunk 2: bytes 16-23
-	c3 := utils.Load64(segment[24:28]) ^ ZERO_PATTERN // Chunk 3: bytes 24-27 (partial)
+	c3 := utils.Load64(segment[24:32]) ^ ZERO_PATTERN // Chunk 3: bytes 24-31
 
 	// Create bitmask: 1 bit per chunk indicating non-zero content
 	// Use (x | (~x + 1)) >> 63 to convert any non-zero value to 1
