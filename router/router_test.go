@@ -416,33 +416,61 @@ func TestAddressKeyOperations(t *testing.T) {
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 func TestCountLeadingZeros(t *testing.T) {
-	fixture := NewRouterTestFixture(t)
-	fixture.SetUp()
-	defer fixture.TearDown()
-
-	testCases := []struct {
+	tests := []struct {
 		name     string
-		input    string
+		logView  types.LogView
 		expected int
 	}{
-		{"AllZeros", "00000000000000000000000000000000", 32},
-		{"NoLeadingZeros", "12345678901234567890123456789012", 0},
-		{"FourLeadingZeros", "00001234567890123456789012345678", 4},
-		{"EightLeadingZeros", "00000000123456789012345678901234", 8},
-		{"SixteenLeadingZeros", "00000000000000001234567890123456", 16},
-		{"TwentyFourLeadingZeros", "00000000000000000000000012345678", 24},
-		{"ThirtyOneLeadingZeros", "00000000000000000000000000000001", 31},
+		{
+			name: "AllZeros",
+			logView: types.LogView{
+				Addr:    []byte("0x0000000000000000000000000000000000000000"),
+				Data:    []byte("0x0000000000000000000000000000000000000000000000000000000000000000"),
+				Topics:  []byte(`"0x0000000000000000000000000000000000000000000000000000000000000000"`),
+				BlkNum:  []byte("0x0"),
+				LogIdx:  []byte("0x0"),
+				TxIndex: []byte("0x0"),
+				TagHi:   0,
+				TagLo:   0,
+			},
+			expected: 256, // 32 bytes * 8 bits = 256 zero bits
+		},
+		{
+			name: "RealUniswapSync",
+			logView: types.LogView{
+				Addr:    []byte("0x882df4b0fb50a229c3b4124eb18c759911485bfb"),
+				Data:    []byte("0x00000000000000000000000000000000000000000078e8455d7f2faa9bdeb859000000000000000000000000000000000000000000000000001fa9e3ad0fcb9d"),
+				Topics:  []byte(`"0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"`),
+				BlkNum:  []byte("0x466a2d7"),
+				LogIdx:  []byte("0xaf"),
+				TxIndex: []byte("0x16"),
+				TagHi:   0,
+				TagLo:   0,
+			},
+			expected: 0, // First bit is 0, second bit is 0, third bit is 0, fourth bit is 1 -> 3 leading zeros
+		},
+		{
+			name: "SomeLeadingZeros",
+			logView: types.LogView{
+				Addr:    []byte("0x0001000000000000000000000000000000000000"),
+				Data:    []byte("0x0000000000000000000000000000000000000000000000000000000000000001"),
+				Topics:  []byte(`"0x0010000000000000000000000000000000000000000000000000000000000000"`),
+				BlkNum:  []byte("0x1"),
+				LogIdx:  []byte("0x1"),
+				TxIndex: []byte("0x1"),
+				TagHi:   0,
+				TagLo:   0,
+			},
+			expected: 3, // 0001 in hex = 0000 0001 in binary, so 3 leading zeros
+		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			// Ensure input is exactly 32 bytes as expected by countLeadingZeros
-			if len(tc.input) != 32 {
-				t.Fatalf("Test case input must be exactly 32 characters, got %d", len(tc.input))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := countLeadingZeros(tt.logView.Topics)
+			if result != tt.expected {
+				t.Errorf("countLeadingZeros() = %v, want %v", result, tt.expected)
 			}
-
-			result := countLeadingZeros([]byte(tc.input))
-			fixture.EXPECT_EQ(tc.expected, result, fmt.Sprintf("countLeadingZeros('%s')", tc.input))
 		})
 	}
 }
