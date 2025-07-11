@@ -416,63 +416,119 @@ func TestAddressKeyOperations(t *testing.T) {
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 func TestCountLeadingZeros(t *testing.T) {
-	tests := []struct {
-		name     string
-		logView  types.LogView
-		expected int
-	}{
-		{
-			name: "AllZeros",
-			logView: types.LogView{
-				Addr:    []byte("0x0000000000000000000000000000000000000000"),
-				Data:    []byte("0x0000000000000000000000000000000000000000000000000000000000000000"),
-				Topics:  []byte(`"0x0000000000000000000000000000000000000000000000000000000000000000"`),
-				BlkNum:  []byte("0x0"),
-				LogIdx:  []byte("0x0"),
-				TxIndex: []byte("0x0"),
-				TagHi:   0,
-				TagLo:   0,
-			},
-			expected: 256, // 32 bytes * 8 bits = 256 zero bits
-		},
-		{
-			name: "RealUniswapSync",
-			logView: types.LogView{
-				Addr:    []byte("0x882df4b0fb50a229c3b4124eb18c759911485bfb"),
-				Data:    []byte("0x00000000000000000000000000000000000000000078e8455d7f2faa9bdeb859000000000000000000000000000000000000000000000000001fa9e3ad0fcb9d"),
-				Topics:  []byte(`"0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"`),
-				BlkNum:  []byte("0x466a2d7"),
-				LogIdx:  []byte("0xaf"),
-				TxIndex: []byte("0x16"),
-				TagHi:   0,
-				TagLo:   0,
-			},
-			expected: 0, // First bit is 0, second bit is 0, third bit is 0, fourth bit is 1 -> 3 leading zeros
-		},
-		{
-			name: "SomeLeadingZeros",
-			logView: types.LogView{
-				Addr:    []byte("0x0001000000000000000000000000000000000000"),
-				Data:    []byte("0x0000000000000000000000000000000000000000000000000000000000000001"),
-				Topics:  []byte(`"0x0010000000000000000000000000000000000000000000000000000000000000"`),
-				BlkNum:  []byte("0x1"),
-				LogIdx:  []byte("0x1"),
-				TxIndex: []byte("0x1"),
-				TagHi:   0,
-				TagLo:   0,
-			},
-			expected: 3, // 0001 in hex = 0000 0001 in binary, so 3 leading zeros
-		},
-	}
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+	defer fixture.TearDown()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := countLeadingZeros(tt.logView.Topics)
-			if result != tt.expected {
-				t.Errorf("countLeadingZeros() = %v, want %v", result, tt.expected)
+	t.Run("AllZeros", func(t *testing.T) {
+		// 32 ASCII '0' characters
+		input := make([]byte, 32)
+		for i := range input {
+			input[i] = '0'
+		}
+		result := countLeadingZeros(input)
+		fixture.EXPECT_EQ(32, result, "All ASCII zeros should return 32")
+	})
+
+	t.Run("NoLeadingZeros", func(t *testing.T) {
+		// Start with non-'0' character
+		input := make([]byte, 32)
+		copy(input, []byte("78e8455d7f2faa9bdeb859ffffffffff"))
+		result := countLeadingZeros(input)
+		fixture.EXPECT_EQ(0, result, "No leading zeros should return 0")
+	})
+
+	t.Run("SomeLeadingZeros", func(t *testing.T) {
+		// 30 '0' characters followed by '78'
+		input := make([]byte, 32)
+		for i := 0; i < 30; i++ {
+			input[i] = '0'
+		}
+		copy(input[30:], []byte("78"))
+		result := countLeadingZeros(input)
+		fixture.EXPECT_EQ(30, result, "30 leading zeros before '78'")
+	})
+
+	t.Run("OneLeadingZero", func(t *testing.T) {
+		input := make([]byte, 32)
+		input[0] = '0'
+		copy(input[1:], []byte("123456789abcdef0123456789abcdef"))
+		result := countLeadingZeros(input)
+		fixture.EXPECT_EQ(1, result, "One leading zero before '1'")
+	})
+
+	t.Run("HalfLeadingZeros", func(t *testing.T) {
+		input := make([]byte, 32)
+		for i := 0; i < 16; i++ {
+			input[i] = '0'
+		}
+		copy(input[16:], []byte("e8455d7f2faa9bde"))
+		result := countLeadingZeros(input)
+		fixture.EXPECT_EQ(16, result, "16 leading zeros")
+	})
+
+	t.Run("ChunkBoundaries", func(t *testing.T) {
+		// Test at 8-byte chunk boundaries (8, 16, 24, 32)
+		testCases := []struct {
+			leadingZeros int
+			description  string
+		}{
+			{7, "Just before first chunk boundary"},
+			{8, "First chunk boundary"},
+			{15, "Just before second chunk boundary"},
+			{16, "Second chunk boundary"},
+			{23, "Just before third chunk boundary"},
+			{24, "Third chunk boundary"},
+			{31, "Maximum leading zeros before all-zeros"},
+			{32, "All zeros (special case)"},
+		}
+
+		for _, tc := range testCases {
+			input := make([]byte, 32)
+			for i := 0; i < tc.leadingZeros; i++ {
+				input[i] = '0'
 			}
-		})
-	}
+			// Fill rest with non-zero (unless it's all zeros)
+			if tc.leadingZeros < 32 {
+				for i := tc.leadingZeros; i < 32; i++ {
+					input[i] = 'a'
+				}
+			}
+			result := countLeadingZeros(input)
+			fixture.EXPECT_EQ(tc.leadingZeros, result, tc.description)
+		}
+	})
+
+	t.Run("RealWorldUsage", func(t *testing.T) {
+		// Simulate how it's actually used in DispatchTickUpdate
+		// The function is called on the second half of reserve values
+
+		// Typical case: some leading zeros before the actual value
+		input1 := make([]byte, 32)
+		for i := 0; i < 26; i++ {
+			input1[i] = '0'
+		}
+		copy(input1[26:], []byte("78e845"))
+		result1 := countLeadingZeros(input1)
+		fixture.EXPECT_EQ(26, result1, "Typical reserve value pattern")
+
+		// Edge case: very small reserve (many leading zeros)
+		input2 := make([]byte, 32)
+		for i := 0; i < 31; i++ {
+			input2[i] = '0'
+		}
+		input2[31] = '1'
+		result2 := countLeadingZeros(input2)
+		fixture.EXPECT_EQ(31, result2, "Very small reserve value")
+
+		// Edge case: zero reserve (all zeros) - should be handled gracefully
+		input3 := make([]byte, 32)
+		for i := 0; i < 32; i++ {
+			input3[i] = '0'
+		}
+		result3 := countLeadingZeros(input3)
+		fixture.EXPECT_EQ(32, result3, "Zero reserve (all zeros)")
+	})
 }
 
 func TestBytesToAddressKey(t *testing.T) {
