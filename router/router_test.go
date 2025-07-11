@@ -319,26 +319,12 @@ func (f *RouterTestFixture) SetUp() {
 }
 
 func (f *RouterTestFixture) CreateTestLogView(address string, reserve0, reserve1 uint64) *types.LogView {
-	// Create properly formatted hex data for reserves
-	data := "0x"
+	// Create properly formatted hex data matching real Uniswap V2 Sync events
+	// Real format: "0x" + 64 hex chars (reserve0 padded to 32 bytes) + 64 hex chars (reserve1 padded to 32 bytes)
+	// Example: 0x00000000000000000000000000000000000000000078e3833588cda8d5e102c3000000000000000000000000000000000000000000000000001fa8dd7963f22c
 
-	// Reserve 0: 32 bytes (64 hex chars) with uint112 value
-	reserve0Hex := make([]byte, 64)
-	for i := range reserve0Hex {
-		reserve0Hex[i] = '0'
-	}
-	reserve0Str := fmt.Sprintf("%028x", reserve0) // 28 chars for uint112
-	copy(reserve0Hex[64-len(reserve0Str):], reserve0Str)
-	data += string(reserve0Hex)
-
-	// Reserve 1: 32 bytes (64 hex chars) with uint112 value
-	reserve1Hex := make([]byte, 64)
-	for i := range reserve1Hex {
-		reserve1Hex[i] = '0'
-	}
-	reserve1Str := fmt.Sprintf("%028x", reserve1) // 28 chars for uint112
-	copy(reserve1Hex[64-len(reserve1Str):], reserve1Str)
-	data += string(reserve1Hex)
+	// Each reserve is a uint112 value padded to 32 bytes (64 hex characters)
+	data := fmt.Sprintf("0x%064x%064x", reserve0, reserve1)
 
 	return &types.LogView{
 		Addr: []byte(address),
@@ -441,15 +427,20 @@ func TestCountLeadingZeros(t *testing.T) {
 	}{
 		{"AllZeros", "00000000000000000000000000000000", 32},
 		{"NoLeadingZeros", "12345678901234567890123456789012", 0},
-		{"FourLeadingZeros", "0000567890123456789012345678901", 4},
-		{"EightLeadingZeros", "00000000901234567890123456789012", 8},
-		{"SixteenLeadingZeros", "0000000000000000567890123456789", 16},
-		{"TwentyFourLeadingZeros", "000000000000000000000000567890", 24},
-		{"ThirtyOneLeadingZeros", "0000000000000000000000000000001", 31},
+		{"FourLeadingZeros", "00001234567890123456789012345678", 4},
+		{"EightLeadingZeros", "00000000123456789012345678901234", 8},
+		{"SixteenLeadingZeros", "00000000000000001234567890123456", 16},
+		{"TwentyFourLeadingZeros", "00000000000000000000000012345678", 24},
+		{"ThirtyOneLeadingZeros", "00000000000000000000000000000001", 31},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Ensure input is exactly 32 bytes as expected by countLeadingZeros
+			if len(tc.input) != 32 {
+				t.Fatalf("Test case input must be exactly 32 characters, got %d", len(tc.input))
+			}
+
 			result := countLeadingZeros([]byte(tc.input))
 			fixture.EXPECT_EQ(tc.expected, result, fmt.Sprintf("countLeadingZeros('%s')", tc.input))
 		})
@@ -797,6 +788,36 @@ func TestDispatchTickUpdateFlow(t *testing.T) {
 		fixture.EXPECT_EQ(pairID, tickUpdate.pairID, "Message should contain correct pairID")
 		fixture.EXPECT_NE(0.0, tickUpdate.forwardTick, "Forward tick should be non-zero")
 		fixture.EXPECT_EQ(-tickUpdate.forwardTick, tickUpdate.reverseTick, "Reverse tick should be negative of forward")
+	})
+
+	t.Run("RealUniswapV2Data", func(t *testing.T) {
+		// Test with real data from actual Uniswap V2 Sync events
+		address := "0x882df4b0fb50a229c3b4124eb18c759911485bfb"
+		pairID := PairID(54321)
+
+		RegisterPairAddress([]byte(address[2:]), pairID)
+		RegisterPairToCore(pairID, 0)
+		coreRings[0] = ring24.New(constants.DefaultRingSize)
+
+		// Real event data: reserve0=0x78e3833588cda8d5e102c3, reserve1=0x1fa8dd7963f22c
+		realLogView := &types.LogView{
+			Addr: []byte(address),
+			Data: []byte("0x00000000000000000000000000000000000000000078e3833588cda8d5e102c3000000000000000000000000000000000000000000000000001fa8dd7963f22c"),
+		}
+
+		fixture.EXPECT_NO_FATAL_FAILURE(func() {
+			DispatchTickUpdate(realLogView)
+		})
+
+		// Verify real data processing
+		message := coreRings[0].Pop()
+		fixture.ASSERT_TRUE(message != nil, "Real data should produce message")
+
+		tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
+		fixture.EXPECT_EQ(pairID, tickUpdate.pairID, "Real data should have correct pairID")
+		fixture.EXPECT_NE(0.0, tickUpdate.forwardTick, "Real data should produce non-zero tick")
+		fixture.EXPECT_FALSE(math.IsNaN(tickUpdate.forwardTick), "Real data tick should not be NaN")
+		fixture.EXPECT_FALSE(math.IsInf(tickUpdate.forwardTick, 0), "Real data tick should not be infinite")
 	})
 }
 
