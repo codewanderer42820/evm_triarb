@@ -367,8 +367,8 @@ func DispatchTickUpdate(logView *types.LogView) {
 	available := 32 - minZeros // Available chars in both reserves
 
 	// Branchless min(16, available) - same for both reserves
-	cond := 16 - available
-	mask := cond >> 31
+	cond = 16 - available
+	mask = cond >> 31
 	remaining := available ^ ((16 ^ available) & mask)
 
 	// STEP 7: Hex Parsing (~10-15 cycles)
