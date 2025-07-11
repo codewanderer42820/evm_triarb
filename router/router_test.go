@@ -1571,64 +1571,102 @@ func TestPipelineIntegration(t *testing.T) {
 	defer fixture.TearDown()
 
 	t.Run("DispatchToRingIntegration", func(t *testing.T) {
-		// Setup a simple arbitrage cycle
+		// Create a fresh sub-fixture for this test
+		subFixture := NewRouterTestFixture(t)
+
+		// Setup test pairs
 		pair1, pair2, pair3 := PairID(6001), PairID(6002), PairID(6003)
 
-		// Register addresses
-		addr1 := "0xf000000000000000000000000000000000000001"
-		addr2 := "0xf000000000000000000000000000000000000002"
-		addr3 := "0xf000000000000000000000000000000000000003"
+		// Create properly formatted Ethereum addresses (40 hex chars)
+		addr1Hex := "f000000000000000000000000000000000000001"
+		addr2Hex := "f000000000000000000000000000000000000002"
+		addr3Hex := "f000000000000000000000000000000000000003"
 
-		RegisterPairAddress([]byte(addr1[2:]), pair1)
-		RegisterPairAddress([]byte(addr2[2:]), pair2)
-		RegisterPairAddress([]byte(addr3[2:]), pair3)
+		// Register addresses (expecting 40 hex chars without 0x)
+		RegisterPairAddress([]byte(addr1Hex), pair1)
+		RegisterPairAddress([]byte(addr2Hex), pair2)
+		RegisterPairAddress([]byte(addr3Hex), pair3)
 
-		// Assign all to core 0
+		// Verify registration
+		subFixture.EXPECT_EQ(pair1, lookupPairIDByAddress([]byte(addr1Hex)), "Pair1 registration")
+		subFixture.EXPECT_EQ(pair2, lookupPairIDByAddress([]byte(addr2Hex)), "Pair2 registration")
+		subFixture.EXPECT_EQ(pair3, lookupPairIDByAddress([]byte(addr3Hex)), "Pair3 registration")
+
+		// Setup core assignments
 		RegisterPairToCore(pair1, 0)
 		RegisterPairToCore(pair2, 0)
 		RegisterPairToCore(pair3, 0)
 
+		// Create ring buffer
 		coreRings[0] = ring24.New(constants.DefaultRingSize)
 
-		// Send events for all three pairs
-		event1 := fixture.CreateTestLogView(addr1, 1000000000000000000, 2000000000000000000)
-		event2 := fixture.CreateTestLogView(addr2, 2000000000000000000, 3000000000000000000)
-		event3 := fixture.CreateTestLogView(addr3, 3000000000000000000, 1000000000000000000)
+		// Create events using the same format as CreateTestLogView
+		addr1Full := "0x" + addr1Hex
+		addr2Full := "0x" + addr2Hex
+		addr3Full := "0x" + addr3Hex
 
+		// Create events
+		event1 := &types.LogView{
+			Addr: []byte(addr1Full),
+			Data: []byte(fmt.Sprintf("0x%064x%064x", uint64(1000000000000000000), uint64(2000000000000000000))),
+		}
+		event2 := &types.LogView{
+			Addr: []byte(addr2Full),
+			Data: []byte(fmt.Sprintf("0x%064x%064x", uint64(2000000000000000000), uint64(3000000000000000000))),
+		}
+		event3 := &types.LogView{
+			Addr: []byte(addr3Full),
+			Data: []byte(fmt.Sprintf("0x%064x%064x", uint64(3000000000000000000), uint64(1000000000000000000))),
+		}
+
+		// Dispatch events
 		DispatchTickUpdate(event1)
 		DispatchTickUpdate(event2)
 		DispatchTickUpdate(event3)
 
-		// Verify all three messages arrived
-		messages := make([]*TickUpdate, 0)
+		// Collect messages
+		messages := make([]*TickUpdate, 0, 3)
 		for i := 0; i < 3; i++ {
 			msg := coreRings[0].Pop()
-			if msg != nil {
-				messages = append(messages, (*TickUpdate)(unsafe.Pointer(msg)))
+			if msg == nil {
+				break
 			}
+			messages = append(messages, (*TickUpdate)(unsafe.Pointer(msg)))
 		}
 
-		fixture.EXPECT_EQ(3, len(messages), "Should receive all 3 messages")
+		// Log what we got
+		t.Logf("Received %d messages", len(messages))
+		for i, msg := range messages {
+			t.Logf("Message %d: pairID=%d, forwardTick=%f, reverseTick=%f",
+				i, msg.pairID, msg.forwardTick, msg.reverseTick)
+		}
 
-		// Verify message content
+		// Verify we got all messages
+		subFixture.EXPECT_EQ(3, len(messages), "Should receive 3 messages")
+
+		// Check message content
 		pairsSeen := make(map[PairID]bool)
 		for _, msg := range messages {
 			pairsSeen[msg.pairID] = true
-			fixture.EXPECT_NE(0.0, msg.forwardTick, "Forward tick should be non-zero")
-			fixture.EXPECT_EQ(-msg.forwardTick, msg.reverseTick, "Reverse should be negative of forward")
+			subFixture.EXPECT_NE(0.0, msg.forwardTick, "Forward tick should be non-zero")
+			subFixture.EXPECT_EQ(-msg.forwardTick, msg.reverseTick, "Reverse should be negative of forward")
 		}
 
-		fixture.EXPECT_TRUE(pairsSeen[pair1], "Should see pair1")
-		fixture.EXPECT_TRUE(pairsSeen[pair2], "Should see pair2")
-		fixture.EXPECT_TRUE(pairsSeen[pair3], "Should see pair3")
+		// Verify all pairs were seen
+		subFixture.EXPECT_TRUE(pairsSeen[pair1], fmt.Sprintf("Should see pair1 (%d)", pair1))
+		subFixture.EXPECT_TRUE(pairsSeen[pair2], fmt.Sprintf("Should see pair2 (%d)", pair2))
+		subFixture.EXPECT_TRUE(pairsSeen[pair3], fmt.Sprintf("Should see pair3 (%d)", pair3))
 	})
 
 	t.Run("ZeroReserveRobustness", func(t *testing.T) {
+		// Create a fresh sub-fixture for this test
+		subFixture := NewRouterTestFixture(t)
+
 		// Test system robustness with edge cases
 		pairID := PairID(7001)
-		addr := "0xf000000000000000000000000000000000000004"
+		addr := "f000000000000000000000000000000000000004"
 
-		RegisterPairAddress([]byte(addr[2:]), pairID)
+		RegisterPairAddress([]byte(addr), pairID)
 		RegisterPairToCore(pairID, 0)
 		coreRings[0] = ring24.New(constants.DefaultRingSize)
 
@@ -1647,10 +1685,13 @@ func TestPipelineIntegration(t *testing.T) {
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				event := fixture.CreateTestLogView(addr, tc.reserve0, tc.reserve1)
+				event := &types.LogView{
+					Addr: []byte("0x" + addr),
+					Data: []byte(fmt.Sprintf("0x%064x%064x", tc.reserve0, tc.reserve1)),
+				}
 
 				// Should not panic
-				fixture.EXPECT_NO_FATAL_FAILURE(func() {
+				subFixture.EXPECT_NO_FATAL_FAILURE(func() {
 					DispatchTickUpdate(event)
 				})
 
@@ -1658,8 +1699,8 @@ func TestPipelineIntegration(t *testing.T) {
 				msg := coreRings[0].Pop()
 				if msg != nil {
 					tickUpdate := (*TickUpdate)(unsafe.Pointer(msg))
-					fixture.EXPECT_FALSE(math.IsNaN(tickUpdate.forwardTick), "Should not produce NaN")
-					fixture.EXPECT_FALSE(math.IsInf(tickUpdate.forwardTick, 0), "Should not produce Inf")
+					subFixture.EXPECT_FALSE(math.IsNaN(tickUpdate.forwardTick), "Should not produce NaN")
+					subFixture.EXPECT_FALSE(math.IsInf(tickUpdate.forwardTick, 0), "Should not produce Inf")
 				}
 			})
 		}
