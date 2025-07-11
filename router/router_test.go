@@ -1928,9 +1928,20 @@ func BenchmarkBlockSizeProcessing(b *testing.B) {
 		}
 	}
 
-	// Initialize infrastructure
+	// Initialize infrastructure - ensure power of 2 and minimum size
+	ringSize := 1
+	minSize := (eventsPerBlock / runtime.NumCPU()) * 2
+	if minSize < 1024 {
+		minSize = 1024 // Minimum reasonable size
+	}
+
+	// Find next power of 2 greater than minSize
+	for ringSize < minSize {
+		ringSize <<= 1
+	}
+
 	for i := 0; i < runtime.NumCPU(); i++ {
-		coreRings[i] = ring24.New(eventsPerBlock / runtime.NumCPU() * 2)
+		coreRings[i] = ring24.New(ringSize)
 	}
 
 	b.ResetTimer()
