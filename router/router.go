@@ -798,6 +798,15 @@ func countLeadingZeros(segment []byte) int {
 	//
 	// Locate the first chunk containing non-zero data using trailing zero count.
 	firstChunk := bits.TrailingZeros64(mask)
+
+	// SANITY CHECK: Handle all-zeros case
+	//
+	// If mask is 0, all chunks contain only '0' characters (0x30).
+	// Return 32 to indicate all 32 bytes are leading zeros.
+	if firstChunk == 64 {
+		return 32
+	}
+
 	chunks := [4]uint64{c0, c1, c2, c3}
 
 	// BYTE-LEVEL ZERO DETECTION
