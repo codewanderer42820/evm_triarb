@@ -27,8 +27,8 @@
 package router
 
 import (
-	"encoding/binary"
 	"fmt"
+	"hash"
 	"math/bits"
 	"runtime"
 	"unsafe"
@@ -267,8 +267,9 @@ type PairShardBucket struct {
 // This prevents adversarial input from creating pathological
 // load imbalances across CPU cores.
 type keccakRandomState struct {
-	seed    [32]byte // 32B - Current random seed (Keccak-256 hash)
-	counter uint64   // 8B - Increment counter for sequence generation
+	counter uint64    // 8B - HOTTEST: Increment counter for sequence generation
+	seed    [32]byte  // 32B - WARM: Current random seed (Keccak-256 hash)
+	hasher  hash.Hash // 24B - COLD: Reused Keccak-256 hasher instance
 }
 
 // ============================================================================
@@ -795,8 +796,9 @@ func newKeccakRandom(initialSeed []byte) *keccakRandomState {
 	copy(seed[:], hasher.Sum(nil))
 
 	return &keccakRandomState{
-		seed:    seed,
 		counter: 0,
+		seed:    seed,
+		hasher:  sha3.NewLegacyKeccak256(), // Reusable hasher instance
 	}
 }
 
@@ -812,12 +814,12 @@ func (k *keccakRandomState) nextUint64() uint64 {
 	// Create input: seed || counter
 	var input [40]byte
 	copy(input[:32], k.seed[:])
-	binary.LittleEndian.PutUint64(input[32:], k.counter)
+	*(*uint64)(unsafe.Pointer(&input[32])) = k.counter // Fast uint64 write
 
-	// Hash to get random bytes
-	hasher := sha3.NewLegacyKeccak256()
-	hasher.Write(input[:])
-	output := hasher.Sum(nil)
+	// Reuse hasher instance - much faster than creating new one
+	k.hasher.Reset()
+	k.hasher.Write(input[:])
+	output := k.hasher.Sum(nil)
 
 	// Increment counter for next call
 	k.counter++
@@ -827,7 +829,6 @@ func (k *keccakRandomState) nextUint64() uint64 {
 }
 
 // nextInt generates a random integer in the range [0, upperBound).
-// Uses unbiased modular reduction to ensure uniform distribution.
 //
 //go:norace
 //go:nocheckptr
@@ -841,15 +842,8 @@ func (k *keccakRandomState) nextInt(upperBound int) int {
 
 	randomValue := k.nextUint64()
 
-	// Optimization for power-of-2 bounds
-	if upperBound&(upperBound-1) == 0 {
-		return int(randomValue & uint64(upperBound-1))
-	}
-
-	// Unbiased modular reduction using multiplication method
-	// This avoids modulo bias that would favor smaller values
-	high64, _ := bits.Mul64(randomValue, uint64(upperBound))
-	return int(high64)
+	// Fast modulo - bias doesn't matter for shuffling
+	return int(randomValue % uint64(upperBound))
 }
 
 // keccakShuffleEdgeBindings performs Fisher-Yates shuffle with deterministic randomness.
@@ -867,7 +861,7 @@ func keccakShuffleEdgeBindings(bindings []ArbitrageEdgeBinding, pairID PairID) {
 
 	// Create deterministic seed based on pair ID
 	var seedInput [8]byte
-	binary.LittleEndian.PutUint64(seedInput[:], utils.Mix64(uint64(pairID)))
+	*(*uint64)(unsafe.Pointer(&seedInput[0])) = utils.Mix64(uint64(pairID))
 
 	rng := newKeccakRandom(seedInput[:])
 
