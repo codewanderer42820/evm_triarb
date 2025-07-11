@@ -688,17 +688,17 @@ func bytesToAddressKey(address40HexChars []byte) AddressKey {
 	// Parse hex string to 20-byte address using SIMD-optimized parser
 	parsedAddress := utils.ParseEthereumAddress(address40HexChars)
 
-	// Pack the last 4 bytes (bytes 16-19) into a 64-bit word
-	var lastWordBytes [8]byte
-	copy(lastWordBytes[:4], parsedAddress[16:20])
-	lastWord := utils.Load64(lastWordBytes[:]) >> 32 // Right-shift to get only lower 32 bits
+	// Optimized: Use utils.Load64 for all memory operations
+	word0 := utils.Load64(parsedAddress[0:8])  // Bytes 0-7
+	word1 := utils.Load64(parsedAddress[8:16]) // Bytes 8-15
+
+	// Load last 8 bytes and mask to get only the 4 bytes we need
+	// This eliminates the copy + array allocation completely
+	word2 := utils.Load64(parsedAddress[12:20]) & 0xFFFFFFFF
+	//                    ^^^^^^^^^^ Load bytes 12-19, mask to get bytes 16-19
 
 	return AddressKey{
-		words: [3]uint64{
-			utils.Load64(parsedAddress[0:8]),  // Bytes 0-7
-			utils.Load64(parsedAddress[8:16]), // Bytes 8-15
-			lastWord,                          // Bytes 16-19 (in lower 32 bits)
-		},
+		words: [3]uint64{word0, word1, word2},
 	}
 }
 
