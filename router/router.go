@@ -52,6 +52,7 @@
 // • Bounded buffer sizes prevent memory exhaustion
 // • Graceful degradation under extreme load conditions
 // • Comprehensive error handling with zero-allocation logging
+
 package router
 
 import (
