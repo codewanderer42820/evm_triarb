@@ -544,6 +544,8 @@ type PairShardBucket struct {
 // • counter: Incremented on every random number generation (hottest field)
 // • seed: Read on every generation for hash input (hot field)
 // • hasher: Reset occasionally during sequence generation (cold field)
+//
+//go:notinheap
 type keccakRandomState struct {
 	counter uint64    // 8B - PRIMARY: Sequence counter incremented per generation
 	seed    [32]byte  // 32B - ENTROPY: Cryptographic seed for random generation
