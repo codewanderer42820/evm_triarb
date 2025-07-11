@@ -1746,7 +1746,7 @@ func BenchmarkBlockchainEventIngestion(b *testing.B) {
 	defer fixture.TearDown()
 
 	numPairs := 1000
-	numCores := 4 // Fixed number
+	numCores := 4
 
 	// Initialize rings
 	for i := 0; i < numCores; i++ {
@@ -1760,13 +1760,16 @@ func BenchmarkBlockchainEventIngestion(b *testing.B) {
 		RegisterPairToCore(PairID(i+1), uint8(i%numCores))
 	}
 
-	// Pre-generate events
+	// Pre-generate events with correct format
 	events := make([]*types.LogView, numPairs)
 	for i := 0; i < numPairs; i++ {
 		addr := fmt.Sprintf("0x%040x", i)
+		// Correct format: 0x + 64 hex chars (reserve0) + 64 hex chars (reserve1) = 130 total
 		events[i] = &types.LogView{
 			Addr: []byte(addr),
-			Data: []byte("0x00000000000000000000000000000000000000000000000de0b6b3a764000000000000000000000000000000000000000000000000000001bc16d674ec80000"),
+			Data: []byte("0x" +
+				"00000000000000000000000000000000000000000000000de0b6b3a7640000" + // reserve0: 1e18
+				"00000000000000000000000000000000000000000000001bc16d674ec80000"), // reserve1: 2e18
 		}
 	}
 
@@ -1792,11 +1795,11 @@ func BenchmarkBlockSizeProcessing(b *testing.B) {
 	fixture.SetUp()
 	defer fixture.TearDown()
 
-	eventsPerBlock := 10000 // Smaller, realistic number
+	eventsPerBlock := 10000
 	numPairs := 1000
 	numCores := 4
 
-	// Initialize rings - use fixed power of 2
+	// Initialize rings
 	for i := 0; i < numCores; i++ {
 		coreRings[i] = ring24.New(1 << 16) // 65k slots
 	}
@@ -1808,14 +1811,16 @@ func BenchmarkBlockSizeProcessing(b *testing.B) {
 		RegisterPairToCore(PairID(i+1), uint8(i%numCores))
 	}
 
-	// Pre-generate block events
+	// Pre-generate block events with correct data format
 	blockEvents := make([]*types.LogView, eventsPerBlock)
 	for i := range blockEvents {
 		pairIdx := i % numPairs
 		addr := fmt.Sprintf("0x%040x", pairIdx)
 		blockEvents[i] = &types.LogView{
 			Addr: []byte(addr),
-			Data: []byte("0x00000000000000000000000000000000000000000000000de0b6b3a764000000000000000000000000000000000000000000000000000001bc16d674ec80000"),
+			Data: []byte("0x" +
+				"00000000000000000000000000000000000000000000000de0b6b3a7640000" +
+				"00000000000000000000000000000000000000000000001bc16d674ec80000"),
 		}
 	}
 
@@ -1855,7 +1860,9 @@ func BenchmarkSimpleDispatch(b *testing.B) {
 
 	event := &types.LogView{
 		Addr: []byte("0x1234567890123456789012345678901234567890"),
-		Data: []byte("0x00000000000000000000000000000000000000000000000de0b6b3a764000000000000000000000000000000000000000000000000000001bc16d674ec80000"),
+		Data: []byte("0x" +
+			"00000000000000000000000000000000000000000000000de0b6b3a7640000" +
+			"00000000000000000000000000000000000000000000001bc16d674ec80000"),
 	}
 
 	b.ResetTimer()
@@ -1871,4 +1878,72 @@ func BenchmarkSimpleDispatch(b *testing.B) {
 	}
 
 	b.ReportMetric(float64(count)/float64(b.N)*100, "delivery_%")
+}
+
+// Add the original benchmarks back but skip the problematic ones
+func BenchmarkDispatchTickUpdate(b *testing.B) {
+	fixture := NewRouterTestFixture(&testing.T{})
+	fixture.SetUp()
+	defer fixture.TearDown()
+
+	address := "0x1234567890123456789012345678901234567890"
+	pairID := PairID(12345)
+	RegisterPairAddress([]byte(address[2:]), pairID)
+	RegisterPairToCore(pairID, 0)
+	coreRings[0] = ring24.New(1 << 20) // Large ring
+
+	logView := fixture.CreateTestLogView(address, 1000000000000000000, 2000000000000000000)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		DispatchTickUpdate(logView)
+	}
+
+	// Drain to prevent overflow
+	for coreRings[0].Pop() != nil {
+	}
+}
+
+func BenchmarkCountLeadingZeros(b *testing.B) {
+	input := make([]byte, 32)
+	for i := 0; i < 16; i++ {
+		input[i] = '0'
+	}
+	copy(input[16:], []byte("78e8455d7f2faa9bde"))
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = countLeadingZeros(input)
+	}
+}
+
+func BenchmarkAddressLookup(b *testing.B) {
+	fixture := NewRouterTestFixture(&testing.T{})
+	fixture.SetUp()
+	defer fixture.TearDown()
+
+	// Register addresses
+	for i := 0; i < 1000; i++ {
+		address := fmt.Sprintf("%040d", i)
+		RegisterPairAddress([]byte(address), PairID(i+1))
+	}
+
+	addresses := make([][]byte, 100)
+	for i := range addresses {
+		addresses[i] = []byte(fmt.Sprintf("%040d", i))
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = lookupPairIDByAddress(addresses[i%len(addresses)])
+	}
+}
+
+func BenchmarkQuantization(b *testing.B) {
+	values := []float64{-100.5, -50.0, 0.0, 25.7, 100.0}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = quantizeTickToInt64(values[i%len(values)])
+	}
 }
