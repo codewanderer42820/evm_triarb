@@ -2105,29 +2105,44 @@ func BenchmarkEndToEndPipeline(b *testing.B) {
 		}
 	}
 
-	// Initialize rings
+	// Initialize rings with larger size to prevent overflow
 	for i := 0; i < numCores; i++ {
-		coreRings[i] = ring24.New(constants.DefaultRingSize)
+		coreRings[i] = ring24.New(constants.DefaultRingSize * 4) // Larger rings
+	}
+
+	// Launch consumers to drain rings continuously
+	stopChan := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < numCores; i++ {
+		wg.Add(1)
+		go func(coreID int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stopChan:
+					return
+				default:
+					// Continuously drain
+					for j := 0; j < 100; j++ {
+						if coreRings[coreID].Pop() == nil {
+							break
+						}
+					}
+				}
+			}
+		}(i)
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		event := events[i%len(events)]
 		DispatchTickUpdate(event)
-
-		// Drain rings occasionally
-		if i%1000 == 0 {
-			for j := 0; j < numCores; j++ {
-				count := 0
-				for coreRings[j].Pop() != nil {
-					count++
-					if count > 100 {
-						break
-					}
-				}
-			}
-		}
 	}
+	b.StopTimer()
+
+	// Stop consumers
+	close(stopChan)
+	wg.Wait()
 }
 
 // BenchmarkKeccakShuffle measures shuffling performance
