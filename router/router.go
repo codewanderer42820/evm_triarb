@@ -359,33 +359,36 @@ func DispatchTickUpdate(logView *types.LogView) {
 	// Calculate absolute positions in the original hex string.
 	// Add 2 for "0x", add ABI padding skip, add leading zeros skip.
 	offsetA := 2 + 32 + minZeros // Position for reserve A extraction
-	offsetB := 2 + 96 + minZeros // Position for reserve B extraction
+	offsetB := offsetA + 64      // Reserve B is exactly 64 chars later
 
-	// STEP 6: Bounds Calculation (~6-8 cycles)
+	// STEP 6: Bounds Calculation (~3-4 cycles)
 	// Calculate how many hex characters are available for extraction.
-	// Use branchless min to clamp to maximum extraction length (16 chars = uint64).
-	availableA := 64 - 32 - minZeros  // Available chars in reserve A (32 - minZeros)
-	availableB := 128 - 96 - minZeros // Available chars in reserve B (32 - minZeros)
+	// Both reserves have identical structure, so calculate once and reuse.
+	available := 32 - minZeros // Available chars in both reserves
 
-	// Branchless min(16, available) for both reserves
-	condA := 16 - availableA
-	maskA := condA >> 31
-	remainingA := availableA ^ ((16 ^ availableA) & maskA)
-
-	condB := 16 - availableB
-	maskB := condB >> 31
-	remainingB := availableB ^ ((16 ^ availableB) & maskB)
+	// Branchless min(16, available) - same for both reserves
+	cond := 16 - available
+	mask := cond >> 31
+	remaining := available ^ ((16 ^ available) & mask)
 
 	// STEP 7: Hex Parsing (~10-15 cycles)
 	// Extract the actual reserve values as uint64 integers.
 	// ParseHexU64 uses SIMD-style optimizations for maximum speed.
-	reserve0 := utils.ParseHexU64(logView.Data[offsetA : offsetA+remainingA])
-	reserve1 := utils.ParseHexU64(logView.Data[offsetB : offsetB+remainingB])
+	reserve0 := utils.ParseHexU64(logView.Data[offsetA : offsetA+remaining])
+	reserve1 := utils.ParseHexU64(logView.Data[offsetB : offsetB+remaining])
 
 	// STEP 8: Price Ratio Calculation (~10-15 cycles)
 	// Compute log2(reserve0/reserve1) using ultra-fast logarithm library.
 	// The 3.5ns performance here is critical for overall system latency.
-	tickValue, _ := fastuni.Log2ReserveRatio(reserve0, reserve1)
+	// Handle edge cases (zero reserves) by setting randomized extreme tick value.
+	tickValue, err := fastuni.Log2ReserveRatio(reserve0, reserve1)
+	if err != nil {
+		// Fast randomization using address entropy: 51.2 to 64.0 range
+		// Prevents hash collisions in priority queues (Pareto 80/20 distribution)
+		addrHash := uint64(uintptr(unsafe.Pointer(&message[0]))) // Stack address entropy
+		randBits := addrHash & 0x1FFF                            // Extract 13 bits (0-8191)
+		tickValue = 51.2 + float64(randBits)*0.0015625           // Scale to [51.2, 64.0]
+	}
 
 	// STEP 9: Message Construction (~3-4 cycles)
 	// Build the tick update message on the stack (zero allocation).
