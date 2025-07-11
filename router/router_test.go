@@ -1989,6 +1989,7 @@ func BenchmarkConcurrentBlockchainLoad(b *testing.B) {
 	b.SetParallelism(2) // Very limited parallelism
 
 	produced := atomic.Uint64{}
+	startTime := time.Now() // Track start time ourselves
 
 	b.RunParallel(func(pb *testing.PB) {
 		// Each worker gets its own event set
@@ -2017,7 +2018,7 @@ func BenchmarkConcurrentBlockchainLoad(b *testing.B) {
 	cancel()
 	wg.Wait()
 
-	elapsed := time.Since(b.StartTime)
+	elapsed := time.Since(startTime) // Use our tracked start time
 	actualTPS := float64(produced.Load()) / elapsed.Seconds()
 
 	b.ReportMetric(actualTPS/1e6, "M_TPS")
