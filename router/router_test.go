@@ -1901,7 +1901,6 @@ func BenchmarkDispatchTickUpdate(b *testing.B) {
 	b.ReportMetric(float64(consumed), "consumed")
 }
 
-// Alternative: Benchmarks that measure just dispatch without retry
 func BenchmarkDispatchOnly(b *testing.B) {
 	// Temporarily save the retry logic by making rings nil
 	fixture := NewRouterTestFixture(&testing.T{})
