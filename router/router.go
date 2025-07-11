@@ -744,16 +744,32 @@ func DispatchTickUpdate(logView *types.LogView) {
 		}
 	}
 
-	// PHASE 10: MULTI-CORE DISTRIBUTION (Target: 5-10 cycles)
+	// PHASE 10: MULTI-CORE DISTRIBUTION WITH GUARANTEED DELIVERY
 	//
-	// Broadcast the update to all cores assigned to process this trading pair.
-	// Uses bit manipulation to iterate through assigned cores without branches.
+	// Broadcast updates to all assigned cores with retry logic to ensure
+	// no price updates are lost. Critical for maintaining state consistency
+	// across the distributed arbitrage detection system.
 	coreAssignments := pairToCoreAssignment[pairID]
+
 	for coreAssignments != 0 {
-		coreID := bits.TrailingZeros64(uint64(coreAssignments))
-		messageBytes := (*[24]byte)(unsafe.Pointer(&message))
-		coreRings[coreID].Push(messageBytes)
-		coreAssignments &^= 1 << coreID
+		failedCores := uint64(0)
+
+		// Attempt delivery to all currently assigned cores
+		currentAssignments := coreAssignments
+		for currentAssignments != 0 {
+			coreID := bits.TrailingZeros64(currentAssignments)
+			messageBytes := (*[24]byte)(unsafe.Pointer(&message))
+
+			if !coreRings[coreID].Push(messageBytes) {
+				// Mark core for retry if ring was full
+				failedCores |= 1 << coreID
+			}
+
+			currentAssignments &^= 1 << coreID
+		}
+
+		// Continue with only failed cores, exit if all succeeded
+		coreAssignments = failedCores
 	}
 }
 
