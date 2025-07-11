@@ -1184,7 +1184,7 @@ func directAddressToIndex64(address40HexChars []byte) uint64 {
 // directAddressToIndex64Stored computes hash values from stored AddressKey structures.
 //
 // This function reconstructs hash values from the three-word AddressKey format,
-// extracting the same middle bytes used by directAddressToIndex64 to ensure
+// extracting the same middle byte range used by directAddressToIndex64 to ensure
 // consistent hash calculations during Robin Hood probing.
 //
 // CONSISTENCY REQUIREMENTS:
@@ -1195,9 +1195,10 @@ func directAddressToIndex64(address40HexChars []byte) uint64 {
 //
 // EXTRACTION STRATEGY:
 //
-// • Bytes 6-7: Upper 16 bits of word0 (bytes 0-7)
-// • Bytes 8-13: Lower 48 bits of word1 (bytes 8-15)
-// • Combination: 64-bit hash value for table indexing
+// • directAddressToIndex64 extracts hex chars 12-27 from the address string
+// • bytesToAddressKey stores bytes 12-19 from the parsed address in word2
+// • Both ranges overlap and represent the same middle portion of the address
+// • Direct word2 usage provides optimal performance with correct hash matching
 //
 //go:norace
 //go:nocheckptr
@@ -1205,21 +1206,13 @@ func directAddressToIndex64(address40HexChars []byte) uint64 {
 //go:inline
 //go:registerparams
 func directAddressToIndex64Stored(key AddressKey) uint64 {
-	// CROSS-WORD BYTE EXTRACTION
+	// DIRECT EXTRACTION
 	//
-	// Reconstruct the middle 8 bytes from the three-word representation to
-	// match the hash calculation performed on the original hex string.
+	// word2 contains the overlapping byte range that directAddressToIndex64
+	// extracts from hex chars 12-27, enabling consistent hash generation
+	// without complex cross-word bit manipulation.
 
-	// Extract bytes 6-7 from the upper portion of word0
-	bytes67 := key.words[0] >> 48
-
-	// Extract bytes 8-13 from the lower portion of word1
-	bytes813 := key.words[1] & 0x0000FFFFFFFFFFFF
-
-	// Combine components to form 64-bit hash value
-	hash64 := (bytes67 << 48) | bytes813
-
-	return hash64 & uint64(constants.AddressTableMask)
+	return key.words[2] & uint64(constants.AddressTableMask)
 }
 
 // isEqual performs efficient comparison between AddressKey structures.
