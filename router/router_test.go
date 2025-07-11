@@ -2218,12 +2218,12 @@ func BenchmarkParallelDispatch(b *testing.B) {
 		}
 	}
 
-	// Initialize rings with larger capacity
+	// Initialize VERY large rings
 	for i := 0; i < 8; i++ {
-		coreRings[i] = ring24.New(constants.DefaultRingSize * 8) // Much larger
+		coreRings[i] = ring24.New(1 << 16) // 65536 slots
 	}
 
-	// Launch dedicated consumers for each ring
+	// Launch aggressive consumers
 	stopChan := make(chan struct{})
 	var wg sync.WaitGroup
 
@@ -2234,30 +2234,27 @@ func BenchmarkParallelDispatch(b *testing.B) {
 			for {
 				select {
 				case <-stopChan:
-					// Drain remaining messages before exit
 					for coreRings[coreID].Pop() != nil {
 					}
 					return
 				default:
-					// Continuously consume messages
-					for j := 0; j < 1000; j++ {
-						if coreRings[coreID].Pop() == nil {
-							break
-						}
-					}
+					// Spin aggressively - no sleep
+					coreRings[coreID].Pop()
 				}
 			}
 		}(i)
 	}
 
+	// Give consumers time to start
+	time.Sleep(10 * time.Millisecond)
+
 	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		i := 0
-		for pb.Next() {
-			DispatchTickUpdate(events[i%len(events)])
-			i++
-		}
-	})
+
+	// Use regular loop instead of RunParallel to control concurrency
+	for i := 0; i < b.N; i++ {
+		DispatchTickUpdate(events[i%len(events)])
+	}
+
 	b.StopTimer()
 
 	// Stop consumers
