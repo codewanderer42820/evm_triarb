@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"math/bits"
 	"math/rand"
 	"runtime"
 	"sort"
@@ -1843,37 +1842,53 @@ func BenchmarkArbitrageDetectionLatency(b *testing.B) {
 	}
 
 	InitializeArbitrageSystem(cycles)
-	// Note: We can't close the shutdown channels since they're receive-only
-	// The goroutines will terminate when the process ends
 
-	// Simulate price updates that create arbitrage
-	profitableUpdates := make([]*TickUpdate, 100)
-	for i := range profitableUpdates {
-		profitableUpdates[i] = &TickUpdate{
-			pairID:      PairID(i + 1),
-			forwardTick: -0.001 * float64(i+1), // Slight negative = profit
-			reverseTick: 0.001 * float64(i+1),
+	// Wait for initialization to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Create events that will go through the normal dispatch pipeline
+	events := make([]*types.LogView, 100)
+	for i := range events {
+		// Create addresses for pairs that were registered during InitializeArbitrageSystem
+		addr := fmt.Sprintf("0x%040x", i+1)
+
+		// Register the address for this pair
+		RegisterPairAddress([]byte(addr[2:]), PairID(i+1))
+
+		// Create a price update that represents arbitrage opportunity
+		// reserve1 > reserve0 creates negative tick (profit opportunity)
+		reserve0 := uint64(1000000000000000000) // 1e18
+		reserve1 := uint64(1001000000000000000) // 1.001e18 (0.1% difference)
+
+		events[i] = &types.LogView{
+			Addr: []byte(addr),
+			Data: []byte(fmt.Sprintf("0x%064x%064x", reserve0, reserve1)),
 		}
 	}
 
 	b.ResetTimer()
 	b.ReportMetric(float64(len(cycles)), "arbitrage_cycles")
 
-	detected := 0
+	// Now use DispatchTickUpdate instead of calling processTickUpdate directly
 	for i := 0; i < b.N; i++ {
-		update := profitableUpdates[i%len(profitableUpdates)]
+		event := events[i%len(events)]
+		DispatchTickUpdate(event)
+	}
 
-		// Find the executor for this pair
-		coreAssignment := pairToCoreAssignment[update.pairID]
-		coreID := bits.TrailingZeros64(coreAssignment)
+	// Give time for processing
+	time.Sleep(10 * time.Millisecond)
 
-		if coreID < len(coreExecutors) && coreExecutors[coreID] != nil {
-			processTickUpdate(coreExecutors[coreID], update)
-			detected++
+	// Count messages in rings to verify processing
+	processed := 0
+	for i := 0; i < runtime.NumCPU(); i++ {
+		if coreRings[i] != nil {
+			for coreRings[i].Pop() != nil {
+				processed++
+			}
 		}
 	}
 
-	b.ReportMetric(float64(detected)/float64(b.N)*100, "detection_rate_%")
+	b.ReportMetric(float64(processed)/float64(b.N)*100, "detection_rate_%")
 }
 
 // BenchmarkBlockSizeProcessing simulates processing full blocks of DEX events
