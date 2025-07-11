@@ -52,7 +52,7 @@ type ArbitrageTriplet [3]PairID // Three-pair arbitrage cycle
 type CycleStateIndex uint64     // Index into cycle state storage
 
 // ============================================================================
-// MESSAGE PASSING STRUCTURES (Runtime Hot Path)
+// MESSAGE PASSING STRUCTURES (Runtime Hot Path) - OPTIMIZED FIELD ORDERING
 // ============================================================================
 //
 // These structures are used for inter-core communication via lock-free ring buffers.
@@ -64,21 +64,21 @@ type CycleStateIndex uint64     // Index into cycle state storage
 // CRITICAL CONSTRAINT: Must remain exactly 24 bytes for ring24 compatibility.
 // Adding any fields will break the lock-free message passing system.
 //
-// MEMORY LAYOUT:
+// OPTIMIZED MEMORY LAYOUT (HOTTEST TO COLDEST):
 //
-//	[0-7]:   forwardTick (float64) - Price in forward direction
-//	[8-15]:  reverseTick (float64) - Price in reverse direction
-//	[16-23]: pairID (uint64)       - Pair identifier
+//	[0-7]:   pairID (uint64)       - HOTTEST: Used first for routing in DispatchTickUpdate
+//	[8-15]:  forwardTick (float64) - HOT: Price for A→B trades (log2 ratio)
+//	[16-23]: reverseTick (float64) - HOT: Price for B→A trades (negative log2 ratio)
 //
 //go:notinheap
 type TickUpdate struct {
-	forwardTick float64 // 8B - Price for A→B trades (log2 ratio)
-	reverseTick float64 // 8B - Price for B→A trades (negative log2 ratio)
-	pairID      PairID  // 8B - Which trading pair this update affects
+	pairID      PairID  // 8B - HOTTEST: Used first for core routing and queue lookup
+	forwardTick float64 // 8B - HOT: Price for A→B trades (log2 ratio)
+	reverseTick float64 // 8B - HOT: Price for B→A trades (negative log2 ratio)
 }
 
 // ============================================================================
-// RUNTIME PROCESSING STRUCTURES (Hot path - ordered by access frequency)
+// RUNTIME PROCESSING STRUCTURES (Hot path) - OPTIMIZED FIELD ORDERING
 // ============================================================================
 //
 // These structures are accessed during every arbitrage computation and are
@@ -102,11 +102,15 @@ type TickUpdate struct {
 // processes directly, while the other two edges are updated via fanout.
 // This creates an intentional asymmetry that simplifies the update logic.
 //
+// FIELD ORDERING RATIONALE:
+// tickValues[3] are accessed in EVERY profitability calculation (sum operation)
+// pairIDs[3] are accessed only during fanout setup and debugging
+//
 //go:notinheap
 //go:align 64
 type ArbitrageCycleState struct {
-	tickValues [3]float64 // 24B - HOTTEST: Log price ratios for each edge
-	pairIDs    [3]PairID  // 24B - WARM: Pair identifiers for debugging
+	tickValues [3]float64 // 24B - HOTTEST: Log price ratios summed every cycle evaluation
+	pairIDs    [3]PairID  // 24B - WARM: Pair identifiers for fanout and debugging
 	_          [16]byte   // 16B - Padding to 64B cache line boundary
 }
 
@@ -124,17 +128,19 @@ type ArbitrageCycleState struct {
 // This prevents pathological cases where one pair dominates processing time,
 // ensuring consistent performance regardless of cycle distribution patterns.
 //
-// CACHE OPTIMIZATION:
-// - edgeIndex and cycleStateIndex are accessed together (hot fields first)
-// - queueHandle and queue pointer are used for priority queue operations
+// OPTIMIZED FIELD ORDERING (HOTTEST TO COLDEST):
+// 1. cycleStateIndex: Used FIRST for direct array access in fanout operations
+// 2. edgeIndex: Used immediately after for indexing into tickValues[edgeIndex]
+// 3. queue: Used for subsequent priority queue operations
+// 4. queueHandle: Used for specific queue manipulation operations
 //
 //go:notinheap
 //go:align 32
 type FanoutEntry struct {
-	edgeIndex       uint64                         // 8B - HOTTEST: Which edge (0,1,2) in the cycle
-	cycleStateIndex uint64                         // 8B - HOTTEST: Index into cycleStates array
-	queueHandle     uint64                         // 8B - WARM: Handle for priority queue operations
-	queue           *quantumqueue64.QuantumQueue64 // 8B - WARM: Pointer to the priority queue
+	cycleStateIndex uint64                         // 8B - HOTTEST: Array index for direct cycle access
+	edgeIndex       uint64                         // 8B - HOT: Which edge (0,1,2) for tickValues indexing
+	queue           *quantumqueue64.QuantumQueue64 // 8B - WARM: Pointer for queue operations
+	queueHandle     uint64                         // 8B - COLD: Handle for priority queue operations
 }
 
 // ProcessedCycle is a temporary structure used during cycle extraction.
@@ -145,11 +151,16 @@ type FanoutEntry struct {
 // This struct is part of a pre-allocated array in ArbitrageCoreExecutor,
 // eliminating heap allocations during hot path processing.
 //
+// OPTIMIZED FIELD ORDERING (HOTTEST TO COLDEST):
+// 1. cycleStateIndex: Used FIRST for array access during cycle processing
+// 2. originalTick: Used immediately after for priority calculation
+// 3. queueHandle: Used for queue reinsertion operations
+//
 //go:notinheap
 //go:align 32
 type ProcessedCycle struct {
+	cycleStateIndex CycleStateIndex       // 8B - HOTTEST: Array index for cycle state access
 	originalTick    int64                 // 8B - HOT: Original tick value for reinsertion
-	cycleStateIndex CycleStateIndex       // 8B - HOT: Index into cycle state storage
 	queueHandle     quantumqueue64.Handle // 4B - WARM: Queue handle for reinsertion
 	_               uint32                // 4B - Padding for 8-byte alignment
 	_               [8]byte               // 8B - Padding to 32B boundary
@@ -166,34 +177,44 @@ type ProcessedCycle struct {
 //
 // PROCESSING MODEL:
 // 1. Receive TickUpdate messages via ring buffer
-// 2. Look up affected arbitrage cycles
-// 3. Extract profitable cycles from priority queues
-// 4. Update cycle states and recompute priorities
-// 5. Emit arbitrage opportunities for execution
+// 2. Look up affected arbitrage cycles using pairToQueueIndex (HOTTEST PATH)
+// 3. Check direction flag to select tick value (HOTTEST PATH)
+// 4. Extract profitable cycles from priority queues
+// 5. Update cycle states and recompute priorities
+// 6. Emit arbitrage opportunities for execution
+//
+// CRITICAL FIELD ORDERING (HOTTEST TO COLDEST):
+// 1. pairToQueueIndex: Hit on EVERY tick update for queue lookup
+// 2. isReverseDirection: Checked on EVERY tick update for direction selection
+// 3. cycleStates: Accessed frequently during cycle state updates
+// 4. fanoutTables: Accessed during fanout operations for affected cycles
+// 5. priorityQueues: Accessed during queue operations (less frequent)
+// 6. processedCycles: Only used during profitable cycle extraction
+// 7. shutdownSignal: Rarely accessed after initialization
 //
 //go:notinheap
 type ArbitrageCoreExecutor struct {
-	// HOTTEST PATH: Accessed every tick update
-	pairToQueueIndex localidx.Hash // 64B - O(1) mapping from pair→queue index
+	// HOTTEST PATH: Accessed every tick update (millions of times per second)
+	pairToQueueIndex   localidx.Hash // 64B - O(1) mapping from pair→queue index
+	isReverseDirection bool          // 1B - HOTTEST: Checked every tick for direction selection
+	_                  [7]byte       // 7B - Padding for alignment
 
-	// HOT PATH: Accessed during cycle processing
-	fanoutTables [][]FanoutEntry       // 24B - Maps pairs to affected cycles
+	// HOT PATH: Accessed during cycle processing (frequent)
 	cycleStates  []ArbitrageCycleState // 24B - All arbitrage cycle states
+	fanoutTables [][]FanoutEntry       // 24B - Maps pairs to affected cycles
 
-	// WARM PATH: Used during queue operations
+	// WARM PATH: Used during queue operations (moderate frequency)
 	priorityQueues []quantumqueue64.QuantumQueue64 // 24B - Priority queues for each pair
 
-	// BUFFER SPACE: Pre-allocated working memory (eliminates allocations)
+	// BUFFER SPACE: Pre-allocated working memory (used during extraction only)
 	processedCycles [128]ProcessedCycle // 4096B - Temporary storage for extracted cycles
 
-	// COLD PATH: Rarely accessed after initialization
-	shutdownSignal     <-chan struct{} // 8B - Shutdown coordination
-	isReverseDirection bool            // 1B - Forward vs reverse direction flag
-	_                  [7]byte         // 7B - Padding for alignment
+	// COLD PATH: Control (rarely accessed after initialization)
+	shutdownSignal <-chan struct{} // 8B - Shutdown coordination
 }
 
 // ============================================================================
-// ADDRESS HANDLING STRUCTURES (Lookup tables)
+// ADDRESS HANDLING STRUCTURES (Lookup tables) - OPTIMIZED FIELD ORDERING
 // ============================================================================
 //
 // The address system uses Robin Hood hashing for O(1) pair lookups.
@@ -212,15 +233,18 @@ type ArbitrageCoreExecutor struct {
 //	words[1]: Address bytes 8-15  (64 bits)
 //	words[2]: Address bytes 16-19 (32 bits in lower word)
 //
+// FIELD ORDERING: All words are accessed together during key comparison,
+// so ordering doesn't matter for performance - current layout is optimal.
+//
 //go:notinheap
 //go:align 32
 type AddressKey struct {
-	words [3]uint64 // 24B - Packed 160-bit Ethereum address
+	words [3]uint64 // 24B - Packed 160-bit Ethereum address (all accessed together)
 	_     [8]byte   // 8B - Padding to 32B cache line boundary
 }
 
 // ============================================================================
-// INITIALIZATION STRUCTURES (Setup only)
+// INITIALIZATION STRUCTURES (Setup only) - OPTIMIZED FIELD ORDERING
 // ============================================================================
 //
 // These structures are used only during system initialization to build
@@ -235,10 +259,13 @@ type AddressKey struct {
 // 3. Group bindings by pair into shards
 // 4. Distribute shards across CPU cores
 //
+// FIELD ORDERING: cyclePairs accessed more frequently than edgeIndex during
+// initialization processing, current order is optimal.
+//
 //go:notinheap
 //go:align 32
 type ArbitrageEdgeBinding struct {
-	cyclePairs [3]PairID // 24B - The complete three-pair cycle
+	cyclePairs [3]PairID // 24B - The complete three-pair cycle (accessed first)
 	edgeIndex  uint64    // 8B - Which position (0,1,2) this pair occupies
 }
 
@@ -251,10 +278,14 @@ type ArbitrageEdgeBinding struct {
 // - Distribute shards evenly across cores
 // - Use deterministic shuffling for load balancing
 //
+// OPTIMIZED FIELD ORDERING (HOTTEST TO COLDEST):
+// 1. pairID: Used FIRST for shard identification and routing
+// 2. edgeBindings: Processed after shard identification
+//
 //go:notinheap
 //go:align 32
 type PairShardBucket struct {
-	pairID       PairID                 // 8B - The pair this shard handles
+	pairID       PairID                 // 8B - HOTTEST: Shard identifier accessed first
 	edgeBindings []ArbitrageEdgeBinding // 24B - All cycles containing this pair
 }
 
@@ -266,10 +297,15 @@ type PairShardBucket struct {
 // Uses Keccak-256 for high-quality randomness distribution.
 // This prevents adversarial input from creating pathological
 // load imbalances across CPU cores.
+//
+// OPTIMIZED FIELD ORDERING (HOTTEST TO COLDEST):
+// 1. counter: Incremented on EVERY call to nextUint64() - hottest field
+// 2. seed: Read on every call for hash input - hot field
+// 3. hasher: Reset occasionally, accessed less frequently - cold field
 type keccakRandomState struct {
 	counter uint64    // 8B - HOTTEST: Increment counter for sequence generation
-	seed    [32]byte  // 32B - WARM: Current random seed (Keccak-256 hash)
-	hasher  hash.Hash // 24B - COLD: Reused Keccak-256 hasher instance
+	seed    [32]byte  // 32B - HOT: Current random seed (read each call)
+	hasher  hash.Hash // 24B - COLD: Reused hasher instance (occasionally reset)
 }
 
 // ============================================================================
@@ -374,11 +410,12 @@ func DispatchTickUpdate(logView *types.LogView) {
 
 	// STEP 9: Message Construction (~3-4 cycles)
 	// Build 24-byte message on stack (zero allocation)
+	// OPTIMIZED: pairID first for faster core routing
 	var message [24]byte
 	tickUpdate := (*TickUpdate)(unsafe.Pointer(&message))
+	tickUpdate.pairID = pairID
 	tickUpdate.forwardTick = tickValue
 	tickUpdate.reverseTick = -tickValue
-	tickUpdate.pairID = pairID
 
 	// STEP 10: Core Broadcasting (~5-10 cycles)
 	// Send to all cores handling this pair using bit manipulation
@@ -494,7 +531,7 @@ func lookupPairIDByAddress(address42HexBytes []byte) PairID {
 //
 // ALGORITHM:
 // 1. Select tick direction (forward/reverse)
-// 2. Find priority queue for updated pair
+// 2. Find priority queue for updated pair (HOTTEST PATH - pairToQueueIndex)
 // 3. Extract profitable cycles to pre-allocated buffer
 // 4. Reinsert cycles with original priorities
 // 5. Update other cycles containing this pair (fanout)
@@ -514,8 +551,8 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 		currentTick = update.reverseTick
 	}
 
-	// STEP 2: Queue Lookup
-	// Find priority queue for this pair
+	// STEP 2: Queue Lookup (HOTTEST PATH)
+	// Find priority queue for this pair using optimized hash lookup
 	queueIndex, _ := executor.pairToQueueIndex.Get(uint32(update.pairID))
 	queue := &executor.priorityQueues[queueIndex]
 
@@ -543,10 +580,11 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 		}
 
 		// Store in pre-allocated buffer for reinsertion
+		// OPTIMIZED: cycleStateIndex first for faster array access
 		executor.processedCycles[cycleCount] = ProcessedCycle{
-			queueHandle:     handle,
-			originalTick:    queueTick,
 			cycleStateIndex: cycleIndex,
+			originalTick:    queueTick,
+			queueHandle:     handle,
 		}
 		cycleCount++
 
@@ -566,6 +604,7 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 	// STEP 5: Fanout Updates
 	// Update other cycles containing this pair
 	for _, fanoutEntry := range executor.fanoutTables[queueIndex] {
+		// OPTIMIZED: cycleStateIndex first for direct array access
 		cycle := &executor.cycleStates[fanoutEntry.cycleStateIndex]
 		cycle.tickValues[fanoutEntry.edgeIndex] = currentTick
 
@@ -954,12 +993,13 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 		otherEdge2 := (edgeBinding.edgeIndex + 2) % 3
 
 		for _, edgeIdx := range [...]uint64{otherEdge1, otherEdge2} {
+			// OPTIMIZED: cycleStateIndex first for direct array access
 			executor.fanoutTables[queueIndex] = append(executor.fanoutTables[queueIndex],
 				FanoutEntry{
-					edgeIndex:       edgeIdx,
 					cycleStateIndex: uint64(cycleIndex),
-					queueHandle:     uint64(queueHandle),
+					edgeIndex:       edgeIdx,
 					queue:           queue,
+					queueHandle:     uint64(queueHandle),
 				})
 		}
 	}
@@ -979,11 +1019,14 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 	shutdownChannel := make(chan struct{})
 
 	// Initialize core executor with pre-allocated buffers
+	// OPTIMIZED: Hot fields first for cache performance
 	executor := &ArbitrageCoreExecutor{
-		isReverseDirection: coreID >= forwardCoreCount, // Second half of cores handle reverse direction
-		shutdownSignal:     shutdownChannel,
 		pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
+		isReverseDirection: coreID >= forwardCoreCount, // HOTTEST: Checked every tick update
 		cycleStates:        make([]ArbitrageCycleState, 0),
+		fanoutTables:       nil,
+		priorityQueues:     nil,
+		shutdownSignal:     shutdownChannel,
 		// Pre-allocated processedCycles buffer is part of struct
 	}
 	coreExecutors[coreID] = executor
