@@ -383,11 +383,11 @@ func DispatchTickUpdate(logView *types.LogView) {
 	// Handle edge cases (zero reserves) by setting randomized extreme tick value.
 	tickValue, err := fastuni.Log2ReserveRatio(reserve0, reserve1)
 	if err != nil {
-		// Fast randomization using address entropy: 51.2 to 64.0 range
+		// Fast randomization using reserve values and pair ID: 51.2 to 64.0 range
 		// Prevents hash collisions in priority queues (Pareto 80/20 distribution)
-		addrHash := uint64(uintptr(unsafe.Pointer(&message[0]))) // Stack address entropy
-		randBits := addrHash & 0x1FFF                            // Extract 13 bits (0-8191)
-		tickValue = 51.2 + float64(randBits)*0.0015625           // Scale to [51.2, 64.0]
+		addrHash := uint64(pairID) ^ reserve0 ^ reserve1 // Combine available entropy
+		randBits := addrHash & 0x1FFF                    // Extract 13 bits (0-8191)
+		tickValue = 51.2 + float64(randBits)*0.0015625   // Scale to [51.2, 64.0]
 	}
 
 	// STEP 9: Message Construction (~3-4 cycles)
