@@ -710,9 +710,11 @@ func DispatchTickUpdate(logView *types.LogView) {
 		// FALLBACK: Cryptographically secure random value generation
 		//
 		// When reserves are invalid (typically zero), generate a bounded random
-		// value using available entropy. The range [51.2, 64.0] represents
-		// typical market conditions while ensuring system stability.
-		addrHash := uint64(pairID) ^ reserve0 ^ reserve1
+		// value using cryptographic mixing to prevent priority queue clustering.
+		// The range [51.2, 64.0] ensures corrupted data doesn't interfere with
+		// optimal arbitrage opportunities (which cluster around 0) while maintaining
+		// perfect distribution across priority queue buckets.
+		addrHash := utils.Mix64(uint64(pairID))
 		randBits := addrHash & 0x1FFF // Extract 13 bits for range [0, 8191]
 		tickValue = 51.2 + float64(randBits)*0.0015625
 	}
