@@ -357,6 +357,7 @@ func TestTickUpdateStructure(t *testing.T) {
 			forwardTick: 1.5,
 			reverseTick: -1.5,
 		}
+		_ = tu // Explicitly mark as intentionally unused
 
 		fixture.EXPECT_EQ(24, int(unsafe.Sizeof(tu)), "TickUpdate must be exactly 24 bytes for ring buffer compatibility")
 	})
