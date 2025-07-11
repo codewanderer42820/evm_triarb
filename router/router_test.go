@@ -2218,26 +2218,49 @@ func BenchmarkParallelDispatch(b *testing.B) {
 		}
 	}
 
-	// Initialize rings
+	// Initialize rings with larger capacity
 	for i := 0; i < 8; i++ {
-		coreRings[i] = ring24.New(constants.DefaultRingSize)
+		coreRings[i] = ring24.New(constants.DefaultRingSize * 8) // Much larger
 	}
 
+	// Launch dedicated consumers for each ring
+	stopChan := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(coreID int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stopChan:
+					// Drain remaining messages before exit
+					for coreRings[coreID].Pop() != nil {
+					}
+					return
+				default:
+					// Continuously consume messages
+					for j := 0; j < 1000; j++ {
+						if coreRings[coreID].Pop() == nil {
+							break
+						}
+					}
+				}
+			}
+		}(i)
+	}
+
+	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
 			DispatchTickUpdate(events[i%len(events)])
 			i++
-
-			// Drain occasionally
-			if i%100 == 0 {
-				coreID := i % 8
-				for j := 0; j < 10; j++ {
-					if coreRings[coreID].Pop() == nil {
-						break
-					}
-				}
-			}
 		}
 	})
+	b.StopTimer()
+
+	// Stop consumers
+	close(stopChan)
+	wg.Wait()
 }
