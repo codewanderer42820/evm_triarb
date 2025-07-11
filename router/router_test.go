@@ -1711,9 +1711,10 @@ func TestPipelineIntegration(t *testing.T) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// BENCHMARK TESTS
+// EXTENSIVE BENCHMARK TESTS
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
+// BenchmarkDispatchTickUpdate measures the performance of event dispatch
 func BenchmarkDispatchTickUpdate(b *testing.B) {
 	fixture := NewRouterTestFixture(&testing.T{})
 	fixture.SetUp()
@@ -1725,7 +1726,7 @@ func BenchmarkDispatchTickUpdate(b *testing.B) {
 	RegisterPairToCore(pairID, 0)
 	coreRings[0] = ring24.New(constants.DefaultRingSize)
 
-	logView := fixture.CreateTestLogView(address, 1000000000000, 2000000000000)
+	logView := fixture.CreateTestLogView(address, 1000000000000000000, 2000000000000000000)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -1739,6 +1740,39 @@ func BenchmarkDispatchTickUpdate(b *testing.B) {
 	}
 }
 
+// BenchmarkDispatchTickUpdateMultiCore measures dispatch to multiple cores
+func BenchmarkDispatchTickUpdateMultiCore(b *testing.B) {
+	fixture := NewRouterTestFixture(&testing.T{})
+	fixture.SetUp()
+	defer fixture.TearDown()
+
+	address := "0x1234567890123456789012345678901234567890"
+	pairID := PairID(12345)
+	RegisterPairAddress([]byte(address[2:]), pairID)
+
+	// Assign to 4 cores
+	for i := 0; i < 4; i++ {
+		RegisterPairToCore(pairID, uint8(i))
+		coreRings[i] = ring24.New(constants.DefaultRingSize)
+	}
+
+	logView := fixture.CreateTestLogView(address, 1000000000000000000, 2000000000000000000)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		DispatchTickUpdate(logView)
+
+		// Prevent overflow
+		if i%250 == 0 {
+			for j := 0; j < 4; j++ {
+				for coreRings[j].Pop() != nil {
+				}
+			}
+		}
+	}
+}
+
+// BenchmarkCountLeadingZeros measures the performance of leading zero counting
 func BenchmarkCountLeadingZeros(b *testing.B) {
 	input := make([]byte, 32)
 	for i := 0; i < 16; i++ {
@@ -1752,6 +1786,38 @@ func BenchmarkCountLeadingZeros(b *testing.B) {
 	}
 }
 
+// BenchmarkCountLeadingZerosVaried tests with different zero counts
+func BenchmarkCountLeadingZerosVaried(b *testing.B) {
+	testCases := []struct {
+		name  string
+		zeros int
+	}{
+		{"NoZeros", 0},
+		{"8Zeros", 8},
+		{"16Zeros", 16},
+		{"24Zeros", 24},
+		{"31Zeros", 31},
+	}
+
+	for _, tc := range testCases {
+		b.Run(tc.name, func(b *testing.B) {
+			input := make([]byte, 32)
+			for i := 0; i < tc.zeros; i++ {
+				input[i] = '0'
+			}
+			for i := tc.zeros; i < 32; i++ {
+				input[i] = 'a'
+			}
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = countLeadingZeros(input)
+			}
+		})
+	}
+}
+
+// BenchmarkAddressLookup measures the performance of address resolution
 func BenchmarkAddressLookup(b *testing.B) {
 	fixture := NewRouterTestFixture(&testing.T{})
 	fixture.SetUp()
@@ -1774,6 +1840,57 @@ func BenchmarkAddressLookup(b *testing.B) {
 	}
 }
 
+// BenchmarkAddressLookupTableSizes tests lookup performance with different table loads
+func BenchmarkAddressLookupTableSizes(b *testing.B) {
+	loads := []int{100, 1000, 10000, 50000}
+
+	for _, load := range loads {
+		b.Run(fmt.Sprintf("Load%d", load), func(b *testing.B) {
+			fixture := NewRouterTestFixture(&testing.T{})
+			fixture.SetUp()
+			defer fixture.TearDown()
+
+			// Register addresses with good distribution
+			for i := 0; i < load; i++ {
+				address := fmt.Sprintf("%08x%032x", i*7919, i)
+				RegisterPairAddress([]byte(address), PairID(i+1))
+			}
+
+			// Create test addresses
+			testAddrs := make([][]byte, 100)
+			for i := range testAddrs {
+				idx := i * (load / 100)
+				testAddrs[i] = []byte(fmt.Sprintf("%08x%032x", idx*7919, idx))
+			}
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = lookupPairIDByAddress(testAddrs[i%len(testAddrs)])
+			}
+		})
+	}
+}
+
+// BenchmarkAddressRegistration measures registration performance
+func BenchmarkAddressRegistration(b *testing.B) {
+	addresses := make([][]byte, 10000)
+	for i := range addresses {
+		addresses[i] = []byte(fmt.Sprintf("%08x%032x", i*7919, i))
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		fixture := NewRouterTestFixture(&testing.T{})
+		fixture.SetUp()
+
+		idx := i % len(addresses)
+		RegisterPairAddress(addresses[idx], PairID(idx+1))
+
+		fixture.TearDown()
+	}
+}
+
+// BenchmarkQuantization measures tick quantization performance
 func BenchmarkQuantization(b *testing.B) {
 	values := []float64{-100.5, -50.0, 0.0, 25.7, 100.0}
 
@@ -1781,4 +1898,305 @@ func BenchmarkQuantization(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = quantizeTickToInt64(values[i%len(values)])
 	}
+}
+
+// BenchmarkProcessTickUpdate measures core processing performance
+func BenchmarkProcessTickUpdate(b *testing.B) {
+	executor := &ArbitrageCoreExecutor{
+		pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
+		isReverseDirection: false,
+		cycleStates:        make([]ArbitrageCycleState, 100),
+		fanoutTables:       make([][]FanoutEntry, 10),
+		priorityQueues:     make([]quantumqueue64.QuantumQueue64, 10),
+	}
+
+	// Initialize queues and add some cycles
+	for i := range executor.priorityQueues {
+		executor.priorityQueues[i] = *quantumqueue64.New()
+
+		// Add some cycles to each queue
+		for j := 0; j < 10; j++ {
+			handle, _ := executor.priorityQueues[i].BorrowSafe()
+			executor.priorityQueues[i].Push(constants.MaxInitializationPriority-int64(j*100), handle, uint64(i*10+j))
+		}
+	}
+
+	// Setup pair mappings
+	for i := 0; i < 10; i++ {
+		executor.pairToQueueIndex.Put(uint32(i+1), uint32(i))
+	}
+
+	updates := make([]*TickUpdate, 10)
+	for i := range updates {
+		updates[i] = &TickUpdate{
+			pairID:      PairID(i + 1),
+			forwardTick: float64(i) * 0.1,
+			reverseTick: -float64(i) * 0.1,
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		processTickUpdate(executor, updates[i%len(updates)])
+	}
+}
+
+// BenchmarkFanoutOperations measures fanout update performance
+func BenchmarkFanoutOperations(b *testing.B) {
+	sizes := []int{10, 100, 1000}
+
+	for _, size := range sizes {
+		b.Run(fmt.Sprintf("Fanout%d", size), func(b *testing.B) {
+			executor := &ArbitrageCoreExecutor{
+				pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
+				isReverseDirection: false,
+				cycleStates:        make([]ArbitrageCycleState, size),
+				fanoutTables:       make([][]FanoutEntry, 1),
+				priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
+			}
+
+			executor.priorityQueues[0] = *quantumqueue64.New()
+
+			// Create fanout entries
+			executor.fanoutTables[0] = make([]FanoutEntry, size)
+			for i := 0; i < size; i++ {
+				handle, _ := executor.priorityQueues[0].BorrowSafe()
+				executor.priorityQueues[0].Push(constants.MaxInitializationPriority, handle, uint64(i))
+
+				executor.fanoutTables[0][i] = FanoutEntry{
+					cycleStateIndex: uint64(i),
+					edgeIndex:       uint64(i % 3),
+					queue:           &executor.priorityQueues[0],
+					queueHandle:     uint64(handle),
+				}
+			}
+
+			executor.pairToQueueIndex.Put(1, 0)
+
+			update := &TickUpdate{
+				pairID:      1,
+				forwardTick: 1.5,
+				reverseTick: -1.5,
+			}
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				processTickUpdate(executor, update)
+			}
+		})
+	}
+}
+
+// BenchmarkRingBufferOperations measures ring buffer performance
+func BenchmarkRingBufferOperations(b *testing.B) {
+	b.Run("Push", func(b *testing.B) {
+		ring := ring24.New(constants.DefaultRingSize)
+		message := &TickUpdate{
+			pairID:      12345,
+			forwardTick: 1.5,
+			reverseTick: -1.5,
+		}
+		messageBytes := (*[24]byte)(unsafe.Pointer(message))
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			ring.Push(messageBytes)
+			// Pop occasionally to prevent overflow
+			if i%1000 == 0 {
+				for ring.Pop() != nil {
+				}
+			}
+		}
+	})
+
+	b.Run("Pop", func(b *testing.B) {
+		ring := ring24.New(constants.DefaultRingSize)
+		message := &TickUpdate{
+			pairID:      12345,
+			forwardTick: 1.5,
+			reverseTick: -1.5,
+		}
+		messageBytes := (*[24]byte)(unsafe.Pointer(message))
+
+		// Pre-fill ring
+		for i := 0; i < constants.DefaultRingSize/2; i++ {
+			ring.Push(messageBytes)
+		}
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if msg := ring.Pop(); msg == nil {
+				// Refill if empty
+				for j := 0; j < 100; j++ {
+					ring.Push(messageBytes)
+				}
+			}
+		}
+	})
+
+	b.Run("PushPop", func(b *testing.B) {
+		ring := ring24.New(constants.DefaultRingSize)
+		message := &TickUpdate{
+			pairID:      12345,
+			forwardTick: 1.5,
+			reverseTick: -1.5,
+		}
+		messageBytes := (*[24]byte)(unsafe.Pointer(message))
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			ring.Push(messageBytes)
+			ring.Pop()
+		}
+	})
+}
+
+// BenchmarkEndToEndPipeline measures complete pipeline performance
+func BenchmarkEndToEndPipeline(b *testing.B) {
+	fixture := NewRouterTestFixture(&testing.T{})
+	fixture.SetUp()
+	defer fixture.TearDown()
+
+	// Setup 100 pairs distributed across 4 cores
+	numPairs := 100
+	numCores := 4
+
+	addresses := make([]string, numPairs)
+	events := make([]*types.LogView, numPairs)
+
+	for i := 0; i < numPairs; i++ {
+		addr := fmt.Sprintf("%08x%032x", i*7919, i)
+		addresses[i] = addr
+
+		RegisterPairAddress([]byte(addr), PairID(i+1))
+		RegisterPairToCore(PairID(i+1), uint8(i%numCores))
+
+		events[i] = &types.LogView{
+			Addr: []byte("0x" + addr),
+			Data: []byte(fmt.Sprintf("0x%064x%064x",
+				uint64(1000000000000000000+i*1000000),
+				uint64(2000000000000000000+i*1000000))),
+		}
+	}
+
+	// Initialize rings
+	for i := 0; i < numCores; i++ {
+		coreRings[i] = ring24.New(constants.DefaultRingSize)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		event := events[i%len(events)]
+		DispatchTickUpdate(event)
+
+		// Drain rings occasionally
+		if i%1000 == 0 {
+			for j := 0; j < numCores; j++ {
+				count := 0
+				for coreRings[j].Pop() != nil {
+					count++
+					if count > 100 {
+						break
+					}
+				}
+			}
+		}
+	}
+}
+
+// BenchmarkKeccakShuffle measures shuffling performance
+func BenchmarkKeccakShuffle(b *testing.B) {
+	sizes := []int{10, 100, 1000}
+
+	for _, size := range sizes {
+		b.Run(fmt.Sprintf("Size%d", size), func(b *testing.B) {
+			bindings := make([]ArbitrageEdgeBinding, size)
+			for i := range bindings {
+				bindings[i] = ArbitrageEdgeBinding{
+					cyclePairs: [3]PairID{PairID(i * 3), PairID(i*3 + 1), PairID(i*3 + 2)},
+					edgeIndex:  uint64(i % 3),
+				}
+			}
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				bindingsCopy := make([]ArbitrageEdgeBinding, len(bindings))
+				copy(bindingsCopy, bindings)
+				keccakShuffleEdgeBindings(bindingsCopy, PairID(i))
+			}
+		})
+	}
+}
+
+// BenchmarkBytesToAddressKey measures address conversion performance
+func BenchmarkBytesToAddressKey(b *testing.B) {
+	addresses := make([][]byte, 100)
+	for i := range addresses {
+		addresses[i] = []byte(fmt.Sprintf("%040x", i*7919))
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = bytesToAddressKey(addresses[i%len(addresses)])
+	}
+}
+
+// BenchmarkDirectAddressHashing measures direct hash performance
+func BenchmarkDirectAddressHashing(b *testing.B) {
+	addresses := make([][]byte, 100)
+	for i := range addresses {
+		addresses[i] = []byte(fmt.Sprintf("%040x", i*7919))
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = directAddressToIndex64(addresses[i%len(addresses)])
+	}
+}
+
+// BenchmarkParallelDispatch measures parallel event dispatch
+func BenchmarkParallelDispatch(b *testing.B) {
+	fixture := NewRouterTestFixture(&testing.T{})
+	fixture.SetUp()
+	defer fixture.TearDown()
+
+	// Setup pairs and events
+	numPairs := 1000
+	events := make([]*types.LogView, numPairs)
+
+	for i := 0; i < numPairs; i++ {
+		addr := fmt.Sprintf("%08x%032x", i*7919, i)
+		RegisterPairAddress([]byte(addr), PairID(i+1))
+		RegisterPairToCore(PairID(i+1), uint8(i%8))
+
+		events[i] = &types.LogView{
+			Addr: []byte("0x" + addr),
+			Data: []byte(fmt.Sprintf("0x%064x%064x",
+				uint64(1000000000000000000),
+				uint64(2000000000000000000))),
+		}
+	}
+
+	// Initialize rings
+	for i := 0; i < 8; i++ {
+		coreRings[i] = ring24.New(constants.DefaultRingSize)
+	}
+
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			DispatchTickUpdate(events[i%len(events)])
+			i++
+
+			// Drain occasionally
+			if i%100 == 0 {
+				coreID := i % 8
+				for j := 0; j < 10; j++ {
+					if coreRings[coreID].Pop() == nil {
+						break
+					}
+				}
+			}
+		}
+	})
 }
