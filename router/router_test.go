@@ -1843,14 +1843,8 @@ func BenchmarkArbitrageDetectionLatency(b *testing.B) {
 	}
 
 	InitializeArbitrageSystem(cycles)
-	defer func() {
-		// Cleanup goroutines
-		for i := range coreExecutors {
-			if coreExecutors[i] != nil {
-				close(coreExecutors[i].shutdownSignal)
-			}
-		}
-	}()
+	// Note: We can't close the shutdown channels since they're receive-only
+	// The goroutines will terminate when the process ends
 
 	// Simulate price updates that create arbitrage
 	profitableUpdates := make([]*TickUpdate, 100)
@@ -1945,7 +1939,7 @@ func BenchmarkBlockSizeProcessing(b *testing.B) {
 		}
 
 		blockTime := time.Since(start)
-		b.ReportMetric(blockTime.Milliseconds(), "ms_per_block")
+		b.ReportMetric(float64(blockTime.Milliseconds()), "ms_per_block")
 		b.ReportMetric(float64(processed)/float64(eventsPerBlock)*100, "events_processed_%")
 
 		if blockTime > 400*time.Millisecond {
