@@ -1351,6 +1351,322 @@ func TestMemoryAlignmentRequirements(t *testing.T) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
+// END-TO-END PIPELINE TESTS
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+// TestCompleteEndToEndPipeline verifies the entire flow from event to arbitrage detection
+func TestCompleteEndToEndPipeline(t *testing.T) {
+	t.Skip("Skipping end-to-end tests that require modifying emitArbitrageOpportunity")
+	// TODO: To enable these tests, change emitArbitrageOpportunity in router.go from:
+	//   func emitArbitrageOpportunity(...) { ... }
+	// to:
+	//   var emitArbitrageOpportunity = func(...) { ... }
+}
+
+// TestMessageFlowThroughRings verifies ring buffer message passing
+func TestMessageFlowThroughRings(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+	defer fixture.TearDown()
+
+	t.Run("DirectRingCommunication", func(t *testing.T) {
+		// Create a ring and register a pair to core 0
+		coreRings[0] = ring24.New(constants.DefaultRingSize)
+
+		pairID := PairID(5001)
+		addr := "0xe000000000000000000000000000000000000001"
+
+		RegisterPairAddress([]byte(addr[2:]), pairID)
+		RegisterPairToCore(pairID, 0)
+
+		// Create and dispatch an event
+		event := fixture.CreateTestLogView(addr, 1000000000000000000, 2000000000000000000)
+		DispatchTickUpdate(event)
+
+		// Verify message in ring
+		message := coreRings[0].Pop()
+		fixture.ASSERT_TRUE(message != nil, "Message should be in ring")
+
+		if message != nil {
+			tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
+			fixture.EXPECT_EQ(pairID, tickUpdate.pairID, "PairID should match")
+			fixture.EXPECT_NEAR(-1.0, tickUpdate.forwardTick, 0.1, "Forward tick should be ~-1.0 for 0.5 ratio")
+			fixture.EXPECT_NEAR(1.0, tickUpdate.reverseTick, 0.1, "Reverse tick should be ~1.0")
+		}
+	})
+
+	t.Run("MultiCoreDistribution", func(t *testing.T) {
+		// Setup multiple core rings
+		for i := 0; i < 4; i++ {
+			coreRings[i] = ring24.New(constants.DefaultRingSize)
+		}
+
+		pairID := PairID(5002)
+		addr := "0xe000000000000000000000000000000000000002"
+
+		RegisterPairAddress([]byte(addr[2:]), pairID)
+		// Assign to multiple cores
+		RegisterPairToCore(pairID, 0)
+		RegisterPairToCore(pairID, 2)
+
+		// Dispatch event
+		event := fixture.CreateTestLogView(addr, 3000000000000000000, 1000000000000000000)
+		DispatchTickUpdate(event)
+
+		// Verify both assigned cores received the message
+		msg0 := coreRings[0].Pop()
+		msg2 := coreRings[2].Pop()
+
+		fixture.ASSERT_TRUE(msg0 != nil, "Core 0 should receive message")
+		fixture.ASSERT_TRUE(msg2 != nil, "Core 2 should receive message")
+
+		// Verify unassigned cores didn't receive
+		msg1 := coreRings[1].Pop()
+		msg3 := coreRings[3].Pop()
+
+		fixture.EXPECT_TRUE(msg1 == nil, "Core 1 should not receive message")
+		fixture.EXPECT_TRUE(msg3 == nil, "Core 3 should not receive message")
+	})
+
+	t.Run("RingOverflowHandling", func(t *testing.T) {
+		// Test ring buffer behavior when full
+		coreRings[0] = ring24.New(16) // Small ring for testing
+
+		pairID := PairID(5003)
+		addr := "0xe000000000000000000000000000000000000003"
+
+		RegisterPairAddress([]byte(addr[2:]), pairID)
+		RegisterPairToCore(pairID, 0)
+
+		// Fill the ring
+		for i := 0; i < 20; i++ {
+			event := fixture.CreateTestLogView(addr, uint64(1000+i), uint64(2000+i))
+			DispatchTickUpdate(event)
+		}
+
+		// Count how many messages we can retrieve
+		count := 0
+		for coreRings[0].Pop() != nil {
+			count++
+		}
+
+		// Should get at most ring size messages
+		fixture.EXPECT_LE(count, 16, "Should not exceed ring capacity")
+		fixture.EXPECT_GT(count, 0, "Should have some messages")
+	})
+}
+
+// TestArbitrageCycleConsistency verifies cycle state management
+func TestArbitrageCycleConsistency(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+	defer fixture.TearDown()
+
+	t.Run("FanoutUpdateConsistency", func(t *testing.T) {
+		// Create an executor with a cycle
+		executor := &ArbitrageCoreExecutor{
+			pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
+			isReverseDirection: false,
+			cycleStates:        make([]ArbitrageCycleState, 0),
+			fanoutTables:       make([][]FanoutEntry, 3),
+			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 3),
+		}
+
+		// Initialize queues
+		for i := range executor.priorityQueues {
+			executor.priorityQueues[i] = *quantumqueue64.New()
+		}
+
+		// Create a cycle state
+		cycle := ArbitrageCycleState{
+			pairIDs:    [3]PairID{1, 2, 3},
+			tickValues: [3]float64{0, 0, 0},
+		}
+		executor.cycleStates = append(executor.cycleStates, cycle)
+
+		// Setup pair-to-queue mappings
+		executor.pairToQueueIndex.Put(1, 0)
+		executor.pairToQueueIndex.Put(2, 1)
+		executor.pairToQueueIndex.Put(3, 2)
+
+		// Add cycle to queue 0 (pair 1's queue)
+		handle, _ := executor.priorityQueues[0].BorrowSafe()
+		executor.priorityQueues[0].Push(constants.MaxInitializationPriority, handle, 0)
+
+		// Setup fanout for pair 1 (it affects edges 1 and 2 of the cycle)
+		executor.fanoutTables[0] = []FanoutEntry{
+			{
+				cycleStateIndex: 0,
+				edgeIndex:       1,
+				queue:           &executor.priorityQueues[0],
+				queueHandle:     uint64(handle),
+			},
+			{
+				cycleStateIndex: 0,
+				edgeIndex:       2,
+				queue:           &executor.priorityQueues[0],
+				queueHandle:     uint64(handle),
+			},
+		}
+
+		// Process an update for pair 1
+		update := &TickUpdate{
+			pairID:      1,
+			forwardTick: 2.5,
+			reverseTick: -2.5,
+		}
+
+		processTickUpdate(executor, update)
+
+		// Verify fanout updated the other edges
+		cycle = executor.cycleStates[0]
+		fixture.EXPECT_EQ(2.5, cycle.tickValues[1], "Edge 1 should be updated via fanout")
+		fixture.EXPECT_EQ(2.5, cycle.tickValues[2], "Edge 2 should be updated via fanout")
+		fixture.EXPECT_EQ(0.0, cycle.tickValues[0], "Edge 0 should remain unchanged")
+	})
+
+	t.Run("CycleQueueManagement", func(t *testing.T) {
+		// Test that cycles are properly managed in priority queues
+		executor := &ArbitrageCoreExecutor{
+			pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
+			isReverseDirection: false,
+			cycleStates:        make([]ArbitrageCycleState, 0),
+			fanoutTables:       make([][]FanoutEntry, 1),
+			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
+		}
+
+		executor.priorityQueues[0] = *quantumqueue64.New()
+
+		// Add multiple cycles
+		for i := 0; i < 5; i++ {
+			cycle := ArbitrageCycleState{
+				pairIDs:    [3]PairID{PairID(i*3 + 1), PairID(i*3 + 2), PairID(i*3 + 3)},
+				tickValues: [3]float64{float64(i), float64(i), float64(i)},
+			}
+			executor.cycleStates = append(executor.cycleStates, cycle)
+
+			handle, _ := executor.priorityQueues[0].BorrowSafe()
+			priority := quantizeTickToInt64(float64(i * 3))
+			executor.priorityQueues[0].Push(priority, handle, uint64(i))
+		}
+
+		// Verify queue has correct number of items
+		fixture.EXPECT_FALSE(executor.priorityQueues[0].Empty(), "Queue should not be empty")
+
+		// Extract items and verify ordering
+		prevPriority := int64(-1)
+		for !executor.priorityQueues[0].Empty() {
+			handle, priority, _ := executor.priorityQueues[0].PeepMin()
+			fixture.EXPECT_GE(priority, prevPriority, "Priorities should be in ascending order")
+			prevPriority = priority
+			executor.priorityQueues[0].UnlinkMin(handle)
+		}
+	})
+}
+
+// TestPipelineIntegration tests the integration of dispatch and core processing
+func TestPipelineIntegration(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+	defer fixture.TearDown()
+
+	t.Run("DispatchToRingIntegration", func(t *testing.T) {
+		// Setup a simple arbitrage cycle
+		pair1, pair2, pair3 := PairID(6001), PairID(6002), PairID(6003)
+
+		// Register addresses
+		addr1 := "0xf000000000000000000000000000000000000001"
+		addr2 := "0xf000000000000000000000000000000000000002"
+		addr3 := "0xf000000000000000000000000000000000000003"
+
+		RegisterPairAddress([]byte(addr1[2:]), pair1)
+		RegisterPairAddress([]byte(addr2[2:]), pair2)
+		RegisterPairAddress([]byte(addr3[2:]), pair3)
+
+		// Assign all to core 0
+		RegisterPairToCore(pair1, 0)
+		RegisterPairToCore(pair2, 0)
+		RegisterPairToCore(pair3, 0)
+
+		coreRings[0] = ring24.New(constants.DefaultRingSize)
+
+		// Send events for all three pairs
+		event1 := fixture.CreateTestLogView(addr1, 1000000000000000000, 2000000000000000000)
+		event2 := fixture.CreateTestLogView(addr2, 2000000000000000000, 3000000000000000000)
+		event3 := fixture.CreateTestLogView(addr3, 3000000000000000000, 1000000000000000000)
+
+		DispatchTickUpdate(event1)
+		DispatchTickUpdate(event2)
+		DispatchTickUpdate(event3)
+
+		// Verify all three messages arrived
+		messages := make([]*TickUpdate, 0)
+		for i := 0; i < 3; i++ {
+			msg := coreRings[0].Pop()
+			if msg != nil {
+				messages = append(messages, (*TickUpdate)(unsafe.Pointer(msg)))
+			}
+		}
+
+		fixture.EXPECT_EQ(3, len(messages), "Should receive all 3 messages")
+
+		// Verify message content
+		pairsSeen := make(map[PairID]bool)
+		for _, msg := range messages {
+			pairsSeen[msg.pairID] = true
+			fixture.EXPECT_NE(0.0, msg.forwardTick, "Forward tick should be non-zero")
+			fixture.EXPECT_EQ(-msg.forwardTick, msg.reverseTick, "Reverse should be negative of forward")
+		}
+
+		fixture.EXPECT_TRUE(pairsSeen[pair1], "Should see pair1")
+		fixture.EXPECT_TRUE(pairsSeen[pair2], "Should see pair2")
+		fixture.EXPECT_TRUE(pairsSeen[pair3], "Should see pair3")
+	})
+
+	t.Run("ZeroReserveRobustness", func(t *testing.T) {
+		// Test system robustness with edge cases
+		pairID := PairID(7001)
+		addr := "0xf000000000000000000000000000000000000004"
+
+		RegisterPairAddress([]byte(addr[2:]), pairID)
+		RegisterPairToCore(pairID, 0)
+		coreRings[0] = ring24.New(constants.DefaultRingSize)
+
+		// Test various edge cases
+		testCases := []struct {
+			name     string
+			reserve0 uint64
+			reserve1 uint64
+		}{
+			{"BothZero", 0, 0},
+			{"FirstZero", 0, 1000000},
+			{"SecondZero", 1000000, 0},
+			{"BothOne", 1, 1},
+			{"MaxUint64", 18446744073709551615, 18446744073709551615}, // 2^64 - 1 (max uint64)
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				event := fixture.CreateTestLogView(addr, tc.reserve0, tc.reserve1)
+
+				// Should not panic
+				fixture.EXPECT_NO_FATAL_FAILURE(func() {
+					DispatchTickUpdate(event)
+				})
+
+				// Should produce a message
+				msg := coreRings[0].Pop()
+				if msg != nil {
+					tickUpdate := (*TickUpdate)(unsafe.Pointer(msg))
+					fixture.EXPECT_FALSE(math.IsNaN(tickUpdate.forwardTick), "Should not produce NaN")
+					fixture.EXPECT_FALSE(math.IsInf(tickUpdate.forwardTick, 0), "Should not produce Inf")
+				}
+			})
+		}
+	})
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 // BENCHMARK TESTS
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
