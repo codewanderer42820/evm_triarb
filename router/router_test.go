@@ -919,7 +919,6 @@ func TestDispatchFallbackLogic(t *testing.T) {
 		RegisterPairToCore(pairID, 0)
 		coreRings[0] = ring24.New(constants.DefaultRingSize)
 
-		// Create log view with zero reserves (triggers fallback)
 		logView := fixture.CreateTestLogView(address, 0, 0)
 
 		DispatchTickUpdate(logView)
@@ -931,11 +930,9 @@ func TestDispatchFallbackLogic(t *testing.T) {
 		fixture.EXPECT_GE(tickUpdate.forwardTick, 51.2, "Fallback tick should be >= 51.2")
 		fixture.EXPECT_LE(tickUpdate.forwardTick, 64.0, "Fallback tick should be <= 64.0")
 
-		// FIXED: For invalid reserves, reverseTick should ALSO be positive
 		fixture.EXPECT_GE(tickUpdate.reverseTick, 51.2, "Reverse fallback tick should be >= 51.2")
 		fixture.EXPECT_LE(tickUpdate.reverseTick, 64.0, "Reverse fallback tick should be <= 64.0")
 
-		// Both should be equal for invalid reserves
 		fixture.EXPECT_EQ(tickUpdate.forwardTick, tickUpdate.reverseTick, "Invalid reserves should have equal ticks")
 	})
 }
