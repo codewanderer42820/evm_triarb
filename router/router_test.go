@@ -930,7 +930,13 @@ func TestDispatchFallbackLogic(t *testing.T) {
 		tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
 		fixture.EXPECT_GE(tickUpdate.forwardTick, 51.2, "Fallback tick should be >= 51.2")
 		fixture.EXPECT_LE(tickUpdate.forwardTick, 64.0, "Fallback tick should be <= 64.0")
-		fixture.EXPECT_EQ(-tickUpdate.forwardTick, tickUpdate.reverseTick, "Reverse should be negative forward")
+
+		// FIXED: For invalid reserves, reverseTick should ALSO be positive
+		fixture.EXPECT_GE(tickUpdate.reverseTick, 51.2, "Reverse fallback tick should be >= 51.2")
+		fixture.EXPECT_LE(tickUpdate.reverseTick, 64.0, "Reverse fallback tick should be <= 64.0")
+
+		// Both should be equal for invalid reserves
+		fixture.EXPECT_EQ(tickUpdate.forwardTick, tickUpdate.reverseTick, "Invalid reserves should have equal ticks")
 	})
 }
 
