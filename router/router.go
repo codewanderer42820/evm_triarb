@@ -27,6 +27,7 @@
 package router
 
 import (
+	"encoding/binary"
 	"fmt"
 	"hash"
 	"math/bits"
@@ -410,19 +411,21 @@ func DispatchTickUpdate(logView *types.LogView) {
 
 	// STEP 9: Message Construction (~3-4 cycles)
 	// Build 24-byte message on stack (zero allocation)
-	// OPTIMIZED: pairID first for faster core routing
-	var message [24]byte
-	tickUpdate := (*TickUpdate)(unsafe.Pointer(&message))
-	tickUpdate.pairID = pairID
-	tickUpdate.forwardTick = tickValue
-	tickUpdate.reverseTick = -tickValue
+	// OPTIMIZED: Direct field assignment instead of unsafe casting
+	message := TickUpdate{
+		pairID:      pairID,
+		forwardTick: tickValue,
+		reverseTick: -tickValue,
+	}
 
 	// STEP 10: Core Broadcasting (~5-10 cycles)
 	// Send to all cores handling this pair using bit manipulation
 	coreAssignments := pairToCoreAssignment[pairID]
 	for coreAssignments != 0 {
 		coreID := bits.TrailingZeros64(uint64(coreAssignments))
-		coreRings[coreID].Push(&message)
+		// Convert to [24]byte for ring buffer without casting overhead
+		messageBytes := (*[24]byte)(unsafe.Pointer(&message))
+		coreRings[coreID].Push(messageBytes)
 		coreAssignments &^= 1 << coreID
 	}
 }
@@ -580,7 +583,7 @@ func processTickUpdate(executor *ArbitrageCoreExecutor, update *TickUpdate) {
 		}
 
 		// Store in pre-allocated buffer for reinsertion
-		// OPTIMIZED: cycleStateIndex first for faster array access
+		// Direct assignment without casting overhead
 		executor.processedCycles[cycleCount] = ProcessedCycle{
 			cycleStateIndex: cycleIndex,
 			originalTick:    queueTick,
@@ -853,7 +856,8 @@ func (k *keccakRandomState) nextUint64() uint64 {
 	// Create input: seed || counter
 	var input [40]byte
 	copy(input[:32], k.seed[:])
-	*(*uint64)(unsafe.Pointer(&input[32])) = k.counter // Fast uint64 write
+	// Direct assignment instead of unsafe pointer cast
+	binary.LittleEndian.PutUint64(input[32:], k.counter)
 
 	// Reuse hasher instance - much faster than creating new one
 	k.hasher.Reset()
@@ -900,7 +904,7 @@ func keccakShuffleEdgeBindings(bindings []ArbitrageEdgeBinding, pairID PairID) {
 
 	// Create deterministic seed based on pair ID
 	var seedInput [8]byte
-	*(*uint64)(unsafe.Pointer(&seedInput[0])) = utils.Mix64(uint64(pairID))
+	binary.LittleEndian.PutUint64(seedInput[:], utils.Mix64(uint64(pairID)))
 
 	rng := newKeccakRandom(seedInput[:])
 
@@ -993,7 +997,7 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 		otherEdge2 := (edgeBinding.edgeIndex + 2) % 3
 
 		for _, edgeIdx := range [...]uint64{otherEdge1, otherEdge2} {
-			// OPTIMIZED: cycleStateIndex first for direct array access
+			// Direct assignment without casting overhead
 			executor.fanoutTables[queueIndex] = append(executor.fanoutTables[queueIndex],
 				FanoutEntry{
 					cycleStateIndex: uint64(cycleIndex),
