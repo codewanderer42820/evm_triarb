@@ -706,6 +706,12 @@ func DispatchTickUpdate(logView *types.LogView) {
 	// The logarithmic approach provides numerical stability and cache-friendly
 	// additive operations during arbitrage evaluation.
 	tickValue, err := fastuni.Log2ReserveRatio(reserve0, reserve1)
+
+	// PHASE 9: MESSAGE CONSTRUCTION (Target: 3-4 cycles)
+	//
+	// Construct TickUpdate message directly on the stack to avoid heap allocation.
+	// Field ordering optimized for sequential access patterns during processing.
+	var message TickUpdate
 	if err != nil {
 		// FALLBACK: Cryptographically secure random value generation
 		//
@@ -714,19 +720,25 @@ func DispatchTickUpdate(logView *types.LogView) {
 		// The range [51.2, 64.0] ensures corrupted data doesn't interfere with
 		// optimal arbitrage opportunities (which cluster around 0) while maintaining
 		// perfect distribution across priority queue buckets.
+		//
+		// CRITICAL: Both forward and reverse ticks must be positive to ensure
+		// invalid data deprioritizes cycles in both directions.
 		addrHash := utils.Mix64(uint64(pairID))
 		randBits := addrHash & 0x1FFF // Extract 13 bits for range [0, 8191]
-		tickValue = 51.2 + float64(randBits)*0.0015625
-	}
+		placeholder := 51.2 + float64(randBits)*0.0015625
 
-	// PHASE 9: MESSAGE CONSTRUCTION (Target: 3-4 cycles)
-	//
-	// Construct TickUpdate message directly on the stack to avoid heap allocation.
-	// Field ordering optimized for sequential access patterns during processing.
-	message := TickUpdate{
-		pairID:      pairID,
-		forwardTick: tickValue,
-		reverseTick: -tickValue,
+		message = TickUpdate{
+			pairID:      pairID,
+			forwardTick: placeholder, // Positive - deprioritizes
+			reverseTick: placeholder, // Positive - deprioritizes
+		}
+	} else {
+		// Valid reserves: use actual log ratio with opposite signs for direction
+		message = TickUpdate{
+			pairID:      pairID,
+			forwardTick: tickValue,
+			reverseTick: -tickValue,
+		}
 	}
 
 	// PHASE 10: MULTI-CORE DISTRIBUTION (Target: 5-10 cycles)
