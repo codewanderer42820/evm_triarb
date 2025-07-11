@@ -1753,23 +1753,20 @@ func BenchmarkBlockchainEventIngestion(b *testing.B) {
 		coreRings[i] = ring24.New(1 << 20) // 1M slots
 	}
 
-	// Register pairs
+	// Register pairs using sequential addresses
+	events := make([]*types.LogView, numPairs)
 	for i := 0; i < numPairs; i++ {
+		// Generate address without overflow
 		addr := fmt.Sprintf("%040x", i)
 		RegisterPairAddress([]byte(addr), PairID(i+1))
 		RegisterPairToCore(PairID(i+1), uint8(i%numCores))
-	}
 
-	// Pre-generate events with correct format
-	events := make([]*types.LogView, numPairs)
-	for i := 0; i < numPairs; i++ {
-		addr := fmt.Sprintf("0x%040x", i)
-		// Correct format: 0x + 64 hex chars (reserve0) + 64 hex chars (reserve1) = 130 total
+		// Create event with exact format from real data
 		events[i] = &types.LogView{
-			Addr: []byte(addr),
+			Addr: []byte("0x" + addr),
 			Data: []byte("0x" +
-				"00000000000000000000000000000000000000000000000de0b6b3a7640000" + // reserve0: 1e18
-				"00000000000000000000000000000000000000000000001bc16d674ec80000"), // reserve1: 2e18
+				"00000000000000000000000000000000000000000078ac4cf9c9bb7cb9e54739" +
+				"000000000000000000000000000000000000000000000000001fcf7f300f7aee"),
 		}
 	}
 
@@ -1805,22 +1802,31 @@ func BenchmarkBlockSizeProcessing(b *testing.B) {
 	}
 
 	// Register pairs
+	pairAddrs := make([]string, numPairs)
 	for i := 0; i < numPairs; i++ {
 		addr := fmt.Sprintf("%040x", i)
+		pairAddrs[i] = addr
 		RegisterPairAddress([]byte(addr), PairID(i+1))
 		RegisterPairToCore(PairID(i+1), uint8(i%numCores))
 	}
 
-	// Pre-generate block events with correct data format
+	// Pre-generate block events using real data samples
+	realDataSamples := []string{
+		"0x00000000000000000000000000000000000000000078ac4cf9c9bb7cb9e54739000000000000000000000000000000000000000000000000001fcf7f300f7aee",
+		"0x00000000000000000000000000000000000000000078ac4cee1b8e921e20b13d000000000000000000000000000000000000000000000000001fcf7f3326170a",
+		"0x00000000000000000000000000000000000000000078ac4ac34a431c7c75f189000000000000000000000000000000000000000000000000001fcf7fc5d80e43",
+		"0x0000000000000000000000000000000000000000000000000000011b6dc13f6900000000000000000000000000000000000000000000001638362ed366158ac1",
+		"0x0000000000000000000000000000000000000000000059a034d302879881a1e600000000000000000000000000000000000000000000000045ab5730c156ff13",
+	}
+
 	blockEvents := make([]*types.LogView, eventsPerBlock)
 	for i := range blockEvents {
 		pairIdx := i % numPairs
-		addr := fmt.Sprintf("0x%040x", pairIdx)
+		dataIdx := i % len(realDataSamples)
+
 		blockEvents[i] = &types.LogView{
-			Addr: []byte(addr),
-			Data: []byte("0x" +
-				"00000000000000000000000000000000000000000000000de0b6b3a7640000" +
-				"00000000000000000000000000000000000000000000001bc16d674ec80000"),
+			Addr: []byte("0x" + pairAddrs[pairIdx]),
+			Data: []byte(realDataSamples[dataIdx]),
 		}
 	}
 
@@ -1853,16 +1859,16 @@ func BenchmarkSimpleDispatch(b *testing.B) {
 	fixture.SetUp()
 	defer fixture.TearDown()
 
-	// Single pair, single core
-	RegisterPairAddress([]byte("1234567890123456789012345678901234567890"), PairID(1))
+	// Use a real address from the samples
+	addr := "882df4b0fb50a229c3b4124eb18c759911485bfb"
+	RegisterPairAddress([]byte(addr), PairID(1))
 	RegisterPairToCore(PairID(1), 0)
 	coreRings[0] = ring24.New(1 << 20) // 1M slots
 
+	// Use real event data
 	event := &types.LogView{
-		Addr: []byte("0x1234567890123456789012345678901234567890"),
-		Data: []byte("0x" +
-			"00000000000000000000000000000000000000000000000de0b6b3a7640000" +
-			"00000000000000000000000000000000000000000000001bc16d674ec80000"),
+		Addr: []byte("0x" + addr),
+		Data: []byte("0x00000000000000000000000000000000000000000078ac4cf9c9bb7cb9e54739000000000000000000000000000000000000000000000000001fcf7f300f7aee"),
 	}
 
 	b.ResetTimer()
@@ -1880,27 +1886,32 @@ func BenchmarkSimpleDispatch(b *testing.B) {
 	b.ReportMetric(float64(count)/float64(b.N)*100, "delivery_%")
 }
 
-// Add the original benchmarks back but skip the problematic ones
+// Add back the working original benchmarks
 func BenchmarkDispatchTickUpdate(b *testing.B) {
 	fixture := NewRouterTestFixture(&testing.T{})
 	fixture.SetUp()
 	defer fixture.TearDown()
 
-	address := "0x1234567890123456789012345678901234567890"
+	address := "0x882df4b0fb50a229c3b4124eb18c759911485bfb"
 	pairID := PairID(12345)
 	RegisterPairAddress([]byte(address[2:]), pairID)
 	RegisterPairToCore(pairID, 0)
-	coreRings[0] = ring24.New(1 << 20) // Large ring
+	coreRings[0] = ring24.New(1 << 20)
 
-	logView := fixture.CreateTestLogView(address, 1000000000000000000, 2000000000000000000)
+	logView := &types.LogView{
+		Addr: []byte(address),
+		Data: []byte("0x00000000000000000000000000000000000000000078ac4cf9c9bb7cb9e54739000000000000000000000000000000000000000000000000001fcf7f300f7aee"),
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		DispatchTickUpdate(logView)
 	}
 
-	// Drain to prevent overflow
-	for coreRings[0].Pop() != nil {
+	// Drain periodically
+	if i := b.N; i > 0 && i%10000 == 0 {
+		for coreRings[0].Pop() != nil {
+		}
 	}
 }
 
@@ -1924,13 +1935,13 @@ func BenchmarkAddressLookup(b *testing.B) {
 
 	// Register addresses
 	for i := 0; i < 1000; i++ {
-		address := fmt.Sprintf("%040d", i)
+		address := fmt.Sprintf("%040x", i)
 		RegisterPairAddress([]byte(address), PairID(i+1))
 	}
 
 	addresses := make([][]byte, 100)
 	for i := range addresses {
-		addresses[i] = []byte(fmt.Sprintf("%040d", i))
+		addresses[i] = []byte(fmt.Sprintf("%040x", i))
 	}
 
 	b.ResetTimer()
@@ -1945,5 +1956,45 @@ func BenchmarkQuantization(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = quantizeTickToInt64(values[i%len(values)])
+	}
+}
+
+func BenchmarkProcessTickUpdate(b *testing.B) {
+	executor := &ArbitrageCoreExecutor{
+		pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
+		isReverseDirection: false,
+		cycleStates:        make([]ArbitrageCycleState, 100),
+		fanoutTables:       make([][]FanoutEntry, 10),
+		priorityQueues:     make([]quantumqueue64.QuantumQueue64, 10),
+	}
+
+	// Initialize queues and add some cycles
+	for i := range executor.priorityQueues {
+		executor.priorityQueues[i] = *quantumqueue64.New()
+
+		// Add some cycles to each queue
+		for j := 0; j < 10; j++ {
+			handle, _ := executor.priorityQueues[i].BorrowSafe()
+			executor.priorityQueues[i].Push(constants.MaxInitializationPriority-int64(j*100), handle, uint64(i*10+j))
+		}
+	}
+
+	// Setup pair mappings
+	for i := 0; i < 10; i++ {
+		executor.pairToQueueIndex.Put(uint32(i+1), uint32(i))
+	}
+
+	updates := make([]*TickUpdate, 10)
+	for i := range updates {
+		updates[i] = &TickUpdate{
+			pairID:      PairID(i + 1),
+			forwardTick: float64(i) * 0.1,
+			reverseTick: -float64(i) * 0.1,
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		processTickUpdate(executor, updates[i%len(updates)])
 	}
 }
