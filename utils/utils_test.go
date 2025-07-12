@@ -2876,54 +2876,6 @@ func BenchmarkMix64(b *testing.B) {
 	})
 }
 
-func BenchmarkSystemIO(b *testing.B) {
-	msg := "Benchmark message for system I/O operations"
-
-	// Redirect to avoid console spam
-	oldStdout := os.Stdout
-	oldStderr := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-	os.Stderr = w
-	defer func() {
-		w.Close()
-		os.Stdout = oldStdout
-		os.Stderr = oldStderr
-		r.Close()
-	}()
-
-	b.Run("PrintInfo", func(b *testing.B) {
-		b.SetBytes(int64(len(msg)))
-		b.ReportAllocs()
-		b.ResetTimer()
-
-		for i := 0; i < b.N; i++ {
-			PrintInfo(msg)
-		}
-	})
-
-	b.Run("PrintWarning", func(b *testing.B) {
-		b.SetBytes(int64(len(msg)))
-		b.ReportAllocs()
-		b.ResetTimer()
-
-		for i := 0; i < b.N; i++ {
-			PrintWarning(msg)
-		}
-	})
-
-	// Compare with fmt.Print
-	b.Run("fmt.Print", func(b *testing.B) {
-		b.SetBytes(int64(len(msg)))
-		b.ReportAllocs()
-		b.ResetTimer()
-
-		for i := 0; i < b.N; i++ {
-			fmt.Fprint(io.Discard, msg)
-		}
-	})
-}
-
 // ==============================================================================
 // LATENCY AND THROUGHPUT BENCHMARKS
 // ==============================================================================
@@ -3142,50 +3094,6 @@ func BenchmarkRealWorld(b *testing.B) {
 
 			_ = hash
 		}
-	})
-}
-
-// ==============================================================================
-// SUMMARY AND ANALYSIS
-// ==============================================================================
-
-func BenchmarkSummary(b *testing.B) {
-	b.Run("SUMMARY", func(b *testing.B) {
-		b.Logf("\n=== Utils Package Performance Summary ===")
-		b.Logf("%-30s %15s %15s %12s", "Operation", "Speed", "Latency", "Allocs")
-		b.Logf("%-30s %15s %15s %12s", "---------", "-----", "-------", "------")
-
-		summaryData := []struct {
-			operation string
-			speed     string
-			latency   string
-			allocs    string
-		}{
-			{"Load64", "~20GB/s", "~0.4ns", "0"},
-			{"Load128", "~40GB/s", "~0.4ns", "0"},
-			{"LoadBE64", "~8GB/s", "~1ns", "0"},
-			{"B2s", "~100GB/s", "~0.1ns", "0"},
-			{"Itoa", "~50M ops/s", "~20ns", "0"},
-			{"ParseHexU32", "~200M ops/s", "~5ns", "0"},
-			{"ParseHexU64 (8 chars)", "~150M ops/s", "~7ns", "0"},
-			{"ParseHexU64 (16 chars)", "~100M ops/s", "~10ns", "0"},
-			{"ParseEthereumAddress", "~50M ops/s", "~20ns", "0"},
-			{"Mix64", "~1G ops/s", "~1ns", "0"},
-			{"SkipToQuote", "~10GB/s", "~0.1ns/byte", "0"},
-			{"PrintInfo/Warning", "~500MB/s", "~100ns", "0"},
-		}
-
-		for _, data := range summaryData {
-			b.Logf("%-30s %15s %15s %12s",
-				data.operation, data.speed, data.latency, data.allocs)
-		}
-
-		b.Logf("\nKey Achievements:")
-		b.Logf("- Zero allocations across all functions")
-		b.Logf("- SIMD-optimized hex parsing")
-		b.Logf("- Lock-free concurrent access")
-		b.Logf("- Superior performance vs stdlib")
-		b.Logf("- Production-ready reliability")
 	})
 }
 
