@@ -7,11 +7,9 @@ import (
 	"io"
 	"net"
 	"runtime"
-	"sort"
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 )
 
 // ==============================================================================
@@ -1123,157 +1121,6 @@ func TestProcessorInitialization(t *testing.T) {
 // PERFORMANCE BENCHMARKS - 100% COVERAGE
 // ==============================================================================
 
-func BenchmarkPureWebSocketParsing(b *testing.B) {
-	sizes := []struct {
-		name        string
-		frame       []byte
-		payloadSize int64
-	}{
-		{"64B", frame64, 64},
-		{"512B", frame512, 512},
-		{"1536B", frame1536, 1536},
-		{"4KB", frame4096, 4096},
-		{"16KB", frame16384, 16384},
-		{"64KB", frame65536, 65536},
-	}
-
-	for _, s := range sizes {
-		b.Run(s.name, func(b *testing.B) {
-			// Pre-copy frame to processor buffer
-			copy(processor.buffer[:], s.frame)
-
-			b.SetBytes(s.payloadSize)
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				headerBuf := processor.buffer[:]
-
-				// Extract opcode and FIN bit
-				opcode := headerBuf[0] & 0x0F
-				fin := headerBuf[0]&0x80 != 0
-
-				// Extract payload length
-				payloadLen := uint64(headerBuf[1] & 0x7F)
-				headerSize := 2
-
-				switch payloadLen {
-				case 126:
-					payloadLen = uint64(headerBuf[2])<<8 | uint64(headerBuf[3])
-					headerSize = 4
-				case 127:
-					// Fast big-endian to native conversion
-					v := *(*uint64)(unsafe.Pointer(&headerBuf[2]))
-					payloadLen = ((v & 0xFF) << 56) | ((v & 0xFF00) << 40) |
-						((v & 0xFF0000) << 24) | ((v & 0xFF000000) << 8) |
-						((v & 0xFF00000000) >> 8) | ((v & 0xFF0000000000) >> 24) |
-						((v & 0xFF000000000000) >> 40) | ((v & 0xFF00000000000000) >> 56)
-					headerSize = 10
-				}
-
-				// Zero-copy slice to payload
-				result := processor.buffer[headerSize : headerSize+int(payloadLen)]
-
-				// Prevent compiler optimizations
-				_ = opcode
-				_ = fin
-				_ = result
-			}
-		})
-	}
-}
-
-func BenchmarkFrameHeaderParsing(b *testing.B) {
-	headers := []struct {
-		name   string
-		header []byte
-		desc   string
-	}{
-		{"7bit_length", []byte{0x81, 0x40}, "64 byte payload"},
-		{"16bit_length", []byte{0x81, 0x7E, 0x04, 0x00}, "1024 byte payload"},
-		{"64bit_length", []byte{0x81, 0x7F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}, "64KB payload"},
-	}
-
-	for _, h := range headers {
-		b.Run(h.name, func(b *testing.B) {
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				opcode := h.header[0] & 0x0F
-				fin := h.header[0]&0x80 != 0
-				payloadLen := uint64(h.header[1] & 0x7F)
-
-				switch payloadLen {
-				case 126:
-					payloadLen = uint64(h.header[2])<<8 | uint64(h.header[3])
-				case 127:
-					v := *(*uint64)(unsafe.Pointer(&h.header[2]))
-					payloadLen = ((v & 0xFF) << 56) | ((v & 0xFF00) << 40) |
-						((v & 0xFF0000) << 24) | ((v & 0xFF000000) << 8) |
-						((v & 0xFF00000000) >> 8) | ((v & 0xFF0000000000) >> 24) |
-						((v & 0xFF000000000000) >> 40) | ((v & 0xFF00000000000000) >> 56)
-				}
-
-				_ = opcode
-				_ = fin
-				_ = payloadLen
-			}
-		})
-	}
-}
-
-func BenchmarkControlFrameDetection(b *testing.B) {
-	frames := []struct {
-		name   string
-		opcode byte
-		isCtrl bool
-	}{
-		{"text_frame", 0x1, false},
-		{"binary_frame", 0x2, false},
-		{"close_frame", 0x8, true},
-		{"ping_frame", 0x9, true},
-		{"pong_frame", 0xA, true},
-	}
-
-	for _, f := range frames {
-		b.Run(f.name, func(b *testing.B) {
-			header := []byte{0x80 | f.opcode, 0x04}
-
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				opcode := header[0] & 0x0F
-				isControlFrame := (opcode >> 3) & 1
-				_ = isControlFrame
-			}
-		})
-	}
-}
-
-func BenchmarkZeroCopySlicing(b *testing.B) {
-	sizes := []int{64, 512, 1536, 4096, 16384, 65536}
-
-	for _, size := range sizes {
-		b.Run(fmt.Sprintf("%dB", size), func(b *testing.B) {
-			// Fill buffer with test data
-			for i := 0; i < size && i < len(processor.buffer); i++ {
-				processor.buffer[i] = byte(i & 0xFF)
-			}
-
-			b.SetBytes(int64(size))
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				result := processor.buffer[0:size]
-				_ = result
-			}
-		})
-	}
-}
-
 func BenchmarkFrameSizes(b *testing.B) {
 	sizes := []struct {
 		name  string
@@ -1367,53 +1214,6 @@ func BenchmarkChunkedReads(b *testing.B) {
 				SpinUntilCompleteMessage(conn)
 			}
 		})
-	}
-}
-
-func BenchmarkLatency(b *testing.B) {
-	conn := &zeroConn{data: frame1536}
-
-	// Warmup
-	for i := 0; i < 1000; i++ {
-		conn.reset()
-		_, _ = SpinUntilCompleteMessage(conn)
-	}
-
-	// Measure individual operation latencies
-	const samples = 10000
-	latencies := make([]time.Duration, 0, samples)
-
-	for i := 0; i < samples; i++ {
-		conn.reset()
-		start := time.Now()
-		_, _ = SpinUntilCompleteMessage(conn)
-		elapsed := time.Since(start)
-		latencies = append(latencies, elapsed)
-	}
-
-	// Sort for percentile calculation
-	sort.Slice(latencies, func(i, j int) bool {
-		return latencies[i] < latencies[j]
-	})
-
-	n := len(latencies)
-	if n > 0 {
-		p50 := latencies[n*50/100]
-		p95 := latencies[n*95/100]
-		p99 := latencies[n*99/100]
-		p999 := latencies[n*999/1000]
-
-		b.ReportMetric(float64(p50.Nanoseconds()), "p50_ns")
-		b.ReportMetric(float64(p95.Nanoseconds()), "p95_ns")
-		b.ReportMetric(float64(p99.Nanoseconds()), "p99_ns")
-		b.ReportMetric(float64(p999.Nanoseconds()), "p99.9_ns")
-	}
-
-	// Now run the actual benchmark
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		conn.reset()
-		_, _ = SpinUntilCompleteMessage(conn)
 	}
 }
 
@@ -1528,50 +1328,6 @@ func BenchmarkWorstCase(b *testing.B) {
 		})
 	}
 }
-
-func BenchmarkEndianConversion(b *testing.B) {
-	testData := []uint64{
-		0x0102030405060708,
-		0xFFEEDDCCBBAA9988,
-		0x123456789ABCDEF0,
-	}
-
-	b.Run("unsafe_conversion", func(b *testing.B) {
-		buf := make([]byte, 8)
-		b.ReportAllocs()
-		b.ResetTimer()
-
-		for i := 0; i < b.N; i++ {
-			v := testData[i%len(testData)]
-			*(*uint64)(unsafe.Pointer(&buf[0])) = v
-
-			// Convert back using the same method as in the code
-			loaded := *(*uint64)(unsafe.Pointer(&buf[0]))
-			result := ((loaded & 0xFF) << 56) | ((loaded & 0xFF00) << 40) |
-				((loaded & 0xFF0000) << 24) | ((loaded & 0xFF000000) << 8) |
-				((loaded & 0xFF00000000) >> 8) | ((loaded & 0xFF0000000000) >> 24) |
-				((loaded & 0xFF000000000000) >> 40) | ((loaded & 0xFF00000000000000) >> 56)
-			_ = result
-		}
-	})
-
-	b.Run("binary_bigendian", func(b *testing.B) {
-		buf := make([]byte, 8)
-		b.ReportAllocs()
-		b.ResetTimer()
-
-		for i := 0; i < b.N; i++ {
-			v := testData[i%len(testData)]
-			binary.BigEndian.PutUint64(buf, v)
-			result := binary.BigEndian.Uint64(buf)
-			_ = result
-		}
-	})
-}
-
-// ==============================================================================
-// EDGE CASE COVERAGE
-// ==============================================================================
 
 func TestHandshakeCompleteCoverage(t *testing.T) {
 	// Additional tests to ensure 100% coverage of Handshake function
