@@ -80,26 +80,6 @@ func generateTestData(size int, pattern string) []byte {
 	return data
 }
 
-// alignedBuffer creates properly aligned test buffers
-type alignedBuffer struct {
-	data []byte
-	ptr  unsafe.Pointer
-}
-
-func newAlignedBuffer(size int, alignment int) *alignedBuffer {
-	// Allocate extra space for alignment
-	raw := make([]byte, size+alignment)
-	addr := uintptr(unsafe.Pointer(&raw[0]))
-	offset := alignment - int(addr%uintptr(alignment))
-	if offset == alignment {
-		offset = 0
-	}
-	return &alignedBuffer{
-		data: raw[offset : offset+size],
-		ptr:  unsafe.Pointer(&raw[offset]),
-	}
-}
-
 // ==============================================================================
 // MEMORY OPERATION TESTS
 // ==============================================================================

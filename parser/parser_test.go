@@ -916,6 +916,32 @@ func BenchmarkHandleFrame_ValidEvents(b *testing.B) {
 	}
 }
 
+// Benchmark data field sizes with complete events
+func BenchmarkHandleFrame_DataFieldSizes(b *testing.B) {
+	sizes := []int{0, 10, 32, 63, 64, 65, 100}
+
+	for _, size := range sizes {
+		b.Run(fmt.Sprintf("data_%d_bytes", size), func(b *testing.B) {
+			var dataHex string
+			if size == 0 {
+				dataHex = "0x"
+			} else {
+				dataHex = "0x" + strings.Repeat("ff", size)
+			}
+
+			event := []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"` + dataHex + `","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5"}}}`)
+
+			b.SetBytes(int64(len(event)))
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				HandleFrame(event)
+			}
+		})
+	}
+}
+
 // Benchmark topics validation
 func BenchmarkHandleFrame_TopicsValidation(b *testing.B) {
 	benchmarks := []struct {
@@ -1028,6 +1054,97 @@ func BenchmarkHandleFrame_CompleteFlow(b *testing.B) {
 	}
 }
 
+// Benchmark parallel processing
+func BenchmarkHandleFrame_Parallel(b *testing.B) {
+	// Use events that won't trigger warnings
+	shortEvent := make([]byte, 50) // Too short - early exit
+	validEvent := []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5"}}}`)
+
+	benchmarks := []struct {
+		name  string
+		event []byte
+	}{
+		{"early_exit", shortEvent},
+		{"valid_event", validEvent},
+	}
+
+	for _, bm := range benchmarks {
+		b.Run(bm.name, func(b *testing.B) {
+			b.SetBytes(int64(len(bm.event)))
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					HandleFrame(bm.event)
+				}
+			})
+		})
+	}
+}
+
+// Benchmark transaction field paths
+func BenchmarkHandleFrame_TransactionField(b *testing.B) {
+	benchmarks := []struct {
+		name  string
+		event []byte
+	}{
+		{
+			name:  "with_tx_hash",
+			event: []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionHash":"0x9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba","transactionIndex":"0x5"}}}`),
+		},
+		{
+			name:  "without_tx_hash",
+			event: []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5"}}}`),
+		},
+	}
+
+	for _, bm := range benchmarks {
+		b.Run(bm.name, func(b *testing.B) {
+			b.SetBytes(int64(len(bm.event)))
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				HandleFrame(bm.event)
+			}
+		})
+	}
+}
+
+// Benchmark realistic Ethereum events
+func BenchmarkHandleFrame_RealisticEvents(b *testing.B) {
+	events := []struct {
+		name  string
+		event []byte
+	}{
+		{
+			name:  "swap_event",
+			event: []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2","blockNumber":"0x10d4f5c","data":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000de0b6b3a7640000","logIndex":"0x8f","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","0x0000000000000000000000007a250d5630b4cf539739df2c5dacb4c659f2488d"],"transactionIndex":"0x47"}}}`),
+		},
+		{
+			name:  "transfer_event",
+			event: []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","blockNumber":"0x10d4f5d","data":"0x0000000000000000000000000000000000000000000000000000000005f5e100","logIndex":"0x12","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","0x000000000000000000000000a9d1e08c7793af67e9d92fe308d5697fb81d3e43","0x00000000000000000000000028c6c06298d514db089934071355e5743bf21d60"],"transactionIndex":"0x8"}}}`),
+		},
+		{
+			name:  "mint_event",
+			event: []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d","blockNumber":"0x10d4f5e","data":"0x","logIndex":"0x1a5","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","0x0000000000000000000000000000000000000000000000000000000000000000","0x000000000000000000000000dbfd76af2157dc15ee4e57f3f942bb45ba84af24","0x0000000000000000000000000000000000000000000000000000000000001f40"],"transactionIndex":"0x9c"}}}`),
+		},
+	}
+
+	for _, e := range events {
+		b.Run(e.name, func(b *testing.B) {
+			b.SetBytes(int64(len(e.event)))
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				HandleFrame(e.event)
+			}
+		})
+	}
+}
+
 // Benchmark zero allocation verification
 func BenchmarkHandleFrame_ZeroAllocation(b *testing.B) {
 	// Test with data that causes immediate early exit
@@ -1053,6 +1170,46 @@ func BenchmarkHandleFrame_ZeroAllocation(b *testing.B) {
 			HandleFrame(validEvent)
 		}
 	})
+}
+
+// Benchmark throughput measurement
+func BenchmarkHandleFrame_Throughput(b *testing.B) {
+	events := []struct {
+		name string
+		size int
+	}{
+		{"small_200B", 200},
+		{"medium_500B", 500},
+		{"large_1KB", 1000},
+		{"xlarge_2KB", 2000},
+	}
+
+	for _, e := range events {
+		b.Run(e.name, func(b *testing.B) {
+			// Create valid event of specific size
+			padding := ""
+			if e.size > 400 {
+				padding = `,"padding":"` + strings.Repeat("x", e.size-400) + `"`
+			}
+
+			event := []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5"` + padding + `}}}`)
+
+			b.SetBytes(int64(len(event)))
+			b.ResetTimer()
+
+			start := time.Now()
+			for i := 0; i < b.N; i++ {
+				HandleFrame(event)
+			}
+			elapsed := time.Since(start)
+
+			eventsPerSec := float64(b.N) / elapsed.Seconds()
+			mbPerSec := float64(b.N) * float64(len(event)) / elapsed.Seconds() / (1024 * 1024)
+
+			b.ReportMetric(eventsPerSec, "events/s")
+			b.ReportMetric(mbPerSec, "MB/s")
+		})
+	}
 }
 
 // Benchmark latency distribution
@@ -1124,515 +1281,4 @@ func BenchmarkHandleFrame_CacheEffects(b *testing.B) {
 			}
 		})
 	}
-}
-
-// Benchmark field detection performance
-func BenchmarkHandleFrame_FieldDetection(b *testing.B) {
-	// Create events with fields in different positions
-	benchmarks := []struct {
-		name  string
-		event []byte
-	}{
-		{
-			name: "fields_at_start",
-			event: []byte(createBaseEvent() +
-				`"address":"0x1234567890123456789012345678901234567890",` +
-				`"blockNumber":"0x123456",` +
-				`"data":"0x1234",` +
-				`"logIndex":"0x1",` +
-				`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
-				`"transactionIndex":"0x5"}}}`),
-		},
-		{
-			name: "fields_at_end",
-			event: []byte(createBaseEvent() +
-				`"transactionIndex":"0x5",` +
-				`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
-				`"logIndex":"0x1",` +
-				`"data":"0x1234",` +
-				`"blockNumber":"0x123456",` +
-				`"address":"0x1234567890123456789012345678901234567890"}}}`),
-		},
-		{
-			name: "fields_mixed",
-			event: []byte(createBaseEvent() +
-				`"blockNumber":"0x123456",` +
-				`"address":"0x1234567890123456789012345678901234567890",` +
-				`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
-				`"data":"0x1234",` +
-				`"transactionIndex":"0x5",` +
-				`"logIndex":"0x1"}}}`),
-		},
-	}
-
-	for _, bm := range benchmarks {
-		b.Run(bm.name, func(b *testing.B) {
-			b.SetBytes(int64(len(bm.event)))
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				HandleFrame(bm.event)
-			}
-		})
-	}
-}
-
-// Benchmark data field sizes
-func BenchmarkHandleFrame_DataFieldSizes(b *testing.B) {
-	sizes := []int{0, 10, 32, 63, 64, 65, 100, 256}
-
-	for _, size := range sizes {
-		b.Run(fmt.Sprintf("data_%d_bytes", size), func(b *testing.B) {
-			dataHex := "0x" + strings.Repeat("ff", size)
-			event := []byte(createBaseEvent() +
-				`"address":"0x1234567890123456789012345678901234567890",` +
-				`"blockNumber":"0x123456",` +
-				`"data":"` + dataHex + `",` +
-				`"logIndex":"0x1",` +
-				`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
-				`"transactionIndex":"0x5"}}}`)
-
-			b.SetBytes(int64(len(event)))
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				HandleFrame(event)
-			}
-		})
-	}
-}
-
-// Benchmark topics array sizes
-func BenchmarkHandleFrame_TopicsSizes(b *testing.B) {
-	benchmarks := []struct {
-		name   string
-		topics string
-	}{
-		{
-			name:   "single_topic",
-			topics: `["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"]`,
-		},
-		{
-			name:   "two_topics",
-			topics: `["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","0x000000000000000000000000a0b86a33e6f4e3bbe1b85e8e0e9b8d1234567890"]`,
-		},
-		{
-			name:   "three_topics",
-			topics: `["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","0x000000000000000000000000a0b86a33e6f4e3bbe1b85e8e0e9b8d1234567890","0x0000000000000000000000000000000000000000000000000000000000000001"]`,
-		},
-		{
-			name:   "large_topics",
-			topics: `["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","` + strings.Repeat("0", 100) + `"]`,
-		},
-	}
-
-	for _, bm := range benchmarks {
-		b.Run(bm.name, func(b *testing.B) {
-			event := []byte(createBaseEvent() +
-				`"address":"0x1234567890123456789012345678901234567890",` +
-				`"blockNumber":"0x123456",` +
-				`"data":"0x1234",` +
-				`"logIndex":"0x1",` +
-				`"topics":` + bm.topics + `,` +
-				`"transactionIndex":"0x5"}}}`)
-
-			b.SetBytes(int64(len(event)))
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				HandleFrame(event)
-			}
-		})
-	}
-}
-
-// Benchmark transaction field handling
-func BenchmarkHandleFrame_TransactionField(b *testing.B) {
-	benchmarks := []struct {
-		name           string
-		remainingBytes int
-	}{
-		{"skip_path_100_bytes", 100},
-		{"skip_path_86_bytes", 86},
-		{"parse_path_85_bytes", 85},
-		{"parse_path_50_bytes", 50},
-	}
-
-	for _, bm := range benchmarks {
-		b.Run(bm.name, func(b *testing.B) {
-			// Build event with controlled remaining bytes
-			base := createBaseEvent()
-			baseFields := `"address":"0x1234567890123456789012345678901234567890",` +
-				`"blockNumber":"0x123456",` +
-				`"data":"0x1234",` +
-				`"logIndex":"0x1",` +
-				`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],`
-
-			eventSoFar := base + baseFields
-
-			if bm.remainingBytes >= 86 {
-				eventSoFar += `"transactionHash":"0x9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba",`
-			}
-			eventSoFar += `"transactionIndex":"0x5"`
-
-			// Add padding if needed
-			if bm.remainingBytes > 86 {
-				eventSoFar += `,"pad":"` + strings.Repeat("x", bm.remainingBytes-86) + `"`
-			}
-
-			event := []byte(eventSoFar + "}}}")
-
-			b.SetBytes(int64(len(event)))
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				HandleFrame(event)
-			}
-		})
-	}
-}
-
-// Benchmark fingerprint generation
-func BenchmarkGenerateFingerprint_Paths(b *testing.B) {
-	benchmarks := []struct {
-		name   string
-		topics []byte
-		data   []byte
-		addr   []byte
-	}{
-		{
-			name:   "load128_path",
-			topics: make([]byte, 32),
-			data:   make([]byte, 16),
-			addr:   make([]byte, 20),
-		},
-		{
-			name:   "load64_topics",
-			topics: make([]byte, 12),
-			data:   make([]byte, 16),
-			addr:   make([]byte, 20),
-		},
-		{
-			name:   "load64_data",
-			topics: make([]byte, 4),
-			data:   make([]byte, 16),
-			addr:   make([]byte, 20),
-		},
-		{
-			name:   "load64_addr",
-			topics: make([]byte, 4),
-			data:   make([]byte, 4),
-			addr:   make([]byte, 20),
-		},
-	}
-
-	for _, bm := range benchmarks {
-		// Fill with test data
-		for i := range bm.topics {
-			bm.topics[i] = byte(i + 1)
-		}
-		for i := range bm.data {
-			bm.data[i] = byte(i + 65)
-		}
-		for i := range bm.addr {
-			bm.addr[i] = byte(i + 129)
-		}
-
-		b.Run(bm.name, func(b *testing.B) {
-			v := &types.LogView{
-				Topics: bm.topics,
-				Data:   bm.data,
-				Addr:   bm.addr,
-			}
-
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				generateFingerprint(v)
-			}
-		})
-	}
-}
-
-// Benchmark complete valid event processing
-func BenchmarkHandleFrame_CompleteEvent(b *testing.B) {
-	event := createCompleteValidEvent()
-
-	b.SetBytes(int64(len(event)))
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		HandleFrame(event)
-	}
-}
-
-// Benchmark parallel processing
-func BenchmarkHandleFrame_Parallel(b *testing.B) {
-	events := [][]byte{
-		make([]byte, 50),           // Too short
-		make([]byte, 200),          // Invalid but long enough
-		createCompleteValidEvent(), // Valid event
-	}
-
-	for i, event := range events {
-		b.Run(fmt.Sprintf("event_%d", i), func(b *testing.B) {
-			b.SetBytes(int64(len(event)))
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			b.RunParallel(func(pb *testing.PB) {
-				for pb.Next() {
-					HandleFrame(event)
-				}
-			})
-		})
-	}
-}
-
-// Benchmark worst case scenarios
-func BenchmarkHandleFrame_WorstCase(b *testing.B) {
-	benchmarks := []struct {
-		name  string
-		event []byte
-	}{
-		{
-			name: "all_fields_at_end",
-			event: []byte(createBaseEvent() +
-				strings.Repeat(`"dummy":"value",`, 50) +
-				`"address":"0x1234567890123456789012345678901234567890",` +
-				`"blockNumber":"0x123456",` +
-				`"data":"0x1234",` +
-				`"logIndex":"0x1",` +
-				`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
-				`"transactionIndex":"0x5"}}}`),
-		},
-		{
-			name: "many_skip_fields",
-			event: []byte(createBaseEvent() +
-				`"blockHash":"0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdef",` +
-				`"blockTimestamp":"1234567890",` +
-				`"removed":false,` +
-				`"blockHash2":"0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdef",` +
-				`"blockTimestamp2":"1234567890",` +
-				`"removed2":false,` +
-				`"address":"0x1234567890123456789012345678901234567890",` +
-				`"blockNumber":"0x123456",` +
-				`"data":"0x1234",` +
-				`"logIndex":"0x1",` +
-				`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
-				`"transactionIndex":"0x5"}}}`),
-		},
-	}
-
-	for _, bm := range benchmarks {
-		b.Run(bm.name, func(b *testing.B) {
-			b.SetBytes(int64(len(bm.event)))
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				HandleFrame(bm.event)
-			}
-		})
-	}
-}
-
-// Benchmark memory allocation patterns
-func BenchmarkHandleFrame_AllocationPatterns(b *testing.B) {
-	// Test different scenarios to verify zero allocation goal
-	benchmarks := []struct {
-		name     string
-		event    []byte
-		expected string
-	}{
-		{
-			name:     "early_exit_nil",
-			event:    nil,
-			expected: "0 allocs",
-		},
-		{
-			name:     "early_exit_short",
-			event:    make([]byte, 50),
-			expected: "0 allocs",
-		},
-		{
-			name:     "field_detection_only",
-			event:    make([]byte, 200),
-			expected: "0 allocs",
-		},
-		{
-			name:     "complete_parsing",
-			event:    createCompleteValidEvent(),
-			expected: "minimal allocs",
-		},
-	}
-
-	for _, bm := range benchmarks {
-		b.Run(bm.name, func(b *testing.B) {
-			b.SetBytes(int64(len(bm.event)))
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				HandleFrame(bm.event)
-			}
-		})
-	}
-}
-
-// Benchmark with realistic Ethereum event data
-func BenchmarkHandleFrame_RealisticEvents(b *testing.B) {
-	// Create realistic events with different characteristics
-	events := []struct {
-		name  string
-		event []byte
-	}{
-		{
-			name: "uniswap_swap",
-			event: []byte(createBaseEvent() +
-				`"address":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",` +
-				`"blockNumber":"0x10d4f5c",` +
-				`"data":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000de0b6b3a7640000",` +
-				`"logIndex":"0x8f",` +
-				`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","0x0000000000000000000000007a250d5630b4cf539739df2c5dacb4c659f2488d"],` +
-				`"transactionIndex":"0x47"}}}`),
-		},
-		{
-			name: "erc20_transfer",
-			event: []byte(createBaseEvent() +
-				`"address":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",` +
-				`"blockNumber":"0x10d4f5d",` +
-				`"data":"0x0000000000000000000000000000000000000000000000000000000005f5e100",` +
-				`"logIndex":"0x12",` +
-				`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","0x000000000000000000000000a9d1e08c7793af67e9d92fe308d5697fb81d3e43","0x00000000000000000000000028c6c06298d514db089934071355e5743bf21d60"],` +
-				`"transactionIndex":"0x8"}}}`),
-		},
-		{
-			name: "nft_mint",
-			event: []byte(createBaseEvent() +
-				`"address":"0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d",` +
-				`"blockNumber":"0x10d4f5e",` +
-				`"data":"0x",` +
-				`"logIndex":"0x1a5",` +
-				`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","0x0000000000000000000000000000000000000000000000000000000000000000","0x000000000000000000000000dbfd76af2157dc15ee4e57f3f942bb45ba84af24","0x0000000000000000000000000000000000000000000000000000000000001f40"],` +
-				`"transactionIndex":"0x9c"}}}`),
-		},
-	}
-
-	for _, e := range events {
-		b.Run(e.name, func(b *testing.B) {
-			b.SetBytes(int64(len(e.event)))
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				HandleFrame(e.event)
-			}
-		})
-	}
-}
-
-// Benchmark latency percentiles
-func BenchmarkHandleFrame_Latency(b *testing.B) {
-	event := createCompleteValidEvent()
-
-	b.ResetTimer()
-
-	// Measure individual operation latencies
-	latencies := make([]time.Duration, 0, b.N)
-
-	for i := 0; i < b.N; i++ {
-		start := time.Now()
-		HandleFrame(event)
-		latencies = append(latencies, time.Since(start))
-	}
-
-	// Calculate percentiles
-	if len(latencies) > 0 {
-		sort.Slice(latencies, func(i, j int) bool {
-			return latencies[i] < latencies[j]
-		})
-
-		p50 := latencies[len(latencies)*50/100]
-		p90 := latencies[len(latencies)*90/100]
-		p95 := latencies[len(latencies)*95/100]
-		p99 := latencies[len(latencies)*99/100]
-
-		b.Logf("Latency - P50: %v, P90: %v, P95: %v, P99: %v", p50, p90, p95, p99)
-	}
-}
-
-// Benchmark throughput with different event sizes
-func BenchmarkHandleFrame_Throughput(b *testing.B) {
-	sizes := []int{200, 500, 1000, 2000, 5000}
-
-	for _, size := range sizes {
-		b.Run(fmt.Sprintf("%d_bytes", size), func(b *testing.B) {
-			// Create event of specific size
-			padding := strings.Repeat("x", size-200)
-			event := []byte(createBaseEvent() +
-				`"address":"0x1234567890123456789012345678901234567890",` +
-				`"blockNumber":"0x123456",` +
-				`"data":"0x1234",` +
-				`"logIndex":"0x1",` +
-				`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
-				`"transactionIndex":"0x5",` +
-				`"padding":"` + padding + `"}}}`)
-
-			b.SetBytes(int64(len(event)))
-			b.ResetTimer()
-
-			start := time.Now()
-			for i := 0; i < b.N; i++ {
-				HandleFrame(event)
-			}
-			elapsed := time.Since(start)
-
-			throughput := float64(b.N) * float64(len(event)) / elapsed.Seconds() / (1024 * 1024)
-			b.ReportMetric(throughput, "MB/s")
-		})
-	}
-}
-
-// Benchmark specific optimization paths
-func BenchmarkOptimizations(b *testing.B) {
-	b.Run("field_detection_8byte_aligned", func(b *testing.B) {
-		// Ensure fields are 8-byte aligned for optimal detection
-		event := []byte(createBaseEvent() +
-			`"address":"0x1234567890123456789012345678901234567890",` +
-			`"blockNu":"0x123456",` + // Aligned at 8-byte boundary
-			`"data___":"0x1234",` + // Padded to 8 bytes
-			`"logInde":"0x1",` + // Aligned at 8-byte boundary
-			`"topics_":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
-			`"transac":"0x5"}}}`) // Aligned at 8-byte boundary
-
-		b.SetBytes(int64(len(event)))
-		b.ReportAllocs()
-		b.ResetTimer()
-
-		for i := 0; i < b.N; i++ {
-			HandleFrame(event)
-		}
-	})
-
-	b.Run("unsafe_pointer_operations", func(b *testing.B) {
-		data := []byte("\"address\":\"0x1234567890123456789012345678901234567890\"")
-
-		b.ReportAllocs()
-		b.ResetTimer()
-
-		for i := 0; i < b.N; i++ {
-			// Benchmark the 8-byte tag extraction
-			for j := 0; j <= len(data)-8; j++ {
-				tag := *(*[8]byte)(unsafe.Pointer(&data[j]))
-				_ = tag
-			}
-		}
-	})
 }
