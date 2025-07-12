@@ -1,6 +1,7 @@
 package control
 
 import (
+	"main/constants"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -14,11 +15,47 @@ import (
 // ============================================================================
 
 const (
-	testCooldownPeriod  = 50 * time.Millisecond
-	testGoroutineCount  = 16
-	testOperationsCount = 100
-	timingToleranceMs   = 5
+	testGoroutineCount     = 16
+	testOperationsCount    = 100
+	timingTolerancePercent = 50 // ±50% tolerance for virtual timing approximation
+	performanceIterations  = 100000
 )
+
+// Virtual timing test constants (poll-based instead of time-based)
+var (
+	testCooldownPolls     = uint64(1000000) // Test cooldown period in polls
+	originalCooldownPolls uint64            // Backup for restoration
+)
+
+// ============================================================================
+// TEST SETUP AND HELPERS
+// ============================================================================
+
+// setupTest resets system state for clean testing
+func setupTest() {
+	hot = 0
+	stop = 0
+	lastActivityCount = 0
+	pollCounter = 0
+}
+
+// setupTestCooldown configures shorter cooldown for testing
+func setupTestCooldown() {
+	originalCooldownPolls = constants.CooldownPolls
+	// Temporarily modify for testing (this would normally be unsafe)
+	// In real implementation, consider making CooldownPolls configurable
+}
+
+// restoreTestCooldown restores original cooldown configuration
+func restoreTestCooldown() {
+	// Would restore constants.CooldownPolls = originalCooldownPolls
+	// In practice, might need dependency injection for testability
+}
+
+// advancePollCounter simulates poll advancement for testing
+func advancePollCounter(polls uint64) {
+	pollCounter += polls
+}
 
 // ============================================================================
 // UNIT TESTS - INITIALIZATION AND STATE
@@ -26,9 +63,7 @@ const (
 
 // TestInitialState validates system starts in clean state
 func TestInitialState(t *testing.T) {
-	hot = 0
-	stop = 0
-	lastHot = 0
+	setupTest()
 
 	stopPtr, hotPtr := Flags()
 
@@ -38,18 +73,31 @@ func TestInitialState(t *testing.T) {
 	if *hotPtr != 0 {
 		t.Error("Hot flag must initialize to 0")
 	}
-	if lastHot != 0 {
-		t.Error("Activity timestamp must initialize to 0")
+	if lastActivityCount != 0 {
+		t.Error("Activity count must initialize to 0")
+	}
+	if pollCounter != 0 {
+		t.Error("Poll counter must initialize to 0")
 	}
 }
 
 // TestPointerStability ensures Flags() returns consistent pointers
 func TestPointerStability(t *testing.T) {
+	setupTest()
+
 	stopPtr1, hotPtr1 := Flags()
 	stopPtr2, hotPtr2 := Flags()
 
 	if stopPtr1 != stopPtr2 || hotPtr1 != hotPtr2 {
 		t.Error("Flag pointers must remain stable across calls")
+	}
+
+	// Validate pointer alignment for performance
+	if uintptr(unsafe.Pointer(stopPtr1))%4 != 0 {
+		t.Error("Stop flag pointer should be 4-byte aligned")
+	}
+	if uintptr(unsafe.Pointer(hotPtr1))%4 != 0 {
+		t.Error("Hot flag pointer should be 4-byte aligned")
 	}
 }
 
@@ -57,47 +105,77 @@ func TestPointerStability(t *testing.T) {
 // UNIT TESTS - ACTIVITY SIGNALING
 // ============================================================================
 
-// TestSignalActivity validates activity signaling
+// TestSignalActivity validates activity signaling with virtual timing
 func TestSignalActivity(t *testing.T) {
-	hot = 0
-	lastHot = 0
+	setupTest()
 
-	beforeTime := time.Now().UnixNano()
+	beforeCount := GetPollCount()
 	SignalActivity()
-	afterTime := time.Now().UnixNano()
+	afterCount := GetPollCount()
 
 	_, hotPtr := Flags()
 
 	if *hotPtr != 1 {
 		t.Error("Hot flag must be set after SignalActivity()")
 	}
-	if lastHot < beforeTime || lastHot > afterTime {
-		t.Error("Activity timestamp must be updated to current time")
+	if lastActivityCount != beforeCount {
+		t.Errorf("Activity count should be %d, got %d", beforeCount, lastActivityCount)
+	}
+	if afterCount != beforeCount {
+		t.Error("SignalActivity should not advance poll counter")
+	}
+}
+
+// TestMultipleSignalActivity validates repeated activity signals
+func TestMultipleSignalActivity(t *testing.T) {
+	setupTest()
+
+	// Multiple signals should update activity timestamp
+	for i := 0; i < 5; i++ {
+		advancePollCounter(100)
+		expectedCount := GetPollCount()
+		SignalActivity()
+
+		if lastActivityCount != expectedCount {
+			t.Errorf("Activity count should update to %d on signal %d", expectedCount, i)
+		}
+	}
+
+	_, hotPtr := Flags()
+	if *hotPtr != 1 {
+		t.Error("Hot flag should remain set after multiple signals")
 	}
 }
 
 // ============================================================================
-// UNIT TESTS - COOLDOWN BEHAVIOR
+// UNIT TESTS - BRANCHLESS COOLDOWN BEHAVIOR
 // ============================================================================
 
-// TestPollCooldown validates cooldown behavior
-func TestPollCooldown(t *testing.T) {
-	originalCooldown := cooldownNs
-	cooldownNs = int64(testCooldownPeriod)
-	defer func() { cooldownNs = originalCooldown }()
+// TestPollCooldownBranchless validates branchless cooldown implementation
+func TestPollCooldownBranchless(t *testing.T) {
+	setupTest()
 
 	t.Run("NoOpWhenInactive", func(t *testing.T) {
 		hot = 0
+		beforeCounter := pollCounter
 		PollCooldown()
+
 		if hot != 0 {
-			t.Error("PollCooldown should be no-op when hot=0")
+			t.Error("PollCooldown should not change inactive hot flag")
+		}
+		if pollCounter != beforeCounter+1 {
+			t.Error("PollCooldown should always increment poll counter")
 		}
 	})
 
 	t.Run("CooldownAfterExpiry", func(t *testing.T) {
+		setupTest()
 		hot = 1
-		lastHot = time.Now().UnixNano() - int64(testCooldownPeriod) - 1000000 // Past expiry
+		lastActivityCount = 0
+		pollCounter = 0
 
+		// Advance past cooldown threshold
+		advancePollCounter(constants.CooldownPolls + 100)
 		PollCooldown()
 
 		if hot != 0 {
@@ -106,13 +184,236 @@ func TestPollCooldown(t *testing.T) {
 	})
 
 	t.Run("NoEarlyCooldown", func(t *testing.T) {
+		setupTest()
 		hot = 1
-		lastHot = time.Now().UnixNano() // Recent activity
+		SignalActivity() // Set recent activity
 
+		// Advance but stay within cooldown period
+		advancePollCounter(constants.CooldownPolls / 2)
 		PollCooldown()
 
 		if hot != 1 {
 			t.Error("Hot flag should remain set before cooldown expiry")
+		}
+	})
+
+	t.Run("BoundaryCondition", func(t *testing.T) {
+		setupTest()
+		hot = 1
+		lastActivityCount = 0
+		pollCounter = 0
+
+		// Test exactly at cooldown boundary
+		advancePollCounter(constants.CooldownPolls)
+		PollCooldown()
+
+		if hot != 0 {
+			t.Error("Hot flag should clear exactly at cooldown boundary")
+		}
+	})
+}
+
+// ============================================================================
+// UNIT TESTS - VIRTUAL TIMING FUNCTIONS
+// ============================================================================
+
+// TestGetActivityAge validates activity age calculation
+func TestGetActivityAge(t *testing.T) {
+	setupTest()
+
+	t.Run("ZeroWhenNoActivity", func(t *testing.T) {
+		age := GetActivityAge()
+		if age != 0 {
+			t.Errorf("Activity age should be 0 initially, got %d", age)
+		}
+	})
+
+	t.Run("CorrectAgeCalculation", func(t *testing.T) {
+		SignalActivity()
+		advancePollCounter(1000)
+
+		age := GetActivityAge()
+		if age != 1000 {
+			t.Errorf("Activity age should be 1000, got %d", age)
+		}
+	})
+
+	t.Run("WraparoundHandling", func(t *testing.T) {
+		setupTest()
+
+		// Simulate wraparound condition
+		lastActivityCount = 100
+		pollCounter = 50 // Simulates counter wraparound
+
+		age := GetActivityAge()
+		// Should handle wraparound gracefully (masked result)
+		if age >= (1 << 63) {
+			t.Error("Activity age should handle wraparound condition")
+		}
+	})
+}
+
+// TestGetCooldownProgress validates progress calculation
+func TestGetCooldownProgress(t *testing.T) {
+	setupTest()
+
+	t.Run("ColdSystemReturns100", func(t *testing.T) {
+		hot = 0
+		progress := GetCooldownProgress()
+		if progress != 100 {
+			t.Errorf("Cold system should return 100%% progress, got %d", progress)
+		}
+	})
+
+	t.Run("ProgressCalculation", func(t *testing.T) {
+		hot = 1
+		SignalActivity()
+
+		// Advance to 25% of cooldown
+		advancePollCounter(constants.CooldownPolls / 4)
+		progress := GetCooldownProgress()
+
+		// Allow some tolerance for integer division
+		if progress < 20 || progress > 30 {
+			t.Errorf("Expected ~25%% progress, got %d", progress)
+		}
+	})
+
+	t.Run("CompletedCooldown", func(t *testing.T) {
+		hot = 1
+		SignalActivity()
+
+		// Advance past cooldown
+		advancePollCounter(constants.CooldownPolls + 100)
+		progress := GetCooldownProgress()
+
+		if progress != 100 {
+			t.Errorf("Completed cooldown should return 100%%, got %d", progress)
+		}
+	})
+}
+
+// TestGetCooldownRemaining validates remaining time calculation
+func TestGetCooldownRemaining(t *testing.T) {
+	setupTest()
+
+	t.Run("FullRemainingAtStart", func(t *testing.T) {
+		hot = 1
+		SignalActivity()
+
+		remaining := GetCooldownRemaining()
+		if remaining != constants.CooldownPolls {
+			t.Errorf("Should have full cooldown remaining, got %d", remaining)
+		}
+	})
+
+	t.Run("PartialRemaining", func(t *testing.T) {
+		hot = 1
+		SignalActivity()
+
+		advancePollCounter(1000)
+		remaining := GetCooldownRemaining()
+		expected := constants.CooldownPolls - 1000
+
+		if remaining != expected {
+			t.Errorf("Expected %d remaining, got %d", expected, remaining)
+		}
+	})
+
+	t.Run("ZeroWhenExpired", func(t *testing.T) {
+		hot = 1
+		SignalActivity()
+
+		advancePollCounter(constants.CooldownPolls + 500)
+		remaining := GetCooldownRemaining()
+
+		if remaining != 0 {
+			t.Errorf("Should have 0 remaining after expiry, got %d", remaining)
+		}
+	})
+}
+
+// ============================================================================
+// UNIT TESTS - STATE QUERY FUNCTIONS
+// ============================================================================
+
+// TestStateQueryFunctions validates state query consistency
+func TestStateQueryFunctions(t *testing.T) {
+	setupTest()
+
+	t.Run("IsHotConsistency", func(t *testing.T) {
+		hot = 0
+		if IsHot() {
+			t.Error("IsHot() should return false when hot=0")
+		}
+
+		hot = 1
+		if !IsHot() {
+			t.Error("IsHot() should return true when hot=1")
+		}
+	})
+
+	t.Run("IsStoppingConsistency", func(t *testing.T) {
+		stop = 0
+		if IsStopping() {
+			t.Error("IsStopping() should return false when stop=0")
+		}
+
+		stop = 1
+		if !IsStopping() {
+			t.Error("IsStopping() should return true when stop=1")
+		}
+	})
+
+	t.Run("IsActiveLogic", func(t *testing.T) {
+		// Cold system should not be active
+		hot = 0
+		if IsActive() {
+			t.Error("Cold system should not be active")
+		}
+
+		// Hot system within cooldown should be active
+		hot = 1
+		SignalActivity()
+		if !IsActive() {
+			t.Error("Hot system within cooldown should be active")
+		}
+
+		// Hot system past cooldown should not be active
+		advancePollCounter(constants.CooldownPolls + 100)
+		if IsActive() {
+			t.Error("Hot system past cooldown should not be active")
+		}
+	})
+}
+
+// TestGetSystemState validates packed state representation
+func TestGetSystemState(t *testing.T) {
+	setupTest()
+
+	t.Run("StateBitPacking", func(t *testing.T) {
+		hot = 1
+		stop = 0
+		SignalActivity()
+
+		state := GetSystemState()
+
+		// Check individual bits
+		if (state & 1) != 1 {
+			t.Error("Bit 0 should be set for hot flag")
+		}
+		if (state & 2) != 0 {
+			t.Error("Bit 1 should be clear for stop flag")
+		}
+		if (state & 4) != 4 {
+			t.Error("Bit 2 should be set for active cooldown")
+		}
+
+		// Test after cooldown expiry
+		advancePollCounter(constants.CooldownPolls + 100)
+		state = GetSystemState()
+		if (state & 4) != 0 {
+			t.Error("Bit 2 should be clear after cooldown expiry")
 		}
 	})
 }
@@ -123,7 +424,7 @@ func TestPollCooldown(t *testing.T) {
 
 // TestShutdown validates shutdown signaling
 func TestShutdown(t *testing.T) {
-	stop = 0
+	setupTest()
 
 	Shutdown()
 
@@ -143,35 +444,19 @@ func TestShutdown(t *testing.T) {
 // EDGE CASE TESTS
 // ============================================================================
 
-// TestEdgeCases validates boundary conditions
+// TestEdgeCases validates boundary conditions and edge cases
 func TestEdgeCases(t *testing.T) {
-	t.Run("ZeroCooldown", func(t *testing.T) {
-		originalCooldown := cooldownNs
-		cooldownNs = 0
-		defer func() { cooldownNs = originalCooldown }()
+	t.Run("CounterOverflow", func(t *testing.T) {
+		setupTest()
 
-		hot = 1
-		lastHot = time.Now().UnixNano() - 1
+		// Test with very large counter values
+		pollCounter = ^uint64(0) - 100 // Near max uint64
+		lastActivityCount = ^uint64(0) - 50
 
-		PollCooldown()
-
-		if hot != 0 {
-			t.Error("Zero cooldown should immediately clear hot flag")
-		}
-	})
-
-	t.Run("FutureTimestamp", func(t *testing.T) {
-		originalCooldown := cooldownNs
-		cooldownNs = int64(10 * time.Millisecond)
-		defer func() { cooldownNs = originalCooldown }()
-
-		hot = 1
-		lastHot = time.Now().UnixNano() + int64(time.Hour) // Future time
-
-		PollCooldown()
-
-		if hot != 1 {
-			t.Error("Future timestamp should not trigger cooldown")
+		age := GetActivityAge()
+		// Should handle large values gracefully
+		if age > 100 {
+			t.Error("Activity age should handle large counter values")
 		}
 	})
 
@@ -182,8 +467,24 @@ func TestEdgeCases(t *testing.T) {
 		if unsafe.Sizeof(stop) != 4 {
 			t.Errorf("Stop flag size: %d, expected 4 bytes", unsafe.Sizeof(stop))
 		}
-		if unsafe.Sizeof(lastHot) != 8 {
-			t.Errorf("LastHot size: %d, expected 8 bytes", unsafe.Sizeof(lastHot))
+		if unsafe.Sizeof(lastActivityCount) != 8 {
+			t.Errorf("LastActivityCount size: %d, expected 8 bytes", unsafe.Sizeof(lastActivityCount))
+		}
+		if unsafe.Sizeof(pollCounter) != 8 {
+			t.Errorf("PollCounter size: %d, expected 8 bytes", unsafe.Sizeof(pollCounter))
+		}
+	})
+
+	t.Run("AlignmentValidation", func(t *testing.T) {
+		// Validate memory alignment for performance
+		hotAddr := uintptr(unsafe.Pointer(&hot))
+		stopAddr := uintptr(unsafe.Pointer(&stop))
+
+		if hotAddr%4 != 0 {
+			t.Error("Hot flag should be 4-byte aligned")
+		}
+		if stopAddr%4 != 0 {
+			t.Error("Stop flag should be 4-byte aligned")
 		}
 	})
 }
@@ -192,20 +493,18 @@ func TestEdgeCases(t *testing.T) {
 // CONCURRENCY TESTS
 // ============================================================================
 
-// TestConcurrentActivity validates thread safety
+// TestConcurrentActivity validates thread safety of virtual timing
 func TestConcurrentActivity(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping concurrency test in short mode")
 	}
 
-	hot = 0
-	stop = 0
-	lastHot = 0
+	setupTest()
 
 	var wg sync.WaitGroup
 	operations := uint64(0)
 
-	// Concurrent activity signaling
+	// Concurrent activity signaling with virtual timing
 	for i := 0; i < testGoroutineCount; i++ {
 		wg.Add(1)
 		go func() {
@@ -236,16 +535,10 @@ func TestConcurrentMixedOperations(t *testing.T) {
 		t.Skip("Skipping mixed operations test in short mode")
 	}
 
-	hot = 0
-	stop = 0
-	lastHot = 0
-
-	originalCooldown := cooldownNs
-	cooldownNs = int64(5 * time.Millisecond)
-	defer func() { cooldownNs = originalCooldown }()
+	setupTest()
 
 	var wg sync.WaitGroup
-	var activityOps, cooldownOps, flagOps uint64
+	var activityOps, cooldownOps, flagOps, queryOps uint64
 
 	// Activity workers
 	for i := 0; i < 4; i++ {
@@ -255,7 +548,6 @@ func TestConcurrentMixedOperations(t *testing.T) {
 			for j := 0; j < 50; j++ {
 				SignalActivity()
 				atomic.AddUint64(&activityOps, 1)
-				time.Sleep(time.Microsecond)
 			}
 		}()
 	}
@@ -268,7 +560,6 @@ func TestConcurrentMixedOperations(t *testing.T) {
 			for j := 0; j < 50; j++ {
 				PollCooldown()
 				atomic.AddUint64(&cooldownOps, 1)
-				time.Sleep(time.Microsecond)
 			}
 		}()
 	}
@@ -281,7 +572,20 @@ func TestConcurrentMixedOperations(t *testing.T) {
 			for j := 0; j < 50; j++ {
 				Flags()
 				atomic.AddUint64(&flagOps, 1)
-				runtime.Gosched()
+			}
+		}()
+	}
+
+	// Query function workers
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				GetActivityAge()
+				GetCooldownProgress()
+				IsActive()
+				atomic.AddUint64(&queryOps, 1)
 			}
 		}()
 	}
@@ -290,15 +594,15 @@ func TestConcurrentMixedOperations(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		time.Sleep(5 * time.Millisecond)
+		runtime.Gosched() // Allow other goroutines to start
 		Shutdown()
 	}()
 
 	wg.Wait()
 
-	if activityOps != 200 || cooldownOps != 200 || flagOps != 200 {
-		t.Errorf("Operation counts: activity=%d cooldown=%d flags=%d (expected 200 each)",
-			activityOps, cooldownOps, flagOps)
+	if activityOps != 200 || cooldownOps != 200 || flagOps != 200 || queryOps != 200 {
+		t.Errorf("Operation counts: activity=%d cooldown=%d flags=%d query=%d (expected 200 each)",
+			activityOps, cooldownOps, flagOps, queryOps)
 	}
 
 	stopPtr, _ := Flags()
@@ -311,16 +615,9 @@ func TestConcurrentMixedOperations(t *testing.T) {
 // INTEGRATION TESTS
 // ============================================================================
 
-// TestTypicalWorkflow validates complete operational cycle
+// TestTypicalWorkflow validates complete operational cycle with virtual timing
 func TestTypicalWorkflow(t *testing.T) {
-	// Reset system
-	hot = 0
-	stop = 0
-	lastHot = 0
-
-	originalCooldown := cooldownNs
-	cooldownNs = int64(20 * time.Millisecond)
-	defer func() { cooldownNs = originalCooldown }()
+	setupTest()
 
 	stopPtr, hotPtr := Flags()
 
@@ -335,21 +632,21 @@ func TestTypicalWorkflow(t *testing.T) {
 		t.Error("System should be hot after activity")
 	}
 
-	// Phase 3: Sustained activity
-	for i := 0; i < 3; i++ {
-		time.Sleep(5 * time.Millisecond)
-		SignalActivity()
+	// Phase 3: Sustained activity (simulate multiple events)
+	for i := 0; i < 5; i++ {
+		advancePollCounter(1000) // Simulate some processing
+		SignalActivity()         // Renewed activity
 		PollCooldown()
 		if *hotPtr != 1 {
 			t.Error("System should remain hot during sustained activity")
 		}
 	}
 
-	// Phase 4: Natural cooldown
-	time.Sleep(25 * time.Millisecond)
+	// Phase 4: Natural cooldown (simulate idle period)
+	advancePollCounter(constants.CooldownPolls + 1000)
 	PollCooldown()
 	if *hotPtr != 0 {
-		t.Error("System should cool down after inactivity")
+		t.Error("System should cool down after virtual idle period")
 	}
 
 	// Phase 5: Graceful shutdown
@@ -365,18 +662,24 @@ func TestTypicalWorkflow(t *testing.T) {
 
 // BenchmarkSignalActivity measures activity signaling performance
 func BenchmarkSignalActivity(b *testing.B) {
+	setupTest()
 	b.ReportAllocs()
+	b.ResetTimer()
+
 	for i := 0; i < b.N; i++ {
 		SignalActivity()
 	}
 }
 
-// BenchmarkPollCooldown measures cooldown polling performance
+// BenchmarkPollCooldown measures branchless cooldown performance
 func BenchmarkPollCooldown(b *testing.B) {
+	setupTest()
 	hot = 1
-	lastHot = time.Now().UnixNano()
+	SignalActivity()
 
 	b.ReportAllocs()
+	b.ResetTimer()
+
 	for i := 0; i < b.N; i++ {
 		PollCooldown()
 	}
@@ -384,20 +687,56 @@ func BenchmarkPollCooldown(b *testing.B) {
 
 // BenchmarkFlags measures flag access performance
 func BenchmarkFlags(b *testing.B) {
+	setupTest()
 	b.ReportAllocs()
+	b.ResetTimer()
+
 	for i := 0; i < b.N; i++ {
 		Flags()
 	}
 }
 
-// BenchmarkFlagsWithRead measures flag access + read performance
-func BenchmarkFlagsWithRead(b *testing.B) {
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		stopPtr, hotPtr := Flags()
-		_ = *stopPtr
-		_ = *hotPtr
-	}
+// BenchmarkVirtualTimingFunctions measures query function performance
+func BenchmarkVirtualTimingFunctions(b *testing.B) {
+	setupTest()
+	hot = 1
+	SignalActivity()
+	advancePollCounter(1000)
+
+	b.Run("GetActivityAge", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			GetActivityAge()
+		}
+	})
+
+	b.Run("GetCooldownProgress", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			GetCooldownProgress()
+		}
+	})
+
+	b.Run("GetCooldownRemaining", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			GetCooldownRemaining()
+		}
+	})
+
+	b.Run("IsActive", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			IsActive()
+		}
+	})
+
+	b.Run("GetSystemState", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			GetSystemState()
+		}
+	})
 }
 
 // ============================================================================
@@ -406,7 +745,10 @@ func BenchmarkFlagsWithRead(b *testing.B) {
 
 // BenchmarkConcurrentAccess measures concurrent performance
 func BenchmarkConcurrentAccess(b *testing.B) {
+	setupTest()
 	b.ReportAllocs()
+	b.ResetTimer()
+
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			SignalActivity()
@@ -414,23 +756,25 @@ func BenchmarkConcurrentAccess(b *testing.B) {
 	})
 }
 
-// BenchmarkTypicalWorkload simulates realistic usage patterns
-func BenchmarkTypicalWorkload(b *testing.B) {
-	originalCooldown := cooldownNs
-	cooldownNs = int64(100 * time.Millisecond)
-	defer func() { cooldownNs = originalCooldown }()
+// BenchmarkBranchlessWorkload simulates branchless operation patterns
+func BenchmarkBranchlessWorkload(b *testing.B) {
+	setupTest()
+	hot = 1
+	SignalActivity()
 
 	b.ReportAllocs()
+	b.ResetTimer()
+
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			switch i % 20 {
+			switch i % 10 {
 			case 0:
-				SignalActivity() // 5% activity signals
+				SignalActivity() // 10% activity signals
 			case 1:
-				PollCooldown() // 5% cooldown polls
+				PollCooldown() // 10% cooldown polls
 			default:
-				stopPtr, hotPtr := Flags() // 90% flag reads
+				stopPtr, hotPtr := Flags() // 80% flag reads
 				_ = *stopPtr
 				_ = *hotPtr
 			}
@@ -445,6 +789,7 @@ func BenchmarkTypicalWorkload(b *testing.B) {
 
 // BenchmarkMemoryFootprint validates zero allocation requirement
 func BenchmarkMemoryFootprint(b *testing.B) {
+	setupTest()
 	var m1, m2 runtime.MemStats
 
 	runtime.GC()
@@ -455,6 +800,9 @@ func BenchmarkMemoryFootprint(b *testing.B) {
 		SignalActivity()
 		PollCooldown()
 		Flags()
+		GetActivityAge()
+		GetCooldownProgress()
+		IsActive()
 	}
 	b.StopTimer()
 
@@ -471,35 +819,81 @@ func BenchmarkMemoryFootprint(b *testing.B) {
 // PERFORMANCE VALIDATION
 // ============================================================================
 
-// TestPerformanceRequirements validates timing requirements
+// TestPerformanceRequirements validates branchless timing requirements
 func TestPerformanceRequirements(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping performance validation in short mode")
 	}
 
-	const iterations = 100000
+	setupTest()
 
-	// Test flag access performance (< 1000 ns/op requirement)
+	// Test flag access performance (< 500 ns/op requirement for branchless)
 	start := time.Now()
-	for i := 0; i < iterations; i++ {
+	for i := 0; i < performanceIterations; i++ {
 		Flags()
 	}
-	flagLatency := time.Since(start).Nanoseconds() / iterations
+	flagLatency := time.Since(start).Nanoseconds() / performanceIterations
 
-	// Test activity signaling performance (< 5000 ns/op requirement)
+	// Test activity signaling performance (< 1000 ns/op requirement)
 	start = time.Now()
-	for i := 0; i < iterations; i++ {
+	for i := 0; i < performanceIterations; i++ {
 		SignalActivity()
 	}
-	activityLatency := time.Since(start).Nanoseconds() / iterations
+	activityLatency := time.Since(start).Nanoseconds() / performanceIterations
 
-	t.Logf("Flag access: %d ns/op (requirement: <1000)", flagLatency)
-	t.Logf("Activity signaling: %d ns/op (requirement: <5000)", activityLatency)
+	// Test branchless cooldown performance (< 2000 ns/op requirement)
+	hot = 1
+	SignalActivity()
+	start = time.Now()
+	for i := 0; i < performanceIterations; i++ {
+		PollCooldown()
+	}
+	cooldownLatency := time.Since(start).Nanoseconds() / performanceIterations
 
-	if flagLatency > 1000 {
+	t.Logf("Flag access: %d ns/op (requirement: <500)", flagLatency)
+	t.Logf("Activity signaling: %d ns/op (requirement: <1000)", activityLatency)
+	t.Logf("Branchless cooldown: %d ns/op (requirement: <2000)", cooldownLatency)
+
+	if flagLatency > 500 {
 		t.Errorf("Flag access too slow: %d ns/op", flagLatency)
 	}
-	if activityLatency > 5000 {
+	if activityLatency > 1000 {
 		t.Errorf("Activity signaling too slow: %d ns/op", activityLatency)
 	}
+	if cooldownLatency > 2000 {
+		t.Errorf("Branchless cooldown too slow: %d ns/op", cooldownLatency)
+	}
+}
+
+// TestBranchlessBehavior validates mathematical correctness of branchless operations
+func TestBranchlessBehavior(t *testing.T) {
+	setupTest()
+
+	t.Run("BitManipulationCorrectness", func(t *testing.T) {
+		// Test branchless cooldown logic with known values
+		hot = 1
+		lastActivityCount = 0
+		pollCounter = 0
+
+		// Test boundary conditions
+		testCases := []struct {
+			elapsed  uint64
+			expected uint32
+		}{
+			{constants.CooldownPolls - 1, 1}, // Just before cooldown
+			{constants.CooldownPolls, 0},     // Exactly at cooldown
+			{constants.CooldownPolls + 1, 0}, // Just after cooldown
+		}
+
+		for _, tc := range testCases {
+			hot = 1 // Reset for each test
+			pollCounter = tc.elapsed
+			PollCooldown()
+
+			if hot != tc.expected {
+				t.Errorf("For elapsed=%d, expected hot=%d, got %d",
+					tc.elapsed, tc.expected, hot)
+			}
+		}
+	})
 }
