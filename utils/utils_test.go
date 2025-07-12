@@ -961,7 +961,7 @@ func BenchmarkMix64(b *testing.B) {
 	b.Run("single", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			_ = Mix64(inputs[i&3])
+			_ = Mix64(inputs[i%len(inputs)])
 		}
 	})
 
