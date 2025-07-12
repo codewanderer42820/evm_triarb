@@ -2149,21 +2149,29 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 	// and performance throttling mechanisms.
 	stopFlag, hotFlag := control.Flags()
 
-	// MAIN PROCESSING LOOP LAUNCH
-	//
-	// Core 0 receives enhanced responsibilities including global cooldown
-	// management, while other cores focus purely on arbitrage detection.
-	if coreID == 0 {
-		ring24.PinnedConsumerWithCooldown(coreID, coreRings[coreID], stopFlag, hotFlag,
-			func(messagePtr *[24]byte) {
-				processTickUpdate(executor, (*TickUpdate)(unsafe.Pointer(messagePtr)))
-			}, shutdownChannel)
-	} else {
-		ring24.PinnedConsumer(coreID, coreRings[coreID], stopFlag, hotFlag,
-			func(messagePtr *[24]byte) {
-				processTickUpdate(executor, (*TickUpdate)(unsafe.Pointer(messagePtr)))
-			}, shutdownChannel)
-	}
+	/*
+		// MAIN PROCESSING LOOP LAUNCH
+		//
+		// Core 0 receives enhanced responsibilities including global cooldown
+		// management, while other cores focus purely on arbitrage detection.
+		if coreID == 0 {
+			ring24.PinnedConsumerWithCooldown(coreID, coreRings[coreID], stopFlag, hotFlag,
+				func(messagePtr *[24]byte) {
+					processTickUpdate(executor, (*TickUpdate)(unsafe.Pointer(messagePtr)))
+				}, shutdownChannel)
+		} else {
+			ring24.PinnedConsumer(coreID, coreRings[coreID], stopFlag, hotFlag,
+				func(messagePtr *[24]byte) {
+					processTickUpdate(executor, (*TickUpdate)(unsafe.Pointer(messagePtr)))
+				}, shutdownChannel)
+		}
+	*/
+
+	*hotFlag = 1
+	ring24.PinnedConsumer(coreID, coreRings[coreID], stopFlag, hotFlag,
+		func(messagePtr *[24]byte) {
+			processTickUpdate(executor, (*TickUpdate)(unsafe.Pointer(messagePtr)))
+		}, shutdownChannel)
 }
 
 // InitializeArbitrageSystem orchestrates complete system bootstrap and activation.
