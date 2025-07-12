@@ -1559,7 +1559,7 @@ func TestSkipToQuote(t *testing.T) {
 		// JSON-like structures
 		{"json_object", []byte(`{"key":"value"}`), 0, 1, 1},
 		{"json_string", []byte(`"hello world"`), 0, 1, 0},
-		{"json_nested", []byte(`{"a":{"b":"c"}}`), 7, 1, 9}, // Starting at 7 (after '{"a":{'), next quote is at 9
+		{"json_nested", []byte(`{"a":{"b":"c"}}`), 7, 1, 8}, // Starting at 7 (after '{"a":{'), next quote is at 8
 
 		// Edge cases
 		{"single_quote", []byte(`"`), 0, 1, 0},
@@ -1607,7 +1607,7 @@ func TestSkipToQuoteEarlyExit(t *testing.T) {
 
 		// Hop size variations
 		{"hop_2_found", []byte(`ab"cd"`), 0, 2, 5, 2, false},
-		{"hop_2_early", []byte(`abcdefgh`), 0, 2, 2, 2, true},
+		{"hop_2_early", []byte(`abcdefgh`), 0, 2, 2, 4, true}, // 0->2->4 (2 hops)
 		{"hop_3_found", []byte(`abc"def"`), 0, 3, 5, 3, false},
 
 		// Start index variations
@@ -1615,7 +1615,7 @@ func TestSkipToQuoteEarlyExit(t *testing.T) {
 		{"start_middle_early", []byte(`abcdefghijk`), 4, 1, 3, 7, true},
 
 		// JSON patterns
-		{"json_key_limit", []byte(`{"longkey":"value"}`), 1, 1, 5, 5, true},
+		{"json_key_limit", []byte(`{"longkey":"value"}`), 1, 1, 5, 1, false}, // Quote found immediately at position 1
 		{"json_value_found", []byte(`{"k":"val"}`), 5, 1, 10, 5, false},
 
 		// Boundary conditions
@@ -1738,7 +1738,7 @@ func TestSkipToClosingBracketEarlyExit(t *testing.T) {
 
 		// Hop variations
 		{"hop_2_found", []byte(`ab]cd`), 0, 2, 5, 2, false},
-		{"hop_3_early", []byte(`abcdefghijk`), 0, 3, 2, 3, true},
+		{"hop_3_early", []byte(`abcdefghijk`), 0, 3, 2, 6, true}, // 0->3->6 (2 hops)
 	}
 
 	for _, tt := range tests {
