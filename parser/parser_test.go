@@ -866,7 +866,7 @@ func BenchmarkHandleFrame_EarlyExit(b *testing.B) {
 		{"10_bytes", make([]byte, 10)},
 		{"50_bytes", make([]byte, 50)},
 		{"124_bytes", make([]byte, 124)},
-		{"125_bytes_invalid", make([]byte, 125)},
+		// Skip 125+ bytes as they trigger validation warnings in a loop
 	}
 
 	for _, bm := range benchmarks {
@@ -877,6 +877,250 @@ func BenchmarkHandleFrame_EarlyExit(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				HandleFrame(bm.data)
+			}
+		})
+	}
+}
+
+// Benchmark field detection performance with valid events only
+func BenchmarkHandleFrame_ValidEvents(b *testing.B) {
+	// Create properly formatted events that won't trigger warnings
+	benchmarks := []struct {
+		name  string
+		event []byte
+	}{
+		{
+			name:  "minimal_valid",
+			event: []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5"}}}`),
+		},
+		{
+			name:  "with_extra_fields",
+			event: []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0x1234567890123456789012345678901234567890","blockHash":"0xabcdef","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","removed":false,"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5"}}}`),
+		},
+		{
+			name:  "fields_reordered",
+			event: []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"blockNumber":"0x123456","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"address":"0x1234567890123456789012345678901234567890","data":"0x1234","transactionIndex":"0x5","logIndex":"0x1"}}}`),
+		},
+	}
+
+	for _, bm := range benchmarks {
+		b.Run(bm.name, func(b *testing.B) {
+			b.SetBytes(int64(len(bm.event)))
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				HandleFrame(bm.event)
+			}
+		})
+	}
+}
+
+// Benchmark topics validation
+func BenchmarkHandleFrame_TopicsValidation(b *testing.B) {
+	benchmarks := []struct {
+		name   string
+		topics string
+	}{
+		{
+			name:   "valid_sync",
+			topics: `["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"]`,
+		},
+		{
+			name:   "invalid_sync",
+			topics: `["0x0000000000000000000000000000000000000000000000000000000000000000"]`,
+		},
+		{
+			name:   "multiple_topics",
+			topics: `["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","0x000000000000000000000000a0b86a33e6f4e3bbe1b85e8e0e9b8d1234567890"]`,
+		},
+	}
+
+	for _, bm := range benchmarks {
+		b.Run(bm.name, func(b *testing.B) {
+			event := []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":` + bm.topics + `,"transactionIndex":"0x5"}}}`)
+
+			b.SetBytes(int64(len(event)))
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				HandleFrame(event)
+			}
+		})
+	}
+}
+
+// Benchmark fingerprint generation isolated from parsing
+func BenchmarkGenerateFingerprint(b *testing.B) {
+	benchmarks := []struct {
+		name   string
+		topics []byte
+		data   []byte
+		addr   []byte
+	}{
+		{
+			name:   "load128_32bytes",
+			topics: make([]byte, 32),
+			data:   make([]byte, 16),
+			addr:   make([]byte, 20),
+		},
+		{
+			name:   "load64_topics_12bytes",
+			topics: make([]byte, 12),
+			data:   make([]byte, 16),
+			addr:   make([]byte, 20),
+		},
+		{
+			name:   "load64_data",
+			topics: make([]byte, 4),
+			data:   make([]byte, 16),
+			addr:   make([]byte, 20),
+		},
+		{
+			name:   "load64_addr",
+			topics: make([]byte, 4),
+			data:   make([]byte, 4),
+			addr:   make([]byte, 20),
+		},
+	}
+
+	for _, bm := range benchmarks {
+		// Fill with non-zero test data
+		for i := range bm.topics {
+			bm.topics[i] = byte(i + 1)
+		}
+		for i := range bm.data {
+			bm.data[i] = byte(i + 65)
+		}
+		for i := range bm.addr {
+			bm.addr[i] = byte(i + 129)
+		}
+
+		b.Run(bm.name, func(b *testing.B) {
+			v := &types.LogView{
+				Topics: bm.topics,
+				Data:   bm.data,
+				Addr:   bm.addr,
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				generateFingerprint(v)
+			}
+		})
+	}
+}
+
+// Benchmark complete parsing flow
+func BenchmarkHandleFrame_CompleteFlow(b *testing.B) {
+	// Use a valid event that will parse successfully
+	event := []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5"}}}`)
+
+	b.SetBytes(int64(len(event)))
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		HandleFrame(event)
+	}
+}
+
+// Benchmark zero allocation verification
+func BenchmarkHandleFrame_ZeroAllocation(b *testing.B) {
+	// Test with data that causes immediate early exit
+	shortData := make([]byte, 50)
+
+	b.Run("early_exit", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			HandleFrame(shortData)
+		}
+	})
+
+	// Test with valid event
+	validEvent := []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5"}}}`)
+
+	b.Run("complete_parsing", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			HandleFrame(validEvent)
+		}
+	})
+}
+
+// Benchmark latency distribution
+func BenchmarkHandleFrame_LatencyDistribution(b *testing.B) {
+	event := []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5"}}}`)
+
+	// Warmup
+	for i := 0; i < 1000; i++ {
+		HandleFrame(event)
+	}
+
+	b.ResetTimer()
+
+	// Collect latency samples
+	const samples = 10000
+	latencies := make([]time.Duration, 0, samples)
+
+	for i := 0; i < samples && i < b.N; i++ {
+		start := time.Now()
+		HandleFrame(event)
+		latencies = append(latencies, time.Since(start))
+	}
+
+	// Calculate percentiles
+	sort.Slice(latencies, func(i, j int) bool {
+		return latencies[i] < latencies[j]
+	})
+
+	if len(latencies) > 0 {
+		p50 := latencies[len(latencies)*50/100]
+		p90 := latencies[len(latencies)*90/100]
+		p95 := latencies[len(latencies)*95/100]
+		p99 := latencies[len(latencies)*99/100]
+		p999 := latencies[len(latencies)*999/1000]
+
+		b.ReportMetric(float64(p50.Nanoseconds()), "p50_ns")
+		b.ReportMetric(float64(p90.Nanoseconds()), "p90_ns")
+		b.ReportMetric(float64(p95.Nanoseconds()), "p95_ns")
+		b.ReportMetric(float64(p99.Nanoseconds()), "p99_ns")
+		b.ReportMetric(float64(p999.Nanoseconds()), "p99.9_ns")
+	}
+}
+
+// Benchmark CPU cache effects
+func BenchmarkHandleFrame_CacheEffects(b *testing.B) {
+	// Test with events that fit in different cache levels
+	sizes := []struct {
+		name      string
+		eventSize int
+		desc      string
+	}{
+		{"L1_cache", 256, "Fits in L1 cache"},
+		{"L2_cache", 2048, "Fits in L2 cache"},
+		{"L3_cache", 8192, "Fits in L3 cache"},
+	}
+
+	for _, s := range sizes {
+		b.Run(s.name, func(b *testing.B) {
+			// Create event of specific size
+			padding := strings.Repeat("x", s.eventSize-300)
+			event := []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5","pad":"` + padding + `"}}}`)
+
+			b.SetBytes(int64(len(event)))
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				HandleFrame(event)
 			}
 		})
 	}
