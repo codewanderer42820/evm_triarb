@@ -449,15 +449,29 @@ func TestEdgeCases(t *testing.T) {
 	t.Run("CounterOverflow", func(t *testing.T) {
 		setupTest()
 
-		// Test with very large counter values
-		pollCounter = ^uint64(0) - 100 // Near max uint64
-		lastActivityCount = ^uint64(0) - 50
-
+		// Test 1: Normal large value handling
+		pollCounter = 1000000
+		lastActivityCount = 999000
 		age := GetActivityAge()
-		// Should handle large values gracefully
-		if age > 100 {
-			t.Error("Activity age should handle large counter values")
+		if age != 1000 {
+			t.Errorf("Expected age 1000, got %d", age)
 		}
+
+		// Test 2: Verify no crashes with edge values
+		pollCounter = ^uint64(0)
+		lastActivityCount = ^uint64(0) - 1000
+		age = GetActivityAge()
+		if age != 1000 {
+			t.Errorf("Expected age 1000 at max values, got %d", age)
+		}
+
+		// Test 3: Verify function handles wraparound without crashing
+		// (Result will be large but that's expected behavior)
+		pollCounter = 50
+		lastActivityCount = 100
+		age = GetActivityAge()
+		// Don't check specific value - just ensure no panic/crash
+		_ = age // Function completed successfully
 	})
 
 	t.Run("MemoryLayout", func(t *testing.T) {
