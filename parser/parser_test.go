@@ -13,7 +13,7 @@ import (
 )
 
 // ============================================================================
-// TEST SETUP
+// TEST CONFIGURATION AND SETUP
 // ============================================================================
 
 func init() {
@@ -47,9 +47,10 @@ func createCompleteValidEvent() []byte {
 }
 
 // ============================================================================
-// HANDLEFRAME COVERAGE - EARLY EXIT PATHS
+// EARLY EXIT PATH TESTS
 // ============================================================================
 
+// TestHandleFrame_EarlyExitPaths validates length checks and early termination
 func TestHandleFrame_EarlyExitPaths(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -87,10 +88,135 @@ func TestHandleFrame_EarlyExitPaths(t *testing.T) {
 	}
 }
 
+// TestHandleFrame_DataFieldEarlyExit validates data field size limits
+func TestHandleFrame_DataFieldEarlyExit(t *testing.T) {
+	// Test the early exit condition for data field when size > 64
+	tests := []struct {
+		name       string
+		dataSize   int
+		shouldExit bool
+	}{
+		{"data_size_63", 63, false},
+		{"data_size_64", 64, false},
+		{"data_size_65", 65, true}, // Should trigger early exit
+		{"data_size_100", 100, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataHex := "0x" + strings.Repeat("ff", tt.dataSize)
+			event := []byte(createBaseEvent() +
+				`"data":"` + dataHex + `",` +
+				`"address":"0x1234567890123456789012345678901234567890",` +
+				`"blockNumber":"0x123456",` +
+				`"logIndex":"0x1",` +
+				`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
+				`"transactionIndex":"0x5"}}}`)
+
+			HandleFrame(event)
+			t.Logf("Data size %d: early exit = %v", tt.dataSize, tt.shouldExit)
+		})
+	}
+}
+
+// TestHandleFrame_TopicsEarlyExit validates topics array size limits
+func TestHandleFrame_TopicsEarlyExit(t *testing.T) {
+	// Test early exit when topics array is too large
+	// The parser checks if topics size > 69 and exits early
+	tests := []struct {
+		name       string
+		topics     string
+		shouldExit bool
+	}{
+		{
+			name:       "topics_normal_size",
+			topics:     `["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"]`,
+			shouldExit: false,
+		},
+		{
+			name:       "topics_with_multiple_entries",
+			topics:     `["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","0x000000000000000000000000a0b86a33e6f4e3bbe1b85e8e0e9b8d1234567890"]`,
+			shouldExit: false,
+		},
+		{
+			name:       "topics_large_array",
+			topics:     `["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","` + strings.Repeat("0", 100) + `"]`,
+			shouldExit: true, // This will be > 69 bytes
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := []byte(createBaseEvent() +
+				`"topics":` + tt.topics + `,` +
+				`"address":"0x1234567890123456789012345678901234567890",` +
+				`"blockNumber":"0x123456",` +
+				`"data":"0x1234",` +
+				`"logIndex":"0x1",` +
+				`"transactionIndex":"0x5"}}}`)
+
+			HandleFrame(event)
+			t.Logf("%s: topics length = %d, early exit = %v", tt.name, len(tt.topics), tt.shouldExit)
+		})
+	}
+}
+
+// TestHandleFrame_TopicsEndBeforeStart validates defensive programming in topics parsing
+func TestHandleFrame_TopicsEndBeforeStart(t *testing.T) {
+	// This tests the defensive check: if end < start { end = start }
+	// This could happen if SkipToClosingBracketEarlyExit returns a negative offset
+
+	tests := []struct {
+		name        string
+		description string
+		event       []byte
+	}{
+		{
+			name:        "malformed_topics_array",
+			description: "Topics array that might cause end < start",
+			event:       []byte(createBaseEvent() + `"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":[,"transactionIndex":"0x5"}}}`),
+		},
+		{
+			name:        "topics_no_closing_bracket",
+			description: "Topics array without closing bracket",
+			event:       []byte(createBaseEvent() + `"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","transactionIndex":"0x5"}}}`),
+		},
+		{
+			name:        "topics_immediate_close",
+			description: "Topics with immediate bracket close",
+			event:       []byte(createBaseEvent() + `"topics":[],"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","transactionIndex":"0x5"}}}`),
+		},
+		{
+			name:        "topics_truncated",
+			description: "Topics field truncated",
+			event:       []byte(createBaseEvent() + `"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"`),
+		},
+		{
+			name:        "topics_with_negative_offset",
+			description: "Scenario that could make end calculation negative",
+			event:       []byte(createBaseEvent() + `"topics":[` + strings.Repeat(" ", 10) + `"address":"0x1234567890123456789012345678901234567890"}}}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("Test %s panicked: %v", tt.name, r)
+				}
+			}()
+
+			HandleFrame(tt.event)
+			t.Logf("%s: %s - handled without panic", tt.name, tt.description)
+		})
+	}
+}
+
 // ============================================================================
-// HANDLEFRAME COVERAGE - FIELD DETECTION
+// FIELD DETECTION AND PARSING TESTS
 // ============================================================================
 
+// TestHandleFrame_AllFieldDetection validates switch statement coverage for all fields
 func TestHandleFrame_AllFieldDetection(t *testing.T) {
 	// Test each field that has a case in the switch statement
 	fields := []struct {
@@ -170,193 +296,51 @@ func TestHandleFrame_AllFieldDetection(t *testing.T) {
 	}
 }
 
-// ============================================================================
-// HANDLEFRAME COVERAGE - DATA FIELD EARLY EXIT
-// ============================================================================
-
-func TestHandleFrame_DataFieldEarlyExit(t *testing.T) {
-	// Test the early exit condition for data field when size > 64
+// TestFieldParsing_EdgeCases validates boundary conditions in field extraction
+func TestFieldParsing_EdgeCases(t *testing.T) {
+	// Test edge cases in field value extraction
 	tests := []struct {
-		name       string
-		dataSize   int
-		shouldExit bool
+		name     string
+		eventMod func(string) string
+		desc     string
 	}{
-		{"data_size_63", 63, false},
-		{"data_size_64", 64, false},
-		{"data_size_65", 65, true}, // Should trigger early exit
-		{"data_size_100", 100, true},
+		{
+			name: "address_at_end",
+			eventMod: func(base string) string {
+				return base + `"blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5","address":"0x1234567890123456789012345678901234567890"}}}`
+			},
+			desc: "Address field at end of object",
+		},
+		{
+			name: "quoted_values_in_data",
+			eventMod: func(base string) string {
+				return base + `"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x226461746122","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5"}}}`
+			},
+			desc: "Data field containing quote bytes",
+		},
+		{
+			name: "minimal_spacing",
+			eventMod: func(base string) string {
+				return base + `"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5"}}}`
+			},
+			desc: "Minimal spacing between fields",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dataHex := "0x" + strings.Repeat("ff", tt.dataSize)
-			event := []byte(createBaseEvent() +
-				`"data":"` + dataHex + `",` +
-				`"address":"0x1234567890123456789012345678901234567890",` +
-				`"blockNumber":"0x123456",` +
-				`"logIndex":"0x1",` +
-				`"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],` +
-				`"transactionIndex":"0x5"}}}`)
-
+			event := []byte(tt.eventMod(createBaseEvent()))
 			HandleFrame(event)
-			t.Logf("Data size %d: early exit = %v", tt.dataSize, tt.shouldExit)
+			t.Logf("%s: %s", tt.name, tt.desc)
 		})
 	}
 }
 
 // ============================================================================
-// HANDLEFRAME COVERAGE - TOPICS FIELD VALIDATION
+// TRANSACTION FIELD HANDLING TESTS
 // ============================================================================
 
-func TestHandleFrame_TopicsValidation(t *testing.T) {
-	tests := []struct {
-		name       string
-		topics     string
-		shouldPass bool
-		reason     string
-	}{
-		{
-			name:       "valid_sync_signature",
-			topics:     `["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"]`,
-			shouldPass: true,
-			reason:     "Valid Sync event signature",
-		},
-		{
-			name:       "topics_too_short",
-			topics:     `["0x1c41"]`,
-			shouldPass: false,
-			reason:     "Topics length < 11 bytes",
-		},
-		{
-			name:       "wrong_signature",
-			topics:     `["0x0000000096e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"]`,
-			shouldPass: false,
-			reason:     "Signature doesn't match SigSyncPrefix",
-		},
-		{
-			name:       "empty_topics",
-			topics:     `[]`,
-			shouldPass: false,
-			reason:     "Empty topics array",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			event := []byte(createBaseEvent() +
-				`"topics":` + tt.topics + `,` +
-				`"address":"0x1234567890123456789012345678901234567890",` +
-				`"blockNumber":"0x123456",` +
-				`"data":"0x1234",` +
-				`"logIndex":"0x1",` +
-				`"transactionIndex":"0x5"}}}`)
-
-			HandleFrame(event)
-			t.Logf("%s: %s", tt.name, tt.reason)
-		})
-	}
-}
-
-// ============================================================================
-// HANDLEFRAME COVERAGE - TOPICS EARLY EXIT (SIZE > 69)
-// ============================================================================
-
-func TestHandleFrame_TopicsEarlyExit(t *testing.T) {
-	// Test early exit when topics array is too large
-	// The parser checks if topics size > 69 and exits early
-	tests := []struct {
-		name       string
-		topics     string
-		shouldExit bool
-	}{
-		{
-			name:       "topics_normal_size",
-			topics:     `["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"]`,
-			shouldExit: false,
-		},
-		{
-			name:       "topics_with_multiple_entries",
-			topics:     `["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","0x000000000000000000000000a0b86a33e6f4e3bbe1b85e8e0e9b8d1234567890"]`,
-			shouldExit: false,
-		},
-		{
-			name:       "topics_large_array",
-			topics:     `["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","` + strings.Repeat("0", 100) + `"]`,
-			shouldExit: true, // This will be > 69 bytes
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			event := []byte(createBaseEvent() +
-				`"topics":` + tt.topics + `,` +
-				`"address":"0x1234567890123456789012345678901234567890",` +
-				`"blockNumber":"0x123456",` +
-				`"data":"0x1234",` +
-				`"logIndex":"0x1",` +
-				`"transactionIndex":"0x5"}}}`)
-
-			HandleFrame(event)
-			t.Logf("%s: topics length = %d, early exit = %v", tt.name, len(tt.topics), tt.shouldExit)
-		})
-	}
-}
-
-// Test edge case where end < start in topics parsing
-func TestHandleFrame_TopicsEndBeforeStart(t *testing.T) {
-	// This tests the defensive check: if end < start { end = start }
-	// This could happen if SkipToClosingBracketEarlyExit returns a negative offset
-
-	tests := []struct {
-		name        string
-		description string
-		event       []byte
-	}{
-		{
-			name:        "malformed_topics_array",
-			description: "Topics array that might cause end < start",
-			event:       []byte(createBaseEvent() + `"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":[,"transactionIndex":"0x5"}}}`),
-		},
-		{
-			name:        "topics_no_closing_bracket",
-			description: "Topics array without closing bracket",
-			event:       []byte(createBaseEvent() + `"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","transactionIndex":"0x5"}}}`),
-		},
-		{
-			name:        "topics_immediate_close",
-			description: "Topics with immediate bracket close",
-			event:       []byte(createBaseEvent() + `"topics":[],"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","transactionIndex":"0x5"}}}`),
-		},
-		{
-			name:        "topics_truncated",
-			description: "Topics field truncated",
-			event:       []byte(createBaseEvent() + `"topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78`),
-		},
-		{
-			name:        "topics_with_negative_offset",
-			description: "Scenario that could make end calculation negative",
-			event:       []byte(createBaseEvent() + `"topics":[` + strings.Repeat(" ", 10) + `"address":"0x1234567890123456789012345678901234567890"}}}`),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Errorf("Test %s panicked: %v", tt.name, r)
-				}
-			}()
-
-			HandleFrame(tt.event)
-			t.Logf("%s: %s - handled without panic", tt.name, tt.description)
-		})
-	}
-}
-
-// ============================================================================
-// HANDLEFRAME COVERAGE - TRANSACTION FIELD HANDLING
-// ============================================================================
-
+// TestHandleFrame_TransactionFieldHandling validates transaction parsing logic
 func TestHandleFrame_TransactionFieldHandling(t *testing.T) {
 	// Test both paths: skip when >= 86 bytes remain, parse when < 86 bytes
 	tests := []struct {
@@ -426,9 +410,60 @@ func TestHandleFrame_TransactionFieldHandling(t *testing.T) {
 }
 
 // ============================================================================
-// HANDLEFRAME COVERAGE - REQUIRED FIELDS VALIDATION
+// VALIDATION AND SIGNATURE TESTS
 // ============================================================================
 
+// TestHandleFrame_TopicsValidation validates signature checking and topics format
+func TestHandleFrame_TopicsValidation(t *testing.T) {
+	tests := []struct {
+		name       string
+		topics     string
+		shouldPass bool
+		reason     string
+	}{
+		{
+			name:       "valid_sync_signature",
+			topics:     `["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"]`,
+			shouldPass: true,
+			reason:     "Valid Sync event signature",
+		},
+		{
+			name:       "topics_too_short",
+			topics:     `["0x1c41"]`,
+			shouldPass: false,
+			reason:     "Topics length < 11 bytes",
+		},
+		{
+			name:       "wrong_signature",
+			topics:     `["0x0000000096e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"]`,
+			shouldPass: false,
+			reason:     "Signature doesn't match SigSyncPrefix",
+		},
+		{
+			name:       "empty_topics",
+			topics:     `[]`,
+			shouldPass: false,
+			reason:     "Empty topics array",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := []byte(createBaseEvent() +
+				`"topics":` + tt.topics + `,` +
+				`"address":"0x1234567890123456789012345678901234567890",` +
+				`"blockNumber":"0x123456",` +
+				`"data":"0x1234",` +
+				`"logIndex":"0x1",` +
+				`"transactionIndex":"0x5"}}}`)
+
+			HandleFrame(event)
+			t.Logf("%s: %s", tt.name, tt.reason)
+		})
+	}
+}
+
+// TestHandleFrame_RequiredFieldsValidation validates mandatory field presence
 func TestHandleFrame_RequiredFieldsValidation(t *testing.T) {
 	// Test all combinations of missing required fields
 	requiredFields := []string{"address", "data", "blockNumber", "logIndex", "transactionIndex"}
@@ -476,9 +511,10 @@ func TestHandleFrame_RequiredFieldsValidation(t *testing.T) {
 }
 
 // ============================================================================
-// HANDLEFRAME COVERAGE - DEDUPLICATION CHECK
+// DEDUPLICATION AND STATE TESTS
 // ============================================================================
 
+// TestHandleFrame_DeduplicationPath validates deduplication logic integration
 func TestHandleFrame_DeduplicationPath(t *testing.T) {
 	// Reset state
 	var d dedupe.Deduper
@@ -501,9 +537,10 @@ func TestHandleFrame_DeduplicationPath(t *testing.T) {
 }
 
 // ============================================================================
-// GENERATEFINGERPRINT COVERAGE - ALL PATHS
+// FINGERPRINT GENERATION TESTS
 // ============================================================================
 
+// TestGenerateFingerprint_CompleteCoverage validates all execution paths in fingerprint generation
 func TestGenerateFingerprint_CompleteCoverage(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -605,9 +642,10 @@ func TestGenerateFingerprint_CompleteCoverage(t *testing.T) {
 }
 
 // ============================================================================
-// EMITLOG COVERAGE
+// OUTPUT AND LOGGING TESTS
 // ============================================================================
 
+// TestEmitLog_Coverage validates log output functionality
 func TestEmitLog_Coverage(t *testing.T) {
 	// Test emitLog with various field values
 	// Note: Empty fields cause panics in utils.B2s, so we avoid them
@@ -661,88 +699,10 @@ func TestEmitLog_Coverage(t *testing.T) {
 }
 
 // ============================================================================
-// INTEGRATION TEST - COMPLETE FLOW
+// UTILITY FUNCTION COVERAGE TESTS
 // ============================================================================
 
-func TestCompleteParsingFlow(t *testing.T) {
-	// Reset state
-	var d dedupe.Deduper
-	dedup = d
-	latestBlk = 0
-
-	// Create a perfectly valid event that exercises all paths
-	// Note: The parser is very sensitive to exact format
-	event := createCompleteValidEvent()
-
-	// Log the event for debugging
-	t.Logf("Testing with event: %s", string(event))
-
-	// Process the event
-	oldLatestBlk := latestBlk
-	HandleFrame(event)
-
-	// The parser might fail validation due to field parsing issues
-	// This is not a test failure but a parser characteristic
-	if latestBlk <= oldLatestBlk {
-		t.Log("Note: Valid event did not update latestBlk - parser validation is strict")
-	} else {
-		t.Logf("Success: latestBlk updated from %d to %d", oldLatestBlk, latestBlk)
-	}
-
-	// Try with a different block number
-	event2 := bytes.Replace(event, []byte(`"blockNumber":"0x123456"`), []byte(`"blockNumber":"0x123457"`), 1)
-	HandleFrame(event2)
-
-	t.Logf("Complete flow test: latestBlk = 0x%x", latestBlk)
-}
-
-// ============================================================================
-// EDGE CASES FOR FIELD PARSING
-// ============================================================================
-
-func TestFieldParsing_EdgeCases(t *testing.T) {
-	// Test edge cases in field value extraction
-	tests := []struct {
-		name     string
-		eventMod func(string) string
-		desc     string
-	}{
-		{
-			name: "address_at_end",
-			eventMod: func(base string) string {
-				return base + `"blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5","address":"0x1234567890123456789012345678901234567890"}}}`
-			},
-			desc: "Address field at end of object",
-		},
-		{
-			name: "quoted_values_in_data",
-			eventMod: func(base string) string {
-				return base + `"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x226461746122","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5"}}}`
-			},
-			desc: "Data field containing quote bytes",
-		},
-		{
-			name: "minimal_spacing",
-			eventMod: func(base string) string {
-				return base + `"address":"0x1234567890123456789012345678901234567890","blockNumber":"0x123456","data":"0x1234","logIndex":"0x1","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x5"}}}`
-			},
-			desc: "Minimal spacing between fields",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			event := []byte(tt.eventMod(createBaseEvent()))
-			HandleFrame(event)
-			t.Logf("%s: %s", tt.name, tt.desc)
-		})
-	}
-}
-
-// ============================================================================
-// UTILITY FUNCTION COVERAGE
-// ============================================================================
-
+// TestUtilityFunctions_CompleteCoverage validates all utility function usage paths
 func TestUtilityFunctions_CompleteCoverage(t *testing.T) {
 	// Ensure we use all utility functions that appear in parser
 
@@ -794,9 +754,71 @@ func TestUtilityFunctions_CompleteCoverage(t *testing.T) {
 }
 
 // ============================================================================
-// MAIN PARSING LOOP COVERAGE
+// UNSAFE POINTER OPERATIONS TESTS
 // ============================================================================
 
+// TestUnsafeOperations validates unsafe pointer usage in tag extraction
+func TestUnsafeOperations(t *testing.T) {
+	// Test the unsafe pointer operations used in the parser
+	data := []byte("\"address\":\"0x1234567890123456789012345678901234567890\"")
+
+	// Test the 8-byte tag extraction
+	for i := 0; i <= len(data)-8; i++ {
+		tag := *(*[8]byte)(unsafe.Pointer(&data[i]))
+		if tag == constants.KeyAddress {
+			t.Logf("Found address tag at position %d", i)
+			break
+		}
+	}
+
+	// Test with topics signature check
+	topicsData := []byte("0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1")
+	if len(topicsData) >= 11 {
+		sigCheck := *(*[8]byte)(unsafe.Pointer(&topicsData[3]))
+		if sigCheck == constants.SigSyncPrefix {
+			t.Log("Sync signature check passed")
+		}
+	}
+}
+
+// ============================================================================
+// INTEGRATION AND WORKFLOW TESTS
+// ============================================================================
+
+// TestCompleteParsingFlow validates end-to-end parsing functionality
+func TestCompleteParsingFlow(t *testing.T) {
+	// Reset state
+	var d dedupe.Deduper
+	dedup = d
+	latestBlk = 0
+
+	// Create a perfectly valid event that exercises all paths
+	// Note: The parser is very sensitive to exact format
+	event := createCompleteValidEvent()
+
+	// Log the event for debugging
+	t.Logf("Testing with event: %s", string(event))
+
+	// Process the event
+	oldLatestBlk := latestBlk
+	HandleFrame(event)
+
+	// The parser might fail validation due to field parsing issues
+	// This is not a test failure but a parser characteristic
+	if latestBlk <= oldLatestBlk {
+		t.Log("Note: Valid event did not update latestBlk - parser validation is strict")
+	} else {
+		t.Logf("Success: latestBlk updated from %d to %d", oldLatestBlk, latestBlk)
+	}
+
+	// Try with a different block number
+	event2 := bytes.Replace(event, []byte(`"blockNumber":"0x123456"`), []byte(`"blockNumber":"0x123457"`), 1)
+	HandleFrame(event2)
+
+	t.Logf("Complete flow test: latestBlk = 0x%x", latestBlk)
+}
+
+// TestParsingLoop_AllIterations validates main parsing loop coverage
 func TestParsingLoop_AllIterations(t *testing.T) {
 	// Create event that exercises the main loop thoroughly
 	// Include fields at various positions to ensure loop coverage
@@ -840,36 +862,10 @@ func TestParsingLoop_AllIterations(t *testing.T) {
 }
 
 // ============================================================================
-// UNSAFE POINTER OPERATIONS
-// ============================================================================
-
-func TestUnsafeOperations(t *testing.T) {
-	// Test the unsafe pointer operations used in the parser
-	data := []byte("\"address\":\"0x1234567890123456789012345678901234567890\"")
-
-	// Test the 8-byte tag extraction
-	for i := 0; i <= len(data)-8; i++ {
-		tag := *(*[8]byte)(unsafe.Pointer(&data[i]))
-		if tag == constants.KeyAddress {
-			t.Logf("Found address tag at position %d", i)
-			break
-		}
-	}
-
-	// Test with topics signature check
-	topicsData := []byte("0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1")
-	if len(topicsData) >= 11 {
-		sigCheck := *(*[8]byte)(unsafe.Pointer(&topicsData[3]))
-		if sigCheck == constants.SigSyncPrefix {
-			t.Log("Sync signature check passed")
-		}
-	}
-}
-
-// ============================================================================
 // PERFORMANCE AND STRESS TESTS
 // ============================================================================
 
+// TestPerformanceCharacteristics validates parser performance under various conditions
 func TestPerformanceCharacteristics(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping performance test")
