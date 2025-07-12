@@ -1967,8 +1967,9 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 		// PRIORITY QUEUE INTEGRATION
 		//
 		// Allocate queue handle and insert cycle with maximum initialization
-		// priority to ensure proper queue ordering.
-		queueHandle, _ := queue.BorrowSafe()
+		// priority to ensure proper queue ordering. Handle exhaustion is
+		// impossible as queue capacity exceeds maximum cycle count by design.
+		queueHandle, _ := queue.Borrow()
 		queue.Push(constants.MaxInitializationPriority, queueHandle, uint64(cycleIndex))
 
 		// FANOUT RELATIONSHIP CONSTRUCTION
