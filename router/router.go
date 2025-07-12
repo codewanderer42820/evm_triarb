@@ -1755,10 +1755,13 @@ func (k *keccakRandomState) nextUint64() uint64 {
 // • Slight bias is negligible for load balancing applications
 // • Performance prioritized over perfect statistical distribution
 //
-// BOUNDS CHECKING:
+// BOUNDS HANDLING:
 //
-// • Zero or negative bounds return zero for safety
-// • Modulo operation handles all positive bounds efficiently
+//   - The bounds check has been removed as this function is only called from
+//     Fisher-Yates shuffle where upperBound = i+1 and i > 0, guaranteeing
+//     upperBound >= 2
+//   - Modulo operation handles all positive bounds efficiently
+//   - Caller guarantees valid bounds through algorithmic constraints
 //
 //go:norace
 //go:nocheckptr
