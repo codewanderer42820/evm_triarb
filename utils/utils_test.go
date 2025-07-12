@@ -549,6 +549,9 @@ func TestSkipToQuoteEarlyExit(t *testing.T) {
 		{"early_exit", []byte(`abcdefghij`), 0, 1, 3, 3, true},
 		{"immediate_find", []byte(`"test"`), 0, 1, 10, 0, false},
 		{"zero_max_hops", []byte(`"test"`), 0, 1, 0, 0, true},
+		{"not_found_no_early", []byte(`abcdef`), 0, 1, 10, -1, false}, // -1 case
+		{"empty_data", []byte{}, 0, 1, 10, -1, false},                 // -1 case
+		{"start_past_end", []byte(`"test"`), 10, 1, 5, -1, false},     // -1 case
 	}
 
 	for _, tt := range tests {
@@ -615,6 +618,42 @@ func TestSkipToClosingBracket(t *testing.T) {
 	}
 }
 
+func TestSkipToClosingBracketEarlyExit(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      []byte
+		startIdx  int
+		hopSize   int
+		maxHops   int
+		wantIdx   int
+		wantEarly bool
+	}{
+		{"found_within_limit", []byte(`abc]def`), 0, 1, 10, 3, false},
+		{"found_at_limit", []byte(`abc]def`), 0, 1, 4, 3, false},
+		{"early_exit", []byte(`abcdefghij`), 0, 1, 3, 3, true},
+		{"not_found_no_early", []byte(`abcdef`), 0, 1, 10, -1, false}, // -1 case
+		{"immediate_find", []byte(`]test`), 0, 1, 10, 0, false},
+		{"zero_max_hops", []byte(`]test`), 0, 1, 0, 0, true},
+		{"empty_data", []byte{}, 0, 1, 10, -1, false},            // -1 case
+		{"start_past_end", []byte(`]test`), 10, 1, 5, -1, false}, // -1 case
+		{"hop_2_found", []byte(`ab]cd`), 0, 2, 5, 2, false},
+		{"hop_3_early", []byte(`abcdefghijk`), 0, 3, 2, 6, true}, // 0->3->6 (2 hops)
+		{"json_array_close", []byte(`[1,2,3,4,5]`), 5, 1, 10, 10, false},
+		{"json_array_early", []byte(`[1,2,3,4,5,6,7,8,9`), 5, 1, 5, 10, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotIdx, gotEarly := SkipToClosingBracketEarlyExit(tt.data, tt.startIdx, tt.hopSize, tt.maxHops)
+			if gotIdx != tt.wantIdx || gotEarly != tt.wantEarly {
+				t.Errorf("SkipToClosingBracketEarlyExit(%q, %d, %d, %d) = (%d, %v), want (%d, %v)",
+					tt.data, tt.startIdx, tt.hopSize, tt.maxHops,
+					gotIdx, gotEarly, tt.wantIdx, tt.wantEarly)
+			}
+		})
+	}
+}
+
 func TestJSONParsing_ZeroAllocation(t *testing.T) {
 	data := []byte(`{"key":"value","array":[1,2,3],"nested":{"a":"b"}}`)
 
@@ -632,6 +671,10 @@ func TestJSONParsing_ZeroAllocation(t *testing.T) {
 
 	assertZeroAllocs(t, "SkipToClosingBracket", func() {
 		_ = SkipToClosingBracket(data, 0, 1)
+	})
+
+	assertZeroAllocs(t, "SkipToClosingBracketEarlyExit", func() {
+		_, _ = SkipToClosingBracketEarlyExit(data, 0, 1, 10)
 	})
 }
 
