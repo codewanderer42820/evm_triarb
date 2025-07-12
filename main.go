@@ -8,52 +8,26 @@ import (
 	"main/ws"
 	"net"
 	"runtime"
-	rtdebug "runtime/debug"
 	"syscall"
 )
 
-var memstats runtime.MemStats
-
-// main - Entry point for high-performance stream processor
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
 func main() {
-	debug.DropMessage("STARTUP", "high-performance stream processor initializing")
-
-	// Optimize runtime for predictable latency
-	rtdebug.SetGCPercent(-1) // Disable automatic GC
-	runtime.LockOSThread()   // Pin to OS thread
+	debug.DropMessage("STARTUP", "")
+	runtime.LockOSThread() // Pin to OS thread
 
 	// Main processing loop with auto-recovery
 	for {
-		debug.DropMessage("CONNECT", "establishing stream connection")
-
 		if err := runStream(); err != nil {
 			debug.DropError("stream error", err)
-		}
-
-		// Memory pressure management
-		runtime.ReadMemStats(&memstats)
-		if memstats.HeapAlloc > constants.HeapSoftLimit {
-			rtdebug.SetGCPercent(100)
-			runtime.GC()
-			rtdebug.SetGCPercent(-1)
-			debug.DropMessage("GC", "heap trimmed")
-		}
-
-		// Leak detection
-		if memstats.HeapAlloc > constants.HeapHardLimit {
-			panic("heap leak detected")
 		}
 	}
 }
 
-// runStream processes WebSocket events with minimum latency
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -69,17 +43,15 @@ func runStream() error {
 
 	// WebSocket handshake
 	if err := ws.Handshake(conn); err != nil {
-		debug.DropError("handshake failed", err)
 		return err
 	}
 
 	// Subscribe to logs
 	if err := ws.SendSubscription(conn); err != nil {
-		debug.DropError("subscription failed", err)
 		return err
 	}
 
-	debug.DropMessage("READY", "processing stream events")
+	debug.DropMessage("READY", "")
 
 	// Hot processing loop
 	for {
@@ -93,8 +65,6 @@ func runStream() error {
 	}
 }
 
-// establishConnection creates TCP+TLS with optimal settings
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -124,12 +94,9 @@ func establishConnection() (*tls.Conn, error) {
 		ServerName: constants.WsHost,
 	})
 
-	debug.DropMessage("TCP+TLS", "optimized connection established")
 	return tlsConn, nil
 }
 
-// optimizeSocket applies platform-specific TCP optimizations
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
