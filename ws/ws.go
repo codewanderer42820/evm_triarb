@@ -3,7 +3,6 @@ package ws
 import (
 	"errors"
 	"main/constants"
-	"main/control"
 	"net"
 	"unsafe"
 )
@@ -161,7 +160,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		}
 
 		// Signal activity
-		control.SignalActivity()
+		// control.SignalActivity()
 
 		// Extract frame info
 		opcode = headerBuf[0] & 0x0F
