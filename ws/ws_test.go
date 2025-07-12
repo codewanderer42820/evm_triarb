@@ -1986,10 +1986,9 @@ func TestBufferBoundaryConditions(t *testing.T) {
 }
 
 func TestReadPatterns(t *testing.T) {
-	t.Run("variable_read_sizes", func(t *testing.T) {
-		// Test with connection that returns variable amounts of data
+	t.Run("simple_read", func(t *testing.T) {
+		// Simple test first
 		frame := createTestFrame(0x1, []byte("Hello World"), true)
-
 		conn := &mockConn{readData: frame}
 
 		result, err := SpinUntilCompleteMessage(conn)
@@ -2171,9 +2170,76 @@ func TestFullPathCoverage(t *testing.T) {
 			})
 		}
 	})
-}
 
-func TestVariableReadSizes(t *testing.T) {
+	t.Run("handshake_scan_positions", func(t *testing.T) {
+		// Test different scan positions to ensure all paths are covered
+		testCases := []struct {
+			name     string
+			response string
+		}{
+			// Pattern at different positions to test the scanning loop
+			{"at_13", "HTTP/1.1 101\r\n\r\n"},                                        // At position 13
+			{"at_14", "HTTP/1.1 101!\r\n\r\n"},                                       // At position 14
+			{"at_15", "HTTP/1.1 101!!\r\n\r\n"},                                      // At position 15
+			{"at_16", "HTTP/1.1 101!!!\r\n\r\n"},                                     // At position 16
+			{"at_17", "HTTP/1.1 101!!!!\r\n\r\n"},                                    // At position 17
+			{"at_100", "HTTP/1.1 101 OK\r\n" + strings.Repeat("X", 80) + "\r\n\r\n"}, // Later position
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				conn := &mockConn{readData: []byte(tc.response)}
+				err := Handshake(conn)
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("control_frame_zero_payload", func(t *testing.T) {
+		// Ensure we hit the payloadLen == 0 case for control frames
+		var data []byte
+		data = append(data, []byte{0x88, 0x00}...) // Close frame with 0 payload
+		data = append(data, createTestFrame(0x1, []byte("data"), true)...)
+
+		conn := &mockConn{readData: data}
+		result, err := SpinUntilCompleteMessage(conn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(result) != "data" {
+			t.Errorf("Expected 'data', got %q", string(result))
+		}
+	})
+
+	t.Run("exact_buffer_end", func(t *testing.T) {
+		// Test when msgEnd equals BufferSize (bounds check)
+		// Create fragments that total exactly BufferSize
+		var data []byte
+
+		// First fragment
+		size1 := BufferSize - 10000
+		data = append(data, createTestFrame(0x1, make([]byte, size1), false)...)
+
+		// Second fragment to reach exactly BufferSize
+		// Account for frame overhead
+		frameOverhead := len(createTestFrame(0x0, []byte{}, true)) - 0
+		size2 := 10000 - frameOverhead - len(data)
+		if size2 > 0 {
+			data = append(data, createTestFrame(0x0, make([]byte, size2), true)...)
+		} else {
+			// Just close the message
+			data = append(data, createTestFrame(0x0, []byte{}, true)...)
+		}
+
+		conn := &mockConn{readData: data}
+		_, err := SpinUntilCompleteMessage(conn)
+		if err != nil && !strings.Contains(err.Error(), "message too large") {
+			t.Errorf("Expected success or 'message too large', got: %v", err)
+		}
+	})
+
 	// Test with chunked reads to ensure all read paths are covered
 	t.Run("chunked_header_reads", func(t *testing.T) {
 		frame := createTestFrame(0x1, []byte("Test"), true)
