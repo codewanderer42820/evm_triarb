@@ -2167,7 +2167,7 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 		}
 	*/
 
-	*hotFlag = 1
+	control.SignalActivity()
 	ring24.PinnedConsumer(coreID, coreRings[coreID], stopFlag, hotFlag,
 		func(messagePtr *[24]byte) {
 			processTickUpdate(executor, (*TickUpdate)(unsafe.Pointer(messagePtr)))
