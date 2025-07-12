@@ -67,9 +67,13 @@
 //   - addressToPairID[i] in lookupPairIDByAddress
 //   - coreRings[coreID] in DispatchTickUpdate
 //   - executor.cycleStates[cycleIndex] in processTickUpdate
+//   - pairToCoreAssignment[pairID] in DispatchTickUpdate and RegisterPairToCore
+//   - hexData[32:64] and hexData[96:128] in DispatchTickUpdate
+//   - executor.processedCycles[cycleCount] in processTickUpdate
+//   - chunks[firstChunk] in countLeadingZeros
 //
-// WHY: Each bounds check costs 2-3 CPU cycles. At 24M operations/second, this
-// translates to 72M wasted cycles per second per check.
+// WHY: Each bounds check costs 2-3 CPU cycles. At 14M operations/second, this
+// translates to 42M wasted cycles per second per check.
 //
 // RISK: Array index out of bounds will cause immediate segmentation fault.
 //
@@ -82,6 +86,8 @@
 // The system uses direct memory reinterpretation without type safety:
 //   messageBytes := (*[24]byte)(unsafe.Pointer(&message))
 //   processTickUpdate(executor, (*TickUpdate)(unsafe.Pointer(messagePtr)))
+//   *(*uint64)(unsafe.Pointer(&input[32])) = k.counter
+//   *(*uint64)(unsafe.Pointer(&seedInput[0])) = utils.Mix64(uint64(pairID))
 //
 // WHY: Type-safe conversions would require allocation and copying, adding 10-15ns.
 //
@@ -98,6 +104,8 @@
 //   - coreRings[coreID].Push() assumes ring exists
 //   - executor.cycleStates access assumes initialization
 //   - queue.PeepMin() assumes queue is valid
+//   - fanoutEntry.queue access in processTickUpdate
+//   - coreExecutors[coreID] assignment in launchShardWorker
 //
 // WHY: Each nil check is a branch that disrupts CPU pipelining, costing 5-10 cycles
 // on misprediction.
@@ -131,6 +139,7 @@
 // Multiple cores read shared data without synchronization:
 //   - pairToCoreAssignment read by dispatcher while cores operate
 //   - addressToPairID accessed without locks
+//   - pairShardBuckets accessed during initialization
 //
 // WHY: Read-only after initialization. Memory barriers would cost 50-100 cycles.
 //
@@ -146,6 +155,8 @@
 // Errors are handled locally without propagation:
 //   - fastuni.Log2ReserveRatio error leads to fallback, not error return
 //   - Ring push failures trigger retry, not error handling
+//   - queue.Borrow() failures ignored in attachShardToExecutor
+//   - executor.pairToQueueIndex.Get() second return value ignored
 //
 // WHY: Error propagation requires allocation for error objects and disrupts
 // hot path flow.
@@ -161,6 +172,8 @@
 //
 // DispatchTickUpdate assumes specific data layout:
 //   hexData := logView.Data[2:130]  // Assumes exactly 130 bytes
+//   logView.Addr[constants.AddressHexStart:constants.AddressHexEnd] // Assumes 42 chars
+//   hexData[32:64] and hexData[96:128] // Assumes specific positions
 //
 // WHY: Dynamic length checking would require branches and comparisons.
 //
@@ -205,6 +218,7 @@
 // Complex bit manipulation replaces traditional conditionals:
 //   mask := cond >> 31
 //   minZeros := lzcntB ^ ((lzcntA ^ lzcntB) & mask)
+//   mask := ((c0|(^c0+1))>>63)<<0 | ((c1|(^c1+1))>>63)<<1
 //
 // WHY: Branches cause 15-20 cycle penalties on misprediction.
 //
@@ -215,24 +229,65 @@
 //   - Formal verification of bit operations
 //   - Used only where correctness is deterministic
 //
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUMMARY: PHILOSOPHY OF CONTROLLED DANGER
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// FOOTGUN #11: INTEGER DIVISION WITHOUT ZERO CHECK
 //
-// This system achieves its incredible performance by eliminating every safety mechanism
-// that traditional software engineering would mandate. This is not recklessness - it's
-// a deliberate architectural choice where:
+// keccakRandomState.nextInt performs modulo without bounds check:
+//   return int(randomValue % uint64(upperBound))
 //
-// 1. The system is proven correct by construction
-// 2. Invalid states are impossible rather than checked
-// 3. Performance requirements justify the risk
-// 4. Mitigations eliminate actual (not theoretical) dangers
+// WHY: Only called from Fisher-Yates where upperBound = i+1 and i > 0.
 //
-// The result: 40ns operations that would take microseconds with "safe" code.
+// RISK: Division by zero causes immediate panic.
 //
-// This is what peak performance actually looks like - not pretty, not safe by
-// traditional standards, but FAST and CORRECT through mathematical certainty
-// rather than defensive programming.
+// MITIGATION: Caller constraints guarantee upperBound >= 2:
+//   - Fisher-Yates loop starts at i = len(bindings) - 1
+//   - Called with j := rng.nextInt(i + 1) where i >= 1
+//   - Mathematical impossibility of zero divisor
+//
+// FOOTGUN #12: SLICE CREATION WITHOUT LENGTH VALIDATION
+//
+// Direct slice operations assume valid lengths:
+//   logView.Data[offsetA : offsetA+remaining]
+//   segment[0:8], segment[8:16], segment[16:24], segment[24:32]
+//   address40HexChars[12:28] in directAddressToIndex64
+//
+// WHY: Length checks would add conditional branches.
+//
+// RISK: Slice bounds panic if lengths are incorrect.
+//
+// MITIGATION: All slice lengths derived from constants or validated inputs:
+//   - Ethereum data format guarantees fixed lengths
+//   - Bit manipulation ensures remaining <= 16
+//   - Constants define all fixed offsets
+//
+// FOOTGUN #13: UNINITIALIZED MEMORY ACCESS
+//
+// ProcessedCycle array used without explicit initialization:
+//   executor.processedCycles[cycleCount] = ProcessedCycle{...}
+//
+// WHY: Zero-initialization would waste cycles.
+//
+// RISK: Reading uninitialized data could cause undefined behavior.
+//
+// MITIGATION: Access pattern guarantees safety:
+//   - Only written indices [0, cycleCount) are read
+//   - cycleCount tracks exact valid entries
+//   - No reads beyond written boundary
+//
+// FOOTGUN #14: GLOBAL STATE WITHOUT SYNCHRONIZATION
+//
+// Global variables modified during initialization without locks:
+//   - pairShardBuckets map creation and access
+//   - coreExecutors array assignment
+//   - coreRings array assignment
+//
+// WHY: Synchronization primitives add overhead.
+//
+// RISK: Concurrent modification could corrupt state.
+//
+// MITIGATION: Single-threaded initialization phase:
+//   - All setup completed before worker launch
+//   - Workers only read global state
+//   - Initialization happens once at startup
 
 package router
 
