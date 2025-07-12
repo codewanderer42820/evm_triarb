@@ -651,28 +651,28 @@ func TestDeduper_PerformanceRequirements(t *testing.T) {
 	nsPerOp := elapsed.Nanoseconds() / iterations
 	t.Logf("Average latency: %d ns/op", nsPerOp)
 
-	// Validate reasonable performance (sub-20ns is excellent for this complexity)
-	if nsPerOp > 20 {
-		t.Errorf("Performance requirement not met: %d ns/op (expected <20ns)", nsPerOp)
+	// Validate excellent performance (based on benchmark results showing 3-5ns typical)
+	if nsPerOp > 10 {
+		t.Errorf("Performance requirement not met: %d ns/op (expected <10ns)", nsPerOp)
 	}
 
 	// Measure throughput
 	opsPerSec := float64(iterations) / elapsed.Seconds()
 	t.Logf("Throughput: %.0f ops/sec", opsPerSec)
 
-	// 50M+ ops/sec is excellent performance for this type of operation
-	if opsPerSec < 50_000_000 {
-		t.Errorf("Throughput too low: %.0f ops/sec (expected >50M)", opsPerSec)
+	// Based on benchmark results showing 200M-400M+ ops/sec capability
+	if opsPerSec < 100_000_000 {
+		t.Errorf("Throughput too low: %.0f ops/sec (expected >100M)", opsPerSec)
 	}
 
-	// Performance classification
-	if nsPerOp < 5 {
-		t.Logf("Performance class: EXCEPTIONAL (sub-5ns)")
+	// Performance classification based on benchmark results
+	if nsPerOp < 3 {
+		t.Logf("Performance class: EXCEPTIONAL (sub-3ns - matches duplicate detection)")
+	} else if nsPerOp < 5 {
+		t.Logf("Performance class: EXCELLENT (sub-5ns - matches typical operations)")
 	} else if nsPerOp < 10 {
-		t.Logf("Performance class: EXCELLENT (sub-10ns)")
-	} else if nsPerOp < 20 {
-		t.Logf("Performance class: GOOD (sub-20ns)")
+		t.Logf("Performance class: GOOD (sub-10ns)")
 	} else {
-		t.Logf("Performance class: NEEDS_OPTIMIZATION (>20ns)")
+		t.Logf("Performance class: NEEDS_OPTIMIZATION (>10ns)")
 	}
 }
