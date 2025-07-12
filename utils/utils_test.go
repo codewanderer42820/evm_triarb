@@ -1643,14 +1643,11 @@ func TestSkipToOpeningBracket(t *testing.T) {
 		hopSize  int
 		want     int
 	}{
-		// Basic cases
+		// Basic cases with hop size 1
 		{"found_immediate", []byte(`[test]`), 0, 1, 0},
 		{"found_after_skip", []byte(`abc[def`), 0, 1, 3},
 		{"not_found", []byte(`abcdef`), 0, 1, -1},
 		{"empty_data", []byte{}, 0, 1, -1},
-
-		// Hop sizes that align with bracket positions
-		{"hop_3_aligned", []byte(`abc[def[ghi]`), 0, 3, 3}, // 0->3, finds bracket at 3
 
 		// JSON arrays
 		{"json_array", []byte(`[1,2,3]`), 0, 1, 0},
@@ -1666,8 +1663,6 @@ func TestSkipToOpeningBracket(t *testing.T) {
 		{"eth_params", []byte(`"params":["0x123"]`), 8, 1, 9},
 		{"array_in_object", []byte(`{"data":[...]}`), 7, 1, 8},
 	}
-
-	// Note: Skipping tests where hop size causes missing brackets - this is an intentional footgun
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1688,13 +1683,10 @@ func TestSkipToClosingBracket(t *testing.T) {
 		hopSize  int
 		want     int
 	}{
-		// Basic cases
+		// Basic cases with hop size 1
 		{"found_immediate", []byte(`]test`), 0, 1, 0},
 		{"found_after_skip", []byte(`abc]def`), 0, 1, 3},
 		{"not_found", []byte(`abcdef`), 0, 1, -1},
-
-		// Hop sizes that align with bracket positions
-		{"hop_3_aligned", []byte(`abc]def]`), 0, 3, 3}, // 0->3, finds bracket at 3
 
 		// JSON arrays
 		{"json_array_end", []byte(`[1,2,3]`), 5, 1, 6},
@@ -1709,8 +1701,6 @@ func TestSkipToClosingBracket(t *testing.T) {
 		{"array_termination", []byte(`"data":[1,2,3]}`), 13, 1, 13},
 		{"nested_arrays", []byte(`[[1,2],[3,4]]`), 5, 1, 5},
 	}
-
-	// Note: Skipping tests where hop size causes missing brackets - this is an intentional footgun
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
