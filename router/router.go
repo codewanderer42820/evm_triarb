@@ -1766,10 +1766,6 @@ func (k *keccakRandomState) nextUint64() uint64 {
 //go:inline
 //go:registerparams
 func (k *keccakRandomState) nextInt(upperBound int) int {
-	if upperBound <= 0 {
-		return 0
-	}
-
 	randomValue := k.nextUint64()
 	return int(randomValue % uint64(upperBound))
 }
