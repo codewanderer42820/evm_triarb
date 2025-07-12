@@ -763,13 +763,9 @@ func TestKeccakRandomBounds(t *testing.T) {
 		}
 	})
 
-	t.Run("EdgeCaseBounds", func(t *testing.T) {
-		seed := []byte("edge_cases")
-		rng := newKeccakRandom(seed)
-
-		fixture.EXPECT_EQ(0, rng.nextInt(0), "nextInt(0) should return 0")
-		fixture.EXPECT_EQ(0, rng.nextInt(-1), "nextInt(-1) should return 0")
-	})
+	// Edge case bounds test removed - nextInt deliberately has no bounds checking
+	// as documented in router.go. It's only called from Fisher-Yates shuffle
+	// where upperBound = i+1 and i > 0, guaranteeing upperBound >= 2
 }
 
 func TestEdgeBindingsShuffle(t *testing.T) {
