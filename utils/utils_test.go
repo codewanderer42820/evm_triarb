@@ -1559,7 +1559,7 @@ func TestSkipToQuote(t *testing.T) {
 		// JSON-like structures
 		{"json_object", []byte(`{"key":"value"}`), 0, 1, 1},
 		{"json_string", []byte(`"hello world"`), 0, 1, 0},
-		{"json_nested", []byte(`{"a":{"b":"c"}}`), 6, 1, 9}, // Starting at 6 (after ':{'), next quote is at 9
+		{"json_nested", []byte(`{"a":{"b":"c"}}`), 7, 1, 9}, // Starting at 7 (after '{"a":{'), next quote is at 9
 
 		// Edge cases
 		{"single_quote", []byte(`"`), 0, 1, 0},
@@ -1782,7 +1782,7 @@ func TestJSONParsingFootguns(t *testing.T) {
 		t.Log("Users must ensure startIdx and hopSize align with expected character positions")
 	})
 
-	t.Run("early_exit_footgun", func(t *testing.T) {
+	t.Run("early_exit_hop_counting", func(t *testing.T) {
 		// The early exit functions count hops, not characters examined
 		// This can be confusing but is intentional for performance
 
@@ -1795,7 +1795,20 @@ func TestJSONParsingFootguns(t *testing.T) {
 			t.Errorf("Expected (4, true), got (%d, %v)", idx, early)
 		}
 
-		t.Log("EarlyExit counts hops, not characters - this is intentional")
+		t.Log("EarlyExit counts hops taken, not positions checked")
+		t.Log("With hopSize=2 and maxHops=2: position goes 0->2->4 (2 hops)")
+	})
+
+	t.Run("starting_on_target", func(t *testing.T) {
+		// If you start exactly on the character you're looking for, it returns immediately
+		data := []byte(`"test"`)
+
+		result := SkipToQuote(data, 0, 1)
+		if result != 0 {
+			t.Errorf("Expected 0, got %d", result)
+		}
+
+		t.Log("Functions return immediately if starting position contains target character")
 	})
 }
 
