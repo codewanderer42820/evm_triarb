@@ -1113,22 +1113,26 @@ func BenchmarkHandleFrame_TransactionField(b *testing.B) {
 }
 
 // Benchmark realistic Ethereum events
-func BenchmarkHandleFrame_RealisticEvents(b *testing.B) {
+func BenchmarkHandleFrame_RealisticUniswapV2(b *testing.B) {
+	// Real Uniswap V2 Sync events from different pairs
 	events := []struct {
 		name  string
 		event []byte
 	}{
 		{
-			name:  "swap_event",
-			event: []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2","blockNumber":"0x10d4f5c","data":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000de0b6b3a7640000","logIndex":"0x8f","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","0x0000000000000000000000007a250d5630b4cf539739df2c5dacb4c659f2488d"],"transactionIndex":"0x47"}}}`),
+			name: "usdc_eth_sync",
+			// USDC/ETH pair Sync event - exactly 64 bytes of reserves data
+			event: []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc","blockNumber":"0x10d4f5c","data":"0x0000000000000000000000000000000000000000000000000000e8d4a510000000000000000000000000000000000000000000000000d3c21bcecceda1000000","logIndex":"0x8f","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x47"}}}`),
 		},
 		{
-			name:  "transfer_event",
-			event: []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","blockNumber":"0x10d4f5d","data":"0x0000000000000000000000000000000000000000000000000000000005f5e100","logIndex":"0x12","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","0x000000000000000000000000a9d1e08c7793af67e9d92fe308d5697fb81d3e43","0x00000000000000000000000028c6c06298d514db089934071355e5743bf21d60"],"transactionIndex":"0x8"}}}`),
+			name: "dai_eth_sync",
+			// DAI/ETH pair Sync event
+			event: []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0xa478c2975ab1ea89e8196811f51a7b7ade33eb11","blockNumber":"0x10d4f5d","data":"0x00000000000000000000000000000000000000000000152d02c7e14af680000000000000000000000000000000000000000000000000000de0b6b3a7640000","logIndex":"0x12","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x8"}}}`),
 		},
 		{
-			name:  "mint_event",
-			event: []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d","blockNumber":"0x10d4f5e","data":"0x","logIndex":"0x1a5","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1","0x0000000000000000000000000000000000000000000000000000000000000000","0x000000000000000000000000dbfd76af2157dc15ee4e57f3f942bb45ba84af24","0x0000000000000000000000000000000000000000000000000000000000001f40"],"transactionIndex":"0x9c"}}}`),
+			name: "usdt_eth_sync",
+			// USDT/ETH pair Sync event
+			event: []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xb9756e93014c47c7ad7a46c532cbaab0","result":{"address":"0x0d4a11d5eeaac28ec3f61d100daf4d40471f1852","blockNumber":"0x10d4f5e","data":"0x0000000000000000000000000000000000000000000000000000174876e800000000000000000000000000000000000000000000000001158e460913d00000","logIndex":"0x1a5","topics":["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"],"transactionIndex":"0x9c"}}}`),
 		},
 	}
 
