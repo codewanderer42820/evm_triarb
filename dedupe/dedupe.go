@@ -1,4 +1,3 @@
-// dedupe - High-performance log deduplication with direct-mapped cache
 package dedupe
 
 import (

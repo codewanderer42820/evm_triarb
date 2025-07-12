@@ -1,4 +1,3 @@
-// dedupe_test.go — Comprehensive test suite for log deduplication system
 package dedupe
 
 import (

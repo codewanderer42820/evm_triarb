@@ -1,4 +1,3 @@
-// control.go — Global control flags and activity management for pinned consumers
 package control
 
 import "time"

@@ -1,4 +1,3 @@
-// control_test.go — Comprehensive test suite for global control system
 package control
 
 import (
