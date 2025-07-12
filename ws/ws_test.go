@@ -358,6 +358,109 @@ func TestSpinUntilCompleteMessage(t *testing.T) {
 		}
 	})
 
+	t.Run("control_frame_payload_handling", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			payloadSize int
+			description string
+		}{
+			{"empty_payload", 0, "Control frame with no payload"},
+			{"small_payload", 10, "Control frame with small payload"},
+			{"exact_16_bytes", 16, "Control frame with exactly 16 bytes"},
+			{"over_16_bytes", 50, "Control frame requiring multiple 16-byte reads"},
+			{"max_control_payload", 125, "Control frame with maximum allowed payload"},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				var data []byte
+				// Create control frame with specific payload size
+				controlPayload := bytes.Repeat([]byte("X"), tt.payloadSize)
+				data = append(data, createTestFrame(0x9, controlPayload, true)...) // Ping frame
+				data = append(data, createTestFrame(0x1, []byte("data"), true)...) // Data frame
+
+				conn := &mockConn{readData: data}
+				result, err := SpinUntilCompleteMessage(conn)
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+				if string(result) != "data" {
+					t.Errorf("Expected 'data', got %q", string(result))
+				}
+			})
+		}
+	})
+
+	t.Run("control_frame_read_errors", func(t *testing.T) {
+		t.Run("control_payload_read_error", func(t *testing.T) {
+			callCount := 0
+			conn := &mockConn{
+				readFunc: func(b []byte) (int, error) {
+					callCount++
+					switch callCount {
+					case 1:
+						// Return header for ping frame with 20-byte payload
+						if len(b) >= 2 {
+							b[0] = 0x89 // FIN=1, opcode=9 (ping)
+							b[1] = 20   // 20 bytes payload
+							return 2, nil
+						}
+					case 2:
+						// First control payload read (16 bytes) succeeds
+						if len(b) >= 16 {
+							for i := 0; i < 16; i++ {
+								b[i] = byte('X')
+							}
+							return 16, nil
+						}
+					case 3:
+						// Second control payload read (remaining 4 bytes) fails
+						return 0, fmt.Errorf("control payload read failed")
+					}
+					return 0, fmt.Errorf("unexpected call")
+				},
+			}
+			_, err := SpinUntilCompleteMessage(conn)
+			if err == nil || !strings.Contains(err.Error(), "control payload read failed") {
+				t.Errorf("Expected control payload read error, got: %v", err)
+			}
+		})
+
+		t.Run("control_payload_partial_read", func(t *testing.T) {
+			callCount := 0
+			conn := &mockConn{
+				readFunc: func(b []byte) (int, error) {
+					callCount++
+					switch callCount {
+					case 1:
+						// Return header for ping frame with 30-byte payload
+						if len(b) >= 2 {
+							b[0] = 0x89 // FIN=1, opcode=9 (ping)
+							b[1] = 30   // 30 bytes payload
+							return 2, nil
+						}
+					case 2:
+						// First read returns only 10 bytes instead of requested 16
+						if len(b) >= 10 {
+							for i := 0; i < 10; i++ {
+								b[i] = byte('X')
+							}
+							return 10, nil
+						}
+					case 3:
+						// Second read fails
+						return 0, fmt.Errorf("partial read failed")
+					}
+					return 0, fmt.Errorf("unexpected call")
+				},
+			}
+			_, err := SpinUntilCompleteMessage(conn)
+			if err == nil || !strings.Contains(err.Error(), "partial read failed") {
+				t.Errorf("Expected partial read error, got: %v", err)
+			}
+		})
+	})
+
 	t.Run("payload_length_encoding", func(t *testing.T) {
 		tests := []struct {
 			name   string
