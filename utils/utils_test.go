@@ -13,9 +13,9 @@ import (
 	"unsafe"
 )
 
-// ==============================================================================
-// TEST HELPERS
-// ==============================================================================
+// ============================================================================
+// TEST CONFIGURATION AND HELPERS
+// ============================================================================
 
 // assertZeroAllocs verifies that a function allocates zero memory
 func assertZeroAllocs(t *testing.T, name string, fn func()) {
@@ -65,9 +65,9 @@ func generateTestData(size int, pattern string) []byte {
 	return data
 }
 
-// ==============================================================================
+// ============================================================================
 // MEMORY OPERATION TESTS
-// ==============================================================================
+// ============================================================================
 
 func TestLoad64(t *testing.T) {
 	tests := []struct {
@@ -256,9 +256,9 @@ func TestMemoryOperations_ZeroAllocation(t *testing.T) {
 	})
 }
 
-// ==============================================================================
+// ============================================================================
 // TYPE CONVERSION TESTS
-// ==============================================================================
+// ============================================================================
 
 func TestB2s(t *testing.T) {
 	tests := []struct {
@@ -389,9 +389,9 @@ func TestTypeConversion_ZeroAllocation(t *testing.T) {
 	})
 }
 
-// ==============================================================================
+// ============================================================================
 // HEX PARSING TESTS
-// ==============================================================================
+// ============================================================================
 
 func TestParseHexU32(t *testing.T) {
 	tests := []struct {
@@ -502,9 +502,9 @@ func TestHexParsing_ZeroAllocation(t *testing.T) {
 	})
 }
 
-// ==============================================================================
+// ============================================================================
 // JSON PARSING TESTS
-// ==============================================================================
+// ============================================================================
 
 func TestSkipToQuote(t *testing.T) {
 	tests := []struct {
@@ -678,9 +678,9 @@ func TestJSONParsing_ZeroAllocation(t *testing.T) {
 	})
 }
 
-// ==============================================================================
+// ============================================================================
 // HASH MIXING TESTS
-// ==============================================================================
+// ============================================================================
 
 func TestMix64(t *testing.T) {
 	tests := []struct {
@@ -759,9 +759,9 @@ func TestMix64_ZeroAllocation(t *testing.T) {
 	}
 }
 
-// ==============================================================================
-// SYSTEM I/O TESTS (Simplified)
-// ==============================================================================
+// ============================================================================
+// SYSTEM I/O TESTS
+// ============================================================================
 
 func TestPrintFunctions(t *testing.T) {
 	// Basic test that functions don't panic
@@ -769,9 +769,9 @@ func TestPrintFunctions(t *testing.T) {
 	PrintWarning("test warning")
 }
 
-// ==============================================================================
-// RACE CONDITION TESTS
-// ==============================================================================
+// ============================================================================
+// CONCURRENCY AND RACE CONDITION TESTS
+// ============================================================================
 
 func TestRaceConditions(t *testing.T) {
 	if testing.Short() {
@@ -821,9 +821,9 @@ func TestRaceConditions(t *testing.T) {
 	})
 }
 
-// ==============================================================================
+// ============================================================================
 // EDGE CASES AND BOUNDARY TESTS
-// ==============================================================================
+// ============================================================================
 
 func TestBoundaryConditions(t *testing.T) {
 	t.Run("slice_boundaries", func(t *testing.T) {
@@ -867,9 +867,9 @@ func TestBoundaryConditions(t *testing.T) {
 	})
 }
 
-// ==============================================================================
+// ============================================================================
 // INTENTIONAL LIMITATIONS DOCUMENTATION
-// ==============================================================================
+// ============================================================================
 
 func TestIntentionalLimitations(t *testing.T) {
 	t.Run("B2s_limitations", func(t *testing.T) {
@@ -893,9 +893,68 @@ func TestIntentionalLimitations(t *testing.T) {
 	})
 }
 
-// ==============================================================================
+// ============================================================================
+// INTEGRATION AND COMPATIBILITY TESTS
+// ============================================================================
+
+func TestIntegration(t *testing.T) {
+	t.Run("encoding_compatibility", func(t *testing.T) {
+		// Verify LoadBE64 matches binary.BigEndian
+		data := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+		ourResult := LoadBE64(data)
+		stdResult := binary.BigEndian.Uint64(data)
+
+		if ourResult != stdResult {
+			t.Errorf("LoadBE64 incompatible with binary.BigEndian: 0x%X vs 0x%X",
+				ourResult, stdResult)
+		}
+	})
+
+	t.Run("strconv_compatibility", func(t *testing.T) {
+		// Verify Itoa matches strconv.Itoa for positive numbers
+		testNumbers := []int{0, 1, 10, 100, 1000, 10000, 2147483647}
+
+		for _, n := range testNumbers {
+			our := Itoa(n)
+			std := strconv.Itoa(n)
+			if our != std {
+				t.Errorf("Itoa(%d): our=%q, std=%q", n, our, std)
+			}
+		}
+	})
+}
+
+// ============================================================================
+// STATISTICAL AND DISTRIBUTION TESTS
+// ============================================================================
+
+func TestMix64_Distribution(t *testing.T) {
+	const samples = 100000
+
+	// Test uniform distribution of output bits
+	bitCounts := make([]int, 64)
+
+	for i := 0; i < samples; i++ {
+		result := Mix64(uint64(i))
+		for bit := 0; bit < 64; bit++ {
+			if result&(1<<bit) != 0 {
+				bitCounts[bit]++
+			}
+		}
+	}
+
+	// Check each bit is set approximately 50% of the time
+	for bit, count := range bitCounts {
+		ratio := float64(count) / float64(samples)
+		if math.Abs(ratio-0.5) > 0.01 { // 1% tolerance
+			t.Errorf("Bit %d has biased distribution: %.4f", bit, ratio)
+		}
+	}
+}
+
+// ============================================================================
 // PERFORMANCE BENCHMARKS
-// ==============================================================================
+// ============================================================================
 
 func BenchmarkMemoryOperations(b *testing.B) {
 	data := generateTestData(1024, "sequential")
@@ -993,68 +1052,9 @@ func BenchmarkTypeConversion(b *testing.B) {
 	})
 }
 
-// ==============================================================================
-// INTEGRATION TESTS
-// ==============================================================================
-
-func TestIntegration(t *testing.T) {
-	t.Run("encoding_compatibility", func(t *testing.T) {
-		// Verify LoadBE64 matches binary.BigEndian
-		data := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
-		ourResult := LoadBE64(data)
-		stdResult := binary.BigEndian.Uint64(data)
-
-		if ourResult != stdResult {
-			t.Errorf("LoadBE64 incompatible with binary.BigEndian: 0x%X vs 0x%X",
-				ourResult, stdResult)
-		}
-	})
-
-	t.Run("strconv_compatibility", func(t *testing.T) {
-		// Verify Itoa matches strconv.Itoa for positive numbers
-		testNumbers := []int{0, 1, 10, 100, 1000, 10000, 2147483647}
-
-		for _, n := range testNumbers {
-			our := Itoa(n)
-			std := strconv.Itoa(n)
-			if our != std {
-				t.Errorf("Itoa(%d): our=%q, std=%q", n, our, std)
-			}
-		}
-	})
-}
-
-// ==============================================================================
-// STATISTICAL TESTS
-// ==============================================================================
-
-func TestMix64_Distribution(t *testing.T) {
-	const samples = 100000
-
-	// Test uniform distribution of output bits
-	bitCounts := make([]int, 64)
-
-	for i := 0; i < samples; i++ {
-		result := Mix64(uint64(i))
-		for bit := 0; bit < 64; bit++ {
-			if result&(1<<bit) != 0 {
-				bitCounts[bit]++
-			}
-		}
-	}
-
-	// Check each bit is set approximately 50% of the time
-	for bit, count := range bitCounts {
-		ratio := float64(count) / float64(samples)
-		if math.Abs(ratio-0.5) > 0.01 { // 1% tolerance
-			t.Errorf("Bit %d has biased distribution: %.4f", bit, ratio)
-		}
-	}
-}
-
-// ==============================================================================
-// CLEANUP AND FINAL VERIFICATION
-// ==============================================================================
+// ============================================================================
+// CLEANUP AND RESOURCE VALIDATION
+// ============================================================================
 
 func TestCleanup(t *testing.T) {
 	t.Run("no_goroutine_leaks", func(t *testing.T) {

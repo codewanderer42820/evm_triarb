@@ -21,7 +21,7 @@ const (
 )
 
 // ============================================================================
-// UNIT TESTS
+// UNIT TESTS - INITIALIZATION AND STATE
 // ============================================================================
 
 // TestInitialState validates system starts in clean state
@@ -53,6 +53,10 @@ func TestPointerStability(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// UNIT TESTS - ACTIVITY SIGNALING
+// ============================================================================
+
 // TestSignalActivity validates activity signaling
 func TestSignalActivity(t *testing.T) {
 	hot = 0
@@ -71,6 +75,10 @@ func TestSignalActivity(t *testing.T) {
 		t.Error("Activity timestamp must be updated to current time")
 	}
 }
+
+// ============================================================================
+// UNIT TESTS - COOLDOWN BEHAVIOR
+// ============================================================================
 
 // TestPollCooldown validates cooldown behavior
 func TestPollCooldown(t *testing.T) {
@@ -109,6 +117,10 @@ func TestPollCooldown(t *testing.T) {
 	})
 }
 
+// ============================================================================
+// UNIT TESTS - SHUTDOWN HANDLING
+// ============================================================================
+
 // TestShutdown validates shutdown signaling
 func TestShutdown(t *testing.T) {
 	stop = 0
@@ -125,6 +137,55 @@ func TestShutdown(t *testing.T) {
 	if *stopPtr != 1 {
 		t.Error("Multiple shutdowns should be idempotent")
 	}
+}
+
+// ============================================================================
+// EDGE CASE TESTS
+// ============================================================================
+
+// TestEdgeCases validates boundary conditions
+func TestEdgeCases(t *testing.T) {
+	t.Run("ZeroCooldown", func(t *testing.T) {
+		originalCooldown := cooldownNs
+		cooldownNs = 0
+		defer func() { cooldownNs = originalCooldown }()
+
+		hot = 1
+		lastHot = time.Now().UnixNano() - 1
+
+		PollCooldown()
+
+		if hot != 0 {
+			t.Error("Zero cooldown should immediately clear hot flag")
+		}
+	})
+
+	t.Run("FutureTimestamp", func(t *testing.T) {
+		originalCooldown := cooldownNs
+		cooldownNs = int64(10 * time.Millisecond)
+		defer func() { cooldownNs = originalCooldown }()
+
+		hot = 1
+		lastHot = time.Now().UnixNano() + int64(time.Hour) // Future time
+
+		PollCooldown()
+
+		if hot != 1 {
+			t.Error("Future timestamp should not trigger cooldown")
+		}
+	})
+
+	t.Run("MemoryLayout", func(t *testing.T) {
+		if unsafe.Sizeof(hot) != 4 {
+			t.Errorf("Hot flag size: %d, expected 4 bytes", unsafe.Sizeof(hot))
+		}
+		if unsafe.Sizeof(stop) != 4 {
+			t.Errorf("Stop flag size: %d, expected 4 bytes", unsafe.Sizeof(stop))
+		}
+		if unsafe.Sizeof(lastHot) != 8 {
+			t.Errorf("LastHot size: %d, expected 8 bytes", unsafe.Sizeof(lastHot))
+		}
+	})
 }
 
 // ============================================================================
@@ -299,56 +360,7 @@ func TestTypicalWorkflow(t *testing.T) {
 }
 
 // ============================================================================
-// EDGE CASE TESTS
-// ============================================================================
-
-// TestEdgeCases validates boundary conditions
-func TestEdgeCases(t *testing.T) {
-	t.Run("ZeroCooldown", func(t *testing.T) {
-		originalCooldown := cooldownNs
-		cooldownNs = 0
-		defer func() { cooldownNs = originalCooldown }()
-
-		hot = 1
-		lastHot = time.Now().UnixNano() - 1
-
-		PollCooldown()
-
-		if hot != 0 {
-			t.Error("Zero cooldown should immediately clear hot flag")
-		}
-	})
-
-	t.Run("FutureTimestamp", func(t *testing.T) {
-		originalCooldown := cooldownNs
-		cooldownNs = int64(10 * time.Millisecond)
-		defer func() { cooldownNs = originalCooldown }()
-
-		hot = 1
-		lastHot = time.Now().UnixNano() + int64(time.Hour) // Future time
-
-		PollCooldown()
-
-		if hot != 1 {
-			t.Error("Future timestamp should not trigger cooldown")
-		}
-	})
-
-	t.Run("MemoryLayout", func(t *testing.T) {
-		if unsafe.Sizeof(hot) != 4 {
-			t.Errorf("Hot flag size: %d, expected 4 bytes", unsafe.Sizeof(hot))
-		}
-		if unsafe.Sizeof(stop) != 4 {
-			t.Errorf("Stop flag size: %d, expected 4 bytes", unsafe.Sizeof(stop))
-		}
-		if unsafe.Sizeof(lastHot) != 8 {
-			t.Errorf("LastHot size: %d, expected 8 bytes", unsafe.Sizeof(lastHot))
-		}
-	})
-}
-
-// ============================================================================
-// BENCHMARKS
+// BENCHMARKS - CORE OPERATIONS
 // ============================================================================
 
 // BenchmarkSignalActivity measures activity signaling performance
@@ -388,6 +400,10 @@ func BenchmarkFlagsWithRead(b *testing.B) {
 	}
 }
 
+// ============================================================================
+// BENCHMARKS - CONCURRENCY AND WORKLOADS
+// ============================================================================
+
 // BenchmarkConcurrentAccess measures concurrent performance
 func BenchmarkConcurrentAccess(b *testing.B) {
 	b.ReportAllocs()
@@ -422,6 +438,10 @@ func BenchmarkTypicalWorkload(b *testing.B) {
 		}
 	})
 }
+
+// ============================================================================
+// BENCHMARKS - MEMORY AND PERFORMANCE VALIDATION
+// ============================================================================
 
 // BenchmarkMemoryFootprint validates zero allocation requirement
 func BenchmarkMemoryFootprint(b *testing.B) {

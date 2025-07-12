@@ -16,9 +16,9 @@ import (
 	"main/types"
 )
 
-// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ============================================================================
 // TEST UTILITIES AND FIXTURES
-// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ============================================================================
 
 type TestAssertion struct {
 	t *testing.T
@@ -176,6 +176,7 @@ func (a *TestAssertion) ASSERT_TRUE(condition bool, msg ...string) {
 	}
 }
 
+// RouterTestFixture provides a complete test environment
 type RouterTestFixture struct {
 	*TestAssertion
 }
@@ -215,10 +216,11 @@ func (f *RouterTestFixture) CreateTestLogView(address string, reserve0, reserve1
 	}
 }
 
-// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ============================================================================
 // CORE TYPE STRUCTURE TESTS
-// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ============================================================================
 
+// TestTickUpdateStructure validates TickUpdate memory layout and field access
 func TestTickUpdateStructure(t *testing.T) {
 	fixture := NewRouterTestFixture(t)
 	fixture.SetUp()
@@ -241,6 +243,7 @@ func TestTickUpdateStructure(t *testing.T) {
 	})
 }
 
+// TestArbitrageCycleStateAlignment validates ArbitrageCycleState memory layout
 func TestArbitrageCycleStateAlignment(t *testing.T) {
 	fixture := NewRouterTestFixture(t)
 	fixture.SetUp()
@@ -261,6 +264,7 @@ func TestArbitrageCycleStateAlignment(t *testing.T) {
 	})
 }
 
+// TestAddressKeyOperations validates AddressKey structure and operations
 func TestAddressKeyOperations(t *testing.T) {
 	fixture := NewRouterTestFixture(t)
 	fixture.SetUp()
@@ -280,10 +284,11 @@ func TestAddressKeyOperations(t *testing.T) {
 	})
 }
 
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// HEX PARSING AND ADDRESS RESOLUTION TESTS
-// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ============================================================================
+// HEX PARSING AND ADDRESS CONVERSION TESTS
+// ============================================================================
 
+// TestCountLeadingZeros validates hex string leading zero counting
 func TestCountLeadingZeros(t *testing.T) {
 	fixture := NewRouterTestFixture(t)
 	fixture.SetUp()
@@ -334,6 +339,7 @@ func TestCountLeadingZeros(t *testing.T) {
 	})
 }
 
+// TestBytesToAddressKey validates address byte array to AddressKey conversion
 func TestBytesToAddressKey(t *testing.T) {
 	fixture := NewRouterTestFixture(t)
 	fixture.SetUp()
@@ -364,6 +370,7 @@ func TestBytesToAddressKey(t *testing.T) {
 	})
 }
 
+// TestDirectAddressHashing validates direct address hashing for table indexing
 func TestDirectAddressHashing(t *testing.T) {
 	fixture := NewRouterTestFixture(t)
 	fixture.SetUp()
@@ -388,10 +395,11 @@ func TestDirectAddressHashing(t *testing.T) {
 	})
 }
 
-// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ============================================================================
 // ADDRESS REGISTRATION AND LOOKUP TESTS
-// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ============================================================================
 
+// TestPairAddressRegistration validates basic address registration and lookup
 func TestPairAddressRegistration(t *testing.T) {
 	fixture := NewRouterTestFixture(t)
 	fixture.SetUp()
@@ -428,6 +436,7 @@ func TestPairAddressRegistration(t *testing.T) {
 	})
 }
 
+// TestHashTableCollisionHandling validates collision handling in address table
 func TestHashTableCollisionHandling(t *testing.T) {
 	fixture := NewRouterTestFixture(t)
 	fixture.SetUp()
@@ -454,6 +463,7 @@ func TestHashTableCollisionHandling(t *testing.T) {
 	})
 }
 
+// TestCoreAssignment validates pair-to-core assignment functionality
 func TestCoreAssignment(t *testing.T) {
 	fixture := NewRouterTestFixture(t)
 	fixture.SetUp()
@@ -487,689 +497,11 @@ func TestCoreAssignment(t *testing.T) {
 	})
 }
 
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// CRYPTOGRAPHIC RANDOMNESS TESTS
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestKeccakRandomGeneration(t *testing.T) {
-	fixture := NewRouterTestFixture(t)
-	fixture.SetUp()
-
-	t.Run("BasicRandomGeneration", func(t *testing.T) {
-		seed := []byte("test_seed_12345")
-		rng := newKeccakRandom(seed)
-
-		// Generate multiple values
-		values := make([]uint64, 100)
-		for i := range values {
-			values[i] = rng.nextUint64()
-		}
-
-		// Check for reasonable uniqueness
-		seen := make(map[uint64]bool)
-		duplicates := 0
-		for _, v := range values {
-			if seen[v] {
-				duplicates++
-			}
-			seen[v] = true
-		}
-
-		fixture.EXPECT_LT(duplicates, 5, "Should have very few duplicate random values")
-	})
-
-	t.Run("DeterministicBehavior", func(t *testing.T) {
-		seed := []byte("deterministic_test")
-
-		rng1 := newKeccakRandom(seed)
-		rng2 := newKeccakRandom(seed)
-
-		for i := 0; i < 10; i++ {
-			v1 := rng1.nextUint64()
-			v2 := rng2.nextUint64()
-			fixture.EXPECT_EQ(v1, v2, "Random sequence should be deterministic with same seed")
-		}
-	})
-
-	t.Run("NextIntBoundsChecking", func(t *testing.T) {
-		seed := []byte("bounds_test")
-		rng := newKeccakRandom(seed)
-
-		bounds := []int{1, 10, 100, 1000}
-
-		for _, bound := range bounds {
-			for i := 0; i < 20; i++ {
-				val := rng.nextInt(bound)
-				fixture.EXPECT_GE(val, 0, "Value should be >= 0")
-				fixture.EXPECT_LT(val, bound, fmt.Sprintf("Value should be < %d", bound))
-			}
-		}
-	})
-}
-
-func TestEdgeBindingsShuffle(t *testing.T) {
-	fixture := NewRouterTestFixture(t)
-	fixture.SetUp()
-
-	t.Run("ShufflePreservesElements", func(t *testing.T) {
-		bindings := make([]ArbitrageEdgeBinding, 10)
-		for i := range bindings {
-			bindings[i] = ArbitrageEdgeBinding{
-				cyclePairs: [3]PairID{PairID(i), PairID(i + 1), PairID(i + 2)},
-				edgeIndex:  uint64(i),
-			}
-		}
-
-		keccakShuffleEdgeBindings(bindings, PairID(12345))
-
-		// Verify all elements are preserved
-		elementCounts := make(map[uint64]int)
-		for _, binding := range bindings {
-			elementCounts[binding.edgeIndex]++
-		}
-
-		for i := uint64(0); i < 10; i++ {
-			fixture.EXPECT_EQ(1, elementCounts[i], fmt.Sprintf("Edge index %d should appear exactly once", i))
-		}
-	})
-
-	t.Run("ShuffleDeterminism", func(t *testing.T) {
-		original := make([]ArbitrageEdgeBinding, 5)
-		for i := range original {
-			original[i] = ArbitrageEdgeBinding{
-				cyclePairs: [3]PairID{PairID(i * 3), PairID(i*3 + 1), PairID(i*3 + 2)},
-				edgeIndex:  uint64(i),
-			}
-		}
-
-		bindings1 := make([]ArbitrageEdgeBinding, len(original))
-		bindings2 := make([]ArbitrageEdgeBinding, len(original))
-		copy(bindings1, original)
-		copy(bindings2, original)
-
-		pairID := PairID(54321)
-		keccakShuffleEdgeBindings(bindings1, pairID)
-		keccakShuffleEdgeBindings(bindings2, pairID)
-
-		// Should produce identical results
-		for i := range bindings1 {
-			fixture.EXPECT_EQ(bindings1[i].edgeIndex, bindings2[i].edgeIndex,
-				"Shuffle should be deterministic for same pairID")
-		}
-	})
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// DISPATCH PIPELINE TESTS
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestDispatchTickUpdateFlow(t *testing.T) {
-	fixture := NewRouterTestFixture(t)
-	fixture.SetUp()
-
-	t.Run("UnregisteredPairHandling", func(t *testing.T) {
-		logView := fixture.CreateTestLogView(
-			"0x9999999999999999999999999999999999999999",
-			1000000000000, 2000000000000,
-		)
-
-		fixture.EXPECT_NO_FATAL_FAILURE(func() {
-			DispatchTickUpdate(logView)
-		})
-	})
-
-	t.Run("ValidPairProcessing", func(t *testing.T) {
-		address := "0x1234567890123456789012345678901234567890"
-		pairID := PairID(12345)
-
-		RegisterPairAddress([]byte(address[2:]), pairID)
-		RegisterPairToCore(pairID, 0)
-		coreRings[0] = ring24.New(constants.DefaultRingSize)
-
-		logView := fixture.CreateTestLogView(address, 1000000000000, 2000000000000)
-
-		fixture.EXPECT_NO_FATAL_FAILURE(func() {
-			DispatchTickUpdate(logView)
-		})
-
-		// Verify message was sent
-		message := coreRings[0].Pop()
-		fixture.ASSERT_TRUE(message != nil, "Message should be sent to core ring")
-
-		// Verify message content
-		tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
-		fixture.EXPECT_EQ(pairID, tickUpdate.pairID, "Message should contain correct pairID")
-		fixture.EXPECT_NE(0.0, tickUpdate.forwardTick, "Forward tick should be non-zero")
-		fixture.EXPECT_EQ(-tickUpdate.forwardTick, tickUpdate.reverseTick, "Reverse tick should be negative of forward")
-	})
-
-	t.Run("RealUniswapV2Data", func(t *testing.T) {
-		address := "0x882df4b0fb50a229c3b4124eb18c759911485bfb"
-		pairID := PairID(54321)
-
-		RegisterPairAddress([]byte(address[2:]), pairID)
-		RegisterPairToCore(pairID, 0)
-		coreRings[0] = ring24.New(constants.DefaultRingSize)
-
-		realLogView := &types.LogView{
-			Addr: []byte(address),
-			Data: []byte("0x00000000000000000000000000000000000000000078e3833588cda8d5e102c3000000000000000000000000000000000000000000000000001fa8dd7963f22c"),
-		}
-
-		fixture.EXPECT_NO_FATAL_FAILURE(func() {
-			DispatchTickUpdate(realLogView)
-		})
-
-		message := coreRings[0].Pop()
-		fixture.ASSERT_TRUE(message != nil, "Real data should produce message")
-
-		tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
-		fixture.EXPECT_EQ(pairID, tickUpdate.pairID, "Real data should have correct pairID")
-		fixture.EXPECT_NE(0.0, tickUpdate.forwardTick, "Real data should produce non-zero tick")
-		fixture.EXPECT_FALSE(math.IsNaN(tickUpdate.forwardTick), "Real data tick should not be NaN")
-		fixture.EXPECT_FALSE(math.IsInf(tickUpdate.forwardTick, 0), "Real data tick should not be infinite")
-	})
-}
-
-func TestDispatchFallbackLogic(t *testing.T) {
-	fixture := NewRouterTestFixture(t)
-	fixture.SetUp()
-
-	t.Run("ZeroReservesFallback", func(t *testing.T) {
-		address := "0x1234567890123456789012345678901234567890"
-		pairID := PairID(12345)
-
-		RegisterPairAddress([]byte(address[2:]), pairID)
-		RegisterPairToCore(pairID, 0)
-		coreRings[0] = ring24.New(constants.DefaultRingSize)
-
-		logView := fixture.CreateTestLogView(address, 0, 0)
-
-		DispatchTickUpdate(logView)
-
-		message := coreRings[0].Pop()
-		fixture.ASSERT_TRUE(message != nil, "Fallback should still send message")
-
-		tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
-		fixture.EXPECT_GE(tickUpdate.forwardTick, 51.2, "Fallback tick should be >= 51.2")
-		fixture.EXPECT_LE(tickUpdate.forwardTick, 64.0, "Fallback tick should be <= 64.0")
-		fixture.EXPECT_GE(tickUpdate.reverseTick, 51.2, "Reverse fallback tick should be >= 51.2")
-		fixture.EXPECT_LE(tickUpdate.reverseTick, 64.0, "Reverse fallback tick should be <= 64.0")
-		fixture.EXPECT_EQ(tickUpdate.forwardTick, tickUpdate.reverseTick, "Invalid reserves should have equal ticks")
-	})
-}
-
-func TestDispatchMultiCoreDistribution(t *testing.T) {
-	fixture := NewRouterTestFixture(t)
-	fixture.SetUp()
-
-	t.Run("MultipleCoreDelivery", func(t *testing.T) {
-		address := "0x1234567890123456789012345678901234567890"
-		pairID := PairID(12345)
-		assignedCores := []int{0, 2, 5}
-
-		RegisterPairAddress([]byte(address[2:]), pairID)
-		for _, coreID := range assignedCores {
-			RegisterPairToCore(pairID, uint8(coreID))
-			coreRings[coreID] = ring24.New(constants.DefaultRingSize)
-		}
-
-		logView := fixture.CreateTestLogView(address, 1500000000000, 3000000000000)
-		DispatchTickUpdate(logView)
-
-		// Verify all assigned cores received message
-		for _, coreID := range assignedCores {
-			message := coreRings[coreID].Pop()
-			fixture.EXPECT_TRUE(message != nil, fmt.Sprintf("Core %d should receive message", coreID))
-
-			if message != nil {
-				tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
-				fixture.EXPECT_EQ(pairID, tickUpdate.pairID, "Message should have correct pairID")
-			}
-		}
-
-		// Verify unassigned core doesn't receive message
-		coreRings[1] = ring24.New(constants.DefaultRingSize)
-		message := coreRings[1].Pop()
-		fixture.EXPECT_TRUE(message == nil, "Unassigned core should not receive message")
-	})
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// QUANTIZATION AND CORE PROCESSING TESTS
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestTickQuantization(t *testing.T) {
-	fixture := NewRouterTestFixture(t)
-	fixture.SetUp()
-
-	t.Run("BasicQuantizationBounds", func(t *testing.T) {
-		testValues := []float64{0.0, 50.0, -50.0, 100.0, -100.0}
-
-		for _, tickValue := range testValues {
-			result := quantizeTickToInt64(tickValue)
-			fixture.EXPECT_GE(result, int64(0), "Quantized value should be non-negative")
-			fixture.EXPECT_LE(result, int64(constants.MaxQuantizedTick), "Quantized value should be within max bound")
-		}
-	})
-
-	t.Run("MonotonicityProperty", func(t *testing.T) {
-		baseValue := 10.0
-		largerValue := baseValue + 1.0
-
-		baseQuantized := quantizeTickToInt64(baseValue)
-		largerQuantized := quantizeTickToInt64(largerValue)
-
-		fixture.EXPECT_LT(baseQuantized, largerQuantized, "Quantization should preserve order")
-	})
-}
-
-func TestCoreProcessingLogic(t *testing.T) {
-	fixture := NewRouterTestFixture(t)
-	fixture.SetUp()
-
-	t.Run("ForwardDirectionProcessing", func(t *testing.T) {
-		executor := &ArbitrageCoreExecutor{
-			pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
-			isReverseDirection: false,
-			cycleStates:        make([]ArbitrageCycleState, 10),
-			fanoutTables:       make([][]FanoutEntry, 1),
-			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
-		}
-
-		executor.priorityQueues[0] = *quantumqueue64.New()
-
-		handle, _ := executor.priorityQueues[0].BorrowSafe()
-		executor.priorityQueues[0].Push(constants.MaxInitializationPriority, handle, 0)
-
-		pairID := PairID(123)
-		executor.pairToQueueIndex.Put(uint32(pairID), 0)
-
-		update := &TickUpdate{
-			pairID:      pairID,
-			forwardTick: 1.5,
-			reverseTick: -1.5,
-		}
-
-		fixture.EXPECT_NO_FATAL_FAILURE(func() {
-			processTickUpdate(executor, update)
-		})
-	})
-
-	t.Run("ReverseDirectionProcessing", func(t *testing.T) {
-		executor := &ArbitrageCoreExecutor{
-			pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
-			isReverseDirection: true,
-			cycleStates:        make([]ArbitrageCycleState, 10),
-			fanoutTables:       make([][]FanoutEntry, 1),
-			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
-		}
-
-		executor.priorityQueues[0] = *quantumqueue64.New()
-
-		handle, _ := executor.priorityQueues[0].BorrowSafe()
-		executor.priorityQueues[0].Push(constants.MaxInitializationPriority, handle, 0)
-
-		pairID := PairID(456)
-		executor.pairToQueueIndex.Put(uint32(pairID), 0)
-
-		update := &TickUpdate{
-			pairID:      pairID,
-			forwardTick: 2.0,
-			reverseTick: -2.0,
-		}
-
-		fixture.EXPECT_NO_FATAL_FAILURE(func() {
-			processTickUpdate(executor, update)
-		})
-	})
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// SHARD CONSTRUCTION AND SYSTEM INITIALIZATION TESTS
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestFanoutShardConstruction(t *testing.T) {
-	fixture := NewRouterTestFixture(t)
-	fixture.SetUp()
-
-	t.Run("BasicShardCreation", func(t *testing.T) {
-		cycles := []ArbitrageTriplet{
-			{PairID(1), PairID(2), PairID(3)},
-			{PairID(1), PairID(4), PairID(5)},
-			{PairID(2), PairID(6), PairID(7)},
-		}
-
-		buildFanoutShardBuckets(cycles)
-
-		fixture.EXPECT_TRUE(pairShardBuckets != nil, "Shard buckets should be created")
-		fixture.EXPECT_LT(0, len(pairShardBuckets), "Should have non-empty shard buckets")
-	})
-
-	t.Run("PairCycleMapping", func(t *testing.T) {
-		cycles := []ArbitrageTriplet{
-			{PairID(1), PairID(2), PairID(3)},
-			{PairID(1), PairID(4), PairID(5)},
-		}
-
-		buildFanoutShardBuckets(cycles)
-
-		buckets, exists := pairShardBuckets[PairID(1)]
-		fixture.EXPECT_TRUE(exists, "Pair 1 should have shard buckets")
-
-		totalBindings := 0
-		for _, bucket := range buckets {
-			totalBindings += len(bucket.edgeBindings)
-			fixture.EXPECT_EQ(PairID(1), bucket.pairID, "Bucket should have correct pairID")
-		}
-
-		fixture.EXPECT_EQ(2, totalBindings, "Pair 1 should have 2 edge bindings")
-	})
-}
-
-func TestSystemInitialization(t *testing.T) {
-	fixture := NewRouterTestFixture(t)
-	fixture.SetUp()
-
-	t.Run("SmallSystemInit", func(t *testing.T) {
-		cycles := []ArbitrageTriplet{
-			{PairID(1), PairID(2), PairID(3)},
-			{PairID(4), PairID(5), PairID(6)},
-		}
-
-		fixture.EXPECT_NO_FATAL_FAILURE(func() {
-			InitializeArbitrageSystem(cycles)
-		})
-
-		// Give goroutines time to start
-		time.Sleep(50 * time.Millisecond)
-
-		// Verify some pairs were assigned
-		assigned := false
-		for i := 0; i < 10; i++ {
-			if pairToCoreAssignment[i] != 0 {
-				assigned = true
-				break
-			}
-		}
-		fixture.EXPECT_TRUE(assigned, "Some pairs should be assigned to cores")
-	})
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// STRESS TESTS AND EDGE CASES
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestHighVolumeOperations(t *testing.T) {
-	fixture := NewRouterTestFixture(t)
-	fixture.SetUp()
-
-	t.Run("MassAddressRegistration", func(t *testing.T) {
-		numAddresses := 50
-
-		for i := range addressToPairID {
-			addressToPairID[i] = 0
-			pairAddressKeys[i] = AddressKey{}
-		}
-
-		successfulRegistrations := 0
-		for i := 0; i < numAddresses; i++ {
-			address := fmt.Sprintf("%08x%032d", i*0x10000, i)
-			pairID := PairID(i + 1)
-			RegisterPairAddress([]byte(address), pairID)
-
-			if lookupPairIDByAddress([]byte(address)) == pairID {
-				successfulRegistrations++
-			}
-		}
-
-		fixture.EXPECT_LT(numAddresses*7/10, successfulRegistrations,
-			fmt.Sprintf("Most addresses should be registered successfully (got %d/%d)",
-				successfulRegistrations, numAddresses))
-	})
-
-	t.Run("ConcurrentLookups", func(t *testing.T) {
-		for i := range addressToPairID {
-			addressToPairID[i] = 0
-			pairAddressKeys[i] = AddressKey{}
-		}
-
-		numAddresses := 50
-		for i := 0; i < numAddresses; i++ {
-			address := fmt.Sprintf("%08x%032d", i*0x10000, i)
-			RegisterPairAddress([]byte(address), PairID(i+1))
-		}
-
-		var wg sync.WaitGroup
-		var successCount int32
-
-		for i := 0; i < 5; i++ {
-			wg.Add(1)
-			go func(startIdx int) {
-				defer wg.Done()
-
-				localSuccess := 0
-				for j := 0; j < 10; j++ {
-					idx := (startIdx*10 + j) % numAddresses
-					address := fmt.Sprintf("%08x%032d", idx*0x10000, idx)
-					result := lookupPairIDByAddress([]byte(address))
-					expected := PairID(idx + 1)
-
-					if result == expected {
-						localSuccess++
-					}
-				}
-				atomic.AddInt32(&successCount, int32(localSuccess))
-			}(i)
-		}
-
-		wg.Wait()
-
-		fixture.EXPECT_LT(35, int(successCount),
-			fmt.Sprintf("Most concurrent lookups should succeed (got %d/50)", successCount))
-	})
-}
-
-func TestExtremeValueHandling(t *testing.T) {
-	fixture := NewRouterTestFixture(t)
-	fixture.SetUp()
-
-	t.Run("ExtremeReserveValues", func(t *testing.T) {
-		address := "0x1234567890123456789012345678901234567890"
-		pairID := PairID(12345)
-
-		RegisterPairAddress([]byte(address[2:]), pairID)
-		RegisterPairToCore(pairID, 0)
-		coreRings[0] = ring24.New(constants.DefaultRingSize)
-
-		extremeValues := []struct {
-			name     string
-			reserve0 uint64
-			reserve1 uint64
-		}{
-			{"BothZero", 0, 0},
-			{"OneZero", 1000000, 0},
-			{"MaxValues", math.MaxUint64 >> 16, math.MaxUint64 >> 16},
-			{"HugeDifference", 1, 1000000000000},
-			{"EqualValues", 5000000000, 5000000000},
-		}
-
-		for _, tv := range extremeValues {
-			t.Run(tv.name, func(t *testing.T) {
-				logView := fixture.CreateTestLogView(address, tv.reserve0, tv.reserve1)
-
-				fixture.EXPECT_NO_FATAL_FAILURE(func() {
-					DispatchTickUpdate(logView)
-				})
-
-				message := coreRings[0].Pop()
-				if message != nil {
-					tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
-					fixture.EXPECT_EQ(pairID, tickUpdate.pairID, "PairID should be correct")
-					fixture.EXPECT_FALSE(math.IsNaN(tickUpdate.forwardTick), "Forward tick should not be NaN")
-					fixture.EXPECT_FALSE(math.IsNaN(tickUpdate.reverseTick), "Reverse tick should not be NaN")
-					fixture.EXPECT_FALSE(math.IsInf(tickUpdate.forwardTick, 0), "Forward tick should not be infinite")
-					fixture.EXPECT_FALSE(math.IsInf(tickUpdate.reverseTick, 0), "Reverse tick should not be infinite")
-				}
-			})
-		}
-	})
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// INTEGRATION AND END-TO-END TESTS
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestEndToEndIntegration(t *testing.T) {
-	fixture := NewRouterTestFixture(t)
-	fixture.SetUp()
-
-	t.Run("CompleteProcessingPipeline", func(t *testing.T) {
-		address := "0x1234567890123456789012345678901234567890"
-		pairID := PairID(12345)
-
-		RegisterPairAddress([]byte(address[2:]), pairID)
-		RegisterPairToCore(pairID, 0)
-
-		cycles := []ArbitrageTriplet{{pairID, PairID(2), PairID(3)}}
-		buildFanoutShardBuckets(cycles)
-		coreRings[0] = ring24.New(constants.DefaultRingSize)
-
-		logView := fixture.CreateTestLogView(address, 1000000000000, 2000000000000)
-
-		fixture.EXPECT_NO_FATAL_FAILURE(func() {
-			DispatchTickUpdate(logView)
-		})
-
-		message := coreRings[0].Pop()
-		fixture.EXPECT_TRUE(message != nil, "Pipeline should produce message")
-
-		if message != nil {
-			tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
-			fixture.EXPECT_EQ(pairID, tickUpdate.pairID, "End-to-end pairID should match")
-			fixture.EXPECT_NE(0.0, tickUpdate.forwardTick, "End-to-end tick should be non-zero")
-		}
-	})
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// RING BUFFER OVERFLOW AND RETRY LOGIC TESTS
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestRingBufferRetryLogic(t *testing.T) {
-	fixture := NewRouterTestFixture(t)
-	fixture.SetUp()
-
-	t.Run("RingBufferFullRetry", func(t *testing.T) {
-		address := "0x1234567890123456789012345678901234567890"
-		pairID := PairID(12345)
-
-		RegisterPairAddress([]byte(address[2:]), pairID)
-		RegisterPairToCore(pairID, 0)
-
-		// Create a very small ring that will fill up quickly
-		smallRing := ring24.New(4) // Only 4 slots
-		coreRings[0] = smallRing
-
-		// Fill the ring to capacity by pushing messages directly
-		for i := 0; i < 4; i++ {
-			msg := [24]byte{byte(i), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-			smallRing.Push(&msg)
-		}
-
-		// Verify ring is full
-		testMsg := [24]byte{99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-		fixture.EXPECT_FALSE(smallRing.Push(&testMsg), "Ring should be full and reject new messages")
-
-		// Now try to dispatch - should trigger retry logic
-		logView := fixture.CreateTestLogView(address, 1000000000000, 2000000000000)
-
-		// This call should enter the retry loop but eventually succeed when we drain
-		go func() {
-			time.Sleep(10 * time.Millisecond) // Let dispatch start and hit retry
-			// Drain one message to make space
-			smallRing.Pop()
-		}()
-
-		start := time.Now()
-		fixture.EXPECT_NO_FATAL_FAILURE(func() {
-			DispatchTickUpdate(logView)
-		})
-		elapsed := time.Since(start)
-
-		// Should have taken some time due to retry loop
-		fixture.EXPECT_LT(5*time.Millisecond, elapsed, "Should have spent time in retry loop")
-
-		// Verify the message eventually made it through
-		drainedCount := 0
-		for smallRing.Pop() != nil {
-			drainedCount++
-		}
-		fixture.EXPECT_LT(3, drainedCount, "Should have original messages plus the new one")
-	})
-
-	t.Run("MultiCoreRetrySelective", func(t *testing.T) {
-		address := "0x2234567890123456789012345678901234567890"
-		pairID := PairID(23456)
-
-		RegisterPairAddress([]byte(address[2:]), pairID)
-
-		// Assign to multiple cores - some will be full, some won't
-		RegisterPairToCore(pairID, 0)
-		RegisterPairToCore(pairID, 1)
-		RegisterPairToCore(pairID, 2)
-
-		// Core 0: small ring (will fill)
-		coreRings[0] = ring24.New(2)
-		// Core 1: normal ring (won't fill)
-		coreRings[1] = ring24.New(constants.DefaultRingSize)
-		// Core 2: small ring (will fill)
-		coreRings[2] = ring24.New(2)
-
-		// Fill cores 0 and 2
-		for i := 0; i < 2; i++ {
-			msg := [24]byte{byte(i), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-			coreRings[0].Push(&msg)
-			coreRings[2].Push(&msg)
-		}
-
-		logView := fixture.CreateTestLogView(address, 1000000000000, 2000000000000)
-
-		// Start draining the full rings after a delay
-		go func() {
-			time.Sleep(5 * time.Millisecond)
-			coreRings[0].Pop() // Make space in core 0
-			coreRings[2].Pop() // Make space in core 2
-		}()
-
-		fixture.EXPECT_NO_FATAL_FAILURE(func() {
-			DispatchTickUpdate(logView)
-		})
-
-		// Verify all cores eventually received the message
-		// Core 1 should have received immediately, cores 0&2 after retry
-		msg1 := coreRings[1].Pop()
-		fixture.EXPECT_TRUE(msg1 != nil, "Core 1 should have received message immediately")
-
-		// Cores 0 and 2 should also have messages after retry
-		remaining0 := 0
-		for coreRings[0].Pop() != nil {
-			remaining0++
-		}
-		remaining2 := 0
-		for coreRings[2].Pop() != nil {
-			remaining2++
-		}
-
-		fixture.EXPECT_LT(1, remaining0, "Core 0 should have messages after retry")
-		fixture.EXPECT_LT(1, remaining2, "Core 2 should have messages after retry")
-	})
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ============================================================================
 // ROBIN HOOD HASH TABLE DISPLACEMENT TESTS
-// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ============================================================================
 
+// TestRobinHoodDisplacement validates Robin Hood hashing displacement logic
 func TestRobinHoodDisplacement(t *testing.T) {
 	fixture := NewRouterTestFixture(t)
 	fixture.SetUp()
@@ -1316,10 +648,471 @@ func TestRobinHoodDisplacement(t *testing.T) {
 	})
 }
 
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// FANOUT PROCESSING AND PRIORITY QUEUE TESTS
-// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ============================================================================
+// CRYPTOGRAPHIC RANDOMNESS TESTS
+// ============================================================================
 
+// TestKeccakRandomGeneration validates Keccak-based random number generation
+func TestKeccakRandomGeneration(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+
+	t.Run("BasicRandomGeneration", func(t *testing.T) {
+		seed := []byte("test_seed_12345")
+		rng := newKeccakRandom(seed)
+
+		// Generate multiple values
+		values := make([]uint64, 100)
+		for i := range values {
+			values[i] = rng.nextUint64()
+		}
+
+		// Check for reasonable uniqueness
+		seen := make(map[uint64]bool)
+		duplicates := 0
+		for _, v := range values {
+			if seen[v] {
+				duplicates++
+			}
+			seen[v] = true
+		}
+
+		fixture.EXPECT_LT(duplicates, 5, "Should have very few duplicate random values")
+	})
+
+	t.Run("DeterministicBehavior", func(t *testing.T) {
+		seed := []byte("deterministic_test")
+
+		rng1 := newKeccakRandom(seed)
+		rng2 := newKeccakRandom(seed)
+
+		for i := 0; i < 10; i++ {
+			v1 := rng1.nextUint64()
+			v2 := rng2.nextUint64()
+			fixture.EXPECT_EQ(v1, v2, "Random sequence should be deterministic with same seed")
+		}
+	})
+
+	t.Run("NextIntBoundsChecking", func(t *testing.T) {
+		seed := []byte("bounds_test")
+		rng := newKeccakRandom(seed)
+
+		bounds := []int{1, 10, 100, 1000}
+
+		for _, bound := range bounds {
+			for i := 0; i < 20; i++ {
+				val := rng.nextInt(bound)
+				fixture.EXPECT_GE(val, 0, "Value should be >= 0")
+				fixture.EXPECT_LT(val, bound, fmt.Sprintf("Value should be < %d", bound))
+			}
+		}
+	})
+}
+
+// TestEdgeBindingsShuffle validates edge bindings shuffling functionality
+func TestEdgeBindingsShuffle(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+
+	t.Run("ShufflePreservesElements", func(t *testing.T) {
+		bindings := make([]ArbitrageEdgeBinding, 10)
+		for i := range bindings {
+			bindings[i] = ArbitrageEdgeBinding{
+				cyclePairs: [3]PairID{PairID(i), PairID(i + 1), PairID(i + 2)},
+				edgeIndex:  uint64(i),
+			}
+		}
+
+		keccakShuffleEdgeBindings(bindings, PairID(12345))
+
+		// Verify all elements are preserved
+		elementCounts := make(map[uint64]int)
+		for _, binding := range bindings {
+			elementCounts[binding.edgeIndex]++
+		}
+
+		for i := uint64(0); i < 10; i++ {
+			fixture.EXPECT_EQ(1, elementCounts[i], fmt.Sprintf("Edge index %d should appear exactly once", i))
+		}
+	})
+
+	t.Run("ShuffleDeterminism", func(t *testing.T) {
+		original := make([]ArbitrageEdgeBinding, 5)
+		for i := range original {
+			original[i] = ArbitrageEdgeBinding{
+				cyclePairs: [3]PairID{PairID(i * 3), PairID(i*3 + 1), PairID(i*3 + 2)},
+				edgeIndex:  uint64(i),
+			}
+		}
+
+		bindings1 := make([]ArbitrageEdgeBinding, len(original))
+		bindings2 := make([]ArbitrageEdgeBinding, len(original))
+		copy(bindings1, original)
+		copy(bindings2, original)
+
+		pairID := PairID(54321)
+		keccakShuffleEdgeBindings(bindings1, pairID)
+		keccakShuffleEdgeBindings(bindings2, pairID)
+
+		// Should produce identical results
+		for i := range bindings1 {
+			fixture.EXPECT_EQ(bindings1[i].edgeIndex, bindings2[i].edgeIndex,
+				"Shuffle should be deterministic for same pairID")
+		}
+	})
+}
+
+// ============================================================================
+// DISPATCH PIPELINE TESTS
+// ============================================================================
+
+// TestDispatchTickUpdateFlow validates complete tick update dispatch pipeline
+func TestDispatchTickUpdateFlow(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+
+	t.Run("UnregisteredPairHandling", func(t *testing.T) {
+		logView := fixture.CreateTestLogView(
+			"0x9999999999999999999999999999999999999999",
+			1000000000000, 2000000000000,
+		)
+
+		fixture.EXPECT_NO_FATAL_FAILURE(func() {
+			DispatchTickUpdate(logView)
+		})
+	})
+
+	t.Run("ValidPairProcessing", func(t *testing.T) {
+		address := "0x1234567890123456789012345678901234567890"
+		pairID := PairID(12345)
+
+		RegisterPairAddress([]byte(address[2:]), pairID)
+		RegisterPairToCore(pairID, 0)
+		coreRings[0] = ring24.New(constants.DefaultRingSize)
+
+		logView := fixture.CreateTestLogView(address, 1000000000000, 2000000000000)
+
+		fixture.EXPECT_NO_FATAL_FAILURE(func() {
+			DispatchTickUpdate(logView)
+		})
+
+		// Verify message was sent
+		message := coreRings[0].Pop()
+		fixture.ASSERT_TRUE(message != nil, "Message should be sent to core ring")
+
+		// Verify message content
+		tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
+		fixture.EXPECT_EQ(pairID, tickUpdate.pairID, "Message should contain correct pairID")
+		fixture.EXPECT_NE(0.0, tickUpdate.forwardTick, "Forward tick should be non-zero")
+		fixture.EXPECT_EQ(-tickUpdate.forwardTick, tickUpdate.reverseTick, "Reverse tick should be negative of forward")
+	})
+
+	t.Run("RealUniswapV2Data", func(t *testing.T) {
+		address := "0x882df4b0fb50a229c3b4124eb18c759911485bfb"
+		pairID := PairID(54321)
+
+		RegisterPairAddress([]byte(address[2:]), pairID)
+		RegisterPairToCore(pairID, 0)
+		coreRings[0] = ring24.New(constants.DefaultRingSize)
+
+		realLogView := &types.LogView{
+			Addr: []byte(address),
+			Data: []byte("0x00000000000000000000000000000000000000000078e3833588cda8d5e102c3000000000000000000000000000000000000000000000000001fa8dd7963f22c"),
+		}
+
+		fixture.EXPECT_NO_FATAL_FAILURE(func() {
+			DispatchTickUpdate(realLogView)
+		})
+
+		message := coreRings[0].Pop()
+		fixture.ASSERT_TRUE(message != nil, "Real data should produce message")
+
+		tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
+		fixture.EXPECT_EQ(pairID, tickUpdate.pairID, "Real data should have correct pairID")
+		fixture.EXPECT_NE(0.0, tickUpdate.forwardTick, "Real data should produce non-zero tick")
+		fixture.EXPECT_FALSE(math.IsNaN(tickUpdate.forwardTick), "Real data tick should not be NaN")
+		fixture.EXPECT_FALSE(math.IsInf(tickUpdate.forwardTick, 0), "Real data tick should not be infinite")
+	})
+}
+
+// TestDispatchFallbackLogic validates fallback handling for edge cases
+func TestDispatchFallbackLogic(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+
+	t.Run("ZeroReservesFallback", func(t *testing.T) {
+		address := "0x1234567890123456789012345678901234567890"
+		pairID := PairID(12345)
+
+		RegisterPairAddress([]byte(address[2:]), pairID)
+		RegisterPairToCore(pairID, 0)
+		coreRings[0] = ring24.New(constants.DefaultRingSize)
+
+		logView := fixture.CreateTestLogView(address, 0, 0)
+
+		DispatchTickUpdate(logView)
+
+		message := coreRings[0].Pop()
+		fixture.ASSERT_TRUE(message != nil, "Fallback should still send message")
+
+		tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
+		fixture.EXPECT_GE(tickUpdate.forwardTick, 51.2, "Fallback tick should be >= 51.2")
+		fixture.EXPECT_LE(tickUpdate.forwardTick, 64.0, "Fallback tick should be <= 64.0")
+		fixture.EXPECT_GE(tickUpdate.reverseTick, 51.2, "Reverse fallback tick should be >= 51.2")
+		fixture.EXPECT_LE(tickUpdate.reverseTick, 64.0, "Reverse fallback tick should be <= 64.0")
+		fixture.EXPECT_EQ(tickUpdate.forwardTick, tickUpdate.reverseTick, "Invalid reserves should have equal ticks")
+	})
+}
+
+// TestDispatchMultiCoreDistribution validates multi-core message distribution
+func TestDispatchMultiCoreDistribution(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+
+	t.Run("MultipleCoreDelivery", func(t *testing.T) {
+		address := "0x1234567890123456789012345678901234567890"
+		pairID := PairID(12345)
+		assignedCores := []int{0, 2, 5}
+
+		RegisterPairAddress([]byte(address[2:]), pairID)
+		for _, coreID := range assignedCores {
+			RegisterPairToCore(pairID, uint8(coreID))
+			coreRings[coreID] = ring24.New(constants.DefaultRingSize)
+		}
+
+		logView := fixture.CreateTestLogView(address, 1500000000000, 3000000000000)
+		DispatchTickUpdate(logView)
+
+		// Verify all assigned cores received message
+		for _, coreID := range assignedCores {
+			message := coreRings[coreID].Pop()
+			fixture.EXPECT_TRUE(message != nil, fmt.Sprintf("Core %d should receive message", coreID))
+
+			if message != nil {
+				tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
+				fixture.EXPECT_EQ(pairID, tickUpdate.pairID, "Message should have correct pairID")
+			}
+		}
+
+		// Verify unassigned core doesn't receive message
+		coreRings[1] = ring24.New(constants.DefaultRingSize)
+		message := coreRings[1].Pop()
+		fixture.EXPECT_TRUE(message == nil, "Unassigned core should not receive message")
+	})
+}
+
+// ============================================================================
+// RING BUFFER OVERFLOW AND RETRY LOGIC TESTS
+// ============================================================================
+
+// TestRingBufferRetryLogic validates ring buffer overflow and retry mechanisms
+func TestRingBufferRetryLogic(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+
+	t.Run("RingBufferFullRetry", func(t *testing.T) {
+		address := "0x1234567890123456789012345678901234567890"
+		pairID := PairID(12345)
+
+		RegisterPairAddress([]byte(address[2:]), pairID)
+		RegisterPairToCore(pairID, 0)
+
+		// Create a very small ring that will fill up quickly
+		smallRing := ring24.New(4) // Only 4 slots
+		coreRings[0] = smallRing
+
+		// Fill the ring to capacity by pushing messages directly
+		for i := 0; i < 4; i++ {
+			msg := [24]byte{byte(i), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+			smallRing.Push(&msg)
+		}
+
+		// Verify ring is full
+		testMsg := [24]byte{99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+		fixture.EXPECT_FALSE(smallRing.Push(&testMsg), "Ring should be full and reject new messages")
+
+		// Now try to dispatch - should trigger retry logic
+		logView := fixture.CreateTestLogView(address, 1000000000000, 2000000000000)
+
+		// This call should enter the retry loop but eventually succeed when we drain
+		go func() {
+			time.Sleep(10 * time.Millisecond) // Let dispatch start and hit retry
+			// Drain one message to make space
+			smallRing.Pop()
+		}()
+
+		start := time.Now()
+		fixture.EXPECT_NO_FATAL_FAILURE(func() {
+			DispatchTickUpdate(logView)
+		})
+		elapsed := time.Since(start)
+
+		// Should have taken some time due to retry loop
+		fixture.EXPECT_LT(5*time.Millisecond, elapsed, "Should have spent time in retry loop")
+
+		// Verify the message eventually made it through
+		drainedCount := 0
+		for smallRing.Pop() != nil {
+			drainedCount++
+		}
+		fixture.EXPECT_LT(3, drainedCount, "Should have original messages plus the new one")
+	})
+
+	t.Run("MultiCoreRetrySelective", func(t *testing.T) {
+		address := "0x2234567890123456789012345678901234567890"
+		pairID := PairID(23456)
+
+		RegisterPairAddress([]byte(address[2:]), pairID)
+
+		// Assign to multiple cores - some will be full, some won't
+		RegisterPairToCore(pairID, 0)
+		RegisterPairToCore(pairID, 1)
+		RegisterPairToCore(pairID, 2)
+
+		// Core 0: small ring (will fill)
+		coreRings[0] = ring24.New(2)
+		// Core 1: normal ring (won't fill)
+		coreRings[1] = ring24.New(constants.DefaultRingSize)
+		// Core 2: small ring (will fill)
+		coreRings[2] = ring24.New(2)
+
+		// Fill cores 0 and 2
+		for i := 0; i < 2; i++ {
+			msg := [24]byte{byte(i), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+			coreRings[0].Push(&msg)
+			coreRings[2].Push(&msg)
+		}
+
+		logView := fixture.CreateTestLogView(address, 1000000000000, 2000000000000)
+
+		// Start draining the full rings after a delay
+		go func() {
+			time.Sleep(5 * time.Millisecond)
+			coreRings[0].Pop() // Make space in core 0
+			coreRings[2].Pop() // Make space in core 2
+		}()
+
+		fixture.EXPECT_NO_FATAL_FAILURE(func() {
+			DispatchTickUpdate(logView)
+		})
+
+		// Verify all cores eventually received the message
+		// Core 1 should have received immediately, cores 0&2 after retry
+		msg1 := coreRings[1].Pop()
+		fixture.EXPECT_TRUE(msg1 != nil, "Core 1 should have received message immediately")
+
+		// Cores 0 and 2 should also have messages after retry
+		remaining0 := 0
+		for coreRings[0].Pop() != nil {
+			remaining0++
+		}
+		remaining2 := 0
+		for coreRings[2].Pop() != nil {
+			remaining2++
+		}
+
+		fixture.EXPECT_LT(1, remaining0, "Core 0 should have messages after retry")
+		fixture.EXPECT_LT(1, remaining2, "Core 2 should have messages after retry")
+	})
+}
+
+// ============================================================================
+// QUANTIZATION AND CORE PROCESSING TESTS
+// ============================================================================
+
+// TestTickQuantization validates tick value quantization for priority queues
+func TestTickQuantization(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+
+	t.Run("BasicQuantizationBounds", func(t *testing.T) {
+		testValues := []float64{0.0, 50.0, -50.0, 100.0, -100.0}
+
+		for _, tickValue := range testValues {
+			result := quantizeTickToInt64(tickValue)
+			fixture.EXPECT_GE(result, int64(0), "Quantized value should be non-negative")
+			fixture.EXPECT_LE(result, int64(constants.MaxQuantizedTick), "Quantized value should be within max bound")
+		}
+	})
+
+	t.Run("MonotonicityProperty", func(t *testing.T) {
+		baseValue := 10.0
+		largerValue := baseValue + 1.0
+
+		baseQuantized := quantizeTickToInt64(baseValue)
+		largerQuantized := quantizeTickToInt64(largerValue)
+
+		fixture.EXPECT_LT(baseQuantized, largerQuantized, "Quantization should preserve order")
+	})
+}
+
+// TestCoreProcessingLogic validates core-level tick update processing
+func TestCoreProcessingLogic(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+
+	t.Run("ForwardDirectionProcessing", func(t *testing.T) {
+		executor := &ArbitrageCoreExecutor{
+			pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
+			isReverseDirection: false,
+			cycleStates:        make([]ArbitrageCycleState, 10),
+			fanoutTables:       make([][]FanoutEntry, 1),
+			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
+		}
+
+		executor.priorityQueues[0] = *quantumqueue64.New()
+
+		handle, _ := executor.priorityQueues[0].BorrowSafe()
+		executor.priorityQueues[0].Push(constants.MaxInitializationPriority, handle, 0)
+
+		pairID := PairID(123)
+		executor.pairToQueueIndex.Put(uint32(pairID), 0)
+
+		update := &TickUpdate{
+			pairID:      pairID,
+			forwardTick: 1.5,
+			reverseTick: -1.5,
+		}
+
+		fixture.EXPECT_NO_FATAL_FAILURE(func() {
+			processTickUpdate(executor, update)
+		})
+	})
+
+	t.Run("ReverseDirectionProcessing", func(t *testing.T) {
+		executor := &ArbitrageCoreExecutor{
+			pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
+			isReverseDirection: true,
+			cycleStates:        make([]ArbitrageCycleState, 10),
+			fanoutTables:       make([][]FanoutEntry, 1),
+			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
+		}
+
+		executor.priorityQueues[0] = *quantumqueue64.New()
+
+		handle, _ := executor.priorityQueues[0].BorrowSafe()
+		executor.priorityQueues[0].Push(constants.MaxInitializationPriority, handle, 0)
+
+		pairID := PairID(456)
+		executor.pairToQueueIndex.Put(uint32(pairID), 0)
+
+		update := &TickUpdate{
+			pairID:      pairID,
+			forwardTick: 2.0,
+			reverseTick: -2.0,
+		}
+
+		fixture.EXPECT_NO_FATAL_FAILURE(func() {
+			processTickUpdate(executor, update)
+		})
+	})
+}
+
+// ============================================================================
+// FANOUT PROCESSING AND PRIORITY QUEUE TESTS
+// ============================================================================
+
+// TestFanoutProcessingLogic validates fanout table processing and updates
 func TestFanoutProcessingLogic(t *testing.T) {
 	fixture := NewRouterTestFixture(t)
 	fixture.SetUp()
@@ -1496,14 +1289,243 @@ func TestFanoutProcessingLogic(t *testing.T) {
 	})
 }
 
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// FOCUSED PERFORMANCE BENCHMARKS
-// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ============================================================================
+// SHARD CONSTRUCTION AND SYSTEM INITIALIZATION TESTS
+// ============================================================================
 
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// COMPREHENSIVE PERFORMANCE BENCHMARKS
-// ════════════════════════════════════════════════════════════════════════════════════════════════
+// TestFanoutShardConstruction validates fanout shard bucket construction
+func TestFanoutShardConstruction(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
 
+	t.Run("BasicShardCreation", func(t *testing.T) {
+		cycles := []ArbitrageTriplet{
+			{PairID(1), PairID(2), PairID(3)},
+			{PairID(1), PairID(4), PairID(5)},
+			{PairID(2), PairID(6), PairID(7)},
+		}
+
+		buildFanoutShardBuckets(cycles)
+
+		fixture.EXPECT_TRUE(pairShardBuckets != nil, "Shard buckets should be created")
+		fixture.EXPECT_LT(0, len(pairShardBuckets), "Should have non-empty shard buckets")
+	})
+
+	t.Run("PairCycleMapping", func(t *testing.T) {
+		cycles := []ArbitrageTriplet{
+			{PairID(1), PairID(2), PairID(3)},
+			{PairID(1), PairID(4), PairID(5)},
+		}
+
+		buildFanoutShardBuckets(cycles)
+
+		buckets, exists := pairShardBuckets[PairID(1)]
+		fixture.EXPECT_TRUE(exists, "Pair 1 should have shard buckets")
+
+		totalBindings := 0
+		for _, bucket := range buckets {
+			totalBindings += len(bucket.edgeBindings)
+			fixture.EXPECT_EQ(PairID(1), bucket.pairID, "Bucket should have correct pairID")
+		}
+
+		fixture.EXPECT_EQ(2, totalBindings, "Pair 1 should have 2 edge bindings")
+	})
+}
+
+// TestSystemInitialization validates complete system initialization
+func TestSystemInitialization(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+
+	t.Run("SmallSystemInit", func(t *testing.T) {
+		cycles := []ArbitrageTriplet{
+			{PairID(1), PairID(2), PairID(3)},
+			{PairID(4), PairID(5), PairID(6)},
+		}
+
+		fixture.EXPECT_NO_FATAL_FAILURE(func() {
+			InitializeArbitrageSystem(cycles)
+		})
+
+		// Give goroutines time to start
+		time.Sleep(50 * time.Millisecond)
+
+		// Verify some pairs were assigned
+		assigned := false
+		for i := 0; i < 10; i++ {
+			if pairToCoreAssignment[i] != 0 {
+				assigned = true
+				break
+			}
+		}
+		fixture.EXPECT_TRUE(assigned, "Some pairs should be assigned to cores")
+	})
+}
+
+// ============================================================================
+// STRESS TESTS AND EDGE CASES
+// ============================================================================
+
+// TestHighVolumeOperations validates system behavior under heavy load
+func TestHighVolumeOperations(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+
+	t.Run("MassAddressRegistration", func(t *testing.T) {
+		numAddresses := 50
+
+		for i := range addressToPairID {
+			addressToPairID[i] = 0
+			pairAddressKeys[i] = AddressKey{}
+		}
+
+		successfulRegistrations := 0
+		for i := 0; i < numAddresses; i++ {
+			address := fmt.Sprintf("%08x%032d", i*0x10000, i)
+			pairID := PairID(i + 1)
+			RegisterPairAddress([]byte(address), pairID)
+
+			if lookupPairIDByAddress([]byte(address)) == pairID {
+				successfulRegistrations++
+			}
+		}
+
+		fixture.EXPECT_LT(numAddresses*7/10, successfulRegistrations,
+			fmt.Sprintf("Most addresses should be registered successfully (got %d/%d)",
+				successfulRegistrations, numAddresses))
+	})
+
+	t.Run("ConcurrentLookups", func(t *testing.T) {
+		for i := range addressToPairID {
+			addressToPairID[i] = 0
+			pairAddressKeys[i] = AddressKey{}
+		}
+
+		numAddresses := 50
+		for i := 0; i < numAddresses; i++ {
+			address := fmt.Sprintf("%08x%032d", i*0x10000, i)
+			RegisterPairAddress([]byte(address), PairID(i+1))
+		}
+
+		var wg sync.WaitGroup
+		var successCount int32
+
+		for i := 0; i < 5; i++ {
+			wg.Add(1)
+			go func(startIdx int) {
+				defer wg.Done()
+
+				localSuccess := 0
+				for j := 0; j < 10; j++ {
+					idx := (startIdx*10 + j) % numAddresses
+					address := fmt.Sprintf("%08x%032d", idx*0x10000, idx)
+					result := lookupPairIDByAddress([]byte(address))
+					expected := PairID(idx + 1)
+
+					if result == expected {
+						localSuccess++
+					}
+				}
+				atomic.AddInt32(&successCount, int32(localSuccess))
+			}(i)
+		}
+
+		wg.Wait()
+
+		fixture.EXPECT_LT(35, int(successCount),
+			fmt.Sprintf("Most concurrent lookups should succeed (got %d/50)", successCount))
+	})
+}
+
+// TestExtremeValueHandling validates handling of edge case values
+func TestExtremeValueHandling(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+
+	t.Run("ExtremeReserveValues", func(t *testing.T) {
+		address := "0x1234567890123456789012345678901234567890"
+		pairID := PairID(12345)
+
+		RegisterPairAddress([]byte(address[2:]), pairID)
+		RegisterPairToCore(pairID, 0)
+		coreRings[0] = ring24.New(constants.DefaultRingSize)
+
+		extremeValues := []struct {
+			name     string
+			reserve0 uint64
+			reserve1 uint64
+		}{
+			{"BothZero", 0, 0},
+			{"OneZero", 1000000, 0},
+			{"MaxValues", math.MaxUint64 >> 16, math.MaxUint64 >> 16},
+			{"HugeDifference", 1, 1000000000000},
+			{"EqualValues", 5000000000, 5000000000},
+		}
+
+		for _, tv := range extremeValues {
+			t.Run(tv.name, func(t *testing.T) {
+				logView := fixture.CreateTestLogView(address, tv.reserve0, tv.reserve1)
+
+				fixture.EXPECT_NO_FATAL_FAILURE(func() {
+					DispatchTickUpdate(logView)
+				})
+
+				message := coreRings[0].Pop()
+				if message != nil {
+					tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
+					fixture.EXPECT_EQ(pairID, tickUpdate.pairID, "PairID should be correct")
+					fixture.EXPECT_FALSE(math.IsNaN(tickUpdate.forwardTick), "Forward tick should not be NaN")
+					fixture.EXPECT_FALSE(math.IsNaN(tickUpdate.reverseTick), "Reverse tick should not be NaN")
+					fixture.EXPECT_FALSE(math.IsInf(tickUpdate.forwardTick, 0), "Forward tick should not be infinite")
+					fixture.EXPECT_FALSE(math.IsInf(tickUpdate.reverseTick, 0), "Reverse tick should not be infinite")
+				}
+			})
+		}
+	})
+}
+
+// ============================================================================
+// INTEGRATION AND END-TO-END TESTS
+// ============================================================================
+
+// TestEndToEndIntegration validates complete processing pipeline
+func TestEndToEndIntegration(t *testing.T) {
+	fixture := NewRouterTestFixture(t)
+	fixture.SetUp()
+
+	t.Run("CompleteProcessingPipeline", func(t *testing.T) {
+		address := "0x1234567890123456789012345678901234567890"
+		pairID := PairID(12345)
+
+		RegisterPairAddress([]byte(address[2:]), pairID)
+		RegisterPairToCore(pairID, 0)
+
+		cycles := []ArbitrageTriplet{{pairID, PairID(2), PairID(3)}}
+		buildFanoutShardBuckets(cycles)
+		coreRings[0] = ring24.New(constants.DefaultRingSize)
+
+		logView := fixture.CreateTestLogView(address, 1000000000000, 2000000000000)
+
+		fixture.EXPECT_NO_FATAL_FAILURE(func() {
+			DispatchTickUpdate(logView)
+		})
+
+		message := coreRings[0].Pop()
+		fixture.EXPECT_TRUE(message != nil, "Pipeline should produce message")
+
+		if message != nil {
+			tickUpdate := (*TickUpdate)(unsafe.Pointer(message))
+			fixture.EXPECT_EQ(pairID, tickUpdate.pairID, "End-to-end pairID should match")
+			fixture.EXPECT_NE(0.0, tickUpdate.forwardTick, "End-to-end tick should be non-zero")
+		}
+	})
+}
+
+// ============================================================================
+// PERFORMANCE BENCHMARKS
+// ============================================================================
+
+// BenchmarkDispatchTickUpdate measures dispatch performance with realistic data
 func BenchmarkDispatchTickUpdate(b *testing.B) {
 	fixture := NewRouterTestFixture(&testing.T{})
 	fixture.SetUp()
@@ -1543,6 +1565,7 @@ func BenchmarkDispatchTickUpdate(b *testing.B) {
 	time.Sleep(10 * time.Millisecond)
 }
 
+// BenchmarkCountLeadingZeros measures hex parsing performance
 func BenchmarkCountLeadingZeros(b *testing.B) {
 	testCases := []struct {
 		name  string
@@ -1571,6 +1594,7 @@ func BenchmarkCountLeadingZeros(b *testing.B) {
 	}
 }
 
+// BenchmarkAddressLookup measures address table lookup performance
 func BenchmarkAddressLookup(b *testing.B) {
 	fixture := NewRouterTestFixture(&testing.T{})
 	fixture.SetUp()
@@ -1614,6 +1638,7 @@ func BenchmarkAddressLookup(b *testing.B) {
 	})
 }
 
+// BenchmarkAddressRegistration measures address registration performance
 func BenchmarkAddressRegistration(b *testing.B) {
 	realAddresses := []string{
 		"a478c2975ab1ea89e8196811f51a7b7ade33eb11",
@@ -1641,6 +1666,7 @@ func BenchmarkAddressRegistration(b *testing.B) {
 	}
 }
 
+// BenchmarkQuantization measures tick quantization performance
 func BenchmarkQuantization(b *testing.B) {
 	values := []float64{-100.5, -50.0, 0.0, 25.7, 100.0, -128.0, 127.9, 1.5, -1.5}
 
@@ -1650,6 +1676,7 @@ func BenchmarkQuantization(b *testing.B) {
 	}
 }
 
+// BenchmarkProcessTickUpdate measures core processing performance
 func BenchmarkProcessTickUpdate(b *testing.B) {
 	executor := &ArbitrageCoreExecutor{
 		pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
@@ -1690,6 +1717,7 @@ func BenchmarkProcessTickUpdate(b *testing.B) {
 	}
 }
 
+// BenchmarkBytesToAddressKey measures address key conversion performance
 func BenchmarkBytesToAddressKey(b *testing.B) {
 	addresses := []string{
 		"a478c2975ab1ea89e8196811f51a7b7ade33eb11",
@@ -1705,6 +1733,7 @@ func BenchmarkBytesToAddressKey(b *testing.B) {
 	}
 }
 
+// BenchmarkDirectAddressHashing measures direct address hashing performance
 func BenchmarkDirectAddressHashing(b *testing.B) {
 	addresses := []string{
 		"a478c2975ab1ea89e8196811f51a7b7ade33eb11",
@@ -1720,6 +1749,7 @@ func BenchmarkDirectAddressHashing(b *testing.B) {
 	}
 }
 
+// BenchmarkKeccakRandomGeneration measures random number generation performance
 func BenchmarkKeccakRandomGeneration(b *testing.B) {
 	seed := []byte("benchmark_seed_12345")
 	rng := newKeccakRandom(seed)
@@ -1739,6 +1769,7 @@ func BenchmarkKeccakRandomGeneration(b *testing.B) {
 	})
 }
 
+// BenchmarkHighVolumeEventProcessing measures high-throughput event processing
 func BenchmarkHighVolumeEventProcessing(b *testing.B) {
 	fixture := NewRouterTestFixture(&testing.T{})
 	fixture.SetUp()
@@ -1804,6 +1835,7 @@ func BenchmarkHighVolumeEventProcessing(b *testing.B) {
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "events_per_second")
 }
 
+// BenchmarkBlockProcessingSimulation simulates realistic blockchain block processing
 func BenchmarkBlockProcessingSimulation(b *testing.B) {
 	fixture := NewRouterTestFixture(&testing.T{})
 	fixture.SetUp()
@@ -1894,6 +1926,7 @@ func BenchmarkBlockProcessingSimulation(b *testing.B) {
 	b.ReportMetric(float64(totalProcessed), "total_processed")
 }
 
+// BenchmarkSystemThroughput measures overall system throughput
 func BenchmarkSystemThroughput(b *testing.B) {
 	fixture := NewRouterTestFixture(&testing.T{})
 	fixture.SetUp()

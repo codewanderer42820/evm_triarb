@@ -12,9 +12,41 @@ import (
 	"time"
 )
 
-// ==============================================================================
+// ============================================================================
+// TEST CONFIGURATION
+// ============================================================================
+
+var (
+	// Pre-built test payloads for realistic Ethereum JSON-RPC data
+	ethPayload512   [512]byte
+	ethPayload4096  [4096]byte
+	ethPayload16384 [16384]byte
+	ethPayload65536 [65536]byte
+
+	// Pre-built WebSocket frames for benchmarking
+	frame512   []byte
+	frame4096  []byte
+	frame16384 []byte
+	frame65536 []byte
+)
+
+func init() {
+	// Initialize test data with realistic Ethereum payloads
+	fillEthereumPayload(ethPayload512[:])
+	fillEthereumPayload(ethPayload4096[:])
+	fillEthereumPayload(ethPayload16384[:])
+	fillEthereumPayload(ethPayload65536[:])
+
+	// Pre-build frames for zero-allocation benchmarks
+	frame512 = createTestFrame(0x1, ethPayload512[:], true)
+	frame4096 = createTestFrame(0x1, ethPayload4096[:], true)
+	frame16384 = createTestFrame(0x1, ethPayload16384[:], true)
+	frame65536 = createTestFrame(0x1, ethPayload65536[:], true)
+}
+
+// ============================================================================
 // TEST UTILITIES
-// ==============================================================================
+// ============================================================================
 
 // mockConn provides controllable network connection behavior for testing
 type mockConn struct {
@@ -122,10 +154,11 @@ func fillEthereumPayload(buf []byte) {
 	}
 }
 
-// ==============================================================================
+// ============================================================================
 // INITIALIZATION TESTS
-// ==============================================================================
+// ============================================================================
 
+// TestProcessorInitialization validates proper static initialization
 func TestProcessorInitialization(t *testing.T) {
 	t.Run("upgrade_request_structure", func(t *testing.T) {
 		request := string(processor.upgradeRequest[:upgradeRequestLen])
@@ -176,10 +209,11 @@ func TestProcessorInitialization(t *testing.T) {
 	})
 }
 
-// ==============================================================================
+// ============================================================================
 // HANDSHAKE TESTS
-// ==============================================================================
+// ============================================================================
 
+// TestHandshake validates WebSocket upgrade negotiation
 func TestHandshake(t *testing.T) {
 	validTests := []struct {
 		name     string
@@ -263,10 +297,11 @@ func TestHandshake(t *testing.T) {
 	})
 }
 
-// ==============================================================================
+// ============================================================================
 // SUBSCRIPTION TESTS
-// ==============================================================================
+// ============================================================================
 
+// TestSendSubscription validates subscription frame transmission
 func TestSendSubscription(t *testing.T) {
 	t.Run("successful_send", func(t *testing.T) {
 		conn := &mockConn{}
@@ -291,10 +326,11 @@ func TestSendSubscription(t *testing.T) {
 	})
 }
 
-// ==============================================================================
-// MESSAGE PROCESSING TESTS
-// ==============================================================================
+// ============================================================================
+// WEBSOCKET FRAME PARSING TESTS
+// ============================================================================
 
+// TestSpinUntilCompleteMessage validates WebSocket frame parsing
 func TestSpinUntilCompleteMessage(t *testing.T) {
 	t.Run("basic_frames", func(t *testing.T) {
 		tests := []struct {
@@ -341,7 +377,42 @@ func TestSpinUntilCompleteMessage(t *testing.T) {
 		}
 	})
 
-	t.Run("control_frames", func(t *testing.T) {
+	t.Run("payload_length_encoding", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			length int
+		}{
+			{"7bit_max", 125},
+			{"16bit_min", 126},
+			{"16bit_max", 65535},
+			{"64bit_min", 65536},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				payload := make([]byte, tt.length)
+				frame := createTestFrame(0x1, payload, true)
+
+				conn := &mockConn{readData: frame}
+				result, err := SpinUntilCompleteMessage(conn)
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+				if len(result) != tt.length {
+					t.Errorf("Expected %d bytes, got %d", tt.length, len(result))
+				}
+			})
+		}
+	})
+}
+
+// ============================================================================
+// CONTROL FRAME TESTS
+// ============================================================================
+
+// TestControlFrames validates control frame handling
+func TestControlFrames(t *testing.T) {
+	t.Run("control_frames_skipped", func(t *testing.T) {
 		// Test control frames are properly skipped
 		var data []byte
 		data = append(data, createTestFrame(0x1, []byte("Start"), false)...)
@@ -390,106 +461,13 @@ func TestSpinUntilCompleteMessage(t *testing.T) {
 			})
 		}
 	})
-
-	t.Run("control_frame_read_errors", func(t *testing.T) {
-		t.Run("control_payload_read_error", func(t *testing.T) {
-			callCount := 0
-			conn := &mockConn{
-				readFunc: func(b []byte) (int, error) {
-					callCount++
-					switch callCount {
-					case 1:
-						// Return header for ping frame with 20-byte payload
-						if len(b) >= 2 {
-							b[0] = 0x89 // FIN=1, opcode=9 (ping)
-							b[1] = 20   // 20 bytes payload
-							return 2, nil
-						}
-					case 2:
-						// First control payload read (16 bytes) succeeds
-						if len(b) >= 16 {
-							for i := 0; i < 16; i++ {
-								b[i] = byte('X')
-							}
-							return 16, nil
-						}
-					case 3:
-						// Second control payload read (remaining 4 bytes) fails
-						return 0, fmt.Errorf("control payload read failed")
-					}
-					return 0, fmt.Errorf("unexpected call")
-				},
-			}
-			_, err := SpinUntilCompleteMessage(conn)
-			if err == nil || !strings.Contains(err.Error(), "control payload read failed") {
-				t.Errorf("Expected control payload read error, got: %v", err)
-			}
-		})
-
-		t.Run("control_payload_partial_read", func(t *testing.T) {
-			callCount := 0
-			conn := &mockConn{
-				readFunc: func(b []byte) (int, error) {
-					callCount++
-					switch callCount {
-					case 1:
-						// Return header for ping frame with 30-byte payload
-						if len(b) >= 2 {
-							b[0] = 0x89 // FIN=1, opcode=9 (ping)
-							b[1] = 30   // 30 bytes payload
-							return 2, nil
-						}
-					case 2:
-						// First read returns only 10 bytes instead of requested 16
-						if len(b) >= 10 {
-							for i := 0; i < 10; i++ {
-								b[i] = byte('X')
-							}
-							return 10, nil
-						}
-					case 3:
-						// Second read fails
-						return 0, fmt.Errorf("partial read failed")
-					}
-					return 0, fmt.Errorf("unexpected call")
-				},
-			}
-			_, err := SpinUntilCompleteMessage(conn)
-			if err == nil || !strings.Contains(err.Error(), "partial read failed") {
-				t.Errorf("Expected partial read error, got: %v", err)
-			}
-		})
-	})
-
-	t.Run("payload_length_encoding", func(t *testing.T) {
-		tests := []struct {
-			name   string
-			length int
-		}{
-			{"7bit_max", 125},
-			{"16bit_min", 126},
-			{"16bit_max", 65535},
-			{"64bit_min", 65536},
-		}
-
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				payload := make([]byte, tt.length)
-				frame := createTestFrame(0x1, payload, true)
-
-				conn := &mockConn{readData: frame}
-				result, err := SpinUntilCompleteMessage(conn)
-				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
-				}
-				if len(result) != tt.length {
-					t.Errorf("Expected %d bytes, got %d", tt.length, len(result))
-				}
-			})
-		}
-	})
 }
 
+// ============================================================================
+// ERROR HANDLING TESTS
+// ============================================================================
+
+// TestSpinUntilCompleteMessageErrors validates error conditions
 func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 	t.Run("header_read_error", func(t *testing.T) {
 		conn := &mockConn{readErr: fmt.Errorf("connection lost")}
@@ -601,6 +579,76 @@ func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("control_frame_read_errors", func(t *testing.T) {
+		t.Run("control_payload_read_error", func(t *testing.T) {
+			callCount := 0
+			conn := &mockConn{
+				readFunc: func(b []byte) (int, error) {
+					callCount++
+					switch callCount {
+					case 1:
+						// Return header for ping frame with 20-byte payload
+						if len(b) >= 2 {
+							b[0] = 0x89 // FIN=1, opcode=9 (ping)
+							b[1] = 20   // 20 bytes payload
+							return 2, nil
+						}
+					case 2:
+						// First control payload read (16 bytes) succeeds
+						if len(b) >= 16 {
+							for i := 0; i < 16; i++ {
+								b[i] = byte('X')
+							}
+							return 16, nil
+						}
+					case 3:
+						// Second control payload read (remaining 4 bytes) fails
+						return 0, fmt.Errorf("control payload read failed")
+					}
+					return 0, fmt.Errorf("unexpected call")
+				},
+			}
+			_, err := SpinUntilCompleteMessage(conn)
+			if err == nil || !strings.Contains(err.Error(), "control payload read failed") {
+				t.Errorf("Expected control payload read error, got: %v", err)
+			}
+		})
+
+		t.Run("control_payload_partial_read", func(t *testing.T) {
+			callCount := 0
+			conn := &mockConn{
+				readFunc: func(b []byte) (int, error) {
+					callCount++
+					switch callCount {
+					case 1:
+						// Return header for ping frame with 30-byte payload
+						if len(b) >= 2 {
+							b[0] = 0x89 // FIN=1, opcode=9 (ping)
+							b[1] = 30   // 30 bytes payload
+							return 2, nil
+						}
+					case 2:
+						// First read returns only 10 bytes instead of requested 16
+						if len(b) >= 10 {
+							for i := 0; i < 10; i++ {
+								b[i] = byte('X')
+							}
+							return 10, nil
+						}
+					case 3:
+						// Second read fails
+						return 0, fmt.Errorf("partial read failed")
+					}
+					return 0, fmt.Errorf("unexpected call")
+				},
+			}
+			_, err := SpinUntilCompleteMessage(conn)
+			if err == nil || !strings.Contains(err.Error(), "partial read failed") {
+				t.Errorf("Expected partial read error, got: %v", err)
+			}
+		})
+	})
+
 	t.Run("size_limit_errors", func(t *testing.T) {
 		t.Run("frame_too_large", func(t *testing.T) {
 			frame := []byte{0x81, 127}
@@ -633,8 +681,12 @@ func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 	})
 }
 
+// ============================================================================
+// DATA INTEGRITY TESTS
+// ============================================================================
+
+// TestDataIntegrity validates data is not corrupted during processing
 func TestDataIntegrity(t *testing.T) {
-	// Verify data is not corrupted during processing
 	testCases := []struct {
 		name string
 		data []byte
@@ -668,37 +720,39 @@ func TestDataIntegrity(t *testing.T) {
 	}
 }
 
-// ==============================================================================
+// ============================================================================
 // BENCHMARKS
-// ==============================================================================
+// ============================================================================
 
-var (
-	// Pre-built test payloads
-	ethPayload512   [512]byte
-	ethPayload4096  [4096]byte
-	ethPayload16384 [16384]byte
-	ethPayload65536 [65536]byte
+// BenchmarkHandshake measures handshake operation performance
+func BenchmarkHandshake(b *testing.B) {
+	response := []byte("HTTP/1.1 101 Switching Protocols\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n")
 
-	// Pre-built frames
-	frame512   []byte
-	frame4096  []byte
-	frame16384 []byte
-	frame65536 []byte
-)
+	conn := &benchConn{data: response}
+	b.ReportAllocs()
+	b.ResetTimer()
 
-func init() {
-	// Initialize test data
-	fillEthereumPayload(ethPayload512[:])
-	fillEthereumPayload(ethPayload4096[:])
-	fillEthereumPayload(ethPayload16384[:])
-	fillEthereumPayload(ethPayload65536[:])
-
-	frame512 = createTestFrame(0x1, ethPayload512[:], true)
-	frame4096 = createTestFrame(0x1, ethPayload4096[:], true)
-	frame16384 = createTestFrame(0x1, ethPayload16384[:], true)
-	frame65536 = createTestFrame(0x1, ethPayload65536[:], true)
+	for i := 0; i < b.N; i++ {
+		conn.reset()
+		Handshake(conn)
+	}
 }
 
+// BenchmarkSendSubscription measures subscription frame transmission performance
+func BenchmarkSendSubscription(b *testing.B) {
+	conn := &benchConn{}
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		SendSubscription(conn)
+	}
+}
+
+// BenchmarkFrameSizes measures frame parsing performance at different sizes
 func BenchmarkFrameSizes(b *testing.B) {
 	sizes := []struct {
 		name  string
@@ -726,32 +780,7 @@ func BenchmarkFrameSizes(b *testing.B) {
 	}
 }
 
-func BenchmarkHandshake(b *testing.B) {
-	response := []byte("HTTP/1.1 101 Switching Protocols\r\n" +
-		"Upgrade: websocket\r\n" +
-		"Connection: Upgrade\r\n" +
-		"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n")
-
-	conn := &benchConn{data: response}
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		conn.reset()
-		Handshake(conn)
-	}
-}
-
-func BenchmarkSendSubscription(b *testing.B) {
-	conn := &benchConn{}
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		SendSubscription(conn)
-	}
-}
-
+// BenchmarkZeroAllocation validates zero-allocation message processing
 func BenchmarkZeroAllocation(b *testing.B) {
 	conn := &benchConn{data: frame4096}
 
