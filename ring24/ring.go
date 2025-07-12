@@ -133,16 +133,3 @@ func (r *Ring) PopWait() *[24]byte {
 		cpuRelax()
 	}
 }
-
-// Empty checks if ring has no data
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func (r *Ring) Empty() bool {
-	h := r.head
-	s := &r.buf[h&r.mask]
-	return atomic.LoadUint64(&s.seq) != h+1
-}
