@@ -22,7 +22,7 @@ const (
 )
 
 // ============================================================================
-// UNIT TESTS
+// UNIT TESTS - INITIALIZATION AND STATE
 // ============================================================================
 
 // TestDeduper_InitialState validates clean initialization
@@ -43,6 +43,10 @@ func TestDeduper_InitialState(t *testing.T) {
 		}
 	}
 }
+
+// ============================================================================
+// UNIT TESTS - CORE FUNCTIONALITY
+// ============================================================================
 
 // TestDeduper_BasicDeduplication validates core functionality
 func TestDeduper_BasicDeduplication(t *testing.T) {
@@ -127,6 +131,10 @@ func TestDeduper_StalenessHandling(t *testing.T) {
 		t.Error("Entry beyond reorg threshold should be accepted")
 	}
 }
+
+// ============================================================================
+// UNIT TESTS - EDGE CASES AND BOUNDARIES
+// ============================================================================
 
 // TestDeduper_EdgeCases validates boundary conditions
 func TestDeduper_EdgeCases(t *testing.T) {
@@ -213,7 +221,7 @@ func TestDeduper_BitPatterns(t *testing.T) {
 }
 
 // ============================================================================
-// COLLISION AND HASH TESTS
+// UNIT TESTS - HASH FUNCTION AND COLLISIONS
 // ============================================================================
 
 // TestDeduper_HashCollisions validates collision handling
@@ -285,7 +293,7 @@ func TestDeduper_CacheEviction(t *testing.T) {
 }
 
 // ============================================================================
-// LARGE DATASET TESTS
+// INTEGRATION TESTS - REALISTIC WORKLOADS
 // ============================================================================
 
 // TestDeduper_LargeDataset validates realistic workload performance
@@ -385,7 +393,7 @@ func TestDeduper_RealWorkflow(t *testing.T) {
 }
 
 // ============================================================================
-// MEMORY LAYOUT TESTS
+// MEMORY LAYOUT AND STRUCTURE TESTS
 // ============================================================================
 
 // TestDeduper_MemoryLayout validates structure alignment
@@ -439,7 +447,7 @@ func TestDeduper_ConcurrentAccess(t *testing.T) {
 }
 
 // ============================================================================
-// BENCHMARKS
+// BENCHMARKS - CORE OPERATIONS
 // ============================================================================
 
 // BenchmarkDeduper_Check measures core operation performance
@@ -487,6 +495,10 @@ func BenchmarkDeduper_Duplicates(b *testing.B) {
 		}
 	}
 }
+
+// ============================================================================
+// BENCHMARKS - REALISTIC WORKLOADS
+// ============================================================================
 
 // BenchmarkDeduper_MixedWorkload measures realistic performance
 func BenchmarkDeduper_MixedWorkload(b *testing.B) {
@@ -569,6 +581,10 @@ func BenchmarkDeduper_RandomData(b *testing.B) {
 	}
 }
 
+// ============================================================================
+// BENCHMARKS - CACHE UTILIZATION ANALYSIS
+// ============================================================================
+
 // BenchmarkDeduper_CacheUtilization measures performance at different fill levels
 func BenchmarkDeduper_CacheUtilization(b *testing.B) {
 	levels := []struct {
@@ -607,6 +623,10 @@ func BenchmarkDeduper_CacheUtilization(b *testing.B) {
 		})
 	}
 }
+
+// ============================================================================
+// BENCHMARKS - MEMORY AND PERFORMANCE VALIDATION
+// ============================================================================
 
 // BenchmarkDeduper_MemoryEfficiency validates zero allocations
 func BenchmarkDeduper_MemoryEfficiency(b *testing.B) {
