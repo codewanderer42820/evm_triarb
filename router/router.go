@@ -342,6 +342,7 @@ import (
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func init() {
