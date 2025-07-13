@@ -295,11 +295,11 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 			v := *(*uint64)(unsafe.Pointer(&headerBuf[2]))
 			payloadLen = ((v & 0xFF) << 56) | ((v & 0xFF00) << 40) | ((v & 0xFF0000) << 24) | ((v & 0xFF000000) << 8) |
 				((v & 0xFF00000000) >> 8) | ((v & 0xFF0000000000) >> 24) | ((v & 0xFF000000000000) >> 40) | ((v & 0xFF00000000000000) >> 56)
+		}
 
-			// Check individual frame size limit
-			if payloadLen > uint64(BufferSize) {
-				return nil, errFrameTooLarge
-			}
+		// Check individual frame size limit (for all extended length cases)
+		if payloadLen >= uint64(BufferSize) {
+			return nil, errFrameTooLarge
 		}
 
 		// Handle control frames
