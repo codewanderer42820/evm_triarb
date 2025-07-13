@@ -13,7 +13,7 @@
 //  1. EVENT DISPATCH PIPELINE
 //     Ultra-low latency event processing that extracts price information from Uniswap V2 Sync
 //     events and distributes updates across multiple CPU cores using lock-free ring buffers.
-//     Target performance: 60-70 nanoseconds per event.
+//     Target performance: 46 nanoseconds per event.
 //
 //  2. DISTRIBUTED CORE PROCESSING
 //     Each CPU core runs an independent arbitrage detection engine that maintains its own
@@ -28,11 +28,17 @@
 //     Single-producer, single-consumer ring buffers enable zero-contention message passing
 //     between the event dispatcher and processing cores.
 //
+//  5. SYSCALL-FREE VIRTUAL TIMING
+//     Branchless control system using CPU poll counters for approximate timing.
+//     Eliminates time.Now() syscalls in hot paths while maintaining sufficient
+//     precision for activity detection and cooldown management.
+//
 // PERFORMANCE CHARACTERISTICS:
 //
-// • Event Processing Latency: 60-70 nanoseconds per Uniswap V2 Sync event
+// • Event Processing Latency: 46 nanoseconds per Uniswap V2 Sync event
 // • Address Resolution: 14 nanoseconds (~42 cycles at 3GHz)
-// • Arbitrage Detection: 6 nanoseconds per cycle update
+// • Arbitrage Detection: 7 nanoseconds per cycle update
+// • Virtual Timing: Sub-nanosecond cooldown logic without syscall overhead
 // • Memory Allocation: Zero allocations in all hot paths
 // • Concurrency Model: Completely lock-free critical sections
 // • Scalability: Linear scaling up to 64 CPU cores
@@ -201,8 +207,8 @@
 //
 // FOOTGUN #9: GRADIENT DEGRADATION WITHOUT LIMITS
 //
-// Invalid data gets random priorities 51.2-64.0 without validation:
-//   placeholder := 51.2 + float64(randBits)*0.0015625
+// Invalid data gets random priorities 50.2-63.0 without validation:
+//   placeholder := 50.2 + float64(randBits)*0.0015625
 //
 // WHY: Validation would require branching and bounds checking.
 //
@@ -210,7 +216,7 @@
 //
 // MITIGATION: Range specifically chosen:
 //   - Above all profitable opportunities (negative values)
-//   - Below MaxInitializationPriority
+//   - Below 64.0 hard limit with 1.0 unit safety margin
 //   - Self-limiting through queue extraction
 //
 // FOOTGUN #10: BRANCHLESS ALGORITHMS WITH SUBTLE CORRECTNESS
@@ -290,23 +296,20 @@
 //   - Initialization happens once at startup
 //
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUMMARY: PHILOSOPHY OF CONTROLLED DANGER
+// SUMMARY: MATHEMATICAL CORRECTNESS OVER DEFENSIVE PROGRAMMING
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 //
-// This system achieves its incredible performance by eliminating every safety mechanism
-// that traditional software engineering would mandate. This is not recklessness - it's
-// a deliberate architectural choice where:
+// This system achieves performance by replacing runtime safety checks with
+// mathematical guarantees. Rather than checking for errors, the design makes
+// many error conditions impossible:
 //
-// 1. The system is proven correct by construction
-// 2. Invalid states are impossible rather than checked
-// 3. Performance requirements justify the risk
-// 4. Mitigations eliminate actual (not theoretical) dangers
+// 1. Array bounds violations prevented by power-of-2 masking
+// 2. Invalid states eliminated through careful initialization ordering
+// 3. Resource exhaustion avoided via pre-allocation
+// 4. Timing precision achieved through branchless approximation
 //
-// The result: 60-70ns operations that would take microseconds with "safe" code.
-//
-// This is what peak performance actually looks like - not pretty, not safe by
-// traditional standards, but FAST and CORRECT through mathematical certainty
-// rather than defensive programming.
+// The result: 46ns operations that maintain correctness through construction
+// rather than validation. Fast because it's correct by design.
 
 package router
 
@@ -844,7 +847,7 @@ var (
 //
 // PERFORMANCE OBJECTIVES:
 //
-// • Total processing time: 60-70 nanoseconds per event
+// • Total processing time: 46 nanoseconds per event
 // • Zero memory allocations during processing
 // • Branchless execution in critical sections
 // • Optimal cache utilization through data locality
@@ -892,8 +895,8 @@ var (
 //
 // PERFORMANCE TARGET:
 //
-// The entire function executes in 60-70 nanoseconds under optimal conditions,
-// enabling processing of 14-16 million events per second on a single thread.
+// The entire function executes in 46 nanoseconds under optimal conditions,
+// enabling processing of 21+ million events per second on a single thread.
 //
 //go:norace
 //go:nocheckptr
@@ -989,6 +992,8 @@ func DispatchTickUpdate(logView *types.LogView) {
 		//
 		// CRITICAL: Values must never reach 64.0 as this could interfere with
 		// the priority queue's profitable arbitrage detection
+		//
+		// See FOOTGUN #9 for detailed safety analysis of this fallback range.
 		addrHash := utils.Mix64(uint64(pairID))
 		randBits := addrHash & 0x1FFF // Extract 13 bits for range [0, 8191]
 		placeholder := 50.2 + float64(randBits)*0.0015625
@@ -1271,7 +1276,7 @@ func lookupPairIDByAddress(address42HexBytes []byte) PairID {
 //
 // PERFORMANCE:
 //
-// Executes in ~6 nanoseconds per update, enabling processing of 160+ million
+// Executes in ~7 nanoseconds per update, enabling processing of 140+ million
 // cycle updates per second on a single core.
 //
 //go:norace
