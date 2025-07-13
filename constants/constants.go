@@ -51,17 +51,23 @@ const (
 
 // Arbitrage tick quantization
 const (
-	TickClampingBound = 64.0 // Tick domain bounds [-64, +64] for sums
-	// CRITICAL CONSTRAINT: Although Log2ReserveRatio supports 64-bit inputs,
-	// our extraction strategy (taking minZeros of both reserves) normalizes
-	// them to similar magnitudes. This constrains individual tick values to
-	// ~[-32, +32] in practice. Since we sum 2 populated ticks in triangular
-	// arbitrage (the 3rd is always 0), the maximum sum range is [-64, +64],
-	// not the theoretical [-128, +128].
+	TickClampingBound = 128.0 // Tick domain bounds [-128, +128] for sums
+	// CRITICAL CONSTRAINT: The extraction strategy can extract up to 16 hex
+	// characters (64 bits) per reserve, yielding individual tick values up to
+	// log₂(2⁶⁴-1) ≈ ±64. In triangular arbitrage, we sum 2 populated tick
+	// values (the 3rd tick is always 0 since it represents the direct pair
+	// being updated). Therefore, the maximum possible tick sum is:
+	// 2 × 64 = ±128, requiring TickClampingBound = 128.0
+	//
+	// PREVIOUS ERROR: The original bound of 64.0 incorrectly assumed individual
+	// ticks were constrained to ±32, leading to quantization overflow when
+	// large reserve values produce tick magnitudes approaching ±64.
 	//
 	// FOOTGUN: The quantization formula assumes tick sums stay within
-	// [-64, +64]. Values outside this range will overflow the quantized
+	// [-128, +128]. Values outside this range will overflow the quantized
 	// integer representation, causing incorrect priority queue ordering.
+	// However, this is now mathematically impossible given our 64-bit
+	// extraction limit and 2-tick summation.
 
 	MaxQuantizedTick          = 262_143 // 18-bit ceiling (2^18 - 1)
 	QuantizationScale         = (MaxQuantizedTick - 1) / (2 * TickClampingBound)
