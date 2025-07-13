@@ -1,0 +1,597 @@
+// ============================================================================
+// POOLEDQUANTUMQUEUE CORRECTNESS VALIDATION SUITE
+// ============================================================================
+//
+// Comprehensive test coverage for ISR-safe PooledQuantumQueue operations with
+// emphasis on shared memory pool architecture and external handle management.
+//
+// Test categories:
+//   - Basic construction and initialization with shared pools
+//   - Core API operation verification (Push, PeepMin, MoveTick, UnlinkMin)
+//   - External handle lifecycle and pool management
+//   - LIFO ordering within tick buckets
+//   - Edge case and boundary condition handling
+//   - Footgun behavior validation (panic conditions)
+//   - Data integrity and payload validation
+//   - Bitmap consistency and summary maintenance
+//   - Shared pool usage patterns
+//
+// Safety model validation:
+//   - Protocol violation detection (double unlink, empty PeepMin)
+//   - Handle management correctness with external allocation
+//   - Size tracking accuracy across all operations
+//   - Pool boundary validation
+//
+// Performance assumptions:
+//   - All operations complete in O(1) time
+//   - Zero allocation during normal operation
+//   - Deterministic behavior under stress conditions
+//   - Caller responsible for correct usage patterns
+
+package pooledquantumqueue
+
+import (
+	"testing"
+	"unsafe"
+)
+
+const testPoolSize = 10000 // Pool size for testing
+
+// ============================================================================
+// BASIC CONSTRUCTION AND INITIALIZATION
+// ============================================================================
+
+// TestNewQueueBehavior validates proper queue initialization with external pools.
+//
+// Verification criteria:
+//   - Initial empty state: size=0, Empty()=true
+//   - External pool pointer setup
+//   - Bitmap summaries properly zeroed
+//   - All buckets initialized to nilIdx
+//
+// Validates constructor correctness and external pool setup.
+func TestNewQueueBehavior(t *testing.T) {
+	pool := make([]Entry, testPoolSize)
+	q := New(unsafe.Pointer(&pool[0]))
+
+	// Verify initial empty state
+	if !q.Empty() || q.Size() != 0 {
+		t.Errorf("new queue state invalid: Empty=%v Size=%d; want true, 0",
+			q.Empty(), q.Size())
+	}
+
+	// Verify arena pointer is set
+	if q.arena == 0 {
+		t.Error("arena pointer not set")
+	}
+
+	// Verify bitmap summaries are clear
+	if q.summary != 0 {
+		t.Errorf("summary bitmap not cleared: got %x, want 0", q.summary)
+	}
+
+	for i, group := range q.groups {
+		if group.l1Summary != 0 {
+			t.Errorf("group %d l1Summary not cleared: got %x, want 0", i, group.l1Summary)
+		}
+		for j, lane := range group.l2 {
+			if lane != 0 {
+				t.Errorf("group %d lane %d not cleared: got %x, want 0", i, j, lane)
+			}
+		}
+	}
+
+	// Verify all buckets are empty
+	for i, bucket := range q.buckets {
+		if bucket != nilIdx {
+			t.Errorf("bucket %d not empty: got %v, want %v", i, bucket, nilIdx)
+		}
+	}
+}
+
+// TestPoolAccess validates external pool entry access.
+//
+// Pool validation:
+//   - Correct pointer arithmetic for entry access
+//   - Handle-to-entry mapping accuracy
+//   - Entry field accessibility
+func TestPoolAccess(t *testing.T) {
+	pool := make([]Entry, testPoolSize)
+	q := New(unsafe.Pointer(&pool[0]))
+
+	// Test entry access for various handles
+	for h := Handle(0); h < 10; h++ {
+		entry := q.entry(h)
+		
+		// Verify entry is within pool bounds
+		entryAddr := uintptr(unsafe.Pointer(entry))
+		poolStart := uintptr(unsafe.Pointer(&pool[0]))
+		poolEnd := poolStart + uintptr(len(pool))*unsafe.Sizeof(Entry{})
+		
+		if entryAddr < poolStart || entryAddr >= poolEnd {
+			t.Errorf("entry %d outside pool bounds: addr=%x, start=%x, end=%x",
+				h, entryAddr, poolStart, poolEnd)
+		}
+
+		// Verify handle-to-entry mapping
+		expectedEntry := &pool[h]
+		if entry != expectedEntry {
+			t.Errorf("handle %d maps to wrong entry: got %p, want %p",
+				h, entry, expectedEntry)
+		}
+	}
+}
+
+// ============================================================================
+// CORE API OPERATIONS
+// ============================================================================
+
+// TestPushAndPeepMin validates fundamental queue operations and edge cases.
+//
+// Test scenarios:
+//   - Basic insertion and retrieval correctness
+//   - In-place payload updates for identical tick values
+//   - Proper tick-based ordering across different values
+//   - Edge case handling at tick boundaries (0 and maximum)
+//   - Size tracking accuracy throughout operations
+//   - Bitmap summary updates during insertion
+//
+// Validates core scheduling semantics and boundary condition handling.
+func TestPushAndPeepMin(t *testing.T) {
+	pool := make([]Entry, testPoolSize)
+	q := New(unsafe.Pointer(&pool[0]))
+	h := Handle(0)
+
+	// Test basic insertion
+	q.Push(10, h, 0x123456789ABCDEF0)
+	if q.Empty() || q.Size() != 1 {
+		t.Errorf("queue state after Push: Empty=%v Size=%d; want false, 1",
+			q.Empty(), q.Size())
+	}
+
+	// Verify bitmap summary updates
+	expectedGroup := uint64(10) >> 12
+	expectedLane := (uint64(10) >> 6) & 63
+	expectedBucket := uint64(10) & 63
+
+	if (q.summary & (1 << (63 - expectedGroup))) == 0 {
+		t.Errorf("group summary not set for group %d", expectedGroup)
+	}
+
+	groupBlock := &q.groups[expectedGroup]
+	if (groupBlock.l1Summary & (1 << (63 - expectedLane))) == 0 {
+		t.Errorf("lane summary not set for lane %d in group %d", expectedLane, expectedGroup)
+	}
+
+	if (groupBlock.l2[expectedLane] & (1 << (63 - expectedBucket))) == 0 {
+		t.Errorf("bucket bit not set for bucket %d in lane %d, group %d",
+			expectedBucket, expectedLane, expectedGroup)
+	}
+
+	// Verify insertion correctness
+	hGot, tickGot, data := q.PeepMin()
+	if hGot != h || tickGot != 10 || data != 0x123456789ABCDEF0 {
+		t.Errorf("PeepMin mismatch: h=%v tick=%d data=%x; want %v, 10, %x",
+			hGot, tickGot, data, h, uint64(0x123456789ABCDEF0))
+	}
+
+	// Test in-place update (same tick, same handle)
+	q.Push(10, h, 0xFEDCBA9876543210)
+	if q.Size() != 1 {
+		t.Errorf("in-place update changed size: got %d, want 1", q.Size())
+	}
+
+	// Verify payload update without structural changes
+	hGot2, _, data2 := q.PeepMin()
+	if hGot2 != h || data2 != 0xFEDCBA9876543210 {
+		t.Errorf("payload update failed: got %x, want %x", data2, uint64(0xFEDCBA9876543210))
+	}
+
+	// Test entry removal
+	q.UnlinkMin(h)
+	if !q.Empty() || q.Size() != 0 {
+		t.Error("queue not empty after UnlinkMin")
+	}
+
+	// Verify bitmap cleanup after removal
+	if q.summary != 0 {
+		t.Errorf("summary not cleared after removal: got %x", q.summary)
+	}
+
+	// Test edge cases: boundary tick values
+	pool2 := make([]Entry, testPoolSize)
+	q2 := New(unsafe.Pointer(&pool2[0]))
+	h0 := Handle(0)
+	hMax := Handle(1)
+
+	q2.Push(0, h0, 0x1111)
+	q2.Push(int64(BucketCount-1), hMax, 0x2222)
+
+	// Verify minimum tick priority
+	hMin, tickMin, _ := q2.PeepMin()
+	if hMin != h0 || tickMin != 0 {
+		t.Errorf("minimum tick selection failed: got (%v, %d), want (%v, 0)",
+			hMin, tickMin, h0)
+	}
+
+	// Test maximum tick handling after minimum removal
+	q2.UnlinkMin(h0)
+	hHigh, tickHigh, _ := q2.PeepMin()
+	if hHigh != hMax || tickHigh != int64(BucketCount-1) {
+		t.Errorf("maximum tick retrieval failed: got (%v, %d), want (%v, %d)",
+			hHigh, tickHigh, hMax, int64(BucketCount-1))
+	}
+
+	// Verify complete cleanup
+	q2.UnlinkMin(hMax)
+	if !q2.Empty() {
+		t.Error("queue not empty after removing all entries")
+	}
+}
+
+// TestPushTriggersUnlink validates automatic tick relocation behavior.
+//
+// Test sequence:
+//  1. Insert handle at initial tick position
+//  2. Push same handle to different tick (triggers unlink/relink)
+//  3. Verify correct relocation and payload preservation
+//  4. Validate size invariant maintenance
+//  5. Confirm bitmap updates for both old and new positions
+//
+// ⚠️  FOOTGUN NOTE: No validation of tick bounds or handle state
+// Ensures Push operations handle tick changes via proper unlink/relink cycles.
+func TestPushTriggersUnlink(t *testing.T) {
+	pool := make([]Entry, testPoolSize)
+	q := New(unsafe.Pointer(&pool[0]))
+	h := Handle(0)
+
+	// Insert at initial tick
+	q.Push(42, h, 0xAAAA)
+
+	// Verify initial state
+	if q.Size() != 1 {
+		t.Errorf("initial size incorrect: got %d, want 1", q.Size())
+	}
+
+	initialGroup := uint64(42) >> 12
+	if (q.summary & (1 << (63 - initialGroup))) == 0 {
+		t.Error("initial bitmap not set")
+	}
+
+	// Move to different tick (triggers automatic unlink/relink)
+	q.Push(99, h, 0xBBBB)
+
+	// Verify relocation correctness
+	if q.Size() != 1 {
+		t.Errorf("size after tick change: got %d, want 1", q.Size())
+	}
+
+	hGot, tickGot, data := q.PeepMin()
+	if hGot != h || tickGot != 99 {
+		t.Errorf("tick relocation failed: got (%v, %d), want (%v, 99)",
+			hGot, tickGot, h)
+	}
+
+	if data != 0xBBBB {
+		t.Errorf("payload after relocation: got %x, want %x", data, uint64(0xBBBB))
+	}
+
+	// Verify bitmap updates
+	newGroup := uint64(99) >> 12
+	if (q.summary & (1 << (63 - newGroup))) == 0 {
+		t.Error("new bitmap not set after relocation")
+	}
+
+	// If groups are different, old group should be cleared
+	if initialGroup != newGroup {
+		if (q.summary & (1 << (63 - initialGroup))) != 0 {
+			t.Error("old bitmap not cleared after relocation")
+		}
+	}
+}
+
+// ============================================================================
+// ORDERING SEMANTICS
+// ============================================================================
+
+// TestMultipleSameTickOrdering validates LIFO semantics within tick buckets.
+//
+// Test scenario:
+//  1. Insert multiple entries with identical tick values
+//  2. Verify that newer entries appear first (LIFO ordering)
+//  3. Confirm bucket head management correctness
+//  4. Test chain integrity during insertions
+//
+// Validates Last-In-First-Out behavior for entries sharing tick values.
+func TestMultipleSameTickOrdering(t *testing.T) {
+	pool := make([]Entry, testPoolSize)
+	q := New(unsafe.Pointer(&pool[0]))
+	h1 := Handle(0)
+	h2 := Handle(1)
+	h3 := Handle(2)
+
+	// Insert in chronological order
+	q.Push(5, h1, 0x1111)
+	q.Push(5, h2, 0x2222) // Should become new head
+	q.Push(5, h3, 0x3333) // Should become newest head
+
+	// Verify LIFO ordering - newest first
+	hMin, _, data := q.PeepMin()
+	if hMin != h3 || data != 0x3333 {
+		t.Errorf("LIFO ordering failed: got handle=%v data=%x, want %v %x",
+			hMin, data, h3, uint64(0x3333))
+	}
+
+	// Remove head and check next
+	q.UnlinkMin(h3)
+	hMin2, _, data2 := q.PeepMin()
+	if hMin2 != h2 || data2 != 0x2222 {
+		t.Errorf("second LIFO entry failed: got handle=%v data=%x, want %v %x",
+			hMin2, data2, h2, uint64(0x2222))
+	}
+
+	// Remove second and check oldest
+	q.UnlinkMin(h2)
+	hMin3, _, data3 := q.PeepMin()
+	if hMin3 != h1 || data3 != 0x1111 {
+		t.Errorf("oldest LIFO entry failed: got handle=%v data=%x, want %v %x",
+			hMin3, data3, h1, uint64(0x1111))
+	}
+
+	// Verify size tracking throughout
+	if q.Size() != 1 {
+		t.Errorf("size after LIFO removals: got %d, want 1", q.Size())
+	}
+}
+
+// TestPushDifferentTicks validates tick-based priority ordering.
+//
+// Test scenario:
+//  1. Insert entries with different tick values in arbitrary order
+//  2. Verify that lower tick values have higher priority
+//  3. Confirm hierarchical bitmap minimum finding correctness
+//  4. Test ordering consistency across tick range
+//
+// Validates priority queue semantics regardless of insertion order.
+func TestPushDifferentTicks(t *testing.T) {
+	pool := make([]Entry, testPoolSize)
+	q := New(unsafe.Pointer(&pool[0]))
+	h1 := Handle(0)
+	h2 := Handle(1)
+	h3 := Handle(2)
+
+	// Insert in reverse priority order
+	q.Push(100, h1, 0x1111)
+	q.Push(50, h2, 0x2222) // Lower tick, higher priority
+	q.Push(75, h3, 0x3333) // Middle priority
+
+	// Verify minimum is lowest tick
+	hMin, tickMin, _ := q.PeepMin()
+	if hMin != h2 || tickMin != 50 {
+		t.Errorf("tick priority ordering failed: got (%v, %d), want (%v, 50)",
+			hMin, tickMin, h2)
+	}
+
+	// Remove minimum and check next
+	q.UnlinkMin(h2)
+	hMin2, tickMin2, _ := q.PeepMin()
+	if hMin2 != h3 || tickMin2 != 75 {
+		t.Errorf("second minimum failed: got (%v, %d), want (%v, 75)",
+			hMin2, tickMin2, h3)
+	}
+
+	// Remove second and check highest
+	q.UnlinkMin(h3)
+	hMin3, tickMin3, _ := q.PeepMin()
+	if hMin3 != h1 || tickMin3 != 100 {
+		t.Errorf("highest tick failed: got (%v, %d), want (%v, 100)",
+			hMin3, tickMin3, h1)
+	}
+}
+
+// ============================================================================
+// ADVANCED OPERATIONS
+// ============================================================================
+
+// TestMoveTickBehavior validates tick relocation functionality.
+//
+// Test scenarios:
+//  1. No-op move (same tick): Verify optimization works correctly
+//  2. Actual relocation: Confirm data integrity and position correctness
+//  3. Queue structure consistency: Validate bitmap and link maintenance
+//  4. Cross-bucket movement: Test complex relocation scenarios
+//
+// ⚠️  FOOTGUN NOTE: No validation of handle linkage state or tick bounds
+// Tests MoveTick operation efficiency and correctness.
+func TestMoveTickBehavior(t *testing.T) {
+	pool := make([]Entry, testPoolSize)
+	q := New(unsafe.Pointer(&pool[0]))
+	h := Handle(0)
+
+	q.Push(20, h, 0xCCCC)
+
+	// Test no-op move (same tick) - should be optimized
+	sizeBefore := q.Size()
+	q.MoveTick(h, 20)
+	if q.Size() != sizeBefore {
+		t.Errorf("no-op move changed size: before=%d after=%d", sizeBefore, q.Size())
+	}
+
+	// Verify data integrity after no-op
+	hGot, tickGot, dataGot := q.PeepMin()
+	if hGot != h || tickGot != 20 || dataGot != 0xCCCC {
+		t.Errorf("no-op move corrupted state: got (%v,%d,%x), want (%v,20,%x)",
+			hGot, tickGot, dataGot, h, uint64(0xCCCC))
+	}
+
+	// Test actual relocation to different tick
+	q.MoveTick(h, 30)
+
+	hNew, tickNew, dataNew := q.PeepMin()
+	if hNew != h || tickNew != 30 || dataNew != 0xCCCC {
+		t.Errorf("MoveTick failed: got (%v, %d, %x), want (%v, 30, %x)",
+			hNew, tickNew, dataNew, h, uint64(0xCCCC))
+	}
+
+	// Verify size invariant
+	if q.Size() != 1 {
+		t.Errorf("MoveTick changed size: got %d, want 1", q.Size())
+	}
+}
+
+// ============================================================================
+// FOOTGUN BEHAVIOR VALIDATION
+// ============================================================================
+
+// TestPeepMinWhenEmpty validates panic behavior on empty queue access.
+//
+// ⚠️  FOOTGUN GRADE 10/10: PeepMin on empty queue causes undefined behavior
+//
+// Expected behavior: Immediate panic or memory corruption
+// Safety requirement: Never call PeepMin without checking Empty() first
+func TestPeepMinWhenEmpty(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic when calling PeepMin on empty queue")
+		}
+	}()
+	pool := make([]Entry, testPoolSize)
+	q := New(unsafe.Pointer(&pool[0]))
+	q.PeepMin()
+}
+
+// TestDoubleUnlink validates panic behavior on protocol violations.
+//
+// ⚠️  FOOTGUN GRADES 2/4/8: Double unlink operations cause corruption
+//
+// Expected behavior: Immediate panic or silent state corruption
+// Safety requirement: Never unlink same handle twice without re-linking
+func TestDoubleUnlink(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic on double unlink operation")
+		}
+	}()
+
+	pool := make([]Entry, testPoolSize)
+	q := New(unsafe.Pointer(&pool[0]))
+	h := Handle(0)
+	q.Push(100, h, 0xDEAD)
+	q.UnlinkMin(h)
+	q.UnlinkMin(h) // Protocol violation - should panic
+}
+
+// ============================================================================
+// SHARED POOL VALIDATION
+// ============================================================================
+
+// TestSharedPoolUsage validates multiple queues sharing a single memory pool.
+//
+// Test scenarios:
+//  1. Multiple queues created with same pool pointer
+//  2. Independent operation without interference
+//  3. Handle space partitioning between queues
+//  4. Pool memory utilization efficiency
+//
+// Validates the core shared pool architecture benefit.
+func TestSharedPoolUsage(t *testing.T) {
+	pool := make([]Entry, testPoolSize)
+	q1 := New(unsafe.Pointer(&pool[0]))
+	q2 := New(unsafe.Pointer(&pool[0]))
+	q3 := New(unsafe.Pointer(&pool[0]))
+
+	// Use different handle ranges for each queue
+	h1 := Handle(100)
+	h2 := Handle(200)
+	h3 := Handle(300)
+
+	// Independent operations on shared pool
+	q1.Push(10, h1, 0x1111)
+	q2.Push(20, h2, 0x2222)
+	q3.Push(5, h3, 0x3333)
+
+	// Verify independent queue states
+	if q1.Size() != 1 || q2.Size() != 1 || q3.Size() != 1 {
+		t.Errorf("independent queue sizes incorrect: q1=%d q2=%d q3=%d",
+			q1.Size(), q2.Size(), q3.Size())
+	}
+
+	// Verify independent minimums
+	h1Min, tick1, data1 := q1.PeepMin()
+	h2Min, tick2, data2 := q2.PeepMin()
+	h3Min, tick3, data3 := q3.PeepMin()
+
+	if h1Min != h1 || tick1 != 10 || data1 != 0x1111 {
+		t.Errorf("q1 PeepMin failed: got (%v,%d,%x), want (%v,10,%x)",
+			h1Min, tick1, data1, h1, uint64(0x1111))
+	}
+
+	if h2Min != h2 || tick2 != 20 || data2 != 0x2222 {
+		t.Errorf("q2 PeepMin failed: got (%v,%d,%x), want (%v,20,%x)",
+			h2Min, tick2, data2, h2, uint64(0x2222))
+	}
+
+	if h3Min != h3 || tick3 != 5 || data3 != 0x3333 {
+		t.Errorf("q3 PeepMin failed: got (%v,%d,%x), want (%v,5,%x)",
+			h3Min, tick3, data3, h3, uint64(0x3333))
+	}
+
+	// Verify shared pool entries
+	entry1 := &pool[h1]
+	entry2 := &pool[h2]
+	entry3 := &pool[h3]
+
+	if entry1.tick != 10 || entry1.data != 0x1111 {
+		t.Errorf("shared pool entry1 incorrect: tick=%d data=%x",
+			entry1.tick, entry1.data)
+	}
+
+	if entry2.tick != 20 || entry2.data != 0x2222 {
+		t.Errorf("shared pool entry2 incorrect: tick=%d data=%x",
+			entry2.tick, entry2.data)
+	}
+
+	if entry3.tick != 5 || entry3.data != 0x3333 {
+		t.Errorf("shared pool entry3 incorrect: tick=%d data=%x",
+			entry3.tick, entry3.data)
+	}
+}
+
+// TestPoolBoundaryAccess validates handle bounds within pool capacity.
+//
+// Test scenarios:
+//  1. Access patterns within pool bounds
+//  2. Handle distribution across pool space
+//  3. Entry correlation with pool positions
+//
+// ⚠️  NOTE: No bounds checking performed - this validates correct usage patterns
+func TestPoolBoundaryAccess(t *testing.T) {
+	pool := make([]Entry, testPoolSize)
+	q := New(unsafe.Pointer(&pool[0]))
+
+	// Test various handle positions within pool
+	testHandles := []Handle{0, 1, 100, 1000, Handle(testPoolSize - 1)}
+
+	for _, h := range testHandles {
+		// Use handle
+		q.Push(int64(h), h, uint64(h)*1000)
+
+		// Verify entry access
+		entry := q.entry(h)
+		expectedEntry := &pool[h]
+
+		if entry != expectedEntry {
+			t.Errorf("handle %d entry mismatch: got %p, want %p",
+				h, entry, expectedEntry)
+		}
+
+		// Verify data consistency
+		if entry.tick != int64(h) || entry.data != uint64(h)*1000 {
+			t.Errorf("handle %d data incorrect: tick=%d data=%d",
+				h, entry.tick, entry.data)
+		}
+
+		// Clean up
+		q.UnlinkMin(h)
+	}
+}
