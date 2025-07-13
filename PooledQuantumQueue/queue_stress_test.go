@@ -302,7 +302,7 @@ func TestSharedPoolStress(t *testing.T) {
 
 	// Shared pool for all queues
 	pool := make([]Entry, poolSize)
-	
+
 	// Create multiple queues sharing the pool
 	queues := make([]*PooledQuantumQueue, queueCount)
 	for i := range queues {
@@ -311,51 +311,51 @@ func TestSharedPoolStress(t *testing.T) {
 
 	// Partition handle space between queues
 	handlesPerQueue := poolSize / queueCount
-	
+
 	rng := rand.New(rand.NewSource(42))
-	
+
 	for i := 0; i < operations; i++ {
 		queueIdx := rng.Intn(queueCount)
 		queue := queues[queueIdx]
-		
+
 		// Use handles from this queue's partition
 		handleBase := Handle(queueIdx * handlesPerQueue)
 		h := handleBase + Handle(rng.Intn(handlesPerQueue))
-		
+
 		tick := int64(rng.Intn(10000))
 		val := uint64(rng.Uint64())
-		
+
 		// Random operation
 		switch rng.Intn(3) {
 		case 0: // Push
 			queue.Push(tick, h, val)
-			
+
 		case 1: // MoveTick (if queue not empty)
 			if !queue.Empty() {
 				newTick := int64(rng.Intn(10000))
 				queue.MoveTick(h, newTick)
 			}
-			
+
 		case 2: // Pop (if queue not empty)
 			if !queue.Empty() {
 				popH, _, _ := queue.PeepMin()
 				queue.UnlinkMin(popH)
 			}
 		}
-		
+
 		// Periodic validation of queue independence
 		if i%50000 == 0 {
 			// Verify each queue operates independently
 			for j, q := range queues {
 				size := q.Size()
 				empty := q.Empty()
-				
+
 				// Size consistency
 				if (size == 0) != empty {
 					t.Fatalf("Queue %d size/empty inconsistency: size=%d empty=%v",
 						j, size, empty)
 				}
-				
+
 				// If not empty, should be able to peek
 				if !empty {
 					_, _, _ = q.PeepMin()
@@ -363,7 +363,7 @@ func TestSharedPoolStress(t *testing.T) {
 			}
 		}
 	}
-	
+
 	// Final cleanup and validation
 	for i, queue := range queues {
 		// Drain each queue completely
@@ -371,7 +371,7 @@ func TestSharedPoolStress(t *testing.T) {
 			h, _, _ := queue.PeepMin()
 			queue.UnlinkMin(h)
 		}
-		
+
 		// Verify completely empty
 		if queue.Size() != 0 || !queue.Empty() {
 			t.Errorf("Queue %d not empty after drain: size=%d empty=%v",
@@ -394,48 +394,48 @@ func TestSharedPoolStress(t *testing.T) {
 func TestPoolBoundaryStress(t *testing.T) {
 	const poolSize = 10000
 	const operations = 500000
-	
+
 	pool := make([]Entry, poolSize)
 	q := New(unsafe.Pointer(&pool[0]))
-	
+
 	rng := rand.New(rand.NewSource(123))
 	activeHandles := make(map[Handle]bool)
-	
+
 	for i := 0; i < operations; i++ {
 		// Use handles across entire pool range
 		h := Handle(rng.Intn(poolSize))
 		tick := int64(rng.Intn(100000))
 		val := uint64(rng.Uint64())
-		
+
 		switch rng.Intn(4) {
 		case 0: // Push
 			q.Push(tick, h, val)
 			activeHandles[h] = true
-			
+
 		case 1: // MoveTick existing entry
 			if activeHandles[h] {
 				newTick := int64(rng.Intn(100000))
 				q.MoveTick(h, newTick)
 			}
-			
+
 		case 2: // Pop minimum
 			if !q.Empty() {
 				popH, _, _ := q.PeepMin()
 				q.UnlinkMin(popH)
 				delete(activeHandles, popH)
 			}
-			
+
 		case 3: // Verify pool entry directly
 			entry := q.entry(h)
 			poolEntry := &pool[h]
-			
+
 			// Verify entry access maps correctly
 			if entry != poolEntry {
 				t.Fatalf("Entry access mismatch: handle=%d got=%p want=%p",
 					h, entry, poolEntry)
 			}
 		}
-		
+
 		// Periodic validation
 		if i%25000 == 0 {
 			// Verify queue size matches active handles
@@ -445,7 +445,7 @@ func TestPoolBoundaryStress(t *testing.T) {
 					expectedActive++
 				}
 			}
-			
+
 			actualSize := int(q.Size())
 			if actualSize != expectedActive {
 				t.Fatalf("Size mismatch at iteration %d: queue=%d expected=%d",
@@ -453,7 +453,7 @@ func TestPoolBoundaryStress(t *testing.T) {
 			}
 		}
 	}
-	
+
 	// Final validation: drain and verify
 	drainCount := 0
 	for !q.Empty() {
@@ -461,7 +461,7 @@ func TestPoolBoundaryStress(t *testing.T) {
 		q.UnlinkMin(h)
 		drainCount++
 	}
-	
+
 	if drainCount != len(activeHandles) {
 		t.Errorf("Drain count mismatch: drained=%d expected=%d",
 			drainCount, len(activeHandles))
@@ -482,35 +482,35 @@ func TestPoolBoundaryStress(t *testing.T) {
 func TestBitmapConsistencyUnderStress(t *testing.T) {
 	const poolSize = 50000
 	const operations = 2_000_000
-	
+
 	pool := make([]Entry, poolSize)
 	q := New(unsafe.Pointer(&pool[0]))
-	
+
 	rng := rand.New(rand.NewSource(456))
 	handleTracker := make(map[Handle]int64) // Handle -> tick mapping
-	
+
 	for i := 0; i < operations; i++ {
 		h := Handle(rng.Intn(poolSize))
 		tick := int64(rng.Intn(BucketCount))
 		val := uint64(rng.Uint64())
-		
+
 		switch rng.Intn(3) {
 		case 0: // Push
 			q.Push(tick, h, val)
 			handleTracker[h] = tick
-			
+
 		case 1: // MoveTick
 			if _, exists := handleTracker[h]; exists {
 				newTick := int64(rng.Intn(BucketCount))
 				q.MoveTick(h, newTick)
 				handleTracker[h] = newTick
 			}
-			
+
 		case 2: // Pop
 			if !q.Empty() {
 				popH, popTick, _ := q.PeepMin()
 				q.UnlinkMin(popH)
-				
+
 				// Verify popped handle had correct tick
 				if expectedTick, exists := handleTracker[popH]; exists {
 					if expectedTick != popTick {
@@ -521,12 +521,12 @@ func TestBitmapConsistencyUnderStress(t *testing.T) {
 				delete(handleTracker, popH)
 			}
 		}
-		
+
 		// Intensive bitmap validation every 100k operations
 		if i%100000 == 0 && !q.Empty() {
-			// Verify minimum finding via bitmap is consistent
+			// FIXED: Proper handle and tick validation
 			h, tick, _ := q.PeepMin()
-			
+
 			// Find actual minimum from handle tracker
 			actualMinTick := int64(BucketCount)
 			for _, trackedTick := range handleTracker {
@@ -534,12 +534,18 @@ func TestBitmapConsistencyUnderStress(t *testing.T) {
 					actualMinTick = trackedTick
 				}
 			}
-			
+
 			if tick != actualMinTick {
-				t.Fatalf("Bitmap minimum inconsistent at iteration %d: bitmap=%d actual=%d",
+				t.Fatalf("Bitmap minimum tick inconsistent at iteration %d: bitmap=%d actual=%d",
 					i, tick, actualMinTick)
 			}
-			
+
+			// FIXED: Verify the returned handle corresponds to an entry with the minimum tick
+			if handleTick, exists := handleTracker[h]; !exists || handleTick != actualMinTick {
+				t.Fatalf("Handle validation failed at iteration %d: handle=%d tick=%d, expected tick=%d",
+					i, h, handleTick, actualMinTick)
+			}
+
 			// Verify bitmap summary consistency
 			validateBitmapSummaries(t, q, handleTracker)
 		}
@@ -552,12 +558,12 @@ func validateBitmapSummaries(t *testing.T, q *PooledQuantumQueue, handleTracker 
 	expectedGroups := make(map[uint64]bool)
 	expectedLanes := make(map[uint64]map[uint64]bool)
 	expectedBuckets := make(map[uint64]bool)
-	
+
 	for _, tick := range handleTracker {
 		g := uint64(tick) >> 12
 		l := (uint64(tick) >> 6) & 63
 		b := uint64(tick)
-		
+
 		expectedGroups[g] = true
 		if expectedLanes[g] == nil {
 			expectedLanes[g] = make(map[uint64]bool)
@@ -565,24 +571,24 @@ func validateBitmapSummaries(t *testing.T, q *PooledQuantumQueue, handleTracker 
 		expectedLanes[g][l] = true
 		expectedBuckets[b] = true
 	}
-	
+
 	// Validate global summary
 	for g := uint64(0); g < GroupCount; g++ {
 		expectedActive := expectedGroups[g]
 		actualActive := (q.summary & (1 << (63 - g))) != 0
-		
+
 		if expectedActive != actualActive {
 			t.Fatalf("Group %d summary mismatch: expected=%v actual=%v",
 				g, expectedActive, actualActive)
 		}
-		
+
 		// Validate group-level summaries
 		if expectedActive {
 			gb := &q.groups[g]
 			for l := uint64(0); l < LaneCount; l++ {
 				expectedLaneActive := expectedLanes[g][l]
 				actualLaneActive := (gb.l1Summary & (1 << (63 - l))) != 0
-				
+
 				if expectedLaneActive != actualLaneActive {
 					t.Fatalf("Group %d lane %d summary mismatch: expected=%v actual=%v",
 						g, l, expectedLaneActive, actualLaneActive)
