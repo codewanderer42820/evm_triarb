@@ -252,24 +252,34 @@ func Ftoa(f float64) string {
 		// Regular decimal notation
 		intPart := uint64(absF)
 
-		// Handle fractional part with proper rounding
+		// Handle fractional part with better precision control
 		fracF := absF - float64(intPart)
 		if fracF > 0 {
-			// Use a simpler, more accurate approach
-			// Scale to 6 decimal places and round
-			scaled := uint64(fracF*1000000 + 0.5)
+			// Convert fractional part using digit-by-digit extraction
+			// This preserves the correct decimal places
+			tempF := fracF
+			fracDigits := [6]byte{}
+			fracCount := 0
 
-			// Remove trailing zeros
-			for scaled > 0 && scaled%10 == 0 {
-				scaled /= 10
+			// Extract up to 6 fractional digits
+			for fracCount < 6 && tempF > 1e-15 {
+				tempF *= 10
+				digit := int(tempF)
+				fracDigits[fracCount] = byte(digit + '0')
+				tempF -= float64(digit)
+				fracCount++
 			}
 
-			// Add fractional digits
-			if scaled > 0 {
-				for scaled > 0 {
+			// Remove trailing zeros only
+			for fracCount > 0 && fracDigits[fracCount-1] == '0' {
+				fracCount--
+			}
+
+			// Add the fractional digits
+			if fracCount > 0 {
+				for j := fracCount - 1; j >= 0; j-- {
 					i--
-					buf[i] = byte(scaled%10 + '0')
-					scaled /= 10
+					buf[i] = fracDigits[j]
 				}
 
 				// Decimal point
