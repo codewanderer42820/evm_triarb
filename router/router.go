@@ -334,6 +334,26 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
+// init automatically loads arbitrage cycles and initializes the system at startup.
+//
+// This function runs once when the package is imported, loading the cycle
+// definitions from the configuration file and initializing all runtime
+// data structures required for arbitrage detection.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func init() {
+	cycles, err := loadArbitrageCyclesFromFile("cycles_3_3.txt")
+	if err != nil {
+		panic(fmt.Sprintf("Failed to load arbitrage cycles: %v", err))
+	}
+
+	// Launch the complete arbitrage detection system
+	InitializeArbitrageSystem(cycles)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // CORE TYPE DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
