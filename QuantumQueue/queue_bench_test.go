@@ -67,10 +67,12 @@ func makeBenchData(seed uint64) *[48]byte {
 // Typical use case: ISR guard condition before queue processing
 func BenchmarkEmpty(b *testing.B) {
 	q := New()
+	var result bool // FIXED: Capture result to prevent optimization
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = q.Empty()
+		result = q.Empty() // FIXED: Use the result
 	}
+	_ = result // FIXED: Prevent compiler from optimizing away the call
 }
 
 // BenchmarkSize measures the cost of queue size retrieval.
@@ -80,10 +82,12 @@ func BenchmarkEmpty(b *testing.B) {
 // Typical use case: Load balancing decisions in multi-queue systems
 func BenchmarkSize(b *testing.B) {
 	q := New()
+	var result int // FIXED: Capture result to prevent optimization
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = q.Size()
+		result = q.Size() // FIXED: Use the result
 	}
+	_ = result // FIXED: Prevent compiler from optimizing away the call
 }
 
 // ============================================================================
@@ -347,11 +351,16 @@ func BenchmarkPeepMin(b *testing.B) {
 		data := makeBenchData(uint64(i))
 		q.Push(int64(i), h, data)
 	}
+
+	var h Handle       // FIXED: Capture all results
+	var tick int64     // FIXED: Capture all results
+	var data *[48]byte // FIXED: Capture all results
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		q.PeepMin()
+		h, tick, data = q.PeepMin() // FIXED: Use all return values
 	}
+	_, _, _ = h, tick, data // FIXED: Prevent optimization
 }
 
 // BenchmarkPeepMinSparse measures minimum finding in sparse queues.
@@ -374,11 +383,16 @@ func BenchmarkPeepMinSparse(b *testing.B) {
 		tick := int64(i * (BucketCount / 100))
 		q.Push(tick, h, data)
 	}
+
+	var h Handle             // FIXED: Capture all results
+	var tick int64           // FIXED: Capture all results
+	var dataResult *[48]byte // FIXED: Capture all results
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		q.PeepMin()
+		h, tick, dataResult = q.PeepMin() // FIXED: Use all return values
 	}
+	_, _, _ = h, tick, dataResult // FIXED: Prevent optimization
 }
 
 // BenchmarkPeepMinDense measures minimum finding in dense queues.
@@ -401,11 +415,16 @@ func BenchmarkPeepMinDense(b *testing.B) {
 		tick := int64(i % (BucketCount * 9 / 10))
 		q.Push(tick, h, data)
 	}
+
+	var h Handle             // FIXED: Capture all results
+	var tick int64           // FIXED: Capture all results
+	var dataResult *[48]byte // FIXED: Capture all results
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		q.PeepMin()
+		h, tick, dataResult = q.PeepMin() // FIXED: Use all return values
 	}
+	_, _, _ = h, tick, dataResult // FIXED: Prevent optimization
 }
 
 // ============================================================================
@@ -690,7 +709,7 @@ func BenchmarkMixedOperations(b *testing.B) {
 
 		case op < 0.7: // 30% PeepMin
 			if !q.Empty() {
-				q.PeepMin()
+				_, _, _ = q.PeepMin() // FIXED: Use return values to prevent optimization
 			}
 
 		case op < 0.9: // 20% UnlinkMin
