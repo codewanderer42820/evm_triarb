@@ -2058,7 +2058,16 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 		// priority to ensure proper queue ordering. Handle exhaustion is
 		// impossible as queue capacity exceeds maximum cycle count by design.
 		queueHandle, _ := queue.Borrow()
-		queue.Push(constants.MaxInitializationPriority, queueHandle, uint64(cycleIndex))
+
+		// DISTRIBUTED INITIALIZATION PRIORITY GENERATION
+		//
+		// Direct integer mapping without scaling - bit range perfectly
+		// matches target priority range for optimal performance.
+		cycleHash := utils.Mix64(uint64(cycleIndex))
+		randBits := cycleHash & 0xFFFF
+		initPriority := int64(196608 + randBits)
+
+		queue.Push(initPriority, queueHandle, uint64(cycleIndex))
 
 		// FANOUT RELATIONSHIP CONSTRUCTION
 		//
