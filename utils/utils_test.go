@@ -571,6 +571,26 @@ func TestFtoa_EdgeCases(t *testing.T) {
 	}
 }
 
+func TestItoa_ZeroAllocation(t *testing.T) {
+	testInts := []int{0, 1, 42, 123, 1000, 12345, 999999, 2147483647}
+
+	for _, n := range testInts {
+		assertZeroAllocs(t, fmt.Sprintf("Itoa(%d)", n), func() {
+			_ = Itoa(n)
+		})
+	}
+}
+
+func TestFtoa_ZeroAllocation(t *testing.T) {
+	testFloats := []float64{0.0, 1.0, -1.0, 3.14159, 42.0, 0.123456, 1000000.0, 1e-10}
+
+	for _, f := range testFloats {
+		assertZeroAllocs(t, fmt.Sprintf("Ftoa(%g)", f), func() {
+			_ = Ftoa(f)
+		})
+	}
+}
+
 func TestTypeConversion_ZeroAllocation(t *testing.T) {
 	testBytes := []byte("test string for zero allocation")
 	testInt := 12345
@@ -580,12 +600,12 @@ func TestTypeConversion_ZeroAllocation(t *testing.T) {
 		_ = B2s(testBytes)
 	})
 
-	// Check if Itoa is also allocating
+	// Test Itoa separately to isolate any allocation issues
 	assertZeroAllocs(t, "Itoa", func() {
 		_ = Itoa(testInt)
 	})
 
-	// Only test Ftoa allocation if Itoa passes
+	// Test Ftoa separately to isolate any allocation issues
 	assertZeroAllocs(t, "Ftoa", func() {
 		_ = Ftoa(testFloat)
 	})
@@ -1549,10 +1569,16 @@ func TestStress_AllFunctions(t *testing.T) {
 			_ = ParseEthereumAddress(hexData[:40])
 
 			if i%1000 == 0 {
-				// Verify no allocation every 1000 iterations
-				assertZeroAllocs(t, "stress_iteration", func() {
-					_ = Ftoa(3.14159)
+				// Verify no allocation every 1000 iterations for each function separately
+				assertZeroAllocs(t, "stress_iteration_Itoa", func() {
 					_ = Itoa(42)
+				})
+
+				assertZeroAllocs(t, "stress_iteration_Ftoa", func() {
+					_ = Ftoa(3.14159)
+				})
+
+				assertZeroAllocs(t, "stress_iteration_Mix64", func() {
 					_ = Mix64(0xDEADBEEF)
 				})
 			}
