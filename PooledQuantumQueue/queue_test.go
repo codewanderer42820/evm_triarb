@@ -102,12 +102,12 @@ func TestPoolAccess(t *testing.T) {
 	// Test entry access for various handles
 	for h := Handle(0); h < 10; h++ {
 		entry := q.entry(h)
-		
+
 		// Verify entry is within pool bounds
 		entryAddr := uintptr(unsafe.Pointer(entry))
 		poolStart := uintptr(unsafe.Pointer(&pool[0]))
 		poolEnd := poolStart + uintptr(len(pool))*unsafe.Sizeof(Entry{})
-		
+
 		if entryAddr < poolStart || entryAddr >= poolEnd {
 			t.Errorf("entry %d outside pool bounds: addr=%x, start=%x, end=%x",
 				h, entryAddr, poolStart, poolEnd)
@@ -516,7 +516,7 @@ func TestSharedPoolUsage(t *testing.T) {
 			q1.Size(), q2.Size(), q3.Size())
 	}
 
-	// Verify independent minimums
+	// FIXED: Verify independent minimums AND use all return values
 	h1Min, tick1, data1 := q1.PeepMin()
 	h2Min, tick2, data2 := q2.PeepMin()
 	h3Min, tick3, data3 := q3.PeepMin()
@@ -536,7 +536,7 @@ func TestSharedPoolUsage(t *testing.T) {
 			h3Min, tick3, data3, h3, uint64(0x3333))
 	}
 
-	// Verify shared pool entries
+	// FIXED: Verify shared pool entries AND cross-validate queue operations
 	entry1 := &pool[h1]
 	entry2 := &pool[h2]
 	entry3 := &pool[h3]
@@ -554,6 +554,30 @@ func TestSharedPoolUsage(t *testing.T) {
 	if entry3.tick != 5 || entry3.data != 0x3333 {
 		t.Errorf("shared pool entry3 incorrect: tick=%d data=%x",
 			entry3.tick, entry3.data)
+	}
+
+	// FIXED: Verify queue independence by manipulating one queue
+	// and ensuring others are unaffected
+	q1.UnlinkMin(h1)
+	if q1.Size() != 0 {
+		t.Error("q1 should be empty after unlink")
+	}
+	if q2.Size() != 1 || q3.Size() != 1 {
+		t.Error("q2 and q3 should be unaffected by q1 operations")
+	}
+
+	// FIXED: Verify the other queues still work correctly
+	h2Min2, tick2_2, data2_2 := q2.PeepMin()
+	h3Min2, tick3_2, data3_2 := q3.PeepMin()
+
+	if h2Min2 != h2 || tick2_2 != 20 || data2_2 != 0x2222 {
+		t.Errorf("q2 affected by q1 operation: got (%v,%d,%x), want (%v,20,%x)",
+			h2Min2, tick2_2, data2_2, h2, uint64(0x2222))
+	}
+
+	if h3Min2 != h3 || tick3_2 != 5 || data3_2 != 0x3333 {
+		t.Errorf("q3 affected by q1 operation: got (%v,%d,%x), want (%v,5,%x)",
+			h3Min2, tick3_2, data3_2, h3, uint64(0x3333))
 	}
 }
 
@@ -576,7 +600,7 @@ func TestPoolBoundaryAccess(t *testing.T) {
 		// Use handle
 		q.Push(int64(h), h, uint64(h)*1000)
 
-		// Verify entry access
+		// FIXED: Verify entry access AND operation correctness
 		entry := q.entry(h)
 		expectedEntry := &pool[h]
 
@@ -585,13 +609,25 @@ func TestPoolBoundaryAccess(t *testing.T) {
 				h, entry, expectedEntry)
 		}
 
-		// Verify data consistency
+		// FIXED: Verify data consistency through queue operations
 		if entry.tick != int64(h) || entry.data != uint64(h)*1000 {
 			t.Errorf("handle %d data incorrect: tick=%d data=%d",
 				h, entry.tick, entry.data)
 		}
 
+		// FIXED: Verify queue operations work correctly with this handle
+		retrievedH, retrievedTick, retrievedData := q.PeepMin()
+		if retrievedH != h || retrievedTick != int64(h) || retrievedData != uint64(h)*1000 {
+			t.Errorf("handle %d queue operation failed: got (%v,%d,%d), want (%v,%d,%d)",
+				h, retrievedH, retrievedTick, retrievedData, h, int64(h), uint64(h)*1000)
+		}
+
 		// Clean up
 		q.UnlinkMin(h)
+
+		// FIXED: Verify cleanup was successful
+		if !q.Empty() {
+			t.Errorf("queue not empty after removing handle %d", h)
+		}
 	}
 }
