@@ -111,23 +111,24 @@ func (h *stressHeap) Pop() interface{} {
 //   - Summary bitmap inconsistencies
 func TestQueueStressRandomOperations(t *testing.T) {
 	const iterations = 10_000_000
-	const maxHandles = 50000 // Limit handles for pool bounds
+	const maxHandles = 50000
 
 	// Deterministic PRNG for reproducible failure analysis
 	rng := rand.New(rand.NewSource(69))
 
-	// FIX: Ensure pool size exactly matches maxHandles
-	pool := make([]Entry, maxHandles) // CRITICAL: Pool must be exactly maxHandles size
+	// Initialize external pool
+	pool := make([]Entry, maxHandles)
+	InitializePool(pool) // Use shared helper function
 	q := New(unsafe.Pointer(&pool[0]))
 
 	// Initialize reference heap
 	ref := &stressHeap{}
 	heap.Init(ref)
 
-	// Handle lifecycle management - this part was correct
+	// Handle lifecycle management
 	availableHandles := make([]Handle, maxHandles)
 	for i := range availableHandles {
-		availableHandles[i] = Handle(i) // Now guaranteed to be valid since pool[i] exists
+		availableHandles[i] = Handle(i)
 	}
 	activeHandles := make(map[Handle]bool)
 
@@ -143,7 +144,6 @@ func TestQueueStressRandomOperations(t *testing.T) {
 
 		switch op {
 		case 0: // PUSH
-			// SIMPLE FIX: Just check if handles available
 			if len(availableHandles) == 0 {
 				continue
 			}
@@ -153,7 +153,6 @@ func TestQueueStressRandomOperations(t *testing.T) {
 
 			val := makeVal(int64(seq))
 
-			// These operations are now safe since h < maxHandles and pool[h] exists
 			q.Push(tick, h, val)
 			heap.Push(ref, &stressItem{h: h, tick: tick, seq: seq})
 
@@ -197,6 +196,13 @@ func TestQueueStressRandomOperations(t *testing.T) {
 
 			q.UnlinkMin(h)
 			delete(activeHandles, h)
+
+			// Reset the pool entry to unlinked state when returning handle
+			pool[h].tick = -1
+			pool[h].prev = nilIdx
+			pool[h].next = nilIdx
+			pool[h].data = 0
+
 			availableHandles = append(availableHandles, h)
 		}
 
@@ -213,7 +219,7 @@ func TestQueueStressRandomOperations(t *testing.T) {
 		}
 	}
 
-	// Rest of the drain logic remains the same...
+	// Drain verification
 	for !q.Empty() {
 		h, tickGot, _ := q.PeepMin()
 		exp := heap.Pop(ref).(*stressItem)
@@ -225,6 +231,13 @@ func TestQueueStressRandomOperations(t *testing.T) {
 
 		q.UnlinkMin(h)
 		delete(activeHandles, h)
+
+		// Reset pool entry state
+		pool[h].tick = -1
+		pool[h].prev = nilIdx
+		pool[h].next = nilIdx
+		pool[h].data = 0
+
 		availableHandles = append(availableHandles, h)
 	}
 
@@ -261,6 +274,7 @@ func TestSharedPoolStress(t *testing.T) {
 
 	// Shared pool for all queues
 	pool := make([]Entry, poolSize)
+	InitializePool(pool) // Use shared helper function
 
 	// Create multiple queues sharing the pool
 	queues := make([]*PooledQuantumQueue, queueCount)
@@ -270,6 +284,12 @@ func TestSharedPoolStress(t *testing.T) {
 
 	// Partition handle space between queues
 	handlesPerQueue := poolSize / queueCount
+
+	// Track which handles are active in each queue
+	activeHandles := make([]map[Handle]bool, queueCount)
+	for i := range activeHandles {
+		activeHandles[i] = make(map[Handle]bool)
+	}
 
 	rng := rand.New(rand.NewSource(42))
 
@@ -288,9 +308,10 @@ func TestSharedPoolStress(t *testing.T) {
 		switch rng.Intn(3) {
 		case 0: // Push
 			queue.Push(tick, h, val)
+			activeHandles[queueIdx][h] = true
 
-		case 1: // MoveTick (if queue not empty)
-			if !queue.Empty() {
+		case 1: // MoveTick - FIXED: Only move if handle is active in this queue
+			if activeHandles[queueIdx][h] {
 				newTick := int64(rng.Intn(10000))
 				queue.MoveTick(h, newTick)
 			}
@@ -299,6 +320,10 @@ func TestSharedPoolStress(t *testing.T) {
 			if !queue.Empty() {
 				popH, _, _ := queue.PeepMin()
 				queue.UnlinkMin(popH)
+				// Remove from active set - determine which queue it belonged to
+				for qIdx := range activeHandles {
+					delete(activeHandles[qIdx], popH)
+				}
 			}
 		}
 
@@ -354,15 +379,14 @@ func TestPoolBoundaryStress(t *testing.T) {
 	const poolSize = 10000
 	const operations = 500000
 
-	// FIX: Ensure pool is exactly poolSize
 	pool := make([]Entry, poolSize)
+	InitializePool(pool) // Use shared helper function
 	q := New(unsafe.Pointer(&pool[0]))
 
 	rng := rand.New(rand.NewSource(123))
 	activeHandles := make(map[Handle]bool)
 
 	for i := 0; i < operations; i++ {
-		// This is now safe since we guarantee h < poolSize
 		h := Handle(rng.Intn(poolSize))
 		tick := int64(rng.Intn(100000))
 		val := uint64(rng.Uint64())
@@ -372,7 +396,7 @@ func TestPoolBoundaryStress(t *testing.T) {
 			q.Push(tick, h, val)
 			activeHandles[h] = true
 
-		case 1: // MoveTick existing entry
+		case 1: // MoveTick - FIXED: Only move if handle is active
 			if activeHandles[h] {
 				newTick := int64(rng.Intn(100000))
 				q.MoveTick(h, newTick)
@@ -441,6 +465,7 @@ func TestBitmapConsistencyUnderStress(t *testing.T) {
 	const operations = 2_000_000
 
 	pool := make([]Entry, poolSize)
+	InitializePool(pool) // Use shared helper function
 	q := New(unsafe.Pointer(&pool[0]))
 
 	rng := rand.New(rand.NewSource(456))
@@ -456,7 +481,7 @@ func TestBitmapConsistencyUnderStress(t *testing.T) {
 			q.Push(tick, h, val)
 			handleTracker[h] = tick
 
-		case 1: // MoveTick
+		case 1: // MoveTick - FIXED: Only move if handle is tracked (active)
 			if _, exists := handleTracker[h]; exists {
 				newTick := int64(rng.Intn(BucketCount))
 				q.MoveTick(h, newTick)
@@ -476,12 +501,17 @@ func TestBitmapConsistencyUnderStress(t *testing.T) {
 					}
 				}
 				delete(handleTracker, popH)
+
+				// Reset pool entry state
+				pool[popH].tick = -1
+				pool[popH].prev = nilIdx
+				pool[popH].next = nilIdx
+				pool[popH].data = 0
 			}
 		}
 
 		// Intensive bitmap validation every 100k operations
 		if i%100000 == 0 && !q.Empty() {
-			// FIXED: Proper handle and tick validation
 			h, tick, _ := q.PeepMin()
 
 			// Find actual minimum from handle tracker
@@ -497,7 +527,7 @@ func TestBitmapConsistencyUnderStress(t *testing.T) {
 					i, tick, actualMinTick)
 			}
 
-			// FIXED: Verify the returned handle corresponds to an entry with the minimum tick
+			// Verify the returned handle corresponds to an entry with the minimum tick
 			if handleTick, exists := handleTracker[h]; !exists || handleTick != actualMinTick {
 				t.Fatalf("Handle validation failed at iteration %d: handle=%d tick=%d, expected tick=%d",
 					i, h, handleTick, actualMinTick)

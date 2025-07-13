@@ -52,6 +52,7 @@ const testPoolSize = 10000 // Pool size for testing
 // Validates constructor correctness and external pool setup.
 func TestNewQueueBehavior(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
+	InitializePool(pool) // Use shared helper function
 	q := New(unsafe.Pointer(&pool[0]))
 
 	// Verify initial empty state
@@ -97,6 +98,7 @@ func TestNewQueueBehavior(t *testing.T) {
 //   - Entry field accessibility
 func TestPoolAccess(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
+	InitializePool(pool) // Use shared helper function
 	q := New(unsafe.Pointer(&pool[0]))
 
 	// Test entry access for various handles
@@ -139,6 +141,7 @@ func TestPoolAccess(t *testing.T) {
 // Validates core scheduling semantics and boundary condition handling.
 func TestPushAndPeepMin(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
+	InitializePool(pool) // Use shared helper function
 	q := New(unsafe.Pointer(&pool[0]))
 	h := Handle(0)
 
@@ -200,6 +203,7 @@ func TestPushAndPeepMin(t *testing.T) {
 
 	// Test edge cases: boundary tick values
 	pool2 := make([]Entry, testPoolSize)
+	InitializePool(pool2) // Use shared helper function
 	q2 := New(unsafe.Pointer(&pool2[0]))
 	h0 := Handle(0)
 	hMax := Handle(1)
@@ -242,6 +246,7 @@ func TestPushAndPeepMin(t *testing.T) {
 // Ensures Push operations handle tick changes via proper unlink/relink cycles.
 func TestPushTriggersUnlink(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
+	InitializePool(pool) // Use shared helper function
 	q := New(unsafe.Pointer(&pool[0]))
 	h := Handle(0)
 
@@ -305,6 +310,7 @@ func TestPushTriggersUnlink(t *testing.T) {
 // Validates Last-In-First-Out behavior for entries sharing tick values.
 func TestMultipleSameTickOrdering(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
+	InitializePool(pool) // Use shared helper function
 	q := New(unsafe.Pointer(&pool[0]))
 	h1 := Handle(0)
 	h2 := Handle(1)
@@ -355,6 +361,7 @@ func TestMultipleSameTickOrdering(t *testing.T) {
 // Validates priority queue semantics regardless of insertion order.
 func TestPushDifferentTicks(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
+	InitializePool(pool) // Use shared helper function
 	q := New(unsafe.Pointer(&pool[0]))
 	h1 := Handle(0)
 	h2 := Handle(1)
@@ -405,6 +412,7 @@ func TestPushDifferentTicks(t *testing.T) {
 // Tests MoveTick operation efficiency and correctness.
 func TestMoveTickBehavior(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
+	InitializePool(pool) // Use shared helper function
 	q := New(unsafe.Pointer(&pool[0]))
 	h := Handle(0)
 
@@ -456,6 +464,7 @@ func TestPeepMinWhenEmpty(t *testing.T) {
 		}
 	}()
 	pool := make([]Entry, testPoolSize)
+	InitializePool(pool) // Use shared helper function
 	q := New(unsafe.Pointer(&pool[0]))
 	q.PeepMin()
 }
@@ -474,6 +483,7 @@ func TestDoubleUnlink(t *testing.T) {
 	}()
 
 	pool := make([]Entry, testPoolSize)
+	InitializePool(pool) // Use shared helper function
 	q := New(unsafe.Pointer(&pool[0]))
 	h := Handle(0)
 	q.Push(100, h, 0xDEAD)
@@ -496,6 +506,7 @@ func TestDoubleUnlink(t *testing.T) {
 // Validates the core shared pool architecture benefit.
 func TestSharedPoolUsage(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
+	InitializePool(pool) // Use shared helper function
 	q1 := New(unsafe.Pointer(&pool[0]))
 	q2 := New(unsafe.Pointer(&pool[0]))
 	q3 := New(unsafe.Pointer(&pool[0]))
@@ -516,7 +527,7 @@ func TestSharedPoolUsage(t *testing.T) {
 			q1.Size(), q2.Size(), q3.Size())
 	}
 
-	// FIXED: Verify independent minimums AND use all return values
+	// Verify independent minimums AND use all return values
 	h1Min, tick1, data1 := q1.PeepMin()
 	h2Min, tick2, data2 := q2.PeepMin()
 	h3Min, tick3, data3 := q3.PeepMin()
@@ -536,7 +547,7 @@ func TestSharedPoolUsage(t *testing.T) {
 			h3Min, tick3, data3, h3, uint64(0x3333))
 	}
 
-	// FIXED: Verify shared pool entries AND cross-validate queue operations
+	// Verify shared pool entries AND cross-validate queue operations
 	entry1 := &pool[h1]
 	entry2 := &pool[h2]
 	entry3 := &pool[h3]
@@ -556,7 +567,7 @@ func TestSharedPoolUsage(t *testing.T) {
 			entry3.tick, entry3.data)
 	}
 
-	// FIXED: Verify queue independence by manipulating one queue
+	// Verify queue independence by manipulating one queue
 	// and ensuring others are unaffected
 	q1.UnlinkMin(h1)
 	if q1.Size() != 0 {
@@ -566,7 +577,7 @@ func TestSharedPoolUsage(t *testing.T) {
 		t.Error("q2 and q3 should be unaffected by q1 operations")
 	}
 
-	// FIXED: Verify the other queues still work correctly
+	// Verify the other queues still work correctly
 	h2Min2, tick2_2, data2_2 := q2.PeepMin()
 	h3Min2, tick3_2, data3_2 := q3.PeepMin()
 
@@ -591,6 +602,7 @@ func TestSharedPoolUsage(t *testing.T) {
 // ⚠️  NOTE: No bounds checking performed - this validates correct usage patterns
 func TestPoolBoundaryAccess(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
+	InitializePool(pool) // Use shared helper function
 	q := New(unsafe.Pointer(&pool[0]))
 
 	// Test various handle positions within pool
@@ -600,7 +612,7 @@ func TestPoolBoundaryAccess(t *testing.T) {
 		// Use handle
 		q.Push(int64(h), h, uint64(h)*1000)
 
-		// FIXED: Verify entry access AND operation correctness
+		// Verify entry access AND operation correctness
 		entry := q.entry(h)
 		expectedEntry := &pool[h]
 
@@ -609,13 +621,13 @@ func TestPoolBoundaryAccess(t *testing.T) {
 				h, entry, expectedEntry)
 		}
 
-		// FIXED: Verify data consistency through queue operations
+		// Verify data consistency through queue operations
 		if entry.tick != int64(h) || entry.data != uint64(h)*1000 {
 			t.Errorf("handle %d data incorrect: tick=%d data=%d",
 				h, entry.tick, entry.data)
 		}
 
-		// FIXED: Verify queue operations work correctly with this handle
+		// Verify queue operations work correctly with this handle
 		retrievedH, retrievedTick, retrievedData := q.PeepMin()
 		if retrievedH != h || retrievedTick != int64(h) || retrievedData != uint64(h)*1000 {
 			t.Errorf("handle %d queue operation failed: got (%v,%d,%d), want (%v,%d,%d)",
@@ -625,7 +637,7 @@ func TestPoolBoundaryAccess(t *testing.T) {
 		// Clean up
 		q.UnlinkMin(h)
 
-		// FIXED: Verify cleanup was successful
+		// Verify cleanup was successful
 		if !q.Empty() {
 			t.Errorf("queue not empty after removing handle %d", h)
 		}
