@@ -14,6 +14,7 @@ import (
 	"main/quantumqueue64"
 	"main/ring24"
 	"main/types"
+	"main/utils"
 )
 
 // ============================================================================
@@ -1063,7 +1064,18 @@ func TestCoreProcessingLogic(t *testing.T) {
 		executor.priorityQueues[0] = *quantumqueue64.New()
 
 		handle, _ := executor.priorityQueues[0].BorrowSafe()
-		executor.priorityQueues[0].Push(constants.MaxInitializationPriority, handle, 0)
+
+		// DISTRIBUTED INITIALIZATION PRIORITY GENERATION
+		//
+		// Prevent pathological queue clustering by distributing cycles across
+		// the top 25% priority range [196608, 262143]. Fixed priority would
+		// create identical values causing O(n) extraction degradation and
+		// cache thrashing during startup processing.
+		cycleHash := utils.Mix64(uint64(0))
+		randBits := cycleHash & 0xFFFF
+		initPriority := int64(196608 + randBits)
+
+		executor.priorityQueues[0].Push(initPriority, handle, 0)
 
 		pairID := PairID(123)
 		executor.pairToQueueIndex.Put(uint32(pairID), 0)
@@ -1091,7 +1103,18 @@ func TestCoreProcessingLogic(t *testing.T) {
 		executor.priorityQueues[0] = *quantumqueue64.New()
 
 		handle, _ := executor.priorityQueues[0].BorrowSafe()
-		executor.priorityQueues[0].Push(constants.MaxInitializationPriority, handle, 0)
+
+		// DISTRIBUTED INITIALIZATION PRIORITY GENERATION
+		//
+		// Prevent pathological queue clustering by distributing cycles across
+		// the top 25% priority range [196608, 262143]. Fixed priority would
+		// create identical values causing O(n) extraction degradation and
+		// cache thrashing during startup processing.
+		cycleHash := utils.Mix64(uint64(0))
+		randBits := cycleHash & 0xFFFF
+		initPriority := int64(196608 + randBits)
+
+		executor.priorityQueues[0].Push(initPriority, handle, 0)
 
 		pairID := PairID(456)
 		executor.pairToQueueIndex.Put(uint32(pairID), 0)
@@ -1686,14 +1709,26 @@ func BenchmarkProcessTickUpdate(b *testing.B) {
 		priorityQueues:     make([]quantumqueue64.QuantumQueue64, 10),
 	}
 
-	// Initialize queues and add cycles
+	// Initialize queues and add cycles with distributed priorities
 	for i := range executor.priorityQueues {
 		executor.priorityQueues[i] = *quantumqueue64.New()
 
-		// Add cycles to each queue
+		// Add cycles to each queue using distributed initialization priorities
 		for j := 0; j < 10; j++ {
 			handle, _ := executor.priorityQueues[i].BorrowSafe()
-			executor.priorityQueues[i].Push(constants.MaxInitializationPriority-int64(j*100), handle, uint64(i*10+j))
+
+			// DISTRIBUTED INITIALIZATION PRIORITY GENERATION
+			//
+			// Prevent pathological queue clustering by distributing cycles across
+			// the top 25% priority range [196608, 262143]. Fixed priority would
+			// create identical values causing O(n) extraction degradation and
+			// cache thrashing during startup processing.
+			cycleIndex := uint64(i*10 + j)
+			cycleHash := utils.Mix64(cycleIndex)
+			randBits := cycleHash & 0xFFFF
+			initPriority := int64(196608 + randBits)
+
+			executor.priorityQueues[i].Push(initPriority, handle, uint64(i*10+j))
 		}
 	}
 
