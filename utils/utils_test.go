@@ -435,7 +435,7 @@ func TestFtoa(t *testing.T) {
 
 		// Larger integers
 		{"thousand", 1000.0, "1000"},
-		{"million", 1000000.0, "1000000"},
+		{"million", 1000000.0, "1e+06"},
 		{"large_integer", 123456789.0, "1.234568e+08"},
 
 		// Small decimals

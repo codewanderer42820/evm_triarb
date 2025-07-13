@@ -115,7 +115,7 @@ func Ftoa(f float64) string {
 			buf[i] = 'N'
 			buf[i+1] = 'a'
 			buf[i+2] = 'N'
-			return string(buf[i:])
+			return unsafe.String(&buf[i], 3)
 		}
 		// Infinity
 		if bits&0x8000000000000000 != 0 {
@@ -124,21 +124,22 @@ func Ftoa(f float64) string {
 			buf[i+1] = 'I'
 			buf[i+2] = 'n'
 			buf[i+3] = 'f'
+			return unsafe.String(&buf[i], 4)
 		} else {
 			i -= 4
 			buf[i] = '+'
 			buf[i+1] = 'I'
 			buf[i+2] = 'n'
 			buf[i+3] = 'f'
+			return unsafe.String(&buf[i], 4)
 		}
-		return string(buf[i:])
 	}
 
 	// Handle zero
 	if bits&0x7FFFFFFFFFFFFFFF == 0 {
 		i--
 		buf[i] = '0'
-		return string(buf[i:])
+		return unsafe.String(&buf[i], 1)
 	}
 
 	// Extract sign bit
@@ -151,7 +152,7 @@ func Ftoa(f float64) string {
 	}
 
 	// Fast path for integers in reasonable range
-	if absF >= 1.0 && absF < 1e15 && absF == float64(uint64(absF)) {
+	if absF >= 1.0 && absF < 1e6 && absF == float64(uint64(absF)) {
 		// This is an exact integer - use fast integer conversion like Itoa
 		intVal := uint64(absF)
 
@@ -171,7 +172,7 @@ func Ftoa(f float64) string {
 			i--
 			buf[i] = '-'
 		}
-		return string(buf[i:])
+		return unsafe.String(&buf[i], len(buf)-i)
 	}
 
 	// For non-integers, determine if we need scientific notation
@@ -292,7 +293,7 @@ func Ftoa(f float64) string {
 		buf[i] = '-'
 	}
 
-	return string(buf[i:])
+	return unsafe.String(&buf[i], len(buf)-i)
 }
 
 // ============================================================================
