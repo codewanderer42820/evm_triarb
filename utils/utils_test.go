@@ -65,6 +65,37 @@ func generateTestData(size int, pattern string) []byte {
 	return data
 }
 
+// floatStringsEquivalent checks if two float strings are mathematically equivalent
+func floatStringsEquivalent(got, want string, original float64) bool {
+	if got == want {
+		return true
+	}
+
+	// Parse both strings and compare the actual values
+	gotVal, gotErr := strconv.ParseFloat(got, 64)
+	wantVal, wantErr := strconv.ParseFloat(want, 64)
+
+	if gotErr != nil || wantErr != nil {
+		return false
+	}
+
+	// For very small differences, check if they're within acceptable precision
+	if math.Abs(gotVal-wantVal) < math.Abs(original)*1e-14 {
+		return true
+	}
+
+	// Check if both represent the same special value
+	if math.IsNaN(gotVal) && math.IsNaN(wantVal) {
+		return true
+	}
+
+	if math.IsInf(gotVal, 0) && math.IsInf(wantVal, 0) {
+		return math.Signbit(gotVal) == math.Signbit(wantVal)
+	}
+
+	return false
+}
+
 // ============================================================================
 // MEMORY OPERATION TESTS
 // ============================================================================
@@ -376,9 +407,174 @@ func TestItoa_Negative(t *testing.T) {
 	}
 }
 
+func TestFtoa(t *testing.T) {
+	tests := []struct {
+		name  string
+		input float64
+		want  string
+	}{
+		// Basic values
+		{"zero", 0.0, "0"},
+		{"positive_one", 1.0, "1"},
+		{"negative_one", -1.0, "-1"},
+		{"positive_integer", 42.0, "42"},
+		{"negative_integer", -42.0, "-42"},
+
+		// Simple decimals
+		{"half", 0.5, "0.5"},
+		{"negative_half", -0.5, "-0.5"},
+		{"quarter", 0.25, "0.25"},
+		{"eighth", 0.125, "0.125"},
+		{"three_quarters", 0.75, "0.75"},
+
+		// Common decimals
+		{"pi_short", 3.14, "3.14"},
+		{"e_short", 2.718, "2.718"},
+		{"simple_fraction", 1.5, "1.5"},
+		{"negative_decimal", -3.14, "-3.14"},
+
+		// Larger integers
+		{"thousand", 1000.0, "1000"},
+		{"million", 1000000.0, "1000000"},
+		{"large_integer", 123456789.0, "1.234568e+08"},
+
+		// Small decimals
+		{"small_decimal", 0.001, "0.001"},
+		{"very_small", 0.000001, "0.000001"},
+		{"tiny", 0.0000001, "1e-07"},
+
+		// Powers of 2 (exact in IEEE 754)
+		{"power_2_neg1", 0.5, "0.5"},
+		{"power_2_neg2", 0.25, "0.25"},
+		{"power_2_neg3", 0.125, "0.125"},
+		{"power_2_pos10", 1024.0, "1024"},
+
+		// Trailing zeros should be removed
+		{"trailing_zeros_1", 1.500000, "1.5"},
+		{"trailing_zeros_2", 42.100000, "42.1"},
+		{"trailing_zeros_3", 0.100000, "0.1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Ftoa(tt.input)
+			if !floatStringsEquivalent(got, tt.want, tt.input) {
+				t.Errorf("Ftoa(%g) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFtoa_IEEE754Compliance(t *testing.T) {
+	tests := []struct {
+		name  string
+		input float64
+		want  string
+	}{
+		// IEEE 754 special values
+		{"positive_zero", 0.0, "0"},
+		{"negative_zero", math.Copysign(0.0, -1), "0"}, // IEEE 754: -0 == +0
+		{"positive_infinity", math.Inf(1), "+Inf"},
+		{"negative_infinity", math.Inf(-1), "-Inf"},
+		{"nan", math.NaN(), "NaN"},
+
+		// Subnormal numbers (IEEE 754 compliance)
+		{"smallest_normal", math.SmallestNonzeroFloat64, "4.940656e-324"},
+
+		// Exact decimal representations
+		{"exact_half", 0.5, "0.5"},
+		{"exact_quarter", 0.25, "0.25"},
+		{"exact_eighth", 0.125, "0.125"},
+
+		// Large numbers requiring scientific notation
+		{"large_scientific", 1.23456789e15, "1.234568e+15"},
+		{"very_large", 1e20, "1e+20"},
+
+		// Very small numbers requiring scientific notation
+		{"very_small_scientific", 1.23456e-10, "1.23456e-10"},
+		{"extremely_small", 1e-20, "1e-20"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Ftoa(tt.input)
+			if !floatStringsEquivalent(got, tt.want, tt.input) {
+				t.Errorf("Ftoa(%g) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFtoa_BitPatterns(t *testing.T) {
+	// Test specific IEEE 754 bit patterns
+	tests := []struct {
+		name string
+		bits uint64
+		want string
+	}{
+		{"positive_zero_bits", 0x0000000000000000, "0"},
+		{"negative_zero_bits", 0x8000000000000000, "0"},
+		{"positive_inf_bits", 0x7FF0000000000000, "+Inf"},
+		{"negative_inf_bits", 0xFFF0000000000000, "-Inf"},
+		{"qnan_bits", 0x7FF8000000000000, "NaN"},
+		{"snan_bits", 0x7FF4000000000000, "NaN"},
+		{"one_bits", 0x3FF0000000000000, "1"},
+		{"two_bits", 0x4000000000000000, "2"},
+		{"half_bits", 0x3FE0000000000000, "0.5"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := math.Float64frombits(tt.bits)
+			got := Ftoa(f)
+			if got != tt.want {
+				t.Errorf("Ftoa(Float64frombits(0x%016X)) = %q, want %q",
+					tt.bits, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFtoa_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name  string
+		input float64
+	}{
+		{"max_int64", float64(math.MaxInt64)},
+		{"min_int64", float64(math.MinInt64)},
+		{"just_above_one", math.Nextafter(1.0, 2.0)},
+		{"just_below_one", math.Nextafter(1.0, 0.0)},
+		{"largest_exact_int", float64(1 << 53)},
+		{"smallest_inexact_int", float64(1<<53 + 1)},
+		{"pi", math.Pi},
+		{"e", math.E},
+		{"sqrt2", math.Sqrt2},
+		{"phi", (1 + math.Sqrt(5)) / 2}, // Golden ratio
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Should not panic and should produce valid output
+			result := Ftoa(tt.input)
+			if len(result) == 0 {
+				t.Errorf("Ftoa(%g) produced empty string", tt.input)
+			}
+
+			// Verify it's a valid number representation
+			if result != "NaN" && result != "+Inf" && result != "-Inf" {
+				if _, err := strconv.ParseFloat(result, 64); err != nil {
+					t.Errorf("Ftoa(%g) = %q is not a valid float string: %v",
+						tt.input, result, err)
+				}
+			}
+		})
+	}
+}
+
 func TestTypeConversion_ZeroAllocation(t *testing.T) {
 	testBytes := []byte("test string for zero allocation")
 	testInt := 12345
+	testFloat := 3.14159
 
 	assertZeroAllocs(t, "B2s", func() {
 		_ = B2s(testBytes)
@@ -386,6 +582,10 @@ func TestTypeConversion_ZeroAllocation(t *testing.T) {
 
 	assertZeroAllocs(t, "Itoa", func() {
 		_ = Itoa(testInt)
+	})
+
+	assertZeroAllocs(t, "Ftoa", func() {
+		_ = Ftoa(testFloat)
 	})
 }
 
@@ -819,6 +1019,23 @@ func TestRaceConditions(t *testing.T) {
 
 		wg.Wait()
 	})
+
+	t.Run("concurrent_ftoa", func(t *testing.T) {
+		var wg sync.WaitGroup
+		testFloats := []float64{0.0, 1.0, -1.0, 3.14159, 42.0, 1e10, 1e-10}
+
+		for i := 0; i < 100; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				for j := 0; j < 100; j++ {
+					_ = Ftoa(testFloats[j%len(testFloats)])
+				}
+			}(i)
+		}
+
+		wg.Wait()
+	})
 }
 
 // ============================================================================
@@ -865,6 +1082,23 @@ func TestBoundaryConditions(t *testing.T) {
 			t.Errorf("Max uint64 parse failed: got 0x%X", maxU64)
 		}
 	})
+
+	t.Run("ftoa_extreme_values", func(t *testing.T) {
+		// Test extreme float values
+		extremeValues := []float64{
+			math.MaxFloat64,
+			math.SmallestNonzeroFloat64,
+			1.7976931348623157e+308, // Close to max
+			2.2250738585072014e-308, // Close to min normal
+		}
+
+		for _, f := range extremeValues {
+			result := Ftoa(f)
+			if len(result) == 0 {
+				t.Errorf("Ftoa(%g) produced empty result", f)
+			}
+		}
+	})
 }
 
 // ============================================================================
@@ -880,6 +1114,11 @@ func TestIntentionalLimitations(t *testing.T) {
 	t.Run("Itoa_limitations", func(t *testing.T) {
 		// Itoa only supports positive integers
 		t.Log("Itoa only supports positive integers [0, MaxInt]")
+	})
+
+	t.Run("Ftoa_limitations", func(t *testing.T) {
+		// Ftoa has precision limitations for performance
+		t.Log("Ftoa optimizes for performance - limited precision for very large/small numbers")
 	})
 
 	t.Run("hex_parsing_limitations", func(t *testing.T) {
@@ -919,6 +1158,33 @@ func TestIntegration(t *testing.T) {
 			std := strconv.Itoa(n)
 			if our != std {
 				t.Errorf("Itoa(%d): our=%q, std=%q", n, our, std)
+			}
+		}
+	})
+
+	t.Run("ftoa_parseability", func(t *testing.T) {
+		// Verify Ftoa output can be parsed back
+		testFloats := []float64{
+			0.0, 1.0, -1.0, 0.5, -0.5, 3.14159, -3.14159,
+			42.0, -42.0, 1000000.0, 0.000001, 1e10, 1e-10,
+		}
+
+		for _, f := range testFloats {
+			result := Ftoa(f)
+			if result == "NaN" || result == "+Inf" || result == "-Inf" {
+				continue // Special values are expected
+			}
+
+			parsed, err := strconv.ParseFloat(result, 64)
+			if err != nil {
+				t.Errorf("Ftoa(%g) = %q cannot be parsed: %v", f, result, err)
+				continue
+			}
+
+			// Check that the parsed value is reasonably close to original
+			if math.Abs(parsed-f) > math.Abs(f)*1e-12 {
+				t.Errorf("Ftoa(%g) = %q, parsed back as %g (diff: %g)",
+					f, result, parsed, math.Abs(parsed-f))
 			}
 		}
 	})
@@ -1035,6 +1301,7 @@ func BenchmarkMix64(b *testing.B) {
 func BenchmarkTypeConversion(b *testing.B) {
 	testData := []byte("Hello, World! This is a test string for benchmarking.")
 	testInts := []int{0, 1, 42, 12345, 2147483647}
+	testFloats := []float64{0.0, 1.0, 3.14159, 42.123456, -123.456789}
 
 	b.Run("B2s", func(b *testing.B) {
 		b.SetBytes(int64(len(testData)))
@@ -1048,6 +1315,158 @@ func BenchmarkTypeConversion(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			_ = Itoa(testInts[i%len(testInts)])
+		}
+	})
+
+	b.Run("Ftoa", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = Ftoa(testFloats[i%len(testFloats)])
+		}
+	})
+
+	// Comparison benchmark with standard library
+	b.Run("strconv.Itoa", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = strconv.Itoa(testInts[i%len(testInts)])
+		}
+	})
+
+	b.Run("strconv.FormatFloat_f", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = strconv.FormatFloat(testFloats[i%len(testFloats)], 'f', -1, 64)
+		}
+	})
+
+	b.Run("strconv.FormatFloat_g", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = strconv.FormatFloat(testFloats[i%len(testFloats)], 'g', -1, 64)
+		}
+	})
+
+	b.Run("strconv.FormatFloat_e", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = strconv.FormatFloat(testFloats[i%len(testFloats)], 'e', -1, 64)
+		}
+	})
+}
+
+func BenchmarkFtoa_Detailed(b *testing.B) {
+	b.Run("integers", func(b *testing.B) {
+		integers := []float64{0, 1, 42, 1000, 1000000}
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = Ftoa(integers[i%len(integers)])
+		}
+	})
+
+	b.Run("small_decimals", func(b *testing.B) {
+		decimals := []float64{0.5, 0.25, 0.125, 0.1, 0.01}
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = Ftoa(decimals[i%len(decimals)])
+		}
+	})
+
+	b.Run("scientific_notation", func(b *testing.B) {
+		scientific := []float64{1e10, 1e-10, 1e100, 1e-100, math.MaxFloat64}
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = Ftoa(scientific[i%len(scientific)])
+		}
+	})
+
+	b.Run("special_values", func(b *testing.B) {
+		special := []float64{math.NaN(), math.Inf(1), math.Inf(-1), 0.0}
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = Ftoa(special[i%len(special)])
+		}
+	})
+
+	b.Run("random_floats", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			// Generate random float
+			f := rand.Float64()*2000.0 - 1000.0 // Range [-1000, 1000]
+			_ = Ftoa(f)
+		}
+	})
+
+	b.Run("powers_of_2", func(b *testing.B) {
+		powers := []float64{0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024}
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = Ftoa(powers[i%len(powers)])
+		}
+	})
+
+	b.Run("common_constants", func(b *testing.B) {
+		constants := []float64{math.Pi, math.E, math.Sqrt2, math.Phi, math.Ln2, math.Log2E}
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = Ftoa(constants[i%len(constants)])
+		}
+	})
+}
+
+func BenchmarkJSONParsing(b *testing.B) {
+	data := []byte(`{"key":"value","array":[1,2,3,4,5,6,7,8,9,10],"nested":{"a":"b","c":"d","e":"f"}}`)
+
+	b.Run("SkipToQuote", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = SkipToQuote(data, 0, 1)
+		}
+	})
+
+	b.Run("SkipToQuoteEarlyExit", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = SkipToQuoteEarlyExit(data, 0, 1, 10)
+		}
+	})
+
+	b.Run("SkipToOpeningBracket", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = SkipToOpeningBracket(data, 0, 1)
+		}
+	})
+
+	b.Run("SkipToClosingBracket", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = SkipToClosingBracket(data, 10, 1)
+		}
+	})
+
+	b.Run("SkipToClosingBracketEarlyExit", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = SkipToClosingBracketEarlyExit(data, 10, 1, 20)
+		}
+	})
+}
+
+func BenchmarkSystemIO(b *testing.B) {
+	testMsg := "Benchmark test message\n"
+
+	b.Run("PrintInfo", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			PrintInfo(testMsg)
+		}
+	})
+
+	b.Run("PrintWarning", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			PrintWarning(testMsg)
 		}
 	})
 }
@@ -1066,6 +1485,8 @@ func TestCleanup(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				_ = Mix64(42)
+				_ = Ftoa(3.14159)
+				_ = Itoa(123)
 			}()
 		}
 		wg.Wait()
@@ -1074,6 +1495,103 @@ func TestCleanup(t *testing.T) {
 		after := runtime.NumGoroutine()
 		if after > before {
 			t.Logf("Possible goroutine leak: before=%d, after=%d", before, after)
+		}
+	})
+
+	t.Run("memory_usage_stability", func(t *testing.T) {
+		// Test that repeated calls don't increase memory usage
+		var m1, m2 runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&m1)
+
+		// Perform many operations
+		for i := 0; i < 10000; i++ {
+			_ = Ftoa(float64(i) * 3.14159)
+			_ = Itoa(i)
+			_ = Mix64(uint64(i))
+			_ = ParseHexU64([]byte("deadbeefcafebabe"))
+		}
+
+		runtime.GC()
+		runtime.ReadMemStats(&m2)
+
+		// Memory should not have grown significantly
+		if m2.Alloc > m1.Alloc+1024*1024 { // Allow 1MB growth
+			t.Errorf("Memory usage grew unexpectedly: %d -> %d bytes", m1.Alloc, m2.Alloc)
+		}
+	})
+}
+
+// ============================================================================
+// COMPREHENSIVE STRESS TESTS
+// ============================================================================
+
+func TestStress_AllFunctions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping stress tests in short mode")
+	}
+
+	t.Run("mixed_workload", func(t *testing.T) {
+		const iterations = 100000
+
+		for i := 0; i < iterations; i++ {
+			// Mix all function types
+			f := float64(i) * 0.123456789
+			_ = Ftoa(f)
+			_ = Itoa(i % 1000000)
+			_ = Mix64(uint64(i))
+
+			hexData := []byte("deadbeefcafebabe1234567890abcdef12345678")
+			_ = ParseHexU64(hexData[:16])
+			_ = ParseHexU32(hexData[:8])
+			_ = ParseEthereumAddress(hexData[:40])
+
+			if i%1000 == 0 {
+				// Verify no allocation every 1000 iterations
+				assertZeroAllocs(t, "stress_iteration", func() {
+					_ = Ftoa(3.14159)
+					_ = Itoa(42)
+					_ = Mix64(0xDEADBEEF)
+				})
+			}
+		}
+	})
+
+	t.Run("extreme_values", func(t *testing.T) {
+		extremeFloats := []float64{
+			math.MaxFloat64,
+			math.SmallestNonzeroFloat64,
+			math.NaN(),
+			math.Inf(1),
+			math.Inf(-1),
+			1.7976931348623157e+308, // Near max
+			2.2250738585072014e-308, // Near min normal
+			4.9406564584124654e-324, // Smallest subnormal
+		}
+
+		for _, f := range extremeFloats {
+			result := Ftoa(f)
+			if len(result) == 0 {
+				t.Errorf("Ftoa(%g) returned empty string", f)
+			}
+		}
+	})
+
+	t.Run("random_data_torture", func(t *testing.T) {
+		rand.Seed(42) // Fixed seed for reproducibility
+
+		for i := 0; i < 50000; i++ {
+			// Random floats
+			bits := rand.Uint64()
+			f := math.Float64frombits(bits)
+
+			// Should never panic
+			result := Ftoa(f)
+
+			// Result should be non-empty for valid numbers
+			if !math.IsNaN(f) && !math.IsInf(f, 0) && len(result) == 0 {
+				t.Errorf("Ftoa produced empty result for valid float: %g (bits: 0x%016X)", f, bits)
+			}
 		}
 	})
 }
