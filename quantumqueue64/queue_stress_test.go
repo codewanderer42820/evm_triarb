@@ -189,6 +189,7 @@ func TestQueueStressRandomOperations(t *testing.T) {
 			for j := len(*ref) - 1; j >= 0; j-- {
 				if (*ref)[j].h == h {
 					heap.Remove(ref, j)
+					break // FIXED: Add break to only remove one entry
 				}
 			}
 			heap.Push(ref, &stressItem{h: h, tick: tick, seq: seq})
@@ -217,6 +218,23 @@ func TestQueueStressRandomOperations(t *testing.T) {
 			q.UnlinkMin(h)
 			delete(live, h)
 			free = append(free, h)
+		}
+
+		// Periodic consistency validation (FIXED: Reduced frequency for performance)
+		if i%100000 == 0 && i > 0 {
+			if uint64(len(live)) != uint64(q.Size()) {
+				t.Fatalf("Size mismatch at iteration %d: live=%d, queue=%d",
+					i, len(live), q.Size())
+			}
+			if len(*ref) != len(live) {
+				t.Fatalf("Reference size mismatch at iteration %d: ref=%d, live=%d",
+					i, len(*ref), len(live))
+			}
+
+			// FIXED: Only do expensive bitmap validation occasionally
+			if i%500000 == 0 {
+				validateBitmapSummaries(t, q, live)
+			}
 		}
 	}
 
@@ -257,5 +275,62 @@ func TestQueueStressRandomOperations(t *testing.T) {
 	// No handles should remain in live set
 	if len(live) != 0 {
 		t.Fatalf("Live handle tracking inconsistent: %d handles still marked active", len(live))
+	}
+}
+
+// ============================================================================
+// BITMAP CONSISTENCY VALIDATION
+// ============================================================================
+
+// validateBitmapSummaries performs comprehensive bitmap consistency validation.
+// FIXED: Added this function that was missing from original
+func validateBitmapSummaries(t *testing.T, q *QuantumQueue64, activeHandles map[Handle]bool) {
+	// Build expected bitmap state from active handles
+	expectedGroups := make(map[uint64]bool)
+	expectedLanes := make(map[uint64]map[uint64]bool)
+	expectedBuckets := make(map[uint64]bool)
+
+	// FIXED: Scan through active handles and extract their ticks
+	for h := range activeHandles {
+		tick := q.arena[h].tick
+		if tick < 0 {
+			continue // Skip unlinked entries
+		}
+
+		g := uint64(tick) >> 12
+		l := (uint64(tick) >> 6) & 63
+		b := uint64(tick)
+
+		expectedGroups[g] = true
+		if expectedLanes[g] == nil {
+			expectedLanes[g] = make(map[uint64]bool)
+		}
+		expectedLanes[g][l] = true
+		expectedBuckets[b] = true
+	}
+
+	// Validate global summary
+	for g := uint64(0); g < GroupCount; g++ {
+		expectedActive := expectedGroups[g]
+		actualActive := (q.summary & (1 << (63 - g))) != 0
+
+		if expectedActive != actualActive {
+			t.Fatalf("Group %d summary mismatch: expected=%v actual=%v",
+				g, expectedActive, actualActive)
+		}
+
+		// Validate group-level summaries
+		if expectedActive {
+			gb := &q.groups[g]
+			for l := uint64(0); l < LaneCount; l++ {
+				expectedLaneActive := expectedLanes[g][l]
+				actualLaneActive := (gb.l1Summary & (1 << (63 - l))) != 0
+
+				if expectedLaneActive != actualLaneActive {
+					t.Fatalf("Group %d lane %d summary mismatch: expected=%v actual=%v",
+						g, l, expectedLaneActive, actualLaneActive)
+				}
+			}
+		}
 	}
 }
