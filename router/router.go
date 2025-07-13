@@ -2001,7 +2001,7 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 //
 // 1. QUEUE MANAGEMENT: Create or locate priority queues for pair processing
 // 2. STATE INITIALIZATION: Establish cycle state storage with default values
-// 3. PRIORITY ASSIGNMENT: Insert cycles into queues with initialization priorities
+// 3. PRIORITY ASSIGNMENT: Insert cycles into queues with distributed priorities
 // 4. FANOUT CONSTRUCTION: Build cross-references for related cycle updates
 //
 // MEMORY ORGANIZATION:
@@ -2061,10 +2061,10 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 
 		// DISTRIBUTED INITIALIZATION PRIORITY GENERATION
 		//
-		// Prevent pathological queue clustering by distributing cycles across priority
-		// spectrum [196608, 262143]. Fixed MaxInitializationPriority would create
-		// identical priorities for all cycles, causing O(n) extraction degradation
-		// and cache thrashing during startup processing.
+		// Prevent pathological queue clustering by distributing cycles across
+		// the top 25% priority range [196608, 262143]. Fixed priority would
+		// create identical values causing O(n) extraction degradation and
+		// cache thrashing during startup processing.
 		cycleHash := utils.Mix64(uint64(cycleIndex))
 		randBits := cycleHash & 0xFFFF
 		initPriority := int64(196608 + randBits)
