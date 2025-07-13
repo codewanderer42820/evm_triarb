@@ -59,19 +59,14 @@ const (
 	// being updated). Therefore, the maximum possible tick sum is:
 	// 2 × 64 = ±128, requiring TickClampingBound = 128.0
 	//
-	// PREVIOUS ERROR: The original bound of 64.0 incorrectly assumed individual
-	// ticks were constrained to ±32, leading to quantization overflow when
-	// large reserve values produce tick magnitudes approaching ±64.
-	//
 	// FOOTGUN: The quantization formula assumes tick sums stay within
 	// [-128, +128]. Values outside this range will overflow the quantized
 	// integer representation, causing incorrect priority queue ordering.
 	// However, this is now mathematically impossible given our 64-bit
 	// extraction limit and 2-tick summation.
 
-	MaxQuantizedTick          = 262_143 // 18-bit ceiling (2^18 - 1)
-	QuantizationScale         = (MaxQuantizedTick - 1) / (2 * TickClampingBound)
-	MaxInitializationPriority = MaxQuantizedTick // Lowest priority for new cycles
+	MaxQuantizedTick  = 262_143 // 18-bit ceiling (2^18 - 1)
+	QuantizationScale = (MaxQuantizedTick - 1) / (2 * TickClampingBound)
 )
 
 // WebSocket configuration
