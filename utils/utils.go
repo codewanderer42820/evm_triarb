@@ -115,7 +115,7 @@ func Ftoa(f float64) string {
 			buf[i] = 'N'
 			buf[i+1] = 'a'
 			buf[i+2] = 'N'
-			return unsafe.String(&buf[i], 3)
+			return string(buf[i:])
 		}
 		// Infinity
 		if bits&0x8000000000000000 != 0 {
@@ -124,22 +124,21 @@ func Ftoa(f float64) string {
 			buf[i+1] = 'I'
 			buf[i+2] = 'n'
 			buf[i+3] = 'f'
-			return unsafe.String(&buf[i], 4)
 		} else {
 			i -= 4
 			buf[i] = '+'
 			buf[i+1] = 'I'
 			buf[i+2] = 'n'
 			buf[i+3] = 'f'
-			return unsafe.String(&buf[i], 4)
 		}
+		return string(buf[i:])
 	}
 
 	// Handle zero
 	if bits&0x7FFFFFFFFFFFFFFF == 0 {
 		i--
 		buf[i] = '0'
-		return unsafe.String(&buf[i], 1)
+		return string(buf[i:])
 	}
 
 	// Extract sign bit
@@ -172,7 +171,7 @@ func Ftoa(f float64) string {
 			i--
 			buf[i] = '-'
 		}
-		return unsafe.String(&buf[i], len(buf)-i)
+		return string(buf[i:])
 	}
 
 	// For non-integers, determine if we need scientific notation
@@ -252,25 +251,46 @@ func Ftoa(f float64) string {
 	} else {
 		// Regular decimal notation
 		intPart := uint64(absF)
-		fracPart := uint64((absF-float64(intPart))*1000000 + 0.5)
 
-		// Add fractional part if non-zero
-		if fracPart > 0 {
+		// Handle fractional part more carefully
+		fracF := absF - float64(intPart)
+		if fracF > 0 {
+			// Convert fractional part to string representation
+			// We'll extract digits one by one
+			tempF := fracF
+			fracDigits := [6]byte{}
+			fracCount := 0
+
+			// Extract up to 6 fractional digits
+			for fracCount < 6 && tempF > 0 {
+				tempF *= 10
+				digit := uint64(tempF)
+				fracDigits[fracCount] = byte(digit + '0')
+				tempF -= float64(digit)
+				fracCount++
+
+				// Stop if we've reached sufficient precision
+				if tempF < 1e-15 {
+					break
+				}
+			}
+
 			// Remove trailing zeros
-			for fracPart > 0 && fracPart%10 == 0 {
-				fracPart /= 10
+			for fracCount > 0 && fracDigits[fracCount-1] == '0' {
+				fracCount--
 			}
 
-			// Add fractional digits
-			for fracPart > 0 {
+			// Add the fractional digits in reverse order
+			if fracCount > 0 {
+				for j := fracCount - 1; j >= 0; j-- {
+					i--
+					buf[i] = fracDigits[j]
+				}
+
+				// Decimal point
 				i--
-				buf[i] = byte(fracPart%10 + '0')
-				fracPart /= 10
+				buf[i] = '.'
 			}
-
-			// Decimal point
-			i--
-			buf[i] = '.'
 		}
 
 		// Add integer part
@@ -293,7 +313,7 @@ func Ftoa(f float64) string {
 		buf[i] = '-'
 	}
 
-	return unsafe.String(&buf[i], len(buf)-i)
+	return string(buf[i:])
 }
 
 // ============================================================================
