@@ -314,11 +314,13 @@
 package router
 
 import (
+	"database/sql"
 	"fmt"
 	"hash"
 	"math/bits"
 	"os"
 	"runtime"
+	"strings"
 	"unsafe"
 
 	"main/constants"
@@ -353,6 +355,27 @@ func init() {
 
 	// Launch the complete arbitrage detection system
 	InitializeArbitrageSystem(cycles)
+}
+
+// init automatically loads trading pairs from database and arbitrage cycles from file.
+//
+// This function runs once when the package is imported, loading both the trading
+// pair data from the SQLite database and the arbitrage cycle definitions from
+// the configuration file to fully initialize the arbitrage detection system.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func init() {
+	// COMPLETE DATABASE-DRIVEN INITIALIZATION
+	//
+	// Load trading pairs from SQLite database and arbitrage cycles from file,
+	// then initialize the complete arbitrage detection system.
+	err := initializeFromDatabase("uniswap_pairs.db", "cycles_3_3.txt")
+	if err != nil {
+		panic(fmt.Sprintf("Failed to initialize arbitrage system: %v", err))
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -2432,4 +2455,173 @@ func loadArbitrageCyclesFromFile(filename string) ([]ArbitrageTriplet, error) {
 	}
 
 	return cycles, nil
+}
+
+// loadPoolsFromDatabase reads trading pairs from the SQLite database created by main.go.
+//
+// This function connects to the uniswap_pairs.db database and loads all trading
+// pairs with their pool addresses. Each pool becomes a PairID in our system,
+// and the pool addresses are registered for event processing.
+//
+// DATABASE SCHEMA INTEGRATION:
+//
+// The ingester creates:
+// • pools.id → becomes our PairID
+// • pools.pool_address → registered with RegisterPairAddress()
+// • pools.token0_id, pools.token1_id → for pair identification
+// • pools.fee_bps → for future fee calculations
+//
+// PERFORMANCE CHARACTERISTICS:
+//
+// • Single SQL query with JOIN to get complete pair information
+// • Batch address registration for optimal hash table population
+// • Pre-allocated slices based on row count estimates
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func loadPoolsFromDatabase(dbPath string) error {
+	// OPEN DATABASE CONNECTION
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database %s: %v", dbPath, err)
+	}
+	defer db.Close()
+
+	// QUERY ALL TRADING PAIRS WITH TOKEN INFORMATION
+	//
+	// Join pools with tokens to get complete pair information including
+	// pool addresses and token addresses for comprehensive pair data.
+	const query = `
+		SELECT 
+			p.id,
+			p.pool_address,
+			t0.address as token0_address,
+			t1.address as token1_address,
+			p.fee_bps,
+			e.name as exchange_name
+		FROM pools p
+		JOIN tokens t0 ON p.token0_id = t0.id  
+		JOIN tokens t1 ON p.token1_id = t1.id
+		JOIN exchanges e ON p.exchange_id = e.id
+		ORDER BY p.id`
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return fmt.Errorf("failed to query pools: %v", err)
+	}
+	defer rows.Close()
+
+	// PROCESS EACH TRADING PAIR
+	//
+	// Register each pool address with its corresponding PairID in the
+	// Robin Hood hash table for O(1) event dispatch lookup.
+	count := 0
+	for rows.Next() {
+		var (
+			pairID        int64
+			poolAddress   string
+			token0Address string
+			token1Address string
+			feeBps        sql.NullInt64
+			exchangeName  string
+		)
+
+		err := rows.Scan(&pairID, &poolAddress, &token0Address,
+			&token1Address, &feeBps, &exchangeName)
+		if err != nil {
+			return fmt.Errorf("failed to scan pool row: %v", err)
+		}
+
+		// VALIDATE POOL ADDRESS FORMAT
+		//
+		// Ensure pool address is valid 42-character hex format required
+		// by the address resolution system.
+		if !isValidEthereumAddress(poolAddress) {
+			continue // Skip invalid addresses
+		}
+
+		// REGISTER POOL ADDRESS FOR EVENT PROCESSING
+		//
+		// Convert pool address to bytes and register with PairID for
+		// event dispatch lookup during Uniswap Sync event processing.
+		poolAddressBytes := []byte(strings.TrimPrefix(poolAddress, "0x"))
+		if len(poolAddressBytes) == 40 { // 40 hex chars = 20 bytes
+			RegisterPairAddress(poolAddressBytes, PairID(pairID))
+			count++
+		}
+	}
+
+	if err = rows.Err(); err != nil {
+		return fmt.Errorf("error reading pool rows: %v", err)
+	}
+
+	fmt.Printf("Loaded %d trading pairs from database\n", count)
+	return nil
+}
+
+// isValidEthereumAddress validates Ethereum address format for pool addresses.
+//
+// This function ensures pool addresses conform to the expected format before
+// registration in the address resolution hash table.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func isValidEthereumAddress(addr string) bool {
+	// REMOVE 0x PREFIX
+	addr = strings.TrimPrefix(addr, "0x")
+
+	// VALIDATE LENGTH (40 hex characters = 20 bytes)
+	if len(addr) != 40 {
+		return false
+	}
+
+	// VALIDATE HEX CHARACTERS
+	for _, c := range addr {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// initializeFromDatabase provides complete system initialization from database.
+//
+// This function replaces the file-based initialization with database-driven
+// setup, loading both trading pairs and arbitrage cycles for complete system
+// operation.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func initializeFromDatabase(dbPath string, cyclesFile string) error {
+	// LOAD TRADING PAIRS FROM DATABASE
+	//
+	// Populate the address resolution hash table with all trading pairs
+	// from the SQLite database created by the ingester.
+	if err := loadPoolsFromDatabase(dbPath); err != nil {
+		return fmt.Errorf("failed to load pools from database: %v", err)
+	}
+
+	// LOAD ARBITRAGE CYCLES FROM FILE
+	//
+	// Parse arbitrage cycle definitions to establish the trading relationships
+	// for profitable opportunity detection.
+	cycles, err := loadArbitrageCyclesFromFile(cyclesFile)
+	if err != nil {
+		return fmt.Errorf("failed to load arbitrage cycles: %v", err)
+	}
+
+	// INITIALIZE ARBITRAGE DETECTION SYSTEM
+	//
+	// Launch the complete arbitrage detection engine with loaded pairs and cycles.
+	InitializeArbitrageSystem(cycles)
+
+	return nil
 }
