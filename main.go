@@ -28,7 +28,6 @@ import (
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func init() {
@@ -150,6 +149,7 @@ func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriplet, er
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func loadPoolsFromDatabase(dbPath string) error {
@@ -216,6 +216,7 @@ func loadPoolsFromDatabase(dbPath string) error {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func initializeFromDatabase(dbPath string, cyclesFile string) error {
