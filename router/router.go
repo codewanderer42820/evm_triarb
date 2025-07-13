@@ -2054,15 +2054,17 @@ func attachShardToExecutor(executor *ArbitrageCoreExecutor, shard *PairShardBuck
 
 		// PRIORITY QUEUE INTEGRATION
 		//
-		// Allocate queue handle and insert cycle with maximum initialization
-		// priority to ensure proper queue ordering. Handle exhaustion is
-		// impossible as queue capacity exceeds maximum cycle count by design.
+		// Allocate queue handle and insert cycle with distributed initialization
+		// priority to prevent clustering. Handle exhaustion is impossible as
+		// queue capacity exceeds maximum cycle count by design.
 		queueHandle, _ := queue.Borrow()
 
 		// DISTRIBUTED INITIALIZATION PRIORITY GENERATION
 		//
-		// Direct integer mapping without scaling - bit range perfectly
-		// matches target priority range for optimal performance.
+		// Prevent pathological queue clustering by distributing cycles across priority
+		// spectrum [196608, 262143]. Fixed MaxInitializationPriority would create
+		// identical priorities for all cycles, causing O(n) extraction degradation
+		// and cache thrashing during startup processing.
 		cycleHash := utils.Mix64(uint64(cycleIndex))
 		randBits := cycleHash & 0xFFFF
 		initPriority := int64(196608 + randBits)
