@@ -974,15 +974,24 @@ func DispatchTickUpdate(logView *types.LogView) {
 		//
 		// When reserves are invalid (typically zero), generate a bounded random
 		// value using cryptographic mixing to prevent priority queue clustering.
-		// The range [51.2, 64.0] ensures corrupted data doesn't interfere with
-		// profitable arbitrage opportunities (which cluster around 0) while maintaining
-		// perfect distribution across priority queue buckets.
 		//
-		// CRITICAL: Both forward and reverse ticks must be positive to ensure
-		// invalid data deprioritizes cycles in both directions.
+		// RANGE DESIGN: [50.2, 62.998...]
+		//   - Starting at 50.2 provides substantial safety margin below the 64.0 hard limit
+		//   - With 13-bit precision (0x1FFF = 8191), max value is 50.2 + 8191*0.0015625 = 62.9984375
+		//   - This leaves ~1.0 unit safety margin to prevent floating-point rounding errors
+		//     from exceeding the critical 64.0 threshold
+		//   - Range is far above profitable arbitrage opportunities (which cluster around 0)
+		//   - Both forward and reverse ticks remain positive, ensuring invalid data
+		//     gets consistently deprioritized in both trading directions
+		//
+		// PRECISION: 0.0015625 step size (1/640) provides 8192 distinct values
+		// for uniform distribution across priority queue buckets
+		//
+		// CRITICAL: Values must never reach 64.0 as this could interfere with
+		// the priority queue's profitable arbitrage detection
 		addrHash := utils.Mix64(uint64(pairID))
 		randBits := addrHash & 0x1FFF // Extract 13 bits for range [0, 8191]
-		placeholder := 51.2 + float64(randBits)*0.0015625
+		placeholder := 50.2 + float64(randBits)*0.0015625
 
 		message = TickUpdate{
 			pairID:      pairID,
