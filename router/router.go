@@ -317,6 +317,7 @@ import (
 	"fmt"
 	"hash"
 	"math/bits"
+	"os"
 	"runtime"
 	"unsafe"
 
@@ -2296,4 +2297,118 @@ func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 	for _, channel := range shardChannels {
 		close(channel)
 	}
+}
+
+// loadArbitrageCyclesFromFile loads cycles using simple parentheses extraction.
+//
+// This function implements the straightforward approach: find 3 pairs of parentheses
+// per line, extract the numbers inside them, and build ArbitrageTriplet objects.
+// No complex structural validation - just extract what we need for the system to work.
+//
+// PERFORMANCE CHARACTERISTICS:
+//
+// • Single file read using os.ReadFile
+// • Zero-allocation digit parsing using direct byte operations
+// • Simple linear scan for parentheses pairs
+// • Pre-allocated result slice to minimize growth overhead
+//
+// PARSING STRATEGY:
+//
+// 1. Scan each line for opening parenthesis '('
+// 2. Extract digits until closing parenthesis ')'
+// 3. Convert to PairID and store
+// 4. Repeat 3 times per line
+// 5. Build ArbitrageTriplet from the 3 extracted pair IDs
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func loadArbitrageCyclesFromFile(filename string) ([]ArbitrageTriplet, error) {
+	// SINGLE FILE READ
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	// PRE-ALLOCATE RESULT SLICE
+	estimatedCycles := len(data) / 50 // Rough estimate based on average line length
+	if estimatedCycles < 100 {
+		estimatedCycles = 100
+	}
+	cycles := make([]ArbitrageTriplet, 0, estimatedCycles)
+
+	// LINE-BY-LINE PROCESSING
+	i := 0
+	dataLen := len(data)
+
+	for i < dataLen {
+		var pairIDs [3]uint64
+		pairCount := 0
+
+		// EXTRACT 3 PAIRS FROM CURRENT LINE
+		for pairCount < 3 && i < dataLen && data[i] != '\n' {
+			// FIND OPENING PARENTHESIS
+			for i < dataLen && data[i] != '(' && data[i] != '\n' {
+				i++
+			}
+
+			// CHECK IF WE HIT END OF LINE OR FILE
+			if i >= dataLen || data[i] == '\n' {
+				break
+			}
+
+			i++ // Skip opening '('
+
+			// EXTRACT DIGITS
+			pairID := uint64(0)
+			digitFound := false
+			for i < dataLen && data[i] >= '0' && data[i] <= '9' {
+				pairID = pairID*10 + uint64(data[i]-'0')
+				digitFound = true
+				i++
+			}
+
+			// FIND CLOSING PARENTHESIS
+			for i < dataLen && data[i] != ')' && data[i] != '\n' {
+				i++
+			}
+
+			// STORE VALID PAIR ID
+			if digitFound && pairID > 0 {
+				pairIDs[pairCount] = pairID
+				pairCount++
+			}
+
+			// SKIP CLOSING PARENTHESIS IF FOUND
+			if i < dataLen && data[i] == ')' {
+				i++
+			}
+		}
+
+		// SKIP TO NEXT LINE
+		for i < dataLen && data[i] != '\n' {
+			i++
+		}
+		if i < dataLen {
+			i++ // Skip newline
+		}
+
+		// CREATE ARBITRAGE TRIPLET IF WE FOUND 3 PAIRS
+		if pairCount == 3 {
+			cycles = append(cycles, ArbitrageTriplet{
+				PairID(pairIDs[0]),
+				PairID(pairIDs[1]),
+				PairID(pairIDs[2]),
+			})
+		}
+	}
+
+	// ENSURE WE LOADED SOME CYCLES
+	if len(cycles) == 0 {
+		return nil, fmt.Errorf("no valid arbitrage cycles found in file %s", filename)
+	}
+
+	return cycles, nil
 }
