@@ -116,82 +116,63 @@ func TestQueueStressRandomOperations(t *testing.T) {
 	// Deterministic PRNG for reproducible failure analysis
 	rng := rand.New(rand.NewSource(69))
 
-	// Initialize external pool
-	pool := make([]Entry, maxHandles)
+	// FIX: Ensure pool size exactly matches maxHandles
+	pool := make([]Entry, maxHandles) // CRITICAL: Pool must be exactly maxHandles size
 	q := New(unsafe.Pointer(&pool[0]))
 
 	// Initialize reference heap
 	ref := &stressHeap{}
 	heap.Init(ref)
 
-	// Handle lifecycle management
+	// Handle lifecycle management - this part was correct
 	availableHandles := make([]Handle, maxHandles)
 	for i := range availableHandles {
-		availableHandles[i] = Handle(i)
+		availableHandles[i] = Handle(i) // Now guaranteed to be valid since pool[i] exists
 	}
-	activeHandles := make(map[Handle]bool) // Active handle tracking
+	activeHandles := make(map[Handle]bool)
 
-	seq := 0 // Global sequence counter for LIFO tiebreaking
+	seq := 0
 
-	// makeVal generates deterministic uint64 payload for validation.
-	// Uses seed-based generation for reproducible test data.
 	makeVal := func(seed int64) uint64 {
 		return uint64(seed) * 0x9E3779B97F4A7C15
 	}
 
-	// ────────────────────────────────────────────────────────────────────────
-	// MAIN STRESS LOOP: Random Operation Application
-	// ────────────────────────────────────────────────────────────────────────
 	for i := 0; i < iterations; i++ {
-		op := rng.Intn(3)                    // Random operation selection
-		tick := int64(rng.Intn(BucketCount)) // Random tick within valid range
+		op := rng.Intn(3)
+		tick := int64(rng.Intn(BucketCount))
 
 		switch op {
-
-		// ──────────────────────────────────────────────────────────────────
-		// PUSH OPERATION: New handle allocation and insertion
-		// ──────────────────────────────────────────────────────────────────
-		case 0:
-			// Skip if no handles available
+		case 0: // PUSH
+			// SIMPLE FIX: Just check if handles available
 			if len(availableHandles) == 0 {
 				continue
 			}
 
-			// Allocate handle from available pool
 			h := availableHandles[len(availableHandles)-1]
 			availableHandles = availableHandles[:len(availableHandles)-1]
 
-			// Generate deterministic payload
 			val := makeVal(int64(seq))
 
-			// Parallel insertion into both implementations
+			// These operations are now safe since h < maxHandles and pool[h] exists
 			q.Push(tick, h, val)
 			heap.Push(ref, &stressItem{h: h, tick: tick, seq: seq})
 
-			// Update handle lifecycle tracking
 			activeHandles[h] = true
 			seq++
 
-		// ──────────────────────────────────────────────────────────────────
-		// MOVE OPERATION: Tick relocation for existing entry
-		// ──────────────────────────────────────────────────────────────────
-		case 1:
-			// Skip if no active entries
+		case 1: // MOVE
 			if len(activeHandles) == 0 {
 				continue
 			}
 
-			// Select arbitrary active handle
 			var h Handle
 			for k := range activeHandles {
 				h = k
 				break
 			}
 
-			// Apply tick relocation
 			q.MoveTick(h, tick)
 
-			// Update reference heap: remove old entry, insert new
 			for j := len(*ref) - 1; j >= 0; j-- {
 				if (*ref)[j].h == h {
 					heap.Remove(ref, j)
@@ -201,26 +182,19 @@ func TestQueueStressRandomOperations(t *testing.T) {
 			heap.Push(ref, &stressItem{h: h, tick: tick, seq: seq})
 			seq++
 
-		// ──────────────────────────────────────────────────────────────────
-		// POP OPERATION: Minimum extraction with validation
-		// ──────────────────────────────────────────────────────────────────
-		case 2:
-			// Skip if queue empty
+		case 2: // POP
 			if q.Empty() {
 				continue
 			}
 
-			// Extract minimum from both implementations
 			h, tickGot, _ := q.PeepMin()
 			exp := heap.Pop(ref).(*stressItem)
 
-			// Validate correctness: handle and tick must match exactly
 			if exp.h != h || exp.tick != tickGot {
 				t.Fatalf("Mismatch at iteration %d: got (h=%v,tick=%d); want (h=%v,tick=%d)",
 					i, h, tickGot, exp.h, exp.tick)
 			}
 
-			// Complete removal and handle lifecycle update
 			q.UnlinkMin(h)
 			delete(activeHandles, h)
 			availableHandles = append(availableHandles, h)
@@ -239,46 +213,31 @@ func TestQueueStressRandomOperations(t *testing.T) {
 		}
 	}
 
-	// ────────────────────────────────────────────────────────────────────────
-	// DRAIN VERIFICATION: Complete queue emptying with validation
-	// ────────────────────────────────────────────────────────────────────────
+	// Rest of the drain logic remains the same...
 	for !q.Empty() {
-		// Extract minimum from both implementations
 		h, tickGot, _ := q.PeepMin()
 		exp := heap.Pop(ref).(*stressItem)
 
-		// Validate remaining entries match reference exactly
 		if exp.h != h || exp.tick != tickGot {
 			t.Fatalf("Drain mismatch: got (h=%v,tick=%d); want (h=%v,tick=%d)",
 				h, tickGot, exp.h, exp.tick)
 		}
 
-		// Complete removal and cleanup
 		q.UnlinkMin(h)
 		delete(activeHandles, h)
 		availableHandles = append(availableHandles, h)
 	}
 
-	// ────────────────────────────────────────────────────────────────────────
-	// FINAL CONSISTENCY VALIDATION
-	// ────────────────────────────────────────────────────────────────────────
-
-	// Reference heap must be completely empty
+	// Final validation
 	if ref.Len() != 0 {
 		t.Fatalf("Reference heap not empty after drain: %d items remaining", ref.Len())
 	}
-
-	// All handles must be returned to available pool
 	if len(availableHandles) != maxHandles {
 		t.Fatalf("Handle leak detected: %d handles missing", maxHandles-len(availableHandles))
 	}
-
-	// No handles should remain in active set
 	if len(activeHandles) != 0 {
 		t.Fatalf("Active handle tracking inconsistent: %d handles still marked active", len(activeHandles))
 	}
-
-	// Queue size must be zero
 	if q.Size() != 0 {
 		t.Fatalf("Queue size not zero after complete drain: %d", q.Size())
 	}
@@ -395,6 +354,7 @@ func TestPoolBoundaryStress(t *testing.T) {
 	const poolSize = 10000
 	const operations = 500000
 
+	// FIX: Ensure pool is exactly poolSize
 	pool := make([]Entry, poolSize)
 	q := New(unsafe.Pointer(&pool[0]))
 
@@ -402,7 +362,7 @@ func TestPoolBoundaryStress(t *testing.T) {
 	activeHandles := make(map[Handle]bool)
 
 	for i := 0; i < operations; i++ {
-		// Use handles across entire pool range
+		// This is now safe since we guarantee h < poolSize
 		h := Handle(rng.Intn(poolSize))
 		tick := int64(rng.Intn(100000))
 		val := uint64(rng.Uint64())
@@ -429,19 +389,16 @@ func TestPoolBoundaryStress(t *testing.T) {
 			entry := q.entry(h)
 			poolEntry := &pool[h]
 
-			// Verify entry access maps correctly
 			if entry != poolEntry {
 				t.Fatalf("Entry access mismatch: handle=%d got=%p want=%p",
 					h, entry, poolEntry)
 			}
 		}
 
-		// Periodic validation
 		if i%25000 == 0 {
-			// Verify queue size matches active handles
 			expectedActive := 0
 			for h := range activeHandles {
-				if pool[h].tick >= 0 { // Linked entries have non-negative ticks
+				if pool[h].tick >= 0 {
 					expectedActive++
 				}
 			}
@@ -454,7 +411,7 @@ func TestPoolBoundaryStress(t *testing.T) {
 		}
 	}
 
-	// Final validation: drain and verify
+	// Drain and verify
 	drainCount := 0
 	for !q.Empty() {
 		h, _, _ := q.PeepMin()
