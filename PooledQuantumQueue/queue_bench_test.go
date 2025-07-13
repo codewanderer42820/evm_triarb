@@ -54,10 +54,12 @@ const (
 func BenchmarkEmpty(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	q := New(unsafe.Pointer(&pool[0]))
+	var result bool // FIXED: Capture result to prevent optimization
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = q.Empty()
+		result = q.Empty() // FIXED: Use the result
 	}
+	_ = result // FIXED: Prevent compiler from optimizing away the call
 }
 
 // BenchmarkSize measures the cost of queue size retrieval.
@@ -68,10 +70,12 @@ func BenchmarkEmpty(b *testing.B) {
 func BenchmarkSize(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	q := New(unsafe.Pointer(&pool[0]))
+	var result uint64 // FIXED: Capture result to prevent optimization
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = q.Size()
+		result = q.Size() // FIXED: Use the result
 	}
+	_ = result // FIXED: Prevent compiler from optimizing away the call
 }
 
 // ============================================================================
@@ -111,7 +115,7 @@ func BenchmarkPushUpdate(b *testing.B) {
 	q := New(unsafe.Pointer(&pool[0]))
 	const initValue = uint64(0x1111111111111111)
 	const updateValue = uint64(0x2222222222222222)
-	
+
 	// Pre-populate with initial values
 	for i := 0; i < benchHandles; i++ {
 		h := Handle(i)
@@ -254,17 +258,22 @@ func BenchmarkPushBursty(b *testing.B) {
 func BenchmarkPeepMin(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	q := New(unsafe.Pointer(&pool[0]))
-	
+
 	// Pre-populate queue
 	for i := 0; i < benchHandles; i++ {
 		h := Handle(i)
 		q.Push(int64(i), h, uint64(i))
 	}
+
+	var h Handle    // FIXED: Capture all results
+	var tick int64  // FIXED: Capture all results
+	var data uint64 // FIXED: Capture all results
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		q.PeepMin()
+		h, tick, data = q.PeepMin() // FIXED: Use all return values
 	}
+	_, _, _ = h, tick, data // FIXED: Prevent optimization
 }
 
 // BenchmarkPeepMinSparse measures minimum finding in sparse queues.
@@ -286,11 +295,16 @@ func BenchmarkPeepMinSparse(b *testing.B) {
 		tick := int64(i * (BucketCount / sparseCount))
 		q.Push(tick, h, uint64(i))
 	}
+
+	var h Handle    // FIXED: Capture all results
+	var tick int64  // FIXED: Capture all results
+	var data uint64 // FIXED: Capture all results
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		q.PeepMin()
+		h, tick, data = q.PeepMin() // FIXED: Use all return values
 	}
+	_, _, _ = h, tick, data // FIXED: Prevent optimization
 }
 
 // BenchmarkPeepMinDense measures minimum finding in dense queues.
@@ -311,11 +325,16 @@ func BenchmarkPeepMinDense(b *testing.B) {
 		tick := int64(i % (BucketCount * 9 / 10))
 		q.Push(tick, h, uint64(i))
 	}
+
+	var h Handle    // FIXED: Capture all results
+	var tick int64  // FIXED: Capture all results
+	var data uint64 // FIXED: Capture all results
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		q.PeepMin()
+		h, tick, data = q.PeepMin() // FIXED: Use all return values
 	}
+	_, _, _ = h, tick, data // FIXED: Prevent optimization
 }
 
 // ============================================================================
@@ -357,7 +376,7 @@ func BenchmarkUnlinkMin_DenseBucket(b *testing.B) {
 	q := New(unsafe.Pointer(&pool[0]))
 	hs := [3]Handle{0, 1, 2}
 	const testValue = uint64(0x7777777777777777)
-	
+
 	for i := 0; i < 3; i++ {
 		q.Push(1234, hs[i], testValue)
 	}
@@ -436,7 +455,7 @@ func BenchmarkUnlinkMin_ScatterCollapse(b *testing.B) {
 func BenchmarkMoveTick(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	q := New(unsafe.Pointer(&pool[0]))
-	
+
 	// Pre-populate with handles
 	for i := 0; i < benchHandles; i++ {
 		h := Handle(i)
@@ -461,7 +480,7 @@ func BenchmarkMoveTick(b *testing.B) {
 func BenchmarkMoveTickNoop(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	q := New(unsafe.Pointer(&pool[0]))
-	
+
 	// Pre-populate with handles
 	for i := 0; i < benchHandles; i++ {
 		h := Handle(i)
@@ -487,7 +506,7 @@ func BenchmarkMoveTickNoop(b *testing.B) {
 func BenchmarkMoveTickRandom(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	q := New(unsafe.Pointer(&pool[0]))
-	
+
 	// Pre-populate with handles
 	for i := 0; i < benchHandles; i++ {
 		h := Handle(i)
@@ -527,7 +546,7 @@ func BenchmarkSharedPoolMultiQueue(b *testing.B) {
 	q1 := New(unsafe.Pointer(&pool[0]))
 	q2 := New(unsafe.Pointer(&pool[0]))
 	q3 := New(unsafe.Pointer(&pool[0]))
-	
+
 	const testValue = uint64(0xAAAAAAAAAAAAAAAA)
 	b.ResetTimer()
 
@@ -535,13 +554,13 @@ func BenchmarkSharedPoolMultiQueue(b *testing.B) {
 		// Round-robin across queues with different handle ranges
 		switch i % 3 {
 		case 0:
-			h := Handle(i%1000 + 1000)        // Range 1000-1999
+			h := Handle(i%1000 + 1000) // Range 1000-1999
 			q1.Push(int64(i%1000), h, testValue)
 		case 1:
-			h := Handle(i%1000 + 2000)        // Range 2000-2999
+			h := Handle(i%1000 + 2000) // Range 2000-2999
 			q2.Push(int64(i%1000), h, testValue)
 		case 2:
-			h := Handle(i%1000 + 3000)        // Range 3000-3999
+			h := Handle(i%1000 + 3000) // Range 3000-3999
 			q3.Push(int64(i%1000), h, testValue)
 		}
 	}
@@ -558,15 +577,15 @@ func BenchmarkSharedPoolMultiQueue(b *testing.B) {
 func BenchmarkPoolUtilization(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	q := New(unsafe.Pointer(&pool[0]))
-	
+
 	const testValue = uint64(0xBBBBBBBBBBBBBBBB)
-	
+
 	// Use widely distributed handles across pool
 	handles := make([]Handle, 1000)
 	for i := range handles {
 		handles[i] = Handle(i * (benchPoolSize / 1000))
 	}
-	
+
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
@@ -615,7 +634,7 @@ func BenchmarkMixedOperations(b *testing.B) {
 
 		case op < 0.7: // 30% PeepMin
 			if !q.Empty() {
-				q.PeepMin()
+				_, _, _ = q.PeepMin() // FIXED: Use return values to prevent optimization
 			}
 
 		case op < 0.9: // 20% UnlinkMin
@@ -646,10 +665,10 @@ func BenchmarkHighContention(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	q := New(unsafe.Pointer(&pool[0]))
 	const testValue = uint64(0xDDDDDDDDDDDDDDDD)
-	
+
 	// All operations within narrow range for maximum contention
 	const contentionRange = 64
-	
+
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
