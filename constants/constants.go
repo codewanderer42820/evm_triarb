@@ -33,8 +33,8 @@ const (
 	// In triangular arbitrage, we sum 2 populated tick values (3rd tick is always 0).
 	// Maximum possible tick sum: 2 × 64 = ±128, requiring TickClampingBound = 128.0
 
-	MaxQuantizedTick  = 262_143 // 18-bit ceiling (2^18 - 1) - aligns with queue buckets
-	QuantizationScale = (MaxQuantizedTick - 1) / (2 * TickClampingBound)
+	MaxQuantizedTick  = 262_143                                          // 18-bit ceiling (2^18 - 1) - aligns with queue buckets
+	QuantizationScale = (MaxQuantizedTick - 1) / (2 * TickClampingBound) // -1 prevents rounding overflow past MaxQuantizedTick
 )
 
 // WebSocket configuration
