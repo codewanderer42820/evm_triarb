@@ -1,3 +1,45 @@
+// ============================================================================
+// ROUTER TEST SUITE WITH POOLED QUANTUM QUEUE INTEGRATION
+// ============================================================================
+//
+// Comprehensive test coverage for the 57ns triangular arbitrage detection engine
+// with integrated PooledQuantumQueue architecture and shared memory pools.
+//
+// Test categories:
+//   - Core type structure validation and memory layout verification
+//   - Hex parsing and address conversion correctness
+//   - Robin Hood hash table displacement and collision handling
+//   - Address registration and lookup performance validation
+//   - Cryptographic randomness and deterministic shuffling
+//   - Event dispatch pipeline and tick update processing
+//   - Ring buffer overflow and retry logic stress testing
+//   - Quantization and core processing with pooled queues
+//   - Fanout processing and priority queue operations
+//   - Shard construction and system initialization
+//   - High-volume operations and extreme value handling
+//   - End-to-end integration and performance benchmarks
+//
+// Architecture validation:
+//   - Zero-allocation hot paths with pooled memory architecture
+//   - Multi-core parallelism and lock-free inter-core communication
+//   - Robin Hood address resolution with backward shift deletion
+//   - Branchless algorithms and mathematical correctness
+//   - Shared memory pool efficiency and cache locality
+//
+// Performance benchmarks:
+//   - Event processing: Target 46 nanoseconds per Uniswap V2 Sync event
+//   - Address resolution: Target 14 nanoseconds per lookup
+//   - Arbitrage detection: Target 7 nanoseconds per cycle update
+//   - System throughput: Linear scaling up to 64 CPU cores
+//   - Memory efficiency: Zero allocations in all hot paths
+//
+// Safety model testing:
+//   - Footgun behavior validation under extreme conditions
+//   - Protocol violation detection and graceful degradation
+//   - Bounded buffer overflow handling and retry mechanisms
+//   - Handle lifecycle management with external allocation
+//   - Pool boundary validation and memory coherency
+
 package router
 
 import (
@@ -11,7 +53,7 @@ import (
 
 	"main/constants"
 	"main/localidx"
-	"main/quantumqueue64"
+	"main/pooledquantumqueue" // FIXED: Import correct package
 	"main/ring24"
 	"main/types"
 	"main/utils"
@@ -1053,17 +1095,29 @@ func TestCoreProcessingLogic(t *testing.T) {
 	fixture.SetUp()
 
 	t.Run("ForwardDirectionProcessing", func(t *testing.T) {
+		// FIXED: Create proper shared pool and initialize
+		pool := make([]pooledquantumqueue.Entry, 1000)
+		for i := range pool {
+			pool[i].Tick = -1
+			pool[i].Prev = pooledquantumqueue.Handle(^uint64(0))
+			pool[i].Next = pooledquantumqueue.Handle(^uint64(0))
+			pool[i].Data = 0
+		}
+
 		executor := &ArbitrageCoreExecutor{
 			pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
 			isReverseDirection: false,
 			cycleStates:        make([]ArbitrageCycleState, 10),
 			fanoutTables:       make([][]FanoutEntry, 1),
-			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
+			priorityQueues:     make([]pooledquantumqueue.PooledQuantumQueue, 1), // FIXED: Correct type
+			sharedArena:        pool,                                             // FIXED: Add shared arena
 		}
 
-		executor.priorityQueues[0] = *quantumqueue64.New()
+		// FIXED: Initialize queue with pool
+		executor.priorityQueues[0] = *pooledquantumqueue.New(unsafe.Pointer(&pool[0]))
 
-		handle, _ := executor.priorityQueues[0].BorrowSafe()
+		// FIXED: Manual handle management instead of BorrowSafe
+		handle := pooledquantumqueue.Handle(0)
 
 		// DISTRIBUTED INITIALIZATION PRIORITY GENERATION
 		//
@@ -1092,17 +1146,29 @@ func TestCoreProcessingLogic(t *testing.T) {
 	})
 
 	t.Run("ReverseDirectionProcessing", func(t *testing.T) {
+		// FIXED: Create proper shared pool and initialize
+		pool := make([]pooledquantumqueue.Entry, 1000)
+		for i := range pool {
+			pool[i].Tick = -1
+			pool[i].Prev = pooledquantumqueue.Handle(^uint64(0))
+			pool[i].Next = pooledquantumqueue.Handle(^uint64(0))
+			pool[i].Data = 0
+		}
+
 		executor := &ArbitrageCoreExecutor{
 			pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
 			isReverseDirection: true,
 			cycleStates:        make([]ArbitrageCycleState, 10),
 			fanoutTables:       make([][]FanoutEntry, 1),
-			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
+			priorityQueues:     make([]pooledquantumqueue.PooledQuantumQueue, 1), // FIXED: Correct type
+			sharedArena:        pool,                                             // FIXED: Add shared arena
 		}
 
-		executor.priorityQueues[0] = *quantumqueue64.New()
+		// FIXED: Initialize queue with pool
+		executor.priorityQueues[0] = *pooledquantumqueue.New(unsafe.Pointer(&pool[0]))
 
-		handle, _ := executor.priorityQueues[0].BorrowSafe()
+		// FIXED: Manual handle management instead of BorrowSafe
+		handle := pooledquantumqueue.Handle(0)
 
 		// DISTRIBUTED INITIALIZATION PRIORITY GENERATION
 		//
@@ -1141,17 +1207,27 @@ func TestFanoutProcessingLogic(t *testing.T) {
 	fixture.SetUp()
 
 	t.Run("FanoutTickValueUpdates", func(t *testing.T) {
+		// FIXED: Create proper shared pool and initialize
+		pool := make([]pooledquantumqueue.Entry, 1000)
+		for i := range pool {
+			pool[i].Tick = -1
+			pool[i].Prev = pooledquantumqueue.Handle(^uint64(0))
+			pool[i].Next = pooledquantumqueue.Handle(^uint64(0))
+			pool[i].Data = 0
+		}
+
 		// Create an executor with cycles and fanout tables
 		executor := &ArbitrageCoreExecutor{
 			pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
 			isReverseDirection: false,
 			cycleStates:        make([]ArbitrageCycleState, 3),
 			fanoutTables:       make([][]FanoutEntry, 1),
-			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
+			priorityQueues:     make([]pooledquantumqueue.PooledQuantumQueue, 1), // FIXED: Correct type
+			sharedArena:        pool,                                             // FIXED: Add shared arena
 		}
 
 		// Initialize priority queue
-		executor.priorityQueues[0] = *quantumqueue64.New()
+		executor.priorityQueues[0] = *pooledquantumqueue.New(unsafe.Pointer(&pool[0]))
 
 		// Create cycle states with known initial values
 		executor.cycleStates[0] = ArbitrageCycleState{
@@ -1167,10 +1243,10 @@ func TestFanoutProcessingLogic(t *testing.T) {
 			tickValues: [3]float64{0.0, -2.0, 1.0}, // Initial sum = -1.0
 		}
 
-		// Add handles to the queue for MoveTick operations
-		handle0, _ := executor.priorityQueues[0].BorrowSafe()
-		handle1, _ := executor.priorityQueues[0].BorrowSafe()
-		handle2, _ := executor.priorityQueues[0].BorrowSafe()
+		// FIXED: Manual handle management
+		handle0 := pooledquantumqueue.Handle(0)
+		handle1 := pooledquantumqueue.Handle(1)
+		handle2 := pooledquantumqueue.Handle(2)
 
 		// Set up fanout table for pair 1 (affects edge 0 of each cycle)
 		executor.fanoutTables[0] = []FanoutEntry{
@@ -1178,19 +1254,19 @@ func TestFanoutProcessingLogic(t *testing.T) {
 				cycleStateIndex: 0,
 				edgeIndex:       0, // Update first edge of cycle 0
 				queue:           &executor.priorityQueues[0],
-				queueHandle:     uint64(handle0),
+				queueHandle:     handle0, // FIXED: Direct handle, no uint64 conversion
 			},
 			{
 				cycleStateIndex: 1,
 				edgeIndex:       0, // Update first edge of cycle 1
 				queue:           &executor.priorityQueues[0],
-				queueHandle:     uint64(handle1),
+				queueHandle:     handle1, // FIXED: Direct handle, no uint64 conversion
 			},
 			{
 				cycleStateIndex: 2,
 				edgeIndex:       0, // Update first edge of cycle 2
 				queue:           &executor.priorityQueues[0],
-				queueHandle:     uint64(handle2),
+				queueHandle:     handle2, // FIXED: Direct handle, no uint64 conversion
 			},
 		}
 
@@ -1230,15 +1306,25 @@ func TestFanoutProcessingLogic(t *testing.T) {
 	})
 
 	t.Run("FanoutWithMultipleEdges", func(t *testing.T) {
+		// FIXED: Create proper shared pool and initialize
+		pool := make([]pooledquantumqueue.Entry, 1000)
+		for i := range pool {
+			pool[i].Tick = -1
+			pool[i].Prev = pooledquantumqueue.Handle(^uint64(0))
+			pool[i].Next = pooledquantumqueue.Handle(^uint64(0))
+			pool[i].Data = 0
+		}
+
 		executor := &ArbitrageCoreExecutor{
 			pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
 			isReverseDirection: false,
 			cycleStates:        make([]ArbitrageCycleState, 1),
 			fanoutTables:       make([][]FanoutEntry, 1),
-			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
+			priorityQueues:     make([]pooledquantumqueue.PooledQuantumQueue, 1), // FIXED: Correct type
+			sharedArena:        pool,                                             // FIXED: Add shared arena
 		}
 
-		executor.priorityQueues[0] = *quantumqueue64.New()
+		executor.priorityQueues[0] = *pooledquantumqueue.New(unsafe.Pointer(&pool[0]))
 
 		// Create a cycle where one pair update affects multiple edges
 		executor.cycleStates[0] = ArbitrageCycleState{
@@ -1246,7 +1332,8 @@ func TestFanoutProcessingLogic(t *testing.T) {
 			tickValues: [3]float64{0.0, 0.0, 0.0},
 		}
 
-		handle, _ := executor.priorityQueues[0].BorrowSafe()
+		// FIXED: Manual handle management
+		handle := pooledquantumqueue.Handle(0)
 
 		// Fanout affects edges 0 and 1 of the same cycle (both involve pair 1)
 		executor.fanoutTables[0] = []FanoutEntry{
@@ -1254,13 +1341,13 @@ func TestFanoutProcessingLogic(t *testing.T) {
 				cycleStateIndex: 0,
 				edgeIndex:       0,
 				queue:           &executor.priorityQueues[0],
-				queueHandle:     uint64(handle),
+				queueHandle:     handle, // FIXED: Direct handle, no uint64 conversion
 			},
 			{
 				cycleStateIndex: 0,
 				edgeIndex:       1,
 				queue:           &executor.priorityQueues[0],
-				queueHandle:     uint64(handle),
+				queueHandle:     handle, // FIXED: Direct handle, no uint64 conversion
 			},
 		}
 
@@ -1282,21 +1369,32 @@ func TestFanoutProcessingLogic(t *testing.T) {
 	})
 
 	t.Run("EmptyFanoutTable", func(t *testing.T) {
+		// FIXED: Create proper shared pool and initialize
+		pool := make([]pooledquantumqueue.Entry, 1000)
+		for i := range pool {
+			pool[i].Tick = -1
+			pool[i].Prev = pooledquantumqueue.Handle(^uint64(0))
+			pool[i].Next = pooledquantumqueue.Handle(^uint64(0))
+			pool[i].Data = 0
+		}
+
 		executor := &ArbitrageCoreExecutor{
 			pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
 			isReverseDirection: false,
 			cycleStates:        make([]ArbitrageCycleState, 1),
 			fanoutTables:       make([][]FanoutEntry, 1),
-			priorityQueues:     make([]quantumqueue64.QuantumQueue64, 1),
+			priorityQueues:     make([]pooledquantumqueue.PooledQuantumQueue, 1), // FIXED: Correct type
+			sharedArena:        pool,                                             // FIXED: Add shared arena
 		}
 
-		executor.priorityQueues[0] = *quantumqueue64.New()
+		executor.priorityQueues[0] = *pooledquantumqueue.New(unsafe.Pointer(&pool[0]))
 		executor.fanoutTables[0] = []FanoutEntry{} // Empty fanout table
 
 		executor.pairToQueueIndex.Put(1, 0)
 
 		// Add a cycle to prevent empty queue issues
-		handle, _ := executor.priorityQueues[0].BorrowSafe()
+		// FIXED: Manual handle management
+		handle := pooledquantumqueue.Handle(0)
 		executor.priorityQueues[0].Push(0, handle, 0)
 
 		update := &TickUpdate{
@@ -1701,21 +1799,33 @@ func BenchmarkQuantization(b *testing.B) {
 
 // BenchmarkProcessTickUpdate measures core processing performance
 func BenchmarkProcessTickUpdate(b *testing.B) {
+	// FIXED: Create proper shared pool and initialize
+	pool := make([]pooledquantumqueue.Entry, 10000)
+	for i := range pool {
+		pool[i].Tick = -1
+		pool[i].Prev = pooledquantumqueue.Handle(^uint64(0))
+		pool[i].Next = pooledquantumqueue.Handle(^uint64(0))
+		pool[i].Data = 0
+	}
+
 	executor := &ArbitrageCoreExecutor{
 		pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
 		isReverseDirection: false,
 		cycleStates:        make([]ArbitrageCycleState, 100),
 		fanoutTables:       make([][]FanoutEntry, 10),
-		priorityQueues:     make([]quantumqueue64.QuantumQueue64, 10),
+		priorityQueues:     make([]pooledquantumqueue.PooledQuantumQueue, 10), // FIXED: Correct type
+		sharedArena:        pool,                                              // FIXED: Add shared arena
 	}
 
 	// Initialize queues and add cycles with distributed priorities
 	for i := range executor.priorityQueues {
-		executor.priorityQueues[i] = *quantumqueue64.New()
+		// FIXED: Initialize each queue with shared pool
+		executor.priorityQueues[i] = *pooledquantumqueue.New(unsafe.Pointer(&pool[0]))
 
 		// Add cycles to each queue using distributed initialization priorities
 		for j := 0; j < 10; j++ {
-			handle, _ := executor.priorityQueues[i].BorrowSafe()
+			// FIXED: Manual handle management
+			handle := pooledquantumqueue.Handle(i*10 + j)
 
 			// DISTRIBUTED INITIALIZATION PRIORITY GENERATION
 			//
