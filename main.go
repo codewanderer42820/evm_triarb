@@ -319,7 +319,6 @@ func loadPoolsFromDatabase(dbPath string) error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func initializeFromDatabase(dbPath string, cyclesFile string) error {
