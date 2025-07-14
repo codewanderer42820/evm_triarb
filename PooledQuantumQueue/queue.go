@@ -135,10 +135,12 @@ const nilIdx Handle = ^Handle(0) // Sentinel value for unlinked entries
 //go:notinheap
 //go:align 32
 type Entry struct {
-	Tick int64  // 8B - Active tick or -1 if not linked (EXPORTED)
-	Data uint64 // 8B - User payload (EXPORTED)
-	Prev Handle // 8B - Previous entry in chain (EXPORTED)
-	Next Handle // 8B - Next entry in chain (EXPORTED)
+	Tick int64   // 8B - Active tick or -1 if free
+	Data uint64  // 8B - Compact payload
+	Prev Handle  // 8B - Previous in chain
+	_    [4]byte // 4B - Alignment padding
+	Next Handle  // 8B - Next in chain
+	_    [4]byte // 4B - Alignment padding
 }
 
 // groupBlock implements 2-level bitmap hierarchy for O(1) minimum finding.
@@ -190,15 +192,16 @@ type groupBlock struct {
 //go:notinheap
 //go:align 64
 type PooledQuantumQueue struct {
-	// TIER 1: ULTRA-HOT PATH - Accessed on every queue operation
-	summary uint64  // 8B - Global active groups mask
-	size    uint64  // 8B - Current entry count
+	// Hot path metadata (16 bytes) - matches original exactly
+	summary uint64  // 8B - Active groups bitmask
+	size    int     // 4B - Current entry count
+	_       [4]byte // 4B - Padding (to match int vs uint64 difference)
 	arena   uintptr // 8B - Base pointer to shared memory pool
 
-	// Alignment padding to optimize cache line utilization
-	_ [40]byte // 40B - Ensure hot data fits in first cache line
+	// Padding to cache line boundary (40 bytes)
+	_ [40]byte // 40B - Cache isolation
 
-	// TIER 2: FREQUENT ACCESS - Core data structures
+	// Large data structures
 	buckets [BucketCount]Handle    // Per-tick chain heads
 	groups  [GroupCount]groupBlock // Hierarchical bitmap summaries
 }
@@ -245,7 +248,7 @@ type PooledQuantumQueue struct {
 func New(arena unsafe.Pointer) *PooledQuantumQueue {
 	q := &PooledQuantumQueue{arena: uintptr(arena)}
 
-	// Initialize all buckets to empty state
+	// Initialize empty buckets
 	for i := range q.buckets {
 		q.buckets[i] = nilIdx
 	}
@@ -293,7 +296,7 @@ func (q *PooledQuantumQueue) entry(h Handle) *Entry {
 //go:nosplit
 //go:inline
 //go:registerparams
-func (q *PooledQuantumQueue) Size() uint64 {
+func (q *PooledQuantumQueue) Size() int {
 	return q.size
 }
 
@@ -339,7 +342,13 @@ func (q *PooledQuantumQueue) Empty() bool {
 //go:registerparams
 func (q *PooledQuantumQueue) unlink(h Handle) {
 	entry := q.entry(h)
-	b := uint64(entry.Tick)
+	b := Handle(entry.Tick)
+
+	// Prefetch next node
+	if entry.Next != nilIdx {
+		_ = *(*Entry)(unsafe.Pointer(uintptr(unsafe.Pointer(q.entry(0))) +
+			uintptr(entry.Next)*unsafe.Sizeof(Entry{})))
+	}
 
 	// Remove from doubly-linked chain
 	if entry.Prev != nilIdx {
@@ -359,20 +368,20 @@ func (q *PooledQuantumQueue) unlink(h Handle) {
 		bb := uint64(entry.Tick) & 63       // Bucket index
 
 		gb := &q.groups[g]
-		gb.l2[l] &^= 1 << (63 - bb)
+		gb.l2[l] &^= 1 << (63 - bb) // Clear bucket bit
 
-		if gb.l2[l] == 0 {
-			gb.l1Summary &^= 1 << (63 - l)
-			if gb.l1Summary == 0 {
-				q.summary &^= 1 << (63 - g)
+		if gb.l2[l] == 0 { // Lane empty
+			gb.l1Summary &^= 1 << (63 - l) // Clear lane bit
+			if gb.l1Summary == 0 {         // Group empty
+				q.summary &^= 1 << (63 - g) // Clear group bit
 			}
 		}
 	}
 
 	// Mark entry as unlinked and update size
-	entry.Tick = -1
-	entry.Prev = nilIdx
 	entry.Next = nilIdx
+	entry.Prev = nilIdx
+	entry.Tick = -1
 	q.size--
 }
 
@@ -409,27 +418,32 @@ func (q *PooledQuantumQueue) unlink(h Handle) {
 //go:registerparams
 func (q *PooledQuantumQueue) linkAtHead(h Handle, tick int64) {
 	entry := q.entry(h)
-	b := uint64(tick)
+	b := Handle(uint64(tick))
+
+	// Prefetch bucket head
+	if q.buckets[b] != nilIdx {
+		_ = *(*Entry)(unsafe.Pointer(uintptr(unsafe.Pointer(q.entry(0))) +
+			uintptr(q.buckets[b])*unsafe.Sizeof(Entry{})))
+	}
 
 	// Insert at head of bucket chain
 	entry.Tick = tick
 	entry.Prev = nilIdx
 	entry.Next = q.buckets[b]
-
 	if entry.Next != nilIdx {
 		q.entry(entry.Next).Prev = h
 	}
 	q.buckets[b] = h
 
-	// Update hierarchical bitmap summaries
-	g := uint64(tick) >> 12
-	l := (uint64(tick) >> 6) & 63
-	bb := uint64(tick) & 63
+	// Update bitmap summaries
+	g := uint64(tick) >> 12       // Group index
+	l := (uint64(tick) >> 6) & 63 // Lane index
+	bb := uint64(tick) & 63       // Bucket index
 
 	gb := &q.groups[g]
-	gb.l2[l] |= 1 << (63 - bb)
-	gb.l1Summary |= 1 << (63 - l)
-	q.summary |= 1 << (63 - g)
+	gb.l2[l] |= 1 << (63 - bb)    // Set bucket bit
+	gb.l1Summary |= 1 << (63 - l) // Set lane bit
+	q.summary |= 1 << (63 - g)    // Set group bit
 
 	q.size++
 }
@@ -468,13 +482,13 @@ func (q *PooledQuantumQueue) linkAtHead(h Handle, tick int64) {
 func (q *PooledQuantumQueue) Push(tick int64, h Handle, val uint64) {
 	entry := q.entry(h)
 
-	// Hot path: same tick, update data only
+	// Hot path: same tick update
 	if entry.Tick == tick {
 		entry.Data = val
 		return
 	}
 
-	// Cold path: different tick, relocate entry
+	// Cold path: relocate entry
 	if entry.Tick >= 0 {
 		q.unlink(h)
 	}
@@ -515,15 +529,19 @@ func (q *PooledQuantumQueue) Push(tick int64, h Handle, val uint64) {
 //go:inline
 //go:registerparams
 func (q *PooledQuantumQueue) PeepMin() (Handle, int64, uint64) {
-	// Find minimum entry using bitmap hierarchy traversal
+	// Find minimum via CLZ operations
 	g := bits.LeadingZeros64(q.summary)
 	gb := &q.groups[g]
 	l := bits.LeadingZeros64(gb.l1Summary)
 	t := bits.LeadingZeros64(gb.l2[l])
 
-	// Reconstruct bucket index and retrieve head entry
-	b := (uint64(g) << 12) | (uint64(l) << 6) | uint64(t)
+	// Reconstruct bucket index
+	b := Handle((uint64(g) << 12) | (uint64(l) << 6) | uint64(t))
 	h := q.buckets[b]
+
+	// Prefetch minimum entry
+	_ = *(*Entry)(unsafe.Pointer(uintptr(unsafe.Pointer(q.entry(0))) +
+		uintptr(h)*unsafe.Sizeof(Entry{})))
 
 	// Return handle, tick, and data from minimum entry
 	entry := q.entry(h)
@@ -562,12 +580,12 @@ func (q *PooledQuantumQueue) PeepMin() (Handle, int64, uint64) {
 func (q *PooledQuantumQueue) MoveTick(h Handle, newTick int64) {
 	entry := q.entry(h)
 
-	// Optimized no-op for same tick
+	// No-op if same tick
 	if entry.Tick == newTick {
 		return
 	}
 
-	// Relocate entry to new tick position
+	// Relocate entry
 	q.unlink(h)
 	q.linkAtHead(h, newTick)
 }
