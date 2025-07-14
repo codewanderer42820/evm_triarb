@@ -110,25 +110,25 @@ type ArbitrageEngine struct {
 	// TIER 1: ULTRA-HOT PATH (Every tick update - millions per second)
 	isReverseDirection bool          // 1B - ULTRA-HOT: Direction flag checked on every tick update
 	_                  [7]byte       // 7B - PADDING: Alignment optimization
-	pairToQueueLookup  localidx.Hash // 64B - ULTRA-HOT: Pair-to-queue mapping for O(1) lookup performance
+	pairToQueueLookup  localidx.Hash // 52B + 12B padding = 64B - ULTRA-HOT: Pair-to-queue mapping for O(1) lookup performance
 
 	// TIER 2: HOT PATH (Frequent cycle processing operations)
-	cycleStates      []ArbitrageCycleState // 24B - HOT: Complete arbitrage cycle state storage
-	cycleFanoutTable [][]CycleFanoutEntry  // 24B - HOT: Pair-to-cycle mappings for fanout operations
-	_                [8]byte               // 8B - PADDING: Alignment optimization
+	priorityQueues []pooledquantumqueue.PooledQuantumQueue // 24B - HOT: Priority queues per trading pair
+	sharedArena    []pooledquantumqueue.Entry              // 24B - HOT: Single shared memory pool for all queues
+	_              [8]byte                                 // 8B - PADDING: Fills remainder of cache line after Hash spillover
 
 	// TIER 3: WARM PATH (Moderate frequency queue operations)
-	priorityQueues []pooledquantumqueue.PooledQuantumQueue // 24B - WARM: Priority queues per trading pair
-	sharedArena    []pooledquantumqueue.Entry              // 24B - WARM: Single shared memory pool for all queues
-	nextHandle     pooledquantumqueue.Handle               // 8B - WARM: Simple sequential handle allocation
-	_              [8]byte                                 // 8B - PADDING: Alignment optimization
+	cycleStates      []ArbitrageCycleState // 24B - HOT: Complete arbitrage cycle state storage
+	cycleFanoutTable [][]CycleFanoutEntry  // 24B - HOT: Pair-to-cycle mappings for fanout operations
+	_                [16]byte              // 16B - PADDING: Alignment optimization
 
 	// TIER 4: COOL PATH (Occasional profitable cycle extraction)
 	extractedCycles [32]ExtractedCycle // 1024B - COOL: Pre-allocated buffer for extracted cycles
 
 	// TIER 5: COLD PATH (Rare configuration and control operations)
-	shutdownChannel <-chan struct{} // 8B - COLD: Graceful shutdown coordination channel
-	_               [56]byte        // 56B - PADDING: Alignment optimization
+	nextHandle      pooledquantumqueue.Handle // 8B - COLD: Simple sequential handle allocation (init only)
+	shutdownChannel <-chan struct{}           // 8B - COLD: Graceful shutdown coordination channel
+	_               [48]byte                  // 48B - PADDING: Alignment optimization
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
