@@ -694,6 +694,7 @@ func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
@@ -729,6 +730,7 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWorkloadShard) {
@@ -816,6 +818,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairWorkloadShard) {
@@ -865,6 +868,7 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
