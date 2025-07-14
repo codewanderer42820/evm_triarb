@@ -1,3 +1,5 @@
+// parser.go — Zero-allocation JSON-RPC event parser with sub-microsecond latency
+
 package parser
 
 import (
