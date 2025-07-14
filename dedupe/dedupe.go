@@ -1,3 +1,5 @@
+// dedupe.go — Sub-5ns O(1) duplicate detection using Robin Hood direct-mapped cache
+
 package dedupe
 
 import (
