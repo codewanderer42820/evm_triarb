@@ -117,16 +117,16 @@ const (
 var (
 	// Cooldown in poll counts: (milliseconds * polls_per_second) / 1000
 	// For M4 Pro default: (1000ms * 3,200,000,000 polls/sec) / 1000 = 3,200,000,000 polls
-	CooldownPolls uint64 // Primary cooldown configuration
+	CooldownPolls = (ActiveCooldownMs * ActivePollRate) / 1000 // Primary cooldown configuration
 
 	// Alternative cooldown configurations (pre-computed for fast switching)
-	CooldownPolls50ms   uint64 // 160,000,000 polls (ultra-responsive)
-	CooldownPolls100ms  uint64 // 320,000,000 polls (very responsive)
-	CooldownPolls250ms  uint64 // 800,000,000 polls (responsive)
-	CooldownPolls500ms  uint64 // 1,600,000,000 polls (balanced)
-	CooldownPolls1000ms uint64 // 3,200,000,000 polls (default)
-	CooldownPolls2000ms uint64 // 6,400,000,000 polls (conservative)
-	CooldownPolls5000ms uint64 // 16,000,000,000 polls (ultra-conservative)
+	CooldownPolls50ms   = (CooldownMs50 * ActivePollRate) / 1000   // 160,000,000 polls (ultra-responsive)
+	CooldownPolls100ms  = (CooldownMs100 * ActivePollRate) / 1000  // 320,000,000 polls (very responsive)
+	CooldownPolls250ms  = (CooldownMs250 * ActivePollRate) / 1000  // 800,000,000 polls (responsive)
+	CooldownPolls500ms  = (CooldownMs500 * ActivePollRate) / 1000  // 1,600,000,000 polls (balanced)
+	CooldownPolls1000ms = (CooldownMs1000 * ActivePollRate) / 1000 // 3,200,000,000 polls (default)
+	CooldownPolls2000ms = (CooldownMs2000 * ActivePollRate) / 1000 // 6,400,000,000 polls (conservative)
+	CooldownPolls5000ms = (CooldownMs5000 * ActivePollRate) / 1000 // 16,000,000,000 polls (ultra-conservative)
 )
 
 // JSON PARSING LOOKUP TABLES (READ-ONLY, HOT PATH ACCESS)
@@ -137,50 +137,20 @@ var (
 //go:align 64
 var (
 	// Core log fields (primary event data)
-	KeyAddress [8]byte // "address
-	KeyData    [8]byte // "data":"
-	KeyTopics  [8]byte // "topics"
+	KeyAddress = [8]byte{'"', 'a', 'd', 'd', 'r', 'e', 's', 's'} // "address
+	KeyData    = [8]byte{'"', 'd', 'a', 't', 'a', '"', ':', '"'} // "data":"
+	KeyTopics  = [8]byte{'"', 't', 'o', 'p', 'i', 'c', 's', '"'} // "topics"
 
 	// Block metadata (blockchain context)
-	KeyBlockHash      [8]byte // "blockHa
-	KeyBlockNumber    [8]byte // "blockNu
-	KeyBlockTimestamp [8]byte // "blockTi
-
-	// Transaction fields (event positioning)
-	KeyLogIndex    [8]byte // "logInde
-	KeyTransaction [8]byte // "transac
-	KeyRemoved     [8]byte // "removed
-
-	// Uniswap V2 Sync event signature (arbitrage detection)
-	SigSyncPrefix [8]byte // keccak256("Sync(uint112,uint112)")
-)
-
-// init computes runtime values from compile-time constants
-func init() {
-	// Compute cooldown poll counts from timing configurations
-	CooldownPolls = (ActiveCooldownMs * ActivePollRate) / 1000
-
-	// Pre-compute alternative cooldown configurations
-	CooldownPolls50ms = (CooldownMs50 * ActivePollRate) / 1000
-	CooldownPolls100ms = (CooldownMs100 * ActivePollRate) / 1000
-	CooldownPolls250ms = (CooldownMs250 * ActivePollRate) / 1000
-	CooldownPolls500ms = (CooldownMs500 * ActivePollRate) / 1000
-	CooldownPolls1000ms = (CooldownMs1000 * ActivePollRate) / 1000
-	CooldownPolls2000ms = (CooldownMs2000 * ActivePollRate) / 1000
-	CooldownPolls5000ms = (CooldownMs5000 * ActivePollRate) / 1000
-
-	// Initialize JSON parsing lookup tables
-	KeyAddress = [8]byte{'"', 'a', 'd', 'd', 'r', 'e', 's', 's'} // "address
-	KeyData = [8]byte{'"', 'd', 'a', 't', 'a', '"', ':', '"'}    // "data":"
-	KeyTopics = [8]byte{'"', 't', 'o', 'p', 'i', 'c', 's', '"'}  // "topics"
-
-	KeyBlockHash = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'H', 'a'}      // "blockHa
-	KeyBlockNumber = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'N', 'u'}    // "blockNu
+	KeyBlockHash      = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'H', 'a'} // "blockHa
+	KeyBlockNumber    = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'N', 'u'} // "blockNu
 	KeyBlockTimestamp = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'T', 'i'} // "blockTi
 
-	KeyLogIndex = [8]byte{'"', 'l', 'o', 'g', 'I', 'n', 'd', 'e'}    // "logInde
+	// Transaction fields (event positioning)
+	KeyLogIndex    = [8]byte{'"', 'l', 'o', 'g', 'I', 'n', 'd', 'e'} // "logInde
 	KeyTransaction = [8]byte{'"', 't', 'r', 'a', 'n', 's', 'a', 'c'} // "transac
-	KeyRemoved = [8]byte{'"', 'r', 'e', 'm', 'o', 'v', 'e', 'd'}     // "removed
+	KeyRemoved     = [8]byte{'"', 'r', 'e', 'm', 'o', 'v', 'e', 'd'} // "removed
 
+	// Uniswap V2 Sync event signature (arbitrage detection)
 	SigSyncPrefix = [8]byte{'1', 'c', '4', '1', '1', 'e', '9', 'a'} // keccak256("Sync(uint112,uint112)")
-}
+)
