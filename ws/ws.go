@@ -146,7 +146,7 @@ var (
 type WebSocketProcessor struct {
 	// Hot: Main message buffer (128MB, page-aligned)
 	//go:align 16384
-	buffer [BufferSize]byte // 128MB
+	buffer [constants.BufferSize]byte // 128MB
 
 	// Cold: Pre-built protocol frames
 	upgradeRequest [256]byte // HTTP upgrade
@@ -201,7 +201,7 @@ func Handshake(conn net.Conn) error {
 	}
 
 	// Read response
-	var buf [HandshakeBufferSize]byte
+	var buf [constants.HandshakeBufferSize]byte
 	total := 0
 
 	for total < 500 {
@@ -255,7 +255,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 
 	for {
 		// Early bounds check: ensure we have space for frame header
-		if msgEnd > BufferSize-MaxFrameHeaderSize {
+		if msgEnd > constants.BufferSize-constants.MaxFrameHeaderSize {
 			return nil, errMessageTooLarge
 		}
 
@@ -296,7 +296,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		}
 
 		// Check individual frame size limit (for all extended length cases)
-		if payloadLen >= uint64(BufferSize) {
+		if payloadLen >= uint64(constants.BufferSize) {
 			return nil, errFrameTooLarge
 		}
 
@@ -321,7 +321,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		}
 
 		// Check if adding this payload would exceed buffer
-		if uint64(msgEnd)+payloadLen > uint64(BufferSize) {
+		if uint64(msgEnd)+payloadLen > uint64(constants.BufferSize) {
 			return nil, errMessageTooLarge
 		}
 
@@ -332,8 +332,8 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		remaining := payloadLen
 		for remaining > 0 {
 			toRead := remaining
-			if toRead > uint64(BufferSize-msgEnd) {
-				toRead = uint64(BufferSize - msgEnd)
+			if toRead > uint64(constants.BufferSize-msgEnd) {
+				toRead = uint64(constants.BufferSize - msgEnd)
 			}
 			if toRead > 65536 {
 				toRead = 65536 // 64KB chunks
@@ -351,7 +351,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		// Return if final frame
 		if isLastFrame {
 			// Final bounds check (redundant but safe)
-			if msgEnd > BufferSize {
+			if msgEnd > constants.BufferSize {
 				return nil, errBoundsViolation
 			}
 			return processor.buffer[:msgEnd], nil
