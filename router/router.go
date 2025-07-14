@@ -402,6 +402,7 @@ type CycleStateIndex uint64
 //	Offset 16-23: reverseTick (float64) - Log₂ price ratio for B→A trades
 //
 //go:notinheap
+//go:align 8
 type TickUpdate struct {
 	pairID      PairID  // 8B - PRIMARY: Pair identifier for routing and queue lookup
 	forwardTick float64 // 8B - PRICING: Logarithmic price ratio for forward direction
