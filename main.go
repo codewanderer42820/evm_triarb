@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	rtdebug "runtime/debug"
 	"strings"
 	"syscall"
 
@@ -48,6 +49,25 @@ func init() {
 
 	// Initialize arbitrage system with loaded data
 	router.InitializeArbitrageSystem(cycles)
+
+	// AGGRESSIVE MEMORY CLEANUP: Clear all initialization data
+	debug.DropMessage("MEMORY_CLEANUP", "Clearing initialization data")
+
+	// Clear cycles data (no longer needed after system init)
+	for i := range cycles {
+		cycles[i] = router.ArbitrageTriangle{} // Zero out
+	}
+	cycles = nil // Release slice
+
+	// Force garbage collection twice with GC enabled
+	runtime.GC()
+	runtime.GC()
+	debug.DropMessage("GC_COMPLETE", "Forced garbage collection completed")
+
+	// Disable GC for maximum performance during operation
+	rtdebug.SetGCPercent(-1)
+	debug.DropMessage("GC_DISABLED", "Garbage collector disabled for production operation")
+
 	debug.DropMessage("INIT_COMPLETE", "System ready")
 }
 
