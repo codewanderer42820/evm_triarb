@@ -20,21 +20,17 @@ import (
 // Both structures are cache-aligned and designed for maximum memory efficiency
 // during high-frequency JSON parsing operations.
 
+//go:notinheap
+//go:align 64
 var (
 	// DEDUPLICATION ENGINE (HOT PATH - ACCESSED EVERY EVENT)
 	// Maintains rolling window of processed events to prevent duplicate handling.
 	// Cache-aligned for optimal access patterns during deduplication checks.
-	//
-	//go:notinheap
-	//go:align 64
 	dedup dedupe.Deduper
 
 	// BLOCK STATE TRACKING (WARM PATH - UPDATED PER BLOCK)
 	// Tracks the highest block number processed to maintain chain consistency.
 	// Aligned to prevent false sharing with the deduplication engine.
-	//
-	//go:notinheap
-	//go:align 64
 	latestBlk uint32
 )
 

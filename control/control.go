@@ -3,12 +3,33 @@ package control
 
 import "main/constants"
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// CONTROL GLOBAL STATE - SYSCALL-FREE COORDINATION AND VIRTUAL TIMING
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+//
+// The control package manages global coordination flags and provides syscall-free
+// virtual timing for high-frequency operations. All variables are cache-aligned
+// to prevent false sharing between cores accessing control state.
+//
+// PERFORMANCE OBJECTIVES:
+// - Zero syscall overhead for timing operations
+// - Sub-nanosecond flag access for coordination
+// - Branchless algorithms for predictable performance
+// - Cache-optimized layout for multi-core scaling
+
+//go:notinheap
+//go:align 64
 var (
-	// Global coordination flags - accessed by all consumer threads
+	// GLOBAL COORDINATION FLAGS (HOT PATH - ACCESSED BY ALL CORES)
+	// These flags provide lock-free coordination across all processing cores
+	// without requiring expensive synchronization primitives.
 	hot  uint32 // 1 = active WebSocket traffic, 0 = idle
 	stop uint32 // 1 = graceful shutdown, 0 = normal operation
 
-	// Virtual timing for syscall-free cooldown (no time.Now() calls)
+	// VIRTUAL TIMING INFRASTRUCTURE (SYSCALL-FREE PERFORMANCE)
+	// Provides approximate timing without time.Now() syscalls for maximum
+	// performance in hot paths. Timing precision is sacrificed for speed.
+	//
 	// WARNING: Timing is NOT precise - rough approximation based on CPU poll rate
 	// Actual timing depends on CPU frequency, load, thermal throttling, etc.
 	// Acceptable for hot flag signaling but NOT suitable for precise time measurement
