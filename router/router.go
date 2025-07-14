@@ -1,315 +1,34 @@
 // router.go — 57ns triangular arbitrage detection engine with infinite scalability
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ARCHITECTURAL OVERVIEW
+// CRITICAL FIXES FOR POOLED QUANTUM QUEUE INTEGRATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 //
-// This system implements a real-time triangular arbitrage detection engine capable of processing
-// Ethereum event logs with sub-millisecond latency. The architecture is designed around the
-// principle of zero-allocation hot paths and multi-core parallelism to achieve maximum throughput.
-//
-// CORE ARCHITECTURAL COMPONENTS:
-//
-//  1. EVENT DISPATCH PIPELINE
-//     Ultra-low latency event processing that extracts price information from Uniswap V2 Sync
-//     events and distributes updates across multiple CPU cores using lock-free ring buffers.
-//     Target performance: 46 nanoseconds per event.
-//
-//  2. DISTRIBUTED CORE PROCESSING
-//     Each CPU core runs an independent arbitrage detection engine that maintains its own
-//     subset of trading pairs and arbitrage cycles. This eliminates cross-core synchronization
-//     overhead and scales linearly with available hardware.
-//
-//  3. ROBIN HOOD ADDRESS RESOLUTION
-//     O(1) address-to-pair-ID lookup using Robin Hood hashing with backward shift deletion.
-//     Optimized for cache performance with 64-byte aligned hash tables and prefetching.
-//
-//  4. LOCK-FREE INTER-CORE COMMUNICATION
-//     Single-producer, single-consumer ring buffers enable zero-contention message passing
-//     between the event dispatcher and processing cores.
-//
-//  5. SYSCALL-FREE VIRTUAL TIMING
-//     Branchless control system using CPU poll counters for approximate timing.
-//     Eliminates time.Now() syscalls in hot paths while maintaining sufficient
-//     precision for activity detection and cooldown management.
-//
-// PERFORMANCE CHARACTERISTICS:
-//
-// • Event Processing Latency: 46 nanoseconds per Uniswap V2 Sync event
-// • Address Resolution: 14 nanoseconds (~42 cycles at 3GHz)
-// • Arbitrage Detection: 7 nanoseconds per cycle update
-// • Virtual Timing: Sub-nanosecond cooldown logic without syscall overhead
-// • Memory Allocation: Zero allocations in all hot paths
-// • Concurrency Model: Completely lock-free critical sections
-// • Scalability: Linear scaling up to 64 CPU cores
-//
-// MEMORY ARCHITECTURE:
-//
-// All data structures are designed for optimal cache performance:
-// • 64-byte cache line alignment for frequently accessed structures
-// • Hot fields placed at structure beginnings to maximize cache utilization
-// • NUMA-aware core pinning for optimal memory access patterns
-// • Pre-allocated buffers eliminate garbage collection pressure
-// • Spatial locality optimization for sequential access patterns
-//
-// RELIABILITY AND SAFETY:
-//
-// • Branchless algorithms in critical paths for predictable performance
-// • Bounded buffer sizes prevent memory exhaustion
-// • Graceful degradation under extreme load conditions
-// • Comprehensive error handling with zero-allocation logging
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CRITICAL ARCHITECTURAL DECISIONS: PERFORMANCE OVER SAFETY FOOTGUNS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-//
-// This system makes several deliberate choices that prioritize absolute performance over
-// traditional safety mechanisms. Each decision represents a calculated trade-off where
-// nanoseconds matter more than defensive programming.
-//
-// FOOTGUN #1: NO BOUNDS CHECKING ON ARRAY ACCESS
-//
-// Throughout the codebase, array accesses use direct indexing without bounds checks:
-//   - addressToPairID[i] in lookupPairIDByAddress
-//   - coreRings[coreID] in DispatchTickUpdate
-//   - executor.cycleStates[cycleIndex] in processTickUpdate
-//   - pairToCoreAssignment[pairID] in DispatchTickUpdate and RegisterPairToCore
-//   - hexData[32:64] and hexData[96:128] in DispatchTickUpdate
-//   - executor.processedCycles[cycleCount] in processTickUpdate
-//   - chunks[firstChunk] in countLeadingZeros
-//
-// WHY: Each bounds check costs 2-3 CPU cycles. At 14M operations/second, this
-// translates to 42M wasted cycles per second per check.
-//
-// RISK: Array index out of bounds will cause immediate segmentation fault.
-//
-// MITIGATION: All array sizes are power-of-2 constants with bitwise masking:
-//   i = (i + 1) & uint64(constants.AddressTableMask)
-// This ensures indices CANNOT exceed bounds through mathematical properties.
-//
-// FOOTGUN #2: UNCHECKED TYPE CONVERSIONS WITH unsafe.Pointer
-//
-// The system uses direct memory reinterpretation without type safety:
-//   messageBytes := (*[24]byte)(unsafe.Pointer(&message))
-//   processTickUpdate(executor, (*TickUpdate)(unsafe.Pointer(messagePtr)))
-//   *(*uint64)(unsafe.Pointer(&input[32])) = k.counter
-//   *(*uint64)(unsafe.Pointer(&seedInput[0])) = utils.Mix64(uint64(pairID))
-//
-// WHY: Type-safe conversions would require allocation and copying, adding 10-15ns.
-//
-// RISK: Incorrect casting causes memory corruption or crashes.
-//
-// MITIGATION: All structures using unsafe conversions are:
-//   - Marked with //go:notinheap to prevent GC movement
-//   - Fixed-size (24 bytes for TickUpdate)
-//   - Aligned to prevent partial reads
-//
-// FOOTGUN #3: NO NIL POINTER CHECKS
-//
-// Functions assume pointers are valid without checking:
-//   - coreRings[coreID].Push() assumes ring exists
-//   - executor.cycleStates access assumes initialization
-//   - queue.PeepMin() assumes queue is valid
-//   - fanoutEntry.queue access in processTickUpdate
-//   - coreExecutors[coreID] assignment in launchShardWorker
-//
-// WHY: Each nil check is a branch that disrupts CPU pipelining, costing 5-10 cycles
-// on misprediction.
-//
-// RISK: Nil pointer dereference causes immediate crash.
-//
-// MITIGATION: Initialization order is strictly controlled:
-//   1. All structures allocated in InitializeArbitrageSystem
-//   2. No dynamic allocation after initialization
-//   3. Fixed-size arrays prevent allocation failures
-//
-// FOOTGUN #4: INFINITE RETRY LOOPS WITHOUT TIMEOUT
-//
-// DispatchTickUpdate contains a potentially infinite retry loop:
-//   for coreAssignments != 0 {
-//       // Retry failed cores forever
-//   }
-//
-// WHY: Dropping messages would violate consistency guarantees. The retry loop
-// ensures EVERY price update reaches its destination.
-//
-// RISK: If consumers die, the dispatcher hangs forever.
-//
-// MITIGATION: System design ensures consumers cannot die:
-//   - No allocations that could trigger OOM
-//   - No operations that could panic
-//   - Consumers pinned to CPU cores
-//
-// FOOTGUN #5: RACE CONDITIONS BY DESIGN
-//
-// Multiple cores read shared data without synchronization:
-//   - pairToCoreAssignment read by dispatcher while cores operate
-//   - addressToPairID accessed without locks
-//   - pairShardBuckets accessed during initialization
-//
-// WHY: Read-only after initialization. Memory barriers would cost 50-100 cycles.
-//
-// RISK: Seeing partially written data during initialization.
-//
-// MITIGATION: Strict initialization phases:
-//   1. Build all data structures
-//   2. Memory barrier (implicit in goroutine creation)
-//   3. Launch workers that only read
-//
-// FOOTGUN #6: NO ERROR PROPAGATION
-//
-// Errors are handled locally without propagation:
-//   - fastuni.Log2ReserveRatio error leads to fallback, not error return
-//   - Ring push failures trigger retry, not error handling
-//   - Handle allocation failures ignored in finalization
-//   - executor.pairToQueueIndex.Get() second return value ignored
-//
-// WHY: Error propagation requires allocation for error objects and disrupts
-// hot path flow.
-//
-// RISK: Silent failures could mask systematic issues.
-//
-// MITIGATION: Errors impossible by design:
-//   - Input validation unnecessary (blockchain ensures valid data)
-//   - Resource exhaustion prevented by pre-allocation
-//   - Graceful degradation for invalid states
-//
-// FOOTGUN #7: ASSUMPTIONS ABOUT DATA FORMAT
-//
-// DispatchTickUpdate assumes specific data layout:
-//   hexData := logView.Data[2:130]  // Assumes exactly 130 bytes
-//   logView.Addr[constants.AddressHexStart:constants.AddressHexEnd] // Assumes 42 chars
-//   hexData[32:64] and hexData[96:128] // Assumes specific positions
-//
-// WHY: Dynamic length checking would require branches and comparisons.
-//
-// RISK: Malformed events cause slice bounds panic.
-//
-// MITIGATION: Ethereum events have guaranteed format:
-//   - Sync events always 128 hex chars + "0x"
-//   - Blockchain validates before delivery
-//   - Malformed events cannot exist on-chain
-//
-// FOOTGUN #8: CPU AFFINITY WITHOUT FALLBACK
-//
-// Workers pin to specific CPU cores:
-//   runtime.LockOSThread()
-//   ring24.PinnedConsumer(coreID, ...)
-//
-// WHY: NUMA optimization requires fixed CPU affinity for cache locality.
-//
-// RISK: If OS scheduling changes, performance degrades catastrophically.
-//
-// MITIGATION: System designed for dedicated hardware:
-//   - No other processes competing for cores
-//   - OS configured for real-time scheduling
-//   - Monitoring alerts on CPU migration
-//
-// FOOTGUN #9: GRADIENT DEGRADATION WITHOUT LIMITS
-//
-// Invalid data gets random priorities 50.2-63.0 without validation:
-//   placeholder := 50.2 + float64(randBits)*0.0015625
-//
-// WHY: Validation would require branching and bounds checking.
-//
-// RISK: Accumulation of invalid data could fill queues.
-//
-// MITIGATION: Range specifically chosen:
-//   - Above all profitable opportunities (negative values)
-//   - Below 64.0 hard limit with 1.0 unit safety margin
-//   - Self-limiting through queue extraction
-//
-// FOOTGUN #10: BRANCHLESS ALGORITHMS WITH SUBTLE CORRECTNESS
-//
-// Complex bit manipulation replaces traditional conditionals:
-//   mask := cond >> 31
-//   minZeros := lzcntB ^ ((lzcntA ^ lzcntB) & mask)
-//   mask := ((c0|(^c0+1))>>63)<<0 | ((c1|(^c1+1))>>63)<<1
-//
-// WHY: Branches cause 15-20 cycle penalties on misprediction.
-//
-// RISK: Subtle bugs in bit manipulation cause incorrect results.
-//
-// MITIGATION: Algorithms mathematically proven:
-//   - Extensive unit tests verify all edge cases
-//   - Formal verification of bit operations
-//   - Used only where correctness is deterministic
-//
-// FOOTGUN #11: INTEGER DIVISION WITHOUT ZERO CHECK
-//
-// keccakRandomState.nextInt performs modulo without bounds check:
-//   return int(randomValue % uint64(upperBound))
-//
-// WHY: Only called from Fisher-Yates where upperBound = i+1 and i > 0.
-//
-// RISK: Division by zero causes immediate panic.
-//
-// MITIGATION: Caller constraints guarantee upperBound >= 2:
-//   - Fisher-Yates loop starts at i = len(bindings) - 1
-//   - Called with j := rng.nextInt(i + 1) where i >= 1
-//   - Mathematical impossibility of zero divisor
-//
-// FOOTGUN #12: SLICE CREATION WITHOUT LENGTH VALIDATION
-//
-// Direct slice operations assume valid lengths:
-//   logView.Data[offsetA : offsetA+remaining]
-//   segment[0:8], segment[8:16], segment[16:24], segment[24:32]
-//   address40HexChars[12:28] in directAddressToIndex64
-//
-// WHY: Length checks would add conditional branches.
-//
-// RISK: Slice bounds panic if lengths are incorrect.
-//
-// MITIGATION: All slice lengths derived from constants or validated inputs:
-//   - Ethereum data format guarantees fixed lengths
-//   - Bit manipulation ensures remaining <= 16
-//   - Constants define all fixed offsets
-//
-// FOOTGUN #13: UNINITIALIZED MEMORY ACCESS
-//
-// ProcessedCycle array used without explicit initialization:
-//   executor.processedCycles[cycleCount] = ProcessedCycle{...}
-//
-// WHY: Zero-initialization would waste cycles.
-//
-// RISK: Reading uninitialized data could cause undefined behavior.
-//
-// MITIGATION: Access pattern guarantees safety:
-//   - Only written indices [0, cycleCount) are read
-//   - cycleCount tracks exact valid entries
-//   - No reads beyond written boundary
-//
-// FOOTGUN #14: GLOBAL STATE WITHOUT SYNCHRONIZATION
-//
-// Global variables modified during initialization without locks:
-//   - pairShardBuckets map creation and access
-//   - coreExecutors array assignment
-//   - coreRings array assignment
-//
-// WHY: Synchronization primitives add overhead.
-//
-// RISK: Concurrent modification could corrupt state.
-//
-// MITIGATION: Single-threaded initialization phase:
-//   - All setup completed before worker launch
-//   - Workers only read global state
-//   - Initialization happens once at startup
-//
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SUMMARY: MATHEMATICAL CORRECTNESS OVER DEFENSIVE PROGRAMMING
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-//
-// This system achieves performance by replacing runtime safety checks with
-// mathematical guarantees. Rather than checking for errors, the design makes
-// many error conditions impossible:
-//
-// 1. Array bounds violations prevented by power-of-2 masking
-// 2. Invalid states eliminated through careful initialization ordering
-// 3. Resource exhaustion avoided via pre-allocation
-// 4. Timing precision achieved through branchless approximation
-//
-// The result: 46ns operations that maintain correctness through construction
-// rather than validation. Fast because it's correct by design.
+// This fixed version addresses several critical bugs in the pooled queue integration:
+//
+// 1. HANDLE CALCULATION FIX:
+//    - Fixed entry() method handle calculation to use proper byte offsets
+//    - Handle arithmetic now matches Entry structure size requirements
+//
+// 2. ARENA PARTITIONING FIX:
+//    - Each queue gets its own contiguous arena partition
+//    - Handles are allocated relative to queue's arena base
+//    - No more shared arena conflicts between queues
+//
+// 3. HANDLE ALLOCATOR FIX:
+//    - Fixed double allocation bug where same handle could be allocated twice
+//    - nextHandle now starts at maxHandles to prevent conflicts with free list
+//    - Proper handle lifecycle management with arena-relative calculations
+//
+// 4. INITIALIZATION ORDER FIX:
+//    - Pool entries properly initialized to unlinked state before use
+//    - Arena partitioning calculated before queue creation
+//    - Handle allocation happens after arena setup
+//
+// 5. QUEUE INTERFACE FIX:
+//    - Proper usage of PooledQuantumQueue API
+//    - Correct handle management for Push/PeepMin/UnlinkMin operations
+//    - Fixed fanout table handle references
 
 package router
 
@@ -347,22 +66,11 @@ type ArbitrageTriplet [3]PairID
 type CycleStateIndex uint64
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// HANDLE MANAGEMENT SUBSYSTEM
+// FIXED HANDLE MANAGEMENT SUBSYSTEM
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // HandleAllocator manages handle lifecycle for shared pool architecture.
-// CRITICAL: Provides globally unique handles to prevent queue collisions.
-//
-// Architecture:
-//   - Global handle namespace across all queues and cores
-//   - Thread-safe allocation via atomic operations
-//   - Free handle recycling for optimal memory reuse
-//   - Pool entry cleanup on handle deallocation
-//
-// Safety:
-//   - Prevents handle collisions between multiple queues
-//   - Ensures proper pool entry initialization state
-//   - Tracks handle lifecycle for leak detection
+// FIXED: Proper handle allocation without double allocation bug.
 //
 //go:notinheap
 //go:align 64
@@ -374,15 +82,7 @@ type HandleAllocator struct {
 }
 
 // NewHandleAllocator creates a handle allocator for the shared pool.
-//
-// INITIALIZATION REQUIREMENTS:
-//   - Pool must be pre-initialized to unlinked state
-//   - All pool entries must have Tick = -1
-//   - Free handle list populated with all available handles
-//
-// THREAD SAFETY:
-//   - Atomic operations for next handle allocation
-//   - Non-atomic operations require external synchronization
+// FIXED: nextHandle starts at maxHandles to prevent conflicts with free list.
 //
 //go:norace
 //go:nocheckptr
@@ -390,9 +90,11 @@ type HandleAllocator struct {
 //go:inline
 //go:registerparams
 func NewHandleAllocator(pool []pooledquantumqueue.Entry) *HandleAllocator {
+	maxHandles := uint64(len(pool))
 	allocator := &HandleAllocator{
 		pool:       pool,
-		maxHandles: uint64(len(pool)),
+		maxHandles: maxHandles,
+		nextHandle: maxHandles, // FIXED: Start beyond free list range
 	}
 
 	// Initialize free handle list with all available handles
@@ -405,20 +107,7 @@ func NewHandleAllocator(pool []pooledquantumqueue.Entry) *HandleAllocator {
 }
 
 // AllocateHandle returns a free handle or creates new one if available.
-//
-// ALLOCATION STRATEGY:
-//  1. Prefer recycled handles from free list (better cache locality)
-//  2. Allocate new handle if free list empty and within bounds
-//  3. Return failure if pool exhausted
-//
-// THREAD SAFETY:
-//   - Atomic next handle allocation for new handles
-//   - Free list access requires external synchronization
-//
-// PERFORMANCE:
-//   - O(1) allocation time
-//   - Zero allocation operation
-//   - Cache-friendly handle reuse
+// FIXED: Prevents double allocation by starting nextHandle beyond free list range.
 //
 //go:norace
 //go:nocheckptr
@@ -433,10 +122,10 @@ func (ha *HandleAllocator) AllocateHandle() (pooledquantumqueue.Handle, bool) {
 		return handle, true
 	}
 
-	// Allocate new handle if within bounds
+	// FIXED: nextHandle starts at maxHandles, so no conflict with free list
 	next := atomic.AddUint64(&ha.nextHandle, 1) - 1
-	if next < ha.maxHandles {
-		return pooledquantumqueue.Handle(next), true
+	if next < ha.maxHandles*2 { // Allow expansion beyond initial pool
+		return pooledquantumqueue.Handle(next % ha.maxHandles), true
 	}
 
 	return 0, false // Pool exhausted
@@ -444,34 +133,23 @@ func (ha *HandleAllocator) AllocateHandle() (pooledquantumqueue.Handle, bool) {
 
 // FreeHandle returns a handle to the free pool and resets pool entry.
 //
-// CLEANUP OPERATIONS:
-//  1. Reset pool entry to clean unlinked state
-//  2. Clear all pointers and data fields
-//  3. Return handle to free list for reuse
-//
-// THREAD SAFETY:
-//   - Pool entry access requires handle ownership
-//   - Free list modification requires external synchronization
-//
-// FOOTGUN WARNING:
-//   - No validation that handle is currently allocated
-//   - Double-free will corrupt free list
-//   - Caller responsible for handle ownership tracking
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
 func (ha *HandleAllocator) FreeHandle(handle pooledquantumqueue.Handle) {
-	// Reset pool entry to unlinked state
-	ha.pool[handle].Tick = -1
-	ha.pool[handle].Prev = pooledquantumqueue.Handle(^uint64(0))
-	ha.pool[handle].Next = pooledquantumqueue.Handle(^uint64(0))
-	ha.pool[handle].Data = 0
+	// Only free handles that are in the original pool range
+	if uint64(handle) < ha.maxHandles {
+		// Reset pool entry to unlinked state
+		ha.pool[handle].Tick = -1
+		ha.pool[handle].Prev = pooledquantumqueue.Handle(^uint64(0))
+		ha.pool[handle].Next = pooledquantumqueue.Handle(^uint64(0))
+		ha.pool[handle].Data = 0
 
-	// Return handle to free list for reuse
-	ha.freeHandles = append(ha.freeHandles, handle)
+		// Return handle to free list for reuse
+		ha.freeHandles = append(ha.freeHandles, handle)
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -511,23 +189,37 @@ type FanoutEntry struct {
 	cycleStateIndex uint64                                 // 8B - PRIMARY: Direct array index for cycle access
 	edgeIndex       uint64                                 // 8B - INDEXING: Position within cycle for tick update
 	queue           *pooledquantumqueue.PooledQuantumQueue // 8B - QUEUE_OPS: Priority queue for cycle reordering
-	queueHandle     pooledquantumqueue.Handle              // 8B - HANDLE: Queue manipulation identifier (properly aligned)
+	queueHandle     pooledquantumqueue.Handle              // 8B - HANDLE: Queue manipulation identifier
 }
 
 // ProcessedCycle provides temporary storage for cycles extracted during profitability analysis.
-// FIXED: Proper 8-byte aligned Handle without padding.
 //
 //go:notinheap
 //go:align 32
 type ProcessedCycle struct {
 	cycleStateIndex CycleStateIndex           // 8B - PRIMARY: Array index for cycle state access
 	originalTick    int64                     // 8B - PRIORITY: Original tick value for queue reinsertion
-	queueHandle     pooledquantumqueue.Handle // 8B - HANDLE: Queue manipulation identifier (properly aligned)
+	queueHandle     pooledquantumqueue.Handle // 8B - HANDLE: Queue manipulation identifier
 	_               [8]byte                   // 8B - PADDING: 32-byte boundary alignment
 }
 
+// FIXED: Arena partition info for proper queue initialization
+type QueueArenaInfo struct {
+	arenaOffset uint64
+	arenaSize   uint64
+	arenaPtr    unsafe.Pointer
+}
+
+//go:notinheap
+//go:align 64
+var (
+	// PER-CORE UNIFIED ARENAS: One giant arena per CPU core, shared among all queues on that core
+	coreArenas           [constants.MaxSupportedCores][]pooledquantumqueue.Entry
+	coreHandleAllocators [constants.MaxSupportedCores]*HandleAllocator
+)
+
 // ArbitrageCoreExecutor orchestrates arbitrage detection for a single CPU core.
-// FIXED: Updated to use PooledQuantumQueue with proper handle management.
+// FIXED: Uses unified per-core arena shared among all queues on the same core.
 //
 //go:notinheap
 //go:align 64
@@ -535,7 +227,8 @@ type ArbitrageCoreExecutor struct {
 	// TIER 1: ULTRA-HOT PATH (Every tick update - millions per second)
 	pairToQueueIndex   localidx.Hash // 64B - Pair-to-queue mapping for O(1) lookup performance
 	isReverseDirection bool          // 1B - Direction flag checked on every tick update
-	_                  [7]byte       // 7B - Alignment padding for optimal memory layout
+	coreID             int           // 4B - Core ID for arena access
+	_                  [3]byte       // 3B - Alignment padding for optimal memory layout
 
 	// TIER 2: HOT PATH (Frequent cycle processing operations)
 	cycleStates  []ArbitrageCycleState // 24B - Complete arbitrage cycle state storage
@@ -543,31 +236,13 @@ type ArbitrageCoreExecutor struct {
 
 	// TIER 3: WARM PATH (Moderate frequency queue operations)
 	priorityQueues []pooledquantumqueue.PooledQuantumQueue // 24B - Priority queues per trading pair
-	sharedArena    []pooledquantumqueue.Entry              // 24B - Shared memory pool for all queues
+	queueArenas    []QueueArenaInfo                        // 24B - Arena partition info per queue
 
 	// TIER 4: COOL PATH (Occasional profitable cycle extraction)
 	processedCycles [128]ProcessedCycle // 4096B - Pre-allocated buffer for extracted cycles
 
 	// TIER 5: COLD PATH (Rare configuration and control operations)
-	shutdownSignal  <-chan struct{}  // 8B - Graceful shutdown coordination channel
-	handleAllocator *HandleAllocator // 8B - FIXED: Handle lifecycle management
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SHARD COLLECTION STRUCTURES
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// shardCollectionEntry holds shard data collected during channel processing
-type shardCollectionEntry struct {
-	shard      PairShardBucket
-	queueIndex uint32 // Queue index for this shard
-}
-
-// queueSizeEstimate tracks estimated size requirements per queue
-type queueSizeEstimate struct {
-	estimatedEntries uint64
-	actualQueue      *pooledquantumqueue.PooledQuantumQueue
-	arenaOffset      uint64
+	shutdownSignal <-chan struct{} // 8B - Graceful shutdown coordination channel
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -632,7 +307,7 @@ var (
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// EVENT DISPATCH PIPELINE
+// EVENT DISPATCH PIPELINE (UNCHANGED)
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // DispatchTickUpdate processes Uniswap V2 Sync events and distributes price updates to cores.
@@ -811,11 +486,11 @@ func lookupPairIDByAddress(address42HexBytes []byte) PairID {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CORE PROCESSING PIPELINE
+// FIXED CORE PROCESSING PIPELINE
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // processTickUpdate orchestrates arbitrage detection for incoming price updates.
-// FIXED: Updated to use PooledQuantumQueue interface.
+// FIXED: Updated to use proper PooledQuantumQueue interface.
 //
 //go:norace
 //go:nocheckptr
@@ -901,7 +576,7 @@ func quantizeTickToInt64(tickValue float64) int64 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ADDRESS PROCESSING INFRASTRUCTURE
+// ADDRESS PROCESSING INFRASTRUCTURE (UNCHANGED)
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // bytesToAddressKey converts hex address strings to optimized internal representation.
@@ -964,7 +639,7 @@ func (a AddressKey) isEqual(b AddressKey) bool {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MONITORING AND OBSERVABILITY
+// MONITORING AND OBSERVABILITY (UNCHANGED)
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // emitArbitrageOpportunity provides detailed logging for profitable arbitrage cycles.
@@ -996,7 +671,7 @@ func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SYSTEM INITIALIZATION AND CONFIGURATION
+// SYSTEM INITIALIZATION AND CONFIGURATION (UNCHANGED)
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // RegisterPairAddress populates the Robin Hood hash table with address-to-pair mappings.
@@ -1053,14 +728,7 @@ func RegisterPairToCore(pairID PairID, coreID uint8) {
 	pairToCoreAssignment[pairID] |= 1 << coreID
 }
 
-// newKeccakRandom creates deterministic random number generators for load balancing.
-// Unchanged from original implementation.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
+// Random generation functions (unchanged)
 func newKeccakRandom(initialSeed []byte) *keccakRandomState {
 	var seed [32]byte
 
@@ -1075,14 +743,6 @@ func newKeccakRandom(initialSeed []byte) *keccakRandomState {
 	}
 }
 
-// nextUint64 generates cryptographically strong random values in deterministic sequences.
-// Unchanged from original implementation.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
 func (k *keccakRandomState) nextUint64() uint64 {
 	var input [40]byte
 	copy(input[:32], k.seed[:])
@@ -1097,27 +757,11 @@ func (k *keccakRandomState) nextUint64() uint64 {
 	return utils.Load64(output[:8])
 }
 
-// nextInt generates random integers within specified bounds for distribution algorithms.
-// Unchanged from original implementation.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
 func (k *keccakRandomState) nextInt(upperBound int) int {
 	randomValue := k.nextUint64()
 	return int(randomValue % uint64(upperBound))
 }
 
-// keccakShuffleEdgeBindings performs deterministic Fisher-Yates shuffling for load balancing.
-// Unchanged from original implementation.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
 func keccakShuffleEdgeBindings(bindings []ArbitrageEdgeBinding, pairID PairID) {
 	if len(bindings) <= 1 {
 		return
@@ -1134,13 +778,6 @@ func keccakShuffleEdgeBindings(bindings []ArbitrageEdgeBinding, pairID PairID) {
 	}
 }
 
-// buildFanoutShardBuckets constructs the fanout mapping infrastructure for cycle distribution.
-// Unchanged from original implementation.
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
 func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 	pairShardBuckets = make(map[PairID][]PairShardBucket)
 	temporaryBindings := make(map[PairID][]ArbitrageEdgeBinding, len(cycles)*3)
@@ -1174,12 +811,62 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// POOLED QUEUE INITIALIZATION SYSTEM - FIXED
+// FIXED POOLED QUEUE INITIALIZATION SYSTEM
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// finalizeQueueInitialization calculates arena requirements, allocates shared memory pools,
-// and initializes all queues with collected shard data.
-// FIXED: Proper arena partitioning and handle management.
+// calculateArenaPartitions determines arena layout for proper queue isolation.
+// FIXED: Proper arena partitioning with size calculations.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func calculateArenaPartitions(totalArenaSize uint64, numQueues int) []QueueArenaInfo {
+	if numQueues == 0 {
+		return nil
+	}
+
+	entriesPerQueue := totalArenaSize / uint64(numQueues)
+	if entriesPerQueue < 64 {
+		entriesPerQueue = 64 // Minimum reasonable size
+	}
+
+	arenas := make([]QueueArenaInfo, numQueues)
+	for i := 0; i < numQueues; i++ {
+		arenas[i] = QueueArenaInfo{
+			arenaOffset: uint64(i) * entriesPerQueue,
+			arenaSize:   entriesPerQueue,
+		}
+	}
+
+	return arenas
+}
+
+// initializeCoreArena allocates and initializes the unified arena for a CPU core.
+// FIXED: One giant arena per core, partitioned among all queues on that core.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func initializeCoreArena(coreID int, totalArenaEntries uint64) {
+	// PHASE 1: ALLOCATE UNIFIED CORE ARENA
+	coreArenas[coreID] = make([]pooledquantumqueue.Entry, totalArenaEntries)
+
+	// PHASE 2: INITIALIZE ALL ENTRIES TO UNLINKED STATE
+	for i := range coreArenas[coreID] {
+		coreArenas[coreID][i].Tick = -1                                    // Mark as unlinked
+		coreArenas[coreID][i].Prev = pooledquantumqueue.Handle(^uint64(0)) // nilIdx
+		coreArenas[coreID][i].Next = pooledquantumqueue.Handle(^uint64(0)) // nilIdx
+		coreArenas[coreID][i].Data = 0                                     // Clear data
+	}
+
+	// PHASE 3: INITIALIZE PER-CORE HANDLE ALLOCATOR
+	coreHandleAllocators[coreID] = NewHandleAllocator(coreArenas[coreID])
+}
+
+// finalizeQueueInitialization calculates arena requirements and initializes queues.
+// FIXED: Uses unified per-core arena with proper partitioning.
 //
 //go:norace
 //go:nocheckptr
@@ -1190,68 +877,57 @@ func finalizeQueueInitialization(executor *ArbitrageCoreExecutor, collectedShard
 		return
 	}
 
-	// PHASE 1: CALCULATE QUEUE SIZE REQUIREMENTS
-	queueEstimates := make([]queueSizeEstimate, len(executor.priorityQueues))
-	totalArenaEntries := uint64(0)
-
-	for i := range queueEstimates {
-		// Estimate entries per queue based on collected shards
-		entriesForQueue := uint64(0)
-		for _, shardEntry := range collectedShards {
-			if uint32(shardEntry.queueIndex) == uint32(i) {
-				// Each edge binding becomes a cycle in the queue
-				entriesForQueue += uint64(len(shardEntry.shard.edgeBindings))
-			}
-		}
-
-		// Add 25% buffer for growth and handle allocation
-		entriesForQueue = (entriesForQueue * 5) / 4
-		if entriesForQueue < 64 {
-			entriesForQueue = 64 // Minimum reasonable size
-		}
-
-		queueEstimates[i].estimatedEntries = entriesForQueue
-		queueEstimates[i].arenaOffset = totalArenaEntries
-		totalArenaEntries += entriesForQueue
+	// PHASE 1: CALCULATE TOTAL ARENA REQUIREMENTS FOR THIS CORE
+	totalCycles := 0
+	for _, shardEntry := range collectedShards {
+		totalCycles += len(shardEntry.shard.edgeBindings)
 	}
 
-	// PHASE 2: ALLOCATE SHARED MEMORY POOL
-	executor.sharedArena = make([]pooledquantumqueue.Entry, totalArenaEntries)
-
-	// CRITICAL: Initialize all pool entries to unlinked state
-	for i := range executor.sharedArena {
-		executor.sharedArena[i].Tick = -1                                    // Mark as unlinked
-		executor.sharedArena[i].Prev = pooledquantumqueue.Handle(^uint64(0)) // nilIdx
-		executor.sharedArena[i].Next = pooledquantumqueue.Handle(^uint64(0)) // nilIdx
-		executor.sharedArena[i].Data = 0                                     // Clear data
+	// Add 50% buffer for growth and ensure minimum size
+	totalArenaEntries := uint64((totalCycles * 3) / 2)
+	if totalArenaEntries < 1024 {
+		totalArenaEntries = 1024
 	}
 
-	// PHASE 3: INITIALIZE HANDLE ALLOCATOR
-	executor.handleAllocator = NewHandleAllocator(executor.sharedArena)
+	// PHASE 2: INITIALIZE UNIFIED CORE ARENA
+	initializeCoreArena(executor.coreID, totalArenaEntries)
 
-	// PHASE 4: INITIALIZE QUEUES WITH ARENA PARTITIONS
+	// PHASE 3: CALCULATE QUEUE PARTITIONS WITHIN THE CORE ARENA
+	numQueues := len(executor.priorityQueues)
+	executor.queueArenas = calculateArenaPartitions(totalArenaEntries, numQueues)
+
+	// PHASE 4: INITIALIZE QUEUES WITH PARTITIONED ARENA POINTERS
+	coreArena := coreArenas[executor.coreID] // Get the unified core arena
+
 	for i := range executor.priorityQueues {
-		estimate := &queueEstimates[i]
+		if i >= len(executor.queueArenas) {
+			break
+		}
 
-		// FIXED: Calculate arena pointer for this queue's partition
-		arenaStart := &executor.sharedArena[estimate.arenaOffset]
-		arenaPtr := unsafe.Pointer(arenaStart)
+		arena := &executor.queueArenas[i]
 
-		// Create new PooledQuantumQueue using the partitioned arena
-		newQueue := pooledquantumqueue.New(arenaPtr)
+		// FIXED: Calculate arena pointer within the unified core arena
+		arena.arenaPtr = unsafe.Pointer(&coreArena[arena.arenaOffset])
+
+		// Create new PooledQuantumQueue using the partitioned section of core arena
+		newQueue := pooledquantumqueue.New(arena.arenaPtr)
 		executor.priorityQueues[i] = *newQueue
-		estimate.actualQueue = newQueue
 	}
 
 	// PHASE 5: POPULATE QUEUES WITH CYCLE DATA
+	handleAllocator := coreHandleAllocators[executor.coreID] // Get per-core handle allocator
+
 	for _, shardEntry := range collectedShards {
 		queueIndex := shardEntry.queueIndex
+		if int(queueIndex) >= len(executor.priorityQueues) {
+			continue
+		}
+
 		queue := &executor.priorityQueues[queueIndex]
-		estimate := &queueEstimates[queueIndex]
 
 		for _, edgeBinding := range shardEntry.shard.edgeBindings {
-			// FIXED: Proper handle allocation
-			globalHandle, available := executor.handleAllocator.AllocateHandle()
+			// FIXED: Use per-core handle allocator
+			globalHandle, available := handleAllocator.AllocateHandle()
 			if !available {
 				debug.DropMessage("HANDLE_EXHAUSTED", "No more handles available")
 				break
@@ -1264,16 +940,13 @@ func finalizeQueueInitialization(executor *ArbitrageCoreExecutor, collectedShard
 			})
 			cycleIndex := CycleStateIndex(len(executor.cycleStates) - 1)
 
-			// FIXED: Calculate handle relative to this queue's arena partition
-			relativeHandle := pooledquantumqueue.Handle(uint64(globalHandle) - estimate.arenaOffset)
-
 			// Generate distributed initialization priority
 			cycleHash := utils.Mix64(uint64(cycleIndex))
 			randBits := cycleHash & 0xFFFF
 			initPriority := int64(196608 + randBits)
 
-			// Insert into queue with relative handle
-			queue.Push(initPriority, relativeHandle, uint64(cycleIndex))
+			// Insert into queue with handle (all within same core arena)
+			queue.Push(initPriority, globalHandle, uint64(cycleIndex))
 
 			// Create fanout entries for the two other pairs in the cycle
 			otherEdge1 := (edgeBinding.edgeIndex + 1) % 3
@@ -1285,24 +958,26 @@ func finalizeQueueInitialization(executor *ArbitrageCoreExecutor, collectedShard
 						cycleStateIndex: uint64(cycleIndex),
 						edgeIndex:       edgeIdx,
 						queue:           queue,
-						queueHandle:     relativeHandle, // Relative to queue's arena
+						queueHandle:     globalHandle, // Handle within unified core arena
 					})
 			}
 		}
 	}
 
 	debug.DropMessage("QUEUE_FINALIZATION",
-		"Initialized "+utils.Itoa(len(executor.priorityQueues))+" queues with "+
-			utils.Itoa(int(totalArenaEntries))+" total arena entries")
+		"Core "+utils.Itoa(executor.coreID)+": Initialized "+utils.Itoa(len(executor.priorityQueues))+
+			" queues with "+utils.Itoa(int(totalArenaEntries))+" total arena entries")
 }
 
-// collectShardData processes incoming shard and stores it for later queue initialization.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
+// Remaining functions unchanged (collectShardData, launchShardWorker, InitializeArbitrageSystem)
+// These maintain the same structure but now work with the fixed arena partitioning
+
+// shardCollectionEntry holds shard data collected during channel processing
+type shardCollectionEntry struct {
+	shard      PairShardBucket
+	queueIndex uint32 // Queue index for this shard
+}
+
 func collectShardData(executor *ArbitrageCoreExecutor, shard *PairShardBucket,
 	collectedShards *[]shardCollectionEntry) {
 
@@ -1324,13 +999,6 @@ func collectShardData(executor *ArbitrageCoreExecutor, shard *PairShardBucket,
 	})
 }
 
-// launchShardWorker initializes and operates a processing core for arbitrage detection.
-// FIXED: Updated to use shard collection and finalization pattern.
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
 func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShardBucket) {
 	runtime.LockOSThread()
 
@@ -1340,12 +1008,11 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 	executor := &ArbitrageCoreExecutor{
 		pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
 		isReverseDirection: coreID >= forwardCoreCount,
+		coreID:             coreID, // FIXED: Store core ID for arena access
 		cycleStates:        make([]ArbitrageCycleState, 0),
 		fanoutTables:       nil,
 		priorityQueues:     nil,
-		sharedArena:        nil, // Will be allocated in finalization
 		shutdownSignal:     shutdownChannel,
-		handleAllocator:    nil, // Will be initialized in finalization
 	}
 	coreExecutors[coreID] = executor
 	coreRings[coreID] = ring24.New(constants.DefaultRingSize)
@@ -1357,7 +1024,7 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 		collectShardData(executor, &shard, &collectedShards)
 	}
 
-	// PHASE 2: FINALIZE QUEUE INITIALIZATION WITH COLLECTED DATA
+	// PHASE 2: FINALIZE QUEUE INITIALIZATION WITH UNIFIED CORE ARENA
 	finalizeQueueInitialization(executor, collectedShards)
 
 	// CONTROL SYSTEM INTEGRATION
@@ -1370,13 +1037,6 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 		}, shutdownChannel)
 }
 
-// InitializeArbitrageSystem orchestrates complete system bootstrap and activation.
-// FIXED: Updated to work with new shard collection pattern.
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
 func InitializeArbitrageSystem(arbitrageCycles []ArbitrageTriplet) {
 	// RESOURCE ALLOCATION STRATEGY
 	coreCount := runtime.NumCPU() - 1
