@@ -115,6 +115,7 @@ type ArbitrageEngine struct {
 	// TIER 2: HOT PATH (Frequent cycle processing operations)
 	cycleStates      []ArbitrageCycleState // 24B - HOT: Complete arbitrage cycle state storage
 	cycleFanoutTable [][]CycleFanoutEntry  // 24B - HOT: Pair-to-cycle mappings for fanout operations
+	_                [8]byte               // 8B - PADDING: Alignment optimization
 
 	// TIER 3: WARM PATH (Moderate frequency queue operations)
 	priorityQueues []pooledquantumqueue.PooledQuantumQueue // 24B - WARM: Priority queues per trading pair
