@@ -70,7 +70,7 @@ func BenchmarkEmpty(b *testing.B) {
 func BenchmarkSize(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	q := New(unsafe.Pointer(&pool[0]))
-	var result uint64 // FIXED: Capture result to prevent optimization
+	var result int // FIXED: Capture result to prevent optimization
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		result = q.Size() // FIXED: Use the result

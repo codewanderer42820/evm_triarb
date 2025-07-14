@@ -176,7 +176,7 @@ func TestQueueStressRandomOperations(t *testing.T) {
 
 		// Periodic consistency validation
 		if i%100000 == 0 {
-			if uint64(len(activeHandles)) != q.Size() {
+			if len(activeHandles) != q.Size() {
 				t.Fatalf("Size mismatch at iteration %d: active=%d, queue=%d",
 					i, len(activeHandles), q.Size())
 			}
