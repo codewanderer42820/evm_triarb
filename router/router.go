@@ -285,6 +285,7 @@ func DispatchPriceUpdate(logView *types.LogView) {
 
 	// PHASE 10: MULTI-CORE DISTRIBUTION WITH GUARANTEED DELIVERY
 	coreAssignments := pairToCoreRouting[pairID]
+	messageBytes := (*[24]byte)(unsafe.Pointer(&message))
 
 	for coreAssignments != 0 {
 		failedCores := uint64(0)
@@ -293,7 +294,6 @@ func DispatchPriceUpdate(logView *types.LogView) {
 		currentAssignments := coreAssignments
 		for currentAssignments != 0 {
 			coreID := bits.TrailingZeros64(currentAssignments)
-			messageBytes := (*[24]byte)(unsafe.Pointer(&message))
 
 			if !coreRings[coreID].Push(messageBytes) {
 				// Mark core for retry if ring was full
