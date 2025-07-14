@@ -214,7 +214,7 @@ func loadPoolsFromDatabase(dbPath string) error {
 		count++
 
 		// Progress indicator
-		if count%100 == 0 {
+		if count%10000 == 0 {
 			progressStr := utils.Itoa(count)
 			debug.DropMessage("POOL_PROGRESS", progressStr+" pools loaded")
 		}
