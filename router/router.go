@@ -606,6 +606,7 @@ type ProcessedCycle struct {
 // Cold fields are separated to prevent cache line pollution during normal operation.
 //
 //go:notinheap
+//go:align 64
 type ArbitrageCoreExecutor struct {
 	// TIER 1: ULTRA-HOT PATH (Every tick update - millions per second)
 	pairToQueueIndex   localidx.Hash // 64B - Pair-to-queue mapping for O(1) lookup performance
@@ -803,6 +804,7 @@ type PairShardBucket struct {
 // • hasher: Reset occasionally during sequence generation (cold field)
 //
 //go:notinheap
+//go:align 64
 type keccakRandomState struct {
 	counter uint64    // 8B - PRIMARY: Sequence counter incremented per generation
 	seed    [32]byte  // 32B - ENTROPY: Cryptographic seed for random generation
