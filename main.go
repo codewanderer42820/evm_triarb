@@ -62,7 +62,7 @@ func init() {
 //go:nosplit
 //go:inline
 //go:registerparams
-func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriplet, error) {
+func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriangle, error) {
 	debug.DropMessage("FILE_LOADING", "Reading cycles from: "+filename)
 
 	data, err := os.ReadFile(filename)
@@ -78,7 +78,7 @@ func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriplet, er
 	if estimatedCycles < 100 {
 		estimatedCycles = 100
 	}
-	cycles := make([]router.ArbitrageTriplet, 0, estimatedCycles)
+	cycles := make([]router.ArbitrageTriangle, 0, estimatedCycles)
 
 	// Parse file
 	i, lineCount := 0, 0
@@ -133,12 +133,12 @@ func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriplet, er
 			i++
 		}
 
-		// Create triplet if valid
+		// Create triangle if valid
 		if pairCount == 3 {
-			cycles = append(cycles, router.ArbitrageTriplet{
-				router.PairID(pairIDs[0]),
-				router.PairID(pairIDs[1]),
-				router.PairID(pairIDs[2]),
+			cycles = append(cycles, router.ArbitrageTriangle{
+				router.TradingPairID(pairIDs[0]),
+				router.TradingPairID(pairIDs[1]),
+				router.TradingPairID(pairIDs[2]),
 			})
 		} else if pairCount > 0 {
 			lineStr := utils.Itoa(lineCount)
@@ -205,7 +205,7 @@ func loadPoolsFromDatabase(dbPath string) error {
 
 		// Register pool address
 		poolAddressBytes := []byte(strings.TrimPrefix(poolAddress, "0x"))
-		router.RegisterPairAddress(poolAddressBytes, router.PairID(pairID))
+		router.RegisterTradingPairAddress(poolAddressBytes, router.TradingPairID(pairID))
 		count++
 
 		// Progress indicator
@@ -236,7 +236,7 @@ func loadPoolsFromDatabase(dbPath string) error {
 //go:nosplit
 //go:inline
 //go:registerparams
-func printCyclesInfo(cycles []router.ArbitrageTriplet) {
+func printCyclesInfo(cycles []router.ArbitrageTriangle) {
 	cycleCountStr := utils.Itoa(len(cycles))
 	debug.DropMessage("CYCLES_LOADED", "Total cycles: "+cycleCountStr)
 
