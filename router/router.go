@@ -810,7 +810,7 @@ type keccakRandomState struct {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// GLOBAL SYSTEM STATE
+// GLOBAL SYSTEM STATE - CACHE-OPTIMIZED AND NUMA-AWARE
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 //
 // Global state is minimized and carefully partitioned to prevent cross-core contention.
@@ -821,19 +821,37 @@ var (
 	// PER-CORE EXCLUSIVE STATE
 	// Each processing core owns these structures exclusively, eliminating the need
 	// for synchronization primitives and enabling lock-free operation.
+	//
+	//go:notinheap
+	//go:align 64
 	coreExecutors [constants.MaxSupportedCores]*ArbitrageCoreExecutor
-	coreRings     [constants.MaxSupportedCores]*ring24.Ring
+
+	//go:notinheap
+	//go:align 64
+	coreRings [constants.MaxSupportedCores]*ring24.Ring
 
 	// GLOBAL ROUTING INFRASTRUCTURE (READ-ONLY AFTER INITIALIZATION)
 	// These routing tables are populated during system initialization and remain
 	// immutable during operation, enabling safe concurrent access without locking.
+	//
+	//go:notinheap
+	//go:align 64
 	pairToCoreAssignment [constants.PairRoutingTableCapacity]uint64
-	pairShardBuckets     map[PairID][]PairShardBucket
+
+	//go:notinheap
+	//go:align 64
+	pairShardBuckets map[PairID][]PairShardBucket
 
 	// ADDRESS RESOLUTION TABLES (READ-ONLY AFTER INITIALIZATION)
 	// The address lookup system provides O(1) contract-address-to-pair-ID mapping
 	// using Robin Hood hashing for predictable performance characteristics.
+	//
+	//go:notinheap
+	//go:align 64
 	pairAddressKeys [constants.AddressTableCapacity]AddressKey
+
+	//go:notinheap
+	//go:align 64
 	addressToPairID [constants.AddressTableCapacity]PairID
 )
 
