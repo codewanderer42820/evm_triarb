@@ -1,8 +1,6 @@
 // localidx - ISR-grade Robin Hood hashmap with zero allocations
 package localidx
 
-import "unsafe"
-
 // Hash - Fixed-capacity Robin Hood hashmap for single-threaded ISR processing
 //
 //go:notinheap
@@ -82,11 +80,6 @@ func (h Hash) Put(key, val uint32) uint32 {
 			dist = kDist
 		}
 
-		// Soft prefetch 2 slots ahead
-		_ = *(*uint32)(unsafe.Pointer(
-			uintptr(unsafe.Pointer(&h.keys[0])) +
-				uintptr(((i+2)&h.mask)<<2)))
-
 		// Advance
 		i = (i + 1) & h.mask
 		dist++
@@ -122,11 +115,6 @@ func (h Hash) Get(key uint32) (uint32, bool) {
 		if kDist < dist {
 			return 0, false
 		}
-
-		// Soft prefetch 2 slots ahead
-		_ = *(*uint32)(unsafe.Pointer(
-			uintptr(unsafe.Pointer(&h.keys[0])) +
-				uintptr(((i+2)&h.mask)<<2)))
 
 		// Advance
 		i = (i + 1) & h.mask
