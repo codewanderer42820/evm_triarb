@@ -10,9 +10,10 @@ import (
 //go:notinheap
 //go:align 64
 type slot struct {
+	_   [16]byte // Cache line isolation
 	val [24]byte // Fixed payload
 	seq uint64   // Availability signal
-	_   [32]byte // Cache line isolation
+	_   [16]byte // Cache line isolation
 }
 
 // Ring - Cache-optimized SPSC buffer with isolation padding
