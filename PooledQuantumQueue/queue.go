@@ -135,10 +135,12 @@ const nilIdx Handle = ^Handle(0) // Sentinel value for unlinked entries
 //go:notinheap
 //go:align 32
 type Entry struct {
-	Tick int64  // 8B - Active tick or -1 if free
-	Data uint64 // 8B - Compact payload
-	Prev Handle // 8B - Previous in chain
-	Next Handle // 8B - Next in chain
+	Tick int64   // 8B - Active tick or -1 if free
+	Data uint64  // 8B - Compact payload
+	Prev Handle  // 8B - Previous in chain
+	_    [4]byte // 4B - Alignment padding
+	Next Handle  // 8B - Next in chain
+	_    [4]byte // 4B - Alignment padding
 }
 
 // groupBlock implements 2-level bitmap hierarchy for O(1) minimum finding.
@@ -190,7 +192,7 @@ type groupBlock struct {
 //go:notinheap
 //go:align 64
 type PooledQuantumQueue struct {
-	// Hot path metadata (16 bytes) - matches original exactly
+	// Hot path metadata (24 bytes)
 	summary uint64  // 8B - Active groups bitmask
 	size    int     // 8B - Current entry count
 	arena   uintptr // 8B - Base pointer to shared memory pool
