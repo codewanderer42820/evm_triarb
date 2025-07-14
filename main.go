@@ -203,11 +203,6 @@ func loadPoolsFromDatabase(dbPath string) error {
 			return fmt.Errorf("pool row scan failed: %v", err)
 		}
 
-		// Print first few pools for verification
-		if count < 5 {
-			printPoolInfo(pairID, poolAddress, token0Address, token1Address, exchangeName, feeBps)
-		}
-
 		// Register pool address
 		poolAddressBytes := []byte(strings.TrimPrefix(poolAddress, "0x"))
 		router.RegisterPairAddress(poolAddressBytes, router.PairID(pairID))
@@ -266,30 +261,6 @@ func printCyclesInfo(cycles []router.ArbitrageTriplet) {
 		remainingStr := utils.Itoa(len(cycles) - 10)
 		debug.DropMessage("CYCLES_TRUNCATED", "... and "+remainingStr+" more cycles")
 	}
-}
-
-// printPoolInfo prints detailed information about a loaded pool
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func printPoolInfo(pairID int64, poolAddress, token0Address, token1Address, exchangeName string, feeBps sql.NullInt64) {
-	pairIDStr := utils.Itoa(int(pairID))
-
-	poolInfo := "Pool " + pairIDStr + ": " + poolAddress
-	debug.DropMessage("POOL_ADDRESS", poolInfo)
-
-	tokenInfo := "  Tokens: " + token0Address + " <-> " + token1Address
-	debug.DropMessage("POOL_TOKENS", tokenInfo)
-
-	exchangeInfo := "  Exchange: " + exchangeName
-	if feeBps.Valid {
-		feeStr := utils.Itoa(int(feeBps.Int64))
-		exchangeInfo += " (Fee: " + feeStr + " bps)"
-	}
-	debug.DropMessage("POOL_EXCHANGE", exchangeInfo)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
