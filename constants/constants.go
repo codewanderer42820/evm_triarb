@@ -16,28 +16,6 @@ const (
 	MaxReorg = 256 // Maximum blockchain reorg depth - 4x increase for ultra-safety
 )
 
-// Virtual timing configuration (syscall-free performance)
-const (
-	// CPU polling rates (polls per second) - pure integer arithmetic
-	PollRateConservative = uint64(2_000_000_000) // 2GHz base rate
-	PollRateTypical      = uint64(3_500_000_000) // 3.5GHz realistic typical (was 4GHz)
-	PollRateAggressive   = uint64(4_500_000_000) // 4.5GHz realistic boost (was 5GHz)
-	PollRateAppleSilicon = uint64(3_200_000_000) // M4 Pro measured rate (accurate)
-	PollRateServer       = uint64(2_800_000_000) // Server conservative rate (more realistic)
-
-	// Cooldown timing options (milliseconds)
-	CooldownMs50   = uint64(50)   // 50ms cooldown (ultra-responsive)
-	CooldownMs100  = uint64(100)  // 100ms cooldown (very responsive)
-	CooldownMs250  = uint64(250)  // 250ms cooldown (responsive)
-	CooldownMs500  = uint64(500)  // 500ms cooldown (balanced)
-	CooldownMs1000 = uint64(1000) // 1 second cooldown (conservative)
-	CooldownMs2000 = uint64(2000) // 2 second cooldown (very conservative)
-
-	// Active configuration (easily changeable for different deployments)
-	ActivePollRate   = PollRateAppleSilicon // M4 Pro optimized
-	ActiveCooldownMs = CooldownMs500        // 500ms default (more responsive than 1s)
-)
-
 // Hash table configuration
 const (
 	AddressTableCapacity     = 1 << 21 // 2M entries - 4x increase for massive scale
@@ -88,6 +66,28 @@ const (
 	ConfigLowLatency       = "low_latency" // High poll rate, 50ms cooldown
 	ConfigBatteryOptimized = "battery_opt" // Conservative rate, 2s cooldown
 	ConfigServerOptimized  = "server_opt"  // Balanced rate, 500ms cooldown
+)
+
+// Virtual timing configuration (syscall-free performance)
+const (
+	// CPU polling rates (polls per second) - pure integer arithmetic
+	PollRateConservative = uint64(2_000_000_000) // 2GHz base rate
+	PollRateTypical      = uint64(3_500_000_000) // 3.5GHz realistic typical (was 4GHz)
+	PollRateAggressive   = uint64(4_500_000_000) // 4.5GHz realistic boost (was 5GHz)
+	PollRateAppleSilicon = uint64(3_200_000_000) // M4 Pro measured rate (accurate)
+	PollRateServer       = uint64(2_800_000_000) // Server conservative rate (more realistic)
+
+	// Cooldown timing options (milliseconds)
+	CooldownMs50   = uint64(50)   // 50ms cooldown (ultra-responsive)
+	CooldownMs100  = uint64(100)  // 100ms cooldown (very responsive)
+	CooldownMs250  = uint64(250)  // 250ms cooldown (responsive)
+	CooldownMs500  = uint64(500)  // 500ms cooldown (balanced)
+	CooldownMs1000 = uint64(1000) // 1 second cooldown (conservative)
+	CooldownMs2000 = uint64(2000) // 2 second cooldown (very conservative)
+
+	// Active configuration (easily changeable for different deployments)
+	ActivePollRate   = PollRateAppleSilicon // M4 Pro optimized
+	ActiveCooldownMs = CooldownMs500        // 500ms default (more responsive than 1s)
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
