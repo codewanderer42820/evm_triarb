@@ -39,10 +39,13 @@ const (
 
 // WebSocket configuration
 const (
-	WsDialAddr   = "polygon-mainnet.infura.io:443"
-	WsPath       = "/ws/v3/a2a3139d2ab24d59bed2dc3643664126"
-	WsHost       = "polygon-mainnet.infura.io"
-	MaxFrameSize = 1 << 20 // 1MB frame size - high-volume stream capacity
+	WsDialAddr          = "polygon-mainnet.infura.io:443"
+	WsPath              = "/ws/v3/a2a3139d2ab24d59bed2dc3643664126"
+	WsHost              = "polygon-mainnet.infura.io"
+	MaxFrameSize        = 1 << 20 // 1MB frame size - high-volume stream capacity
+	BufferSize          = 1 << 27 // 128MB buffer (134,217,728 bytes) - extreme performance buffer
+	HandshakeBufferSize = 512     // Handshake response buffer size
+	MaxFrameHeaderSize  = 10      // Maximum WebSocket frame header size
 )
 
 // System initialization
