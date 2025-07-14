@@ -4,7 +4,7 @@ package constants
 
 // Core system limits
 const (
-	MaxSupportedCores   = 128     // Current 1D limit, future 2D bitmapping enables 64×64 = 4,096 cores
+	MaxSupportedCores   = 64      // Current 1D limit, future 2D bitmapping enables 64×64 = 4,096 cores
 	DefaultRingSize     = 1 << 14 // 16,384 entries - optimized for high throughput
 	DefaultLocalIdxSize = 1 << 16 // 65,536 entries - handles growth patterns
 	MaxCyclesPerShard   = 1 << 18 // 262,144 cycles per shard - optimal bucket utilization
