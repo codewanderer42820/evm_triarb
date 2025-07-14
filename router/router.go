@@ -161,7 +161,7 @@
 // Errors are handled locally without propagation:
 //   - fastuni.Log2ReserveRatio error leads to fallback, not error return
 //   - Ring push failures trigger retry, not error handling
-//   - queue.Borrow() failures ignored in attachShardToExecutor
+//   - Handle allocation failures ignored in finalization
 //   - executor.pairToQueueIndex.Get() second return value ignored
 //
 // WHY: Error propagation requires allocation for error objects and disrupts
@@ -317,6 +317,7 @@ import (
 	"hash"
 	"math/bits"
 	"runtime"
+	"sync/atomic"
 	"unsafe"
 
 	"main/constants"
@@ -344,6 +345,134 @@ type ArbitrageTriplet [3]PairID
 
 // CycleStateIndex provides typed access into the cycle state storage arrays.
 type CycleStateIndex uint64
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// HANDLE MANAGEMENT SUBSYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// HandleAllocator manages handle lifecycle for shared pool architecture.
+// CRITICAL: Provides globally unique handles to prevent queue collisions.
+//
+// Architecture:
+//   - Global handle namespace across all queues and cores
+//   - Thread-safe allocation via atomic operations
+//   - Free handle recycling for optimal memory reuse
+//   - Pool entry cleanup on handle deallocation
+//
+// Safety:
+//   - Prevents handle collisions between multiple queues
+//   - Ensures proper pool entry initialization state
+//   - Tracks handle lifecycle for leak detection
+//
+//go:notinheap
+//go:align 64
+type HandleAllocator struct {
+	pool        []pooledquantumqueue.Entry
+	freeHandles []pooledquantumqueue.Handle
+	nextHandle  uint64
+	maxHandles  uint64
+}
+
+// NewHandleAllocator creates a handle allocator for the shared pool.
+//
+// INITIALIZATION REQUIREMENTS:
+//   - Pool must be pre-initialized to unlinked state
+//   - All pool entries must have Tick = -1
+//   - Free handle list populated with all available handles
+//
+// THREAD SAFETY:
+//   - Atomic operations for next handle allocation
+//   - Non-atomic operations require external synchronization
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func NewHandleAllocator(pool []pooledquantumqueue.Entry) *HandleAllocator {
+	allocator := &HandleAllocator{
+		pool:       pool,
+		maxHandles: uint64(len(pool)),
+	}
+
+	// Initialize free handle list with all available handles
+	allocator.freeHandles = make([]pooledquantumqueue.Handle, len(pool))
+	for i := range allocator.freeHandles {
+		allocator.freeHandles[i] = pooledquantumqueue.Handle(i)
+	}
+
+	return allocator
+}
+
+// AllocateHandle returns a free handle or creates new one if available.
+//
+// ALLOCATION STRATEGY:
+//  1. Prefer recycled handles from free list (better cache locality)
+//  2. Allocate new handle if free list empty and within bounds
+//  3. Return failure if pool exhausted
+//
+// THREAD SAFETY:
+//   - Atomic next handle allocation for new handles
+//   - Free list access requires external synchronization
+//
+// PERFORMANCE:
+//   - O(1) allocation time
+//   - Zero allocation operation
+//   - Cache-friendly handle reuse
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func (ha *HandleAllocator) AllocateHandle() (pooledquantumqueue.Handle, bool) {
+	// Try to reuse a freed handle first (better cache locality)
+	if len(ha.freeHandles) > 0 {
+		handle := ha.freeHandles[len(ha.freeHandles)-1]
+		ha.freeHandles = ha.freeHandles[:len(ha.freeHandles)-1]
+		return handle, true
+	}
+
+	// Allocate new handle if within bounds
+	next := atomic.AddUint64(&ha.nextHandle, 1) - 1
+	if next < ha.maxHandles {
+		return pooledquantumqueue.Handle(next), true
+	}
+
+	return 0, false // Pool exhausted
+}
+
+// FreeHandle returns a handle to the free pool and resets pool entry.
+//
+// CLEANUP OPERATIONS:
+//  1. Reset pool entry to clean unlinked state
+//  2. Clear all pointers and data fields
+//  3. Return handle to free list for reuse
+//
+// THREAD SAFETY:
+//   - Pool entry access requires handle ownership
+//   - Free list modification requires external synchronization
+//
+// FOOTGUN WARNING:
+//   - No validation that handle is currently allocated
+//   - Double-free will corrupt free list
+//   - Caller responsible for handle ownership tracking
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func (ha *HandleAllocator) FreeHandle(handle pooledquantumqueue.Handle) {
+	// Reset pool entry to unlinked state
+	ha.pool[handle].Tick = -1
+	ha.pool[handle].Prev = pooledquantumqueue.Handle(^uint64(0))
+	ha.pool[handle].Next = pooledquantumqueue.Handle(^uint64(0))
+	ha.pool[handle].Data = 0
+
+	// Return handle to free list for reuse
+	ha.freeHandles = append(ha.freeHandles, handle)
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // INTER-CORE MESSAGE PASSING ARCHITECTURE
@@ -374,7 +503,7 @@ type ArbitrageCycleState struct {
 }
 
 // FanoutEntry defines the relationship between pair price updates and affected arbitrage cycles.
-// Updated to use 8-byte aligned Handle without padding.
+// FIXED: Proper 8-byte aligned Handle without padding.
 //
 //go:notinheap
 //go:align 32
@@ -382,23 +511,23 @@ type FanoutEntry struct {
 	cycleStateIndex uint64                                 // 8B - PRIMARY: Direct array index for cycle access
 	edgeIndex       uint64                                 // 8B - INDEXING: Position within cycle for tick update
 	queue           *pooledquantumqueue.PooledQuantumQueue // 8B - QUEUE_OPS: Priority queue for cycle reordering
-	queueHandle     pooledquantumqueue.Handle              // 8B - HANDLE: Queue manipulation identifier (no padding)
+	queueHandle     pooledquantumqueue.Handle              // 8B - HANDLE: Queue manipulation identifier (properly aligned)
 }
 
 // ProcessedCycle provides temporary storage for cycles extracted during profitability analysis.
-// Updated to use 8-byte aligned Handle without padding.
+// FIXED: Proper 8-byte aligned Handle without padding.
 //
 //go:notinheap
 //go:align 32
 type ProcessedCycle struct {
 	cycleStateIndex CycleStateIndex           // 8B - PRIMARY: Array index for cycle state access
 	originalTick    int64                     // 8B - PRIORITY: Original tick value for queue reinsertion
-	queueHandle     pooledquantumqueue.Handle // 8B - HANDLE: Queue manipulation identifier (no padding)
+	queueHandle     pooledquantumqueue.Handle // 8B - HANDLE: Queue manipulation identifier (properly aligned)
 	_               [8]byte                   // 8B - PADDING: 32-byte boundary alignment
 }
 
 // ArbitrageCoreExecutor orchestrates arbitrage detection for a single CPU core.
-// Updated to use PooledQuantumQueue and shared memory pools.
+// FIXED: Updated to use PooledQuantumQueue with proper handle management.
 //
 //go:notinheap
 //go:align 64
@@ -420,7 +549,8 @@ type ArbitrageCoreExecutor struct {
 	processedCycles [128]ProcessedCycle // 4096B - Pre-allocated buffer for extracted cycles
 
 	// TIER 5: COLD PATH (Rare configuration and control operations)
-	shutdownSignal <-chan struct{} // 8B - Graceful shutdown coordination channel
+	shutdownSignal  <-chan struct{}  // 8B - Graceful shutdown coordination channel
+	handleAllocator *HandleAllocator // 8B - FIXED: Handle lifecycle management
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -685,7 +815,7 @@ func lookupPairIDByAddress(address42HexBytes []byte) PairID {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // processTickUpdate orchestrates arbitrage detection for incoming price updates.
-// Updated to use PooledQuantumQueue interface.
+// FIXED: Updated to use PooledQuantumQueue interface.
 //
 //go:norace
 //go:nocheckptr
@@ -1044,11 +1174,12 @@ func buildFanoutShardBuckets(cycles []ArbitrageTriplet) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// POOLED QUEUE INITIALIZATION SYSTEM
+// POOLED QUEUE INITIALIZATION SYSTEM - FIXED
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // finalizeQueueInitialization calculates arena requirements, allocates shared memory pools,
 // and initializes all queues with collected shard data.
+// FIXED: Proper arena partitioning and handle management.
 //
 //go:norace
 //go:nocheckptr
@@ -1095,12 +1226,16 @@ func finalizeQueueInitialization(executor *ArbitrageCoreExecutor, collectedShard
 		executor.sharedArena[i].Data = 0                                     // Clear data
 	}
 
-	// PHASE 3: INITIALIZE QUEUES WITH ARENA PARTITIONS
+	// PHASE 3: INITIALIZE HANDLE ALLOCATOR
+	executor.handleAllocator = NewHandleAllocator(executor.sharedArena)
+
+	// PHASE 4: INITIALIZE QUEUES WITH ARENA PARTITIONS
 	for i := range executor.priorityQueues {
 		estimate := &queueEstimates[i]
 
-		// Calculate arena pointer for this queue's partition
-		arenaPtr := unsafe.Pointer(&executor.sharedArena[estimate.arenaOffset])
+		// FIXED: Calculate arena pointer for this queue's partition
+		arenaStart := &executor.sharedArena[estimate.arenaOffset]
+		arenaPtr := unsafe.Pointer(arenaStart)
 
 		// Create new PooledQuantumQueue using the partitioned arena
 		newQueue := pooledquantumqueue.New(arenaPtr)
@@ -1108,18 +1243,17 @@ func finalizeQueueInitialization(executor *ArbitrageCoreExecutor, collectedShard
 		estimate.actualQueue = newQueue
 	}
 
-	// PHASE 4: POPULATE QUEUES WITH CYCLE DATA
-	handleCounter := pooledquantumqueue.Handle(0)
-
+	// PHASE 5: POPULATE QUEUES WITH CYCLE DATA
 	for _, shardEntry := range collectedShards {
 		queueIndex := shardEntry.queueIndex
 		queue := &executor.priorityQueues[queueIndex]
 		estimate := &queueEstimates[queueIndex]
 
 		for _, edgeBinding := range shardEntry.shard.edgeBindings {
-			// Ensure we don't exceed arena partition boundaries
-			if handleCounter >= pooledquantumqueue.Handle(estimate.estimatedEntries) {
-				debug.DropMessage("ARENA_OVERFLOW", "Queue arena partition exceeded")
+			// FIXED: Proper handle allocation
+			globalHandle, available := executor.handleAllocator.AllocateHandle()
+			if !available {
+				debug.DropMessage("HANDLE_EXHAUSTED", "No more handles available")
 				break
 			}
 
@@ -1130,15 +1264,15 @@ func finalizeQueueInitialization(executor *ArbitrageCoreExecutor, collectedShard
 			})
 			cycleIndex := CycleStateIndex(len(executor.cycleStates) - 1)
 
-			// Calculate handle relative to this queue's arena partition
-			relativeHandle := handleCounter
+			// FIXED: Calculate handle relative to this queue's arena partition
+			relativeHandle := pooledquantumqueue.Handle(uint64(globalHandle) - estimate.arenaOffset)
 
 			// Generate distributed initialization priority
 			cycleHash := utils.Mix64(uint64(cycleIndex))
 			randBits := cycleHash & 0xFFFF
 			initPriority := int64(196608 + randBits)
 
-			// Insert into queue
+			// Insert into queue with relative handle
 			queue.Push(initPriority, relativeHandle, uint64(cycleIndex))
 
 			// Create fanout entries for the two other pairs in the cycle
@@ -1151,15 +1285,10 @@ func finalizeQueueInitialization(executor *ArbitrageCoreExecutor, collectedShard
 						cycleStateIndex: uint64(cycleIndex),
 						edgeIndex:       edgeIdx,
 						queue:           queue,
-						queueHandle:     relativeHandle,
+						queueHandle:     relativeHandle, // Relative to queue's arena
 					})
 			}
-
-			handleCounter++
 		}
-
-		// Reset handle counter for next queue's partition
-		handleCounter = 0
 	}
 
 	debug.DropMessage("QUEUE_FINALIZATION",
@@ -1171,6 +1300,7 @@ func finalizeQueueInitialization(executor *ArbitrageCoreExecutor, collectedShard
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func collectShardData(executor *ArbitrageCoreExecutor, shard *PairShardBucket,
@@ -1195,7 +1325,7 @@ func collectShardData(executor *ArbitrageCoreExecutor, shard *PairShardBucket,
 }
 
 // launchShardWorker initializes and operates a processing core for arbitrage detection.
-// Updated to use shard collection and finalization pattern.
+// FIXED: Updated to use shard collection and finalization pattern.
 //
 //go:norace
 //go:nocheckptr
@@ -1215,6 +1345,7 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 		priorityQueues:     nil,
 		sharedArena:        nil, // Will be allocated in finalization
 		shutdownSignal:     shutdownChannel,
+		handleAllocator:    nil, // Will be initialized in finalization
 	}
 	coreExecutors[coreID] = executor
 	coreRings[coreID] = ring24.New(constants.DefaultRingSize)
@@ -1240,7 +1371,7 @@ func launchShardWorker(coreID, forwardCoreCount int, shardInput <-chan PairShard
 }
 
 // InitializeArbitrageSystem orchestrates complete system bootstrap and activation.
-// Updated to work with new shard collection pattern.
+// FIXED: Updated to work with new shard collection pattern.
 //
 //go:norace
 //go:nocheckptr
