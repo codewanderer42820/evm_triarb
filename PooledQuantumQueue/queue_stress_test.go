@@ -38,12 +38,6 @@ import (
 // ============================================================================
 
 // stressItem represents a single entry in the reference heap implementation.
-// Mirrors PooledQuantumQueue node structure for direct comparison validation.
-//
-// Field layout:
-//   - h: Handle into PooledQuantumQueue pool (identity correlation)
-//   - tick: Priority key for ordering comparison
-//   - seq: LIFO tiebreaker (higher sequence = newer entry)
 type stressItem struct {
 	h    Handle // Corresponding handle in PooledQuantumQueue pool
 	tick int64  // Priority key for heap ordering
@@ -51,12 +45,6 @@ type stressItem struct {
 }
 
 // stressHeap implements heap.Interface with PooledQuantumQueue-compatible ordering.
-// Provides reference behavior for correctness validation.
-//
-// Ordering semantics:
-//   - Primary: Ascending tick value (earlier ticks first)
-//   - Secondary: Descending sequence (newer entries first within same tick)
-//   - Matches PooledQuantumQueue LIFO-within-tick behavior exactly
 type stressHeap []*stressItem
 
 func (h stressHeap) Len() int { return len(h) }
@@ -89,26 +77,6 @@ func (h *stressHeap) Pop() interface{} {
 // ============================================================================
 
 // TestQueueStressRandomOperations validates PooledQuantumQueue under chaotic workloads.
-// Applies millions of random operations while maintaining reference comparison.
-//
-// Test methodology:
-//  1. Parallel operation on PooledQuantumQueue and reference heap
-//  2. Random operation selection: 33% push, 33% move, 33% pop
-//  3. Deterministic PRNG seed for reproducible failure analysis
-//  4. Continuous correctness validation at every operation
-//  5. Complete drain verification ensures no phantom state
-//
-// Operation patterns:
-//   - Push: Use sequential handles and insert at random tick with uint64 payload
-//   - Move: Relocate existing entry to different random tick
-//   - Pop: Extract minimum and validate against reference
-//
-// Failure modes detected:
-//   - Ordering violations (wrong minimum returned)
-//   - Handle correlation mismatches
-//   - Phantom entries (queue/reference size mismatches)
-//   - Pool corruption (invalid handle states)
-//   - Summary bitmap inconsistencies
 func TestQueueStressRandomOperations(t *testing.T) {
 	const iterations = 10_000_000
 	const maxHandles = 50000
@@ -197,11 +165,11 @@ func TestQueueStressRandomOperations(t *testing.T) {
 			q.UnlinkMin(h)
 			delete(activeHandles, h)
 
-			// Reset the pool entry to unlinked state when returning handle
-			pool[h].tick = -1
-			pool[h].prev = nilIdx
-			pool[h].next = nilIdx
-			pool[h].data = 0
+			// Reset the pool entry to unlinked state when returning handle (FIXED: using exported fields)
+			pool[h].Tick = -1
+			pool[h].Prev = nilIdx
+			pool[h].Next = nilIdx
+			pool[h].Data = 0
 
 			availableHandles = append(availableHandles, h)
 		}
@@ -232,11 +200,11 @@ func TestQueueStressRandomOperations(t *testing.T) {
 		q.UnlinkMin(h)
 		delete(activeHandles, h)
 
-		// Reset pool entry state
-		pool[h].tick = -1
-		pool[h].prev = nilIdx
-		pool[h].next = nilIdx
-		pool[h].data = 0
+		// Reset pool entry state (FIXED: using exported fields)
+		pool[h].Tick = -1
+		pool[h].Prev = nilIdx
+		pool[h].Next = nilIdx
+		pool[h].Data = 0
 
 		availableHandles = append(availableHandles, h)
 	}
@@ -261,12 +229,6 @@ func TestQueueStressRandomOperations(t *testing.T) {
 // ============================================================================
 
 // TestSharedPoolStress validates multiple queues sharing a single pool under stress.
-//
-// Test scenarios:
-//  1. Multiple queues operating on shared pool simultaneously
-//  2. Handle space partitioning across queues
-//  3. Independent operation without interference
-//  4. Pool memory coherency under concurrent access
 func TestSharedPoolStress(t *testing.T) {
 	const operations = 1_000_000
 	const poolSize = 10000
@@ -369,12 +331,6 @@ func TestSharedPoolStress(t *testing.T) {
 // ============================================================================
 
 // TestPoolBoundaryStress validates handle bounds within pool capacity.
-//
-// Test scenarios:
-//  1. Handle distribution across entire pool range
-//  2. Edge case handling at pool boundaries
-//  3. Pool utilization patterns under stress
-//  4. Memory coherency at pool edges
 func TestPoolBoundaryStress(t *testing.T) {
 	const poolSize = 10000
 	const operations = 500000
@@ -422,7 +378,7 @@ func TestPoolBoundaryStress(t *testing.T) {
 		if i%25000 == 0 {
 			expectedActive := 0
 			for h := range activeHandles {
-				if pool[h].tick >= 0 {
+				if pool[h].Tick >= 0 { // FIXED: using exported field
 					expectedActive++
 				}
 			}
@@ -454,12 +410,6 @@ func TestPoolBoundaryStress(t *testing.T) {
 // ============================================================================
 
 // TestBitmapConsistencyUnderStress validates bitmap integrity under intensive load.
-//
-// Test methodology:
-//  1. Intensive operations across all bitmap groups/lanes/buckets
-//  2. Validation of bitmap state after each operation phase
-//  3. Summary collapse and rebuild verification
-//  4. CLZ operation correctness under stress
 func TestBitmapConsistencyUnderStress(t *testing.T) {
 	const poolSize = 50000
 	const operations = 2_000_000
@@ -502,11 +452,11 @@ func TestBitmapConsistencyUnderStress(t *testing.T) {
 				}
 				delete(handleTracker, popH)
 
-				// Reset pool entry state
-				pool[popH].tick = -1
-				pool[popH].prev = nilIdx
-				pool[popH].next = nilIdx
-				pool[popH].data = 0
+				// Reset pool entry state (FIXED: using exported fields)
+				pool[popH].Tick = -1
+				pool[popH].Prev = nilIdx
+				pool[popH].Next = nilIdx
+				pool[popH].Data = 0
 			}
 		}
 

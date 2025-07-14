@@ -36,31 +36,12 @@ import (
 )
 
 // InitializePool properly initializes a pool to unlinked state.
-//
-// CRITICAL: All pools must be initialized before use with PooledQuantumQueue.
-// This function ensures that all Entry instances in the pool are set to a clean,
-// unlinked state that PooledQuantumQueue expects.
-//
-// INITIALIZATION PERFORMED:
-//   - tick = -1 (marks entry as unlinked, not in any queue)
-//   - prev = nilIdx (clears previous pointer in doubly-linked chain)
-//   - next = nilIdx (clears next pointer in doubly-linked chain)
-//   - data = 0 (clears any payload data)
-//
-// USAGE:
-//
-//	pool := make([]Entry, poolSize)
-//	InitializePool(pool)
-//	q := New(unsafe.Pointer(&pool[0]))
-//
-// This function should be called on every pool slice before creating any
-// PooledQuantumQueue instances that will use the pool.
 func InitializePool(pool []Entry) {
 	for i := range pool {
-		pool[i].tick = -1     // Mark as unlinked
-		pool[i].prev = nilIdx // Clear prev pointer
-		pool[i].next = nilIdx // Clear next pointer
-		pool[i].data = 0      // Clear data
+		pool[i].Tick = -1     // Mark as unlinked (FIXED: using exported field)
+		pool[i].Prev = nilIdx // Clear prev pointer (FIXED: using exported field)
+		pool[i].Next = nilIdx // Clear next pointer (FIXED: using exported field)
+		pool[i].Data = 0      // Clear data (FIXED: using exported field)
 	}
 }
 
@@ -71,17 +52,9 @@ const testPoolSize = 10000 // Pool size for testing
 // ============================================================================
 
 // TestNewQueueBehavior validates proper queue initialization with external pools.
-//
-// Verification criteria:
-//   - Initial empty state: size=0, Empty()=true
-//   - External pool pointer setup
-//   - Bitmap summaries properly zeroed
-//   - All buckets initialized to nilIdx
-//
-// Validates constructor correctness and external pool setup.
 func TestNewQueueBehavior(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
-	InitializePool(pool) // Use shared helper function
+	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 
 	// Verify initial empty state
@@ -120,14 +93,9 @@ func TestNewQueueBehavior(t *testing.T) {
 }
 
 // TestPoolAccess validates external pool entry access.
-//
-// Pool validation:
-//   - Correct pointer arithmetic for entry access
-//   - Handle-to-entry mapping accuracy
-//   - Entry field accessibility
 func TestPoolAccess(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
-	InitializePool(pool) // Use shared helper function
+	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 
 	// Test entry access for various handles
@@ -158,19 +126,9 @@ func TestPoolAccess(t *testing.T) {
 // ============================================================================
 
 // TestPushAndPeepMin validates fundamental queue operations and edge cases.
-//
-// Test scenarios:
-//   - Basic insertion and retrieval correctness
-//   - In-place payload updates for identical tick values
-//   - Proper tick-based ordering across different values
-//   - Edge case handling at tick boundaries (0 and maximum)
-//   - Size tracking accuracy throughout operations
-//   - Bitmap summary updates during insertion
-//
-// Validates core scheduling semantics and boundary condition handling.
 func TestPushAndPeepMin(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
-	InitializePool(pool) // Use shared helper function
+	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 	h := Handle(0)
 
@@ -232,7 +190,7 @@ func TestPushAndPeepMin(t *testing.T) {
 
 	// Test edge cases: boundary tick values
 	pool2 := make([]Entry, testPoolSize)
-	InitializePool(pool2) // Use shared helper function
+	InitializePool(pool2)
 	q2 := New(unsafe.Pointer(&pool2[0]))
 	h0 := Handle(0)
 	hMax := Handle(1)
@@ -263,19 +221,9 @@ func TestPushAndPeepMin(t *testing.T) {
 }
 
 // TestPushTriggersUnlink validates automatic tick relocation behavior.
-//
-// Test sequence:
-//  1. Insert handle at initial tick position
-//  2. Push same handle to different tick (triggers unlink/relink)
-//  3. Verify correct relocation and payload preservation
-//  4. Validate size invariant maintenance
-//  5. Confirm bitmap updates for both old and new positions
-//
-// ⚠️  FOOTGUN NOTE: No validation of tick bounds or handle state
-// Ensures Push operations handle tick changes via proper unlink/relink cycles.
 func TestPushTriggersUnlink(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
-	InitializePool(pool) // Use shared helper function
+	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 	h := Handle(0)
 
@@ -329,17 +277,9 @@ func TestPushTriggersUnlink(t *testing.T) {
 // ============================================================================
 
 // TestMultipleSameTickOrdering validates LIFO semantics within tick buckets.
-//
-// Test scenario:
-//  1. Insert multiple entries with identical tick values
-//  2. Verify that newer entries appear first (LIFO ordering)
-//  3. Confirm bucket head management correctness
-//  4. Test chain integrity during insertions
-//
-// Validates Last-In-First-Out behavior for entries sharing tick values.
 func TestMultipleSameTickOrdering(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
-	InitializePool(pool) // Use shared helper function
+	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 	h1 := Handle(0)
 	h2 := Handle(1)
@@ -380,17 +320,9 @@ func TestMultipleSameTickOrdering(t *testing.T) {
 }
 
 // TestPushDifferentTicks validates tick-based priority ordering.
-//
-// Test scenario:
-//  1. Insert entries with different tick values in arbitrary order
-//  2. Verify that lower tick values have higher priority
-//  3. Confirm hierarchical bitmap minimum finding correctness
-//  4. Test ordering consistency across tick range
-//
-// Validates priority queue semantics regardless of insertion order.
 func TestPushDifferentTicks(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
-	InitializePool(pool) // Use shared helper function
+	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 	h1 := Handle(0)
 	h2 := Handle(1)
@@ -430,18 +362,9 @@ func TestPushDifferentTicks(t *testing.T) {
 // ============================================================================
 
 // TestMoveTickBehavior validates tick relocation functionality.
-//
-// Test scenarios:
-//  1. No-op move (same tick): Verify optimization works correctly
-//  2. Actual relocation: Confirm data integrity and position correctness
-//  3. Queue structure consistency: Validate bitmap and link maintenance
-//  4. Cross-bucket movement: Test complex relocation scenarios
-//
-// ⚠️  FOOTGUN NOTE: No validation of handle linkage state or tick bounds
-// Tests MoveTick operation efficiency and correctness.
 func TestMoveTickBehavior(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
-	InitializePool(pool) // Use shared helper function
+	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 	h := Handle(0)
 
@@ -481,11 +404,6 @@ func TestMoveTickBehavior(t *testing.T) {
 // ============================================================================
 
 // TestPeepMinWhenEmpty validates panic behavior on empty queue access.
-//
-// ⚠️  FOOTGUN GRADE 10/10: PeepMin on empty queue causes undefined behavior
-//
-// Expected behavior: Immediate panic or memory corruption
-// Safety requirement: Never call PeepMin without checking Empty() first
 func TestPeepMinWhenEmpty(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
@@ -493,17 +411,12 @@ func TestPeepMinWhenEmpty(t *testing.T) {
 		}
 	}()
 	pool := make([]Entry, testPoolSize)
-	InitializePool(pool) // Use shared helper function
+	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 	q.PeepMin()
 }
 
 // TestDoubleUnlink validates panic behavior on protocol violations.
-//
-// ⚠️  FOOTGUN GRADES 2/4/8: Double unlink operations cause corruption
-//
-// Expected behavior: Immediate panic or silent state corruption
-// Safety requirement: Never unlink same handle twice without re-linking
 func TestDoubleUnlink(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
@@ -512,7 +425,7 @@ func TestDoubleUnlink(t *testing.T) {
 	}()
 
 	pool := make([]Entry, testPoolSize)
-	InitializePool(pool) // Use shared helper function
+	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 	h := Handle(0)
 	q.Push(100, h, 0xDEAD)
@@ -525,17 +438,9 @@ func TestDoubleUnlink(t *testing.T) {
 // ============================================================================
 
 // TestSharedPoolUsage validates multiple queues sharing a single memory pool.
-//
-// Test scenarios:
-//  1. Multiple queues created with same pool pointer
-//  2. Independent operation without interference
-//  3. Handle space partitioning between queues
-//  4. Pool memory utilization efficiency
-//
-// Validates the core shared pool architecture benefit.
 func TestSharedPoolUsage(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
-	InitializePool(pool) // Use shared helper function
+	InitializePool(pool)
 	q1 := New(unsafe.Pointer(&pool[0]))
 	q2 := New(unsafe.Pointer(&pool[0]))
 	q3 := New(unsafe.Pointer(&pool[0]))
@@ -581,19 +486,19 @@ func TestSharedPoolUsage(t *testing.T) {
 	entry2 := &pool[h2]
 	entry3 := &pool[h3]
 
-	if entry1.tick != 10 || entry1.data != 0x1111 {
+	if entry1.Tick != 10 || entry1.Data != 0x1111 {
 		t.Errorf("shared pool entry1 incorrect: tick=%d data=%x",
-			entry1.tick, entry1.data)
+			entry1.Tick, entry1.Data)
 	}
 
-	if entry2.tick != 20 || entry2.data != 0x2222 {
+	if entry2.Tick != 20 || entry2.Data != 0x2222 {
 		t.Errorf("shared pool entry2 incorrect: tick=%d data=%x",
-			entry2.tick, entry2.data)
+			entry2.Tick, entry2.Data)
 	}
 
-	if entry3.tick != 5 || entry3.data != 0x3333 {
+	if entry3.Tick != 5 || entry3.Data != 0x3333 {
 		t.Errorf("shared pool entry3 incorrect: tick=%d data=%x",
-			entry3.tick, entry3.data)
+			entry3.Tick, entry3.Data)
 	}
 
 	// Verify queue independence by manipulating one queue
@@ -622,16 +527,9 @@ func TestSharedPoolUsage(t *testing.T) {
 }
 
 // TestPoolBoundaryAccess validates handle bounds within pool capacity.
-//
-// Test scenarios:
-//  1. Access patterns within pool bounds
-//  2. Handle distribution across pool space
-//  3. Entry correlation with pool positions
-//
-// ⚠️  NOTE: No bounds checking performed - this validates correct usage patterns
 func TestPoolBoundaryAccess(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
-	InitializePool(pool) // Use shared helper function
+	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 
 	// Test various handle positions within pool
@@ -650,10 +548,10 @@ func TestPoolBoundaryAccess(t *testing.T) {
 				h, entry, expectedEntry)
 		}
 
-		// Verify data consistency through queue operations
-		if entry.tick != int64(h) || entry.data != uint64(h)*1000 {
+		// Verify data consistency through queue operations (FIXED: using exported fields)
+		if entry.Tick != int64(h) || entry.Data != uint64(h)*1000 {
 			t.Errorf("handle %d data incorrect: tick=%d data=%d",
-				h, entry.tick, entry.data)
+				h, entry.Tick, entry.Data)
 		}
 
 		// Verify queue operations work correctly with this handle
