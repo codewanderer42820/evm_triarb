@@ -5,13 +5,14 @@ import (
 	"sync/atomic"
 )
 
-// slot - 32-byte ring entry (half cache line)
+// slot - 64-byte ring entry (full cache line)
 //
 //go:notinheap
-//go:align 32
+//go:align 64
 type slot struct {
 	val [24]byte // Fixed payload
 	seq uint64   // Availability signal
+	_   [32]byte // Cache line isolation
 }
 
 // Ring - Cache-optimized SPSC buffer with isolation padding
