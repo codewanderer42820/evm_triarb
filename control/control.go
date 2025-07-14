@@ -1,4 +1,5 @@
-// control.go — Global control flags and syscall-free branchless timing for pinned consumers
+// control.go — Syscall-free virtual timing and lock-free coordination flags
+
 package control
 
 import "main/constants"
