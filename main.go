@@ -15,6 +15,7 @@ import (
 	"main/debug"
 	"main/parser"
 	"main/router"
+	"main/utils"
 	"main/ws"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -44,11 +45,72 @@ func init() {
 			panic(fmt.Sprintf("Critical failure loading arbitrage cycles: %v", err))
 		}
 
+		// Print cycles loaded from file
+		printCyclesInfo(cycles)
 		router.InitializeArbitrageSystem(cycles)
 		debug.DropMessage("INIT_COMPLETE", "File-only mode")
 	} else {
 		debug.DropMessage("INIT_COMPLETE", "Database integration active")
 	}
+}
+
+// printCyclesInfo prints detailed information about loaded arbitrage cycles
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func printCyclesInfo(cycles []router.ArbitrageTriplet) {
+	cycleCountStr := utils.Itoa(len(cycles))
+	debug.DropMessage("CYCLES_LOADED", "Total cycles: "+cycleCountStr)
+
+	// Print first 10 cycles for verification
+	maxToPrint := len(cycles)
+	if maxToPrint > 10 {
+		maxToPrint = 10
+	}
+
+	for i := 0; i < maxToPrint; i++ {
+		cycle := cycles[i]
+		indexStr := utils.Itoa(i + 1)
+		pair0Str := utils.Itoa(int(cycle[0]))
+		pair1Str := utils.Itoa(int(cycle[1]))
+		pair2Str := utils.Itoa(int(cycle[2]))
+
+		cycleInfo := "Cycle " + indexStr + ": (" + pair0Str + ") -> (" + pair1Str + ") -> (" + pair2Str + ")"
+		debug.DropMessage("CYCLE_DETAIL", cycleInfo)
+	}
+
+	if len(cycles) > 10 {
+		remainingStr := utils.Itoa(len(cycles) - 10)
+		debug.DropMessage("CYCLES_TRUNCATED", "... and "+remainingStr+" more cycles")
+	}
+}
+
+// printPoolInfo prints detailed information about a loaded pool
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func printPoolInfo(pairID int64, poolAddress, token0Address, token1Address, exchangeName string, feeBps sql.NullInt64) {
+	pairIDStr := utils.Itoa(int(pairID))
+
+	// Build pool info string using utils
+	poolInfo := "Pool " + pairIDStr + ": " + poolAddress
+	debug.DropMessage("POOL_ADDRESS", poolInfo)
+
+	tokenInfo := "  Tokens: " + token0Address + " <-> " + token1Address
+	debug.DropMessage("POOL_TOKENS", tokenInfo)
+
+	exchangeInfo := "  Exchange: " + exchangeName
+	if feeBps.Valid {
+		feeStr := utils.Itoa(int(feeBps.Int64))
+		exchangeInfo += " (Fee: " + feeStr + " bps)"
+	}
+	debug.DropMessage("POOL_EXCHANGE", exchangeInfo)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -63,25 +125,36 @@ func init() {
 //go:inline
 //go:registerparams
 func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriplet, error) {
+	debug.DropMessage("FILE_LOADING", "Reading cycles from: "+filename)
+
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}
+
+	fileSizeStr := utils.Itoa(len(data))
+	debug.DropMessage("FILE_SIZE", "File size: "+fileSizeStr+" bytes")
 
 	// Estimate cycles count for pre-allocation
 	estimatedCycles := len(data) / 50
 	if estimatedCycles < 100 {
 		estimatedCycles = 100
 	}
+
+	estimatedStr := utils.Itoa(estimatedCycles)
+	debug.DropMessage("CYCLES_ESTIMATE", "Estimated cycles: "+estimatedStr)
+
 	cycles := make([]router.ArbitrageTriplet, 0, estimatedCycles)
 
 	// Parse file byte by byte
 	i := 0
 	dataLen := len(data)
+	lineCount := 0
 
 	for i < dataLen {
 		var pairIDs [3]uint64
 		pairCount := 0
+		lineCount++
 
 		// Extract 3 pairs from current line
 		for pairCount < 3 && i < dataLen && data[i] != '\n' {
@@ -135,8 +208,16 @@ func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriplet, er
 				router.PairID(pairIDs[1]),
 				router.PairID(pairIDs[2]),
 			})
+		} else if pairCount > 0 {
+			// Log incomplete lines for debugging
+			lineStr := utils.Itoa(lineCount)
+			pairCountStr := utils.Itoa(pairCount)
+			debug.DropMessage("INCOMPLETE_LINE", "Line "+lineStr+" only had "+pairCountStr+" pairs")
 		}
 	}
+
+	linesProcessedStr := utils.Itoa(lineCount)
+	debug.DropMessage("LINES_PROCESSED", "Total lines processed: "+linesProcessedStr)
 
 	if len(cycles) == 0 {
 		return nil, fmt.Errorf("no valid arbitrage cycles found in %s", filename)
@@ -153,6 +234,8 @@ func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriplet, er
 //go:inline
 //go:registerparams
 func loadPoolsFromDatabase(dbPath string) error {
+	debug.DropMessage("DATABASE_CONNECT", "Connecting to: "+dbPath)
+
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return fmt.Errorf("database connection failed: %v", err)
@@ -173,6 +256,8 @@ func loadPoolsFromDatabase(dbPath string) error {
 		JOIN tokens t1 ON p.token1_id = t1.id
 		JOIN exchanges e ON p.exchange_id = e.id
 		ORDER BY p.id`
+
+	debug.DropMessage("DATABASE_QUERY", "Executing pool query")
 
 	rows, err := db.Query(query)
 	if err != nil {
@@ -198,17 +283,35 @@ func loadPoolsFromDatabase(dbPath string) error {
 			return fmt.Errorf("pool row scan failed: %v", err)
 		}
 
+		// Print detailed pool information for first 5 pools
+		if count < 5 {
+			printPoolInfo(pairID, poolAddress, token0Address, token1Address, exchangeName, feeBps)
+		}
+
 		// Register pool address for event processing
 		poolAddressBytes := []byte(strings.TrimPrefix(poolAddress, "0x"))
 		router.RegisterPairAddress(poolAddressBytes, router.PairID(pairID))
 		count++
+
+		// Print progress every 100 pools
+		if count%100 == 0 {
+			progressStr := utils.Itoa(count)
+			debug.DropMessage("POOL_PROGRESS", progressStr+" pools loaded")
+		}
 	}
 
 	if err = rows.Err(); err != nil {
 		return fmt.Errorf("pool iteration error: %v", err)
 	}
 
-	debug.DropMessage("POOLS_LOADED", fmt.Sprintf("%d trading pairs registered", count))
+	countStr := utils.Itoa(count)
+	debug.DropMessage("POOLS_LOADED", countStr+" trading pairs registered")
+
+	if count > 5 {
+		remainingStr := utils.Itoa(count - 5)
+		debug.DropMessage("POOLS_TRUNCATED", "... and "+remainingStr+" more pools (details truncated)")
+	}
+
 	return nil
 }
 
@@ -221,17 +324,23 @@ func loadPoolsFromDatabase(dbPath string) error {
 //go:registerparams
 func initializeFromDatabase(dbPath string, cyclesFile string) error {
 	// Load trading pairs from database
+	debug.DropMessage("INIT_PHASE", "Loading trading pairs from database")
 	if err := loadPoolsFromDatabase(dbPath); err != nil {
 		return fmt.Errorf("trading pair loading failed: %v", err)
 	}
 
 	// Load arbitrage cycles from file
+	debug.DropMessage("INIT_PHASE", "Loading arbitrage cycles from file")
 	cycles, err := loadArbitrageCyclesFromFile(cyclesFile)
 	if err != nil {
 		return fmt.Errorf("arbitrage cycle loading failed: %v", err)
 	}
 
+	// Print cycles information
+	printCyclesInfo(cycles)
+
 	// Initialize arbitrage detection system
+	debug.DropMessage("INIT_PHASE", "Initializing arbitrage detection system")
 	router.InitializeArbitrageSystem(cycles)
 
 	return nil
