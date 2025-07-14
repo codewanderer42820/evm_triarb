@@ -43,7 +43,6 @@ const (
 	WsPath       = "/ws/v3/a2a3139d2ab24d59bed2dc3643664126"
 	WsHost       = "polygon-mainnet.infura.io"
 	MaxFrameSize = 1 << 20 // 1MB frame size - high-volume stream capacity
-	FrameCap     = 1 << 17 // 131,072 frames - massive buffering capacity
 )
 
 // System initialization
