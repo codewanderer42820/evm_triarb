@@ -2075,17 +2075,23 @@ func TestCompleteSystemWithHandleManagement(t *testing.T) {
 	fixture.SetUp()
 
 	t.Run("FullWorkflow", func(t *testing.T) {
-		// Create executor
+		// Create executor with dedicated core
 		executor := NewTestExecutorBuilder().
 			WithPoolSize(500).
 			WithQueues(3).
 			WithCyclesPerQueue(5).
+			WithCoreID(5). // Use core 5 for this test
 			Build()
 
 		defer NewTestCleaner(executor).Cleanup()
 
-		// Verify handle allocation worked
-		fixture.EXPECT_TRUE(executor.handleAllocator != nil, "Handle allocator should be initialized")
+		// Verify handle allocator exists for this core
+		handleAllocator := coreHandleAllocators[executor.coreID]
+		fixture.EXPECT_TRUE(handleAllocator != nil, "Handle allocator should be initialized")
+
+		// Verify core arena was allocated
+		coreArena := coreArenas[executor.coreID]
+		fixture.EXPECT_TRUE(len(coreArena) > 0, "Core arena should be allocated")
 
 		// Verify queues have cycles
 		for i := 0; i < 3; i++ {
@@ -2093,7 +2099,15 @@ func TestCompleteSystemWithHandleManagement(t *testing.T) {
 				fmt.Sprintf("Queue %d should have cycles", i))
 		}
 
-		// Test processing
+		// Verify arena partitioning worked correctly
+		fixture.EXPECT_EQ(3, len(executor.queueArenas), "Should have 3 queue arena partitions")
+		for i, arena := range executor.queueArenas {
+			fixture.EXPECT_TRUE(arena.arenaPtr != nil, fmt.Sprintf("Queue %d should have valid arena pointer", i))
+			fixture.EXPECT_LT(arena.arenaOffset, uint64(len(coreArena)),
+				fmt.Sprintf("Queue %d arena offset should be within core arena bounds", i))
+		}
+
+		// Test processing with realistic tick update
 		update := &TickUpdate{
 			pairID:      PairID(1),
 			forwardTick: 2.5,
@@ -2104,9 +2118,9 @@ func TestCompleteSystemWithHandleManagement(t *testing.T) {
 			processTickUpdate(executor, update)
 		})
 
-		// Verify fanout worked
+		// Verify fanout worked correctly
 		if len(executor.fanoutTables[0]) > 0 {
-			// Check that cycle states were updated
+			// Check that cycle states were updated via fanout mechanism
 			foundUpdatedCycle := false
 			for _, fanout := range executor.fanoutTables[0] {
 				cycle := &executor.cycleStates[fanout.cycleStateIndex]
@@ -2117,5 +2131,122 @@ func TestCompleteSystemWithHandleManagement(t *testing.T) {
 			}
 			fixture.EXPECT_TRUE(foundUpdatedCycle, "At least one cycle should be updated via fanout")
 		}
+
+		// Test handle allocation and deallocation cycle
+		initialHandleCount := len(handleAllocator.freeHandles)
+
+		// Allocate some handles
+		allocatedHandles := make([]pooledquantumqueue.Handle, 0, 10)
+		for i := 0; i < 10; i++ {
+			handle, ok := handleAllocator.AllocateHandle()
+			if ok {
+				allocatedHandles = append(allocatedHandles, handle)
+			}
+		}
+
+		fixture.EXPECT_LT(0, len(allocatedHandles), "Should have allocated some handles")
+		fixture.EXPECT_EQ(initialHandleCount-len(allocatedHandles), len(handleAllocator.freeHandles),
+			"Free handle count should decrease by allocated amount")
+
+		// Free the handles
+		for _, handle := range allocatedHandles {
+			handleAllocator.FreeHandle(handle)
+		}
+
+		fixture.EXPECT_EQ(initialHandleCount, len(handleAllocator.freeHandles),
+			"Free handle count should return to initial value after freeing")
+
+		// Verify queue operations still work after handle cycling
+		if !executor.priorityQueues[0].Empty() {
+			handle, tick, data := executor.priorityQueues[0].PeepMin()
+			fixture.EXPECT_TRUE(handle != pooledquantumqueue.Handle(^uint64(0)), "Should get valid handle from PeepMin")
+			fixture.EXPECT_TRUE(tick != 0, "Should get valid tick from PeepMin")
+			fixture.EXPECT_TRUE(data != ^uint64(0), "Should get valid data from PeepMin")
+		}
+	})
+
+	t.Run("MultipleQueuesSharedArena", func(t *testing.T) {
+		// Test that multiple queues properly share the same core arena
+		executor := NewTestExecutorBuilder().
+			WithPoolSize(2000).
+			WithQueues(5).
+			WithCyclesPerQueue(3).
+			WithCoreID(7). // Use core 7 for this test
+			Build()
+
+		defer NewTestCleaner(executor).Cleanup()
+
+		// Verify all queues share the same core arena
+		coreArena := coreArenas[executor.coreID]
+		fixture.EXPECT_TRUE(len(coreArena) >= 2000, "Core arena should be large enough")
+
+		// Verify each queue has its own partition
+		for i := 0; i < 5; i++ {
+			arena := &executor.queueArenas[i]
+
+			// Check that arena pointer is within the core arena bounds
+			arenaStart := uintptr(arena.arenaPtr)
+			coreArenaStart := uintptr(unsafe.Pointer(&coreArena[0]))
+			coreArenaEnd := uintptr(unsafe.Pointer(&coreArena[len(coreArena)-1]))
+
+			fixture.EXPECT_GE(arenaStart, coreArenaStart,
+				fmt.Sprintf("Queue %d arena should be >= core arena start", i))
+			fixture.EXPECT_LE(arenaStart, coreArenaEnd,
+				fmt.Sprintf("Queue %d arena should be <= core arena end", i))
+		}
+
+		// Verify queues don't interfere with each other
+		for i := 0; i < 5; i++ {
+			fixture.EXPECT_FALSE(executor.priorityQueues[i].Empty(),
+				fmt.Sprintf("Queue %d should have cycles", i))
+
+			// Each queue should have independent sizing
+			size := executor.priorityQueues[i].Size()
+			fixture.EXPECT_LT(uint64(0), size, fmt.Sprintf("Queue %d should have non-zero size", i))
+		}
+	})
+
+	t.Run("HandleSpaceIsolation", func(t *testing.T) {
+		// Test that different cores have isolated handle spaces
+		executor1 := NewTestExecutorBuilder().
+			WithPoolSize(1000).
+			WithQueues(2).
+			WithCyclesPerQueue(2).
+			WithCoreID(8). // Use core 8
+			Build()
+
+		executor2 := NewTestExecutorBuilder().
+			WithPoolSize(1000).
+			WithQueues(2).
+			WithCyclesPerQueue(2).
+			WithCoreID(9). // Use core 9
+			Build()
+
+		defer NewTestCleaner(executor1).Cleanup()
+		defer NewTestCleaner(executor2).Cleanup()
+
+		// Verify they have different handle allocators
+		allocator1 := coreHandleAllocators[executor1.coreID]
+		allocator2 := coreHandleAllocators[executor2.coreID]
+
+		fixture.EXPECT_TRUE(allocator1 != allocator2, "Different cores should have different handle allocators")
+
+		// Verify they have different core arenas
+		arena1 := coreArenas[executor1.coreID]
+		arena2 := coreArenas[executor2.coreID]
+
+		fixture.EXPECT_TRUE(&arena1[0] != &arena2[0], "Different cores should have different arenas")
+
+		// Allocate handles from both cores
+		handle1, ok1 := allocator1.AllocateHandle()
+		handle2, ok2 := allocator2.AllocateHandle()
+
+		fixture.EXPECT_TRUE(ok1, "Core 8 should be able to allocate handles")
+		fixture.EXPECT_TRUE(ok2, "Core 9 should be able to allocate handles")
+
+		// Handles can be the same value but refer to different memory spaces
+		// This is correct behavior - handles are core-local
+		fixture.EXPECT_TRUE(handle1 >= 0, "Core 8 handle should be valid")
+		fixture.EXPECT_TRUE(handle2 >= 0, "Core 9 handle should be valid")
 	})
 }
