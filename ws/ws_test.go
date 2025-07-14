@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"main/constants"
 	"net"
 	"runtime"
 	"strings"
@@ -369,7 +370,7 @@ func handshakeLogic(conn *directConn) error {
 	_ = processor.upgradeRequest[:upgradeRequestLen]
 
 	// Read response logic (same as your actual code)
-	var buf [HandshakeBufferSize]byte
+	var buf [constants.HandshakeBufferSize]byte
 	total := 0
 
 	for total < 500 {
@@ -461,8 +462,8 @@ func TestProcessorInitialization(t *testing.T) {
 	})
 
 	t.Run("buffer_size", func(t *testing.T) {
-		if len(processor.buffer) != BufferSize {
-			t.Errorf("Buffer size incorrect: expected %d, got %d", BufferSize, len(processor.buffer))
+		if len(processor.buffer) != constants.BufferSize {
+			t.Errorf("Buffer size incorrect: expected %d, got %d", constants.BufferSize, len(processor.buffer))
 		}
 	})
 }
@@ -911,7 +912,7 @@ func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 		t.Run("frame_too_large", func(t *testing.T) {
 			frame := []byte{0x81, 127}
 			lenBytes := make([]byte, 8)
-			binary.BigEndian.PutUint64(lenBytes, uint64(BufferSize)+1)
+			binary.BigEndian.PutUint64(lenBytes, uint64(constants.BufferSize)+1)
 			frame = append(frame, lenBytes...)
 
 			conn := &mockConn{readData: frame}
@@ -924,7 +925,7 @@ func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 		t.Run("message_too_large_accumulated", func(t *testing.T) {
 			var data []byte
 			// First fragment takes most of buffer
-			payload1 := make([]byte, BufferSize-1000)
+			payload1 := make([]byte, constants.BufferSize-1000)
 			data = append(data, createTestFrame(0x1, payload1, false)...)
 			// Second fragment exceeds buffer
 			payload2 := make([]byte, 2000)
@@ -945,7 +946,7 @@ func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 
 			// Create a large unfragmented frame that brings msgEnd just past the early check threshold
 			// We want msgEnd to be BufferSize-MaxFrameHeaderSize+1 after this frame
-			targetMsgEnd := BufferSize - MaxFrameHeaderSize + 1
+			targetMsgEnd := constants.BufferSize - constants.MaxFrameHeaderSize + 1
 			largePayload := make([]byte, targetMsgEnd)
 			for i := range largePayload {
 				largePayload[i] = byte('A' + (i % 26))
@@ -980,7 +981,7 @@ func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 
 			// Add 64-bit length for exactly BufferSize
 			lenBytes := make([]byte, 8)
-			binary.BigEndian.PutUint64(lenBytes, uint64(BufferSize))
+			binary.BigEndian.PutUint64(lenBytes, uint64(constants.BufferSize))
 			data = append(data, lenBytes...)
 
 			// We don't need to add the actual payload since the check happens after length parsing
@@ -995,7 +996,7 @@ func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 		t.Run("maximum_valid_frame", func(t *testing.T) {
 			// Test maximum valid frame size (just under BufferSize)
 			// Use a size that's definitely valid
-			maxValidSize := BufferSize - 1000 // Leave some room to be safe
+			maxValidSize := constants.BufferSize - 1000 // Leave some room to be safe
 			payload := make([]byte, maxValidSize)
 			for i := range payload {
 				payload[i] = byte(i & 0xFF)
@@ -1016,7 +1017,7 @@ func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 			var data []byte
 
 			// Create multiple fragments that together approach the buffer limit
-			fragmentSize := BufferSize / 4
+			fragmentSize := constants.BufferSize / 4
 
 			// Fragment 1
 			payload1 := make([]byte, fragmentSize)
@@ -1049,7 +1050,7 @@ func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 			var data []byte
 
 			// Create multiple fragments that together exceed the buffer limit
-			fragmentSize := BufferSize / 3
+			fragmentSize := constants.BufferSize / 3
 
 			// Fragment 1
 			payload1 := make([]byte, fragmentSize)
@@ -1076,7 +1077,7 @@ func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 
 			// Create a frame that should pass all checks but somehow result in msgEnd > BufferSize
 			// This is mostly for code coverage of the final safety check
-			payload := make([]byte, BufferSize-100) // Should be within limits
+			payload := make([]byte, constants.BufferSize-100) // Should be within limits
 			frame := createTestFrame(0x1, payload, true)
 
 			conn := &mockConn{readData: frame}
@@ -1086,8 +1087,8 @@ func TestSpinUntilCompleteMessageErrors(t *testing.T) {
 			if err != nil {
 				t.Errorf("Unexpected error: %v", err)
 			}
-			if len(result) != BufferSize-100 {
-				t.Errorf("Expected %d bytes, got %d", BufferSize-100, len(result))
+			if len(result) != constants.BufferSize-100 {
+				t.Errorf("Expected %d bytes, got %d", constants.BufferSize-100, len(result))
 			}
 		})
 	})
@@ -1164,7 +1165,7 @@ func BenchmarkHandshake(b *testing.B) {
 	// Extended warmup to eliminate any CPU frequency scaling effects
 	for i := 0; i < 10000; i++ {
 		// Simulate the core handshake logic without I/O overhead
-		var buf [HandshakeBufferSize]byte
+		var buf [constants.HandshakeBufferSize]byte
 		copy(buf[:], response) // Simulate read
 		total := responseLen
 
@@ -1192,7 +1193,7 @@ func BenchmarkHandshake(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		// Measure ONLY the core handshake validation logic
-		var buf [HandshakeBufferSize]byte
+		var buf [constants.HandshakeBufferSize]byte
 		copy(buf[:responseLen], response) // Simulate the network read
 		total := responseLen
 
