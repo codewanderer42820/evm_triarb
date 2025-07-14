@@ -108,9 +108,9 @@ type ExtractedCycle struct {
 //go:align 64
 type ArbitrageEngine struct {
 	// TIER 1: ULTRA-HOT PATH (Every tick update - millions per second)
-	pairToQueueLookup  localidx.Hash // 64B - ULTRA-HOT: Pair-to-queue mapping for O(1) lookup performance
 	isReverseDirection bool          // 1B - ULTRA-HOT: Direction flag checked on every tick update
 	_                  [7]byte       // 7B - PADDING: Alignment optimization
+	pairToQueueLookup  localidx.Hash // 64B - ULTRA-HOT: Pair-to-queue mapping for O(1) lookup performance
 
 	// TIER 2: HOT PATH (Frequent cycle processing operations)
 	cycleStates      []ArbitrageCycleState // 24B - HOT: Complete arbitrage cycle state storage
