@@ -27,10 +27,10 @@
 //
 //     // CRITICAL: Initialize pool entries to unlinked state
 //     for i := range sharedPool {
-//         sharedPool[i].tick = -1     // Mark as unlinked
-//         sharedPool[i].prev = nilIdx // Clear prev pointer
-//         sharedPool[i].next = nilIdx // Clear next pointer
-//         sharedPool[i].data = 0      // Clear data
+//         sharedPool[i].Tick = -1     // Mark as unlinked
+//         sharedPool[i].Prev = nilIdx // Clear prev pointer
+//         sharedPool[i].Next = nilIdx // Clear next pointer
+//         sharedPool[i].Data = 0      // Clear data
 //     }
 //
 //     queue1 := pooledquantumqueue.New(unsafe.Pointer(&sharedPool[0]))
@@ -51,10 +51,10 @@
 //
 //     pool := make([]Entry, poolSize)
 //     for i := range pool {
-//         pool[i].tick = -1     // Mark as unlinked (-1 = not in any queue)
-//         pool[i].prev = nilIdx // Clear previous pointer
-//         pool[i].next = nilIdx // Clear next pointer
-//         pool[i].data = 0      // Clear payload data
+//         pool[i].Tick = -1     // Mark as unlinked (-1 = not in any queue)
+//         pool[i].Prev = nilIdx // Clear previous pointer
+//         pool[i].Next = nilIdx // Clear next pointer
+//         pool[i].Data = 0      // Clear payload data
 //     }
 //     q := New(unsafe.Pointer(&pool[0]))
 //
@@ -115,9 +115,9 @@ const nilIdx Handle = ^Handle(0) // Sentinel value for unlinked entries
 // MEMORY LAYOUT OPTIMIZATION:
 //
 //	Fields are ordered by access frequency and aligned for optimal cache performance:
-//	• tick: Primary sorting key, accessed during every queue operation
-//	• data: User payload, accessed during value retrieval and updates
-//	• prev/next: Link pointers, accessed during queue traversal and updates
+//	• Tick: Primary sorting key, accessed during every queue operation
+//	• Data: User payload, accessed during value retrieval and updates
+//	• Prev/Next: Link pointers, accessed during queue traversal and updates
 //
 // CACHE ALIGNMENT:
 //
@@ -127,18 +127,18 @@ const nilIdx Handle = ^Handle(0) // Sentinel value for unlinked entries
 // INITIALIZATION REQUIREMENT:
 //
 //	ALL Entry instances in the pool MUST be initialized to:
-//	• tick = -1 (indicates unlinked state)
-//	• prev = nilIdx (clear previous pointer)
-//	• next = nilIdx (clear next pointer)
-//	• data = 0 (clear payload)
+//	• Tick = -1 (indicates unlinked state)
+//	• Prev = nilIdx (clear previous pointer)
+//	• Next = nilIdx (clear next pointer)
+//	• Data = 0 (clear payload)
 //
 //go:notinheap
 //go:align 32
 type Entry struct {
-	tick int64  // 8B - Active tick or -1 if not linked
-	data uint64 // 8B - User payload
-	prev Handle // 8B - Previous entry in chain
-	next Handle // 8B - Next entry in chain
+	Tick int64  // 8B - Active tick or -1 if not linked (EXPORTED)
+	Data uint64 // 8B - User payload (EXPORTED)
+	Prev Handle // 8B - Previous entry in chain (EXPORTED)
+	Next Handle // 8B - Next entry in chain (EXPORTED)
 }
 
 // groupBlock implements 2-level bitmap hierarchy for O(1) minimum finding.
@@ -221,10 +221,10 @@ type PooledQuantumQueue struct {
 //
 //	  pool := make([]Entry, poolSize)
 //	  for i := range pool {
-//	      pool[i].tick = -1     // Mark as unlinked
-//	      pool[i].prev = nilIdx // Clear prev pointer
-//	      pool[i].next = nilIdx // Clear next pointer
-//	      pool[i].data = 0      // Clear data
+//	      pool[i].Tick = -1     // Mark as unlinked
+//	      pool[i].Prev = nilIdx // Clear prev pointer
+//	      pool[i].Next = nilIdx // Clear next pointer
+//	      pool[i].Data = 0      // Clear data
 //	  }
 //	  q := New(unsafe.Pointer(&pool[0]))
 //
@@ -272,7 +272,7 @@ func New(arena unsafe.Pointer) *PooledQuantumQueue {
 //   - Handle must be valid for the associated memory pool
 //   - No bounds checking performed for maximum performance
 //   - Caller responsible for handle validity
-//   - Referenced entry must be properly initialized (tick = -1 for unlinked)
+//   - Referenced entry must be properly initialized (Tick = -1 for unlinked)
 //
 //go:norace
 //go:nocheckptr
@@ -328,7 +328,7 @@ func (q *PooledQuantumQueue) Empty() bool {
 //	Executes in 4-10 nanoseconds depending on bitmap update requirements.
 //
 // ⚠️  SAFETY REQUIREMENTS:
-//   - Entry must be currently linked (tick >= 0)
+//   - Entry must be currently linked (Tick >= 0)
 //   - Handle must be valid for the associated memory pool
 //   - Entry must have been properly initialized before first use
 //
@@ -339,24 +339,24 @@ func (q *PooledQuantumQueue) Empty() bool {
 //go:registerparams
 func (q *PooledQuantumQueue) unlink(h Handle) {
 	entry := q.entry(h)
-	b := uint64(entry.tick)
+	b := uint64(entry.Tick)
 
 	// Remove from doubly-linked chain
-	if entry.prev != nilIdx {
-		q.entry(entry.prev).next = entry.next
+	if entry.Prev != nilIdx {
+		q.entry(entry.Prev).Next = entry.Next
 	} else {
-		q.buckets[b] = entry.next
+		q.buckets[b] = entry.Next
 	}
 
-	if entry.next != nilIdx {
-		q.entry(entry.next).prev = entry.prev
+	if entry.Next != nilIdx {
+		q.entry(entry.Next).Prev = entry.Prev
 	}
 
 	// Update hierarchical bitmap summaries if bucket is now empty
 	if q.buckets[b] == nilIdx {
-		g := uint64(entry.tick) >> 12       // Group index
-		l := (uint64(entry.tick) >> 6) & 63 // Lane index
-		bb := uint64(entry.tick) & 63       // Bucket index
+		g := uint64(entry.Tick) >> 12       // Group index
+		l := (uint64(entry.Tick) >> 6) & 63 // Lane index
+		bb := uint64(entry.Tick) & 63       // Bucket index
 
 		gb := &q.groups[g]
 		gb.l2[l] &^= 1 << (63 - bb)
@@ -370,9 +370,9 @@ func (q *PooledQuantumQueue) unlink(h Handle) {
 	}
 
 	// Mark entry as unlinked and update size
-	entry.tick = -1
-	entry.prev = nilIdx
-	entry.next = nilIdx
+	entry.Tick = -1
+	entry.Prev = nilIdx
+	entry.Next = nilIdx
 	q.size--
 }
 
@@ -398,7 +398,7 @@ func (q *PooledQuantumQueue) unlink(h Handle) {
 //	Executes in 3-6 nanoseconds depending on bitmap update requirements.
 //
 // ⚠️  SAFETY REQUIREMENTS:
-//   - Entry must be currently unlinked (tick = -1)
+//   - Entry must be currently unlinked (Tick = -1)
 //   - Handle must be valid for the associated memory pool
 //   - Entry must have been properly initialized
 //
@@ -412,12 +412,12 @@ func (q *PooledQuantumQueue) linkAtHead(h Handle, tick int64) {
 	b := uint64(tick)
 
 	// Insert at head of bucket chain
-	entry.tick = tick
-	entry.prev = nilIdx
-	entry.next = q.buckets[b]
+	entry.Tick = tick
+	entry.Prev = nilIdx
+	entry.Next = q.buckets[b]
 
-	if entry.next != nilIdx {
-		q.entry(entry.next).prev = h
+	if entry.Next != nilIdx {
+		q.entry(entry.Next).Prev = h
 	}
 	q.buckets[b] = h
 
@@ -456,7 +456,7 @@ func (q *PooledQuantumQueue) linkAtHead(h Handle, tick int64) {
 //
 // ⚠️  SAFETY REQUIREMENTS:
 //   - Handle must be valid for the associated memory pool
-//   - Entry must be properly initialized (tick = -1 for new entries)
+//   - Entry must be properly initialized (Tick = -1 for new entries)
 //   - Tick values should be within reasonable range for bitmap efficiency
 //   - Concurrent access requires external synchronization
 //
@@ -469,17 +469,17 @@ func (q *PooledQuantumQueue) Push(tick int64, h Handle, val uint64) {
 	entry := q.entry(h)
 
 	// Hot path: same tick, update data only
-	if entry.tick == tick {
-		entry.data = val
+	if entry.Tick == tick {
+		entry.Data = val
 		return
 	}
 
 	// Cold path: different tick, relocate entry
-	if entry.tick >= 0 {
+	if entry.Tick >= 0 {
 		q.unlink(h)
 	}
 	q.linkAtHead(h, tick)
-	entry.data = val
+	entry.Data = val
 }
 
 // PeepMin returns the minimum entry without removing it from the queue.
@@ -527,7 +527,7 @@ func (q *PooledQuantumQueue) PeepMin() (Handle, int64, uint64) {
 
 	// Return handle, tick, and data from minimum entry
 	entry := q.entry(h)
-	return h, entry.tick, entry.data
+	return h, entry.Tick, entry.Data
 }
 
 // MoveTick relocates an entry to a new tick position.
@@ -551,7 +551,7 @@ func (q *PooledQuantumQueue) PeepMin() (Handle, int64, uint64) {
 //
 // ⚠️  SAFETY REQUIREMENTS:
 //   - Handle must be valid for the associated memory pool
-//   - Entry must be currently linked (tick >= 0)
+//   - Entry must be currently linked (Tick >= 0)
 //   - Entry must have been properly initialized
 //
 //go:norace
@@ -563,7 +563,7 @@ func (q *PooledQuantumQueue) MoveTick(h Handle, newTick int64) {
 	entry := q.entry(h)
 
 	// Optimized no-op for same tick
-	if entry.tick == newTick {
+	if entry.Tick == newTick {
 		return
 	}
 
