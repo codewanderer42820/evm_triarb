@@ -34,6 +34,7 @@ const fracMask uint64 = (1<<52 - 1)
 // Uint128 represents 128-bit unsigned integer for Q64.96 prices
 //
 //go:notinheap
+//go:align 16
 type Uint128 struct {
 	Hi uint64 // Upper 64 bits
 	Lo uint64 // Lower 64 bits
