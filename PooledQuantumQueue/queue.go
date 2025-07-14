@@ -192,8 +192,7 @@ type groupBlock struct {
 type PooledQuantumQueue struct {
 	// Hot path metadata (16 bytes) - matches original exactly
 	summary uint64  // 8B - Active groups bitmask
-	size    int     // 4B - Current entry count
-	_       [4]byte // 4B - Padding (to match int vs uint64 difference)
+	size    int     // 8B - Current entry count
 	arena   uintptr // 8B - Base pointer to shared memory pool
 
 	// Padding to cache line boundary (40 bytes)
