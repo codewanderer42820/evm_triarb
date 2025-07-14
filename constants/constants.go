@@ -5,20 +5,20 @@ package constants
 // Core system limits
 const (
 	MaxSupportedCores   = 128     // Current 1D limit, future 2D bitmapping enables 64×64 = 4,096 cores
-	DefaultRingSize     = 1 << 14 // 16,384 entries - 4x increase from optimized baseline
-	DefaultLocalIdxSize = 1 << 16 // 65,536 entries - 4x increase, handles growth
+	DefaultRingSize     = 1 << 14 // 16,384 entries - optimized for high throughput
+	DefaultLocalIdxSize = 1 << 16 // 65,536 entries - handles growth patterns
 	MaxCyclesPerShard   = 1 << 18 // 262,144 cycles per shard - optimal bucket utilization
 )
 
 // Memory management limits
 const (
-	RingBits = 18  // 2^18 = 262,144 dedup cache slots - 4x increase for high volume
-	MaxReorg = 256 // Maximum blockchain reorg depth - 4x increase for ultra-safety
+	RingBits = 18  // 2^18 = 262,144 dedup cache slots - high volume capacity
+	MaxReorg = 256 // Maximum blockchain reorg depth - ultra-safety buffer
 )
 
 // Hash table configuration
 const (
-	AddressTableCapacity     = 1 << 21 // 2M entries - 4x increase for massive scale
+	AddressTableCapacity     = 1 << 21 // 2M entries - massive scale support
 	AddressTableMask         = AddressTableCapacity - 1
 	PairRoutingTableCapacity = 1 << 21 // 2M entries - matches address table
 	AddressHexStart          = 2       // Address parsing start (skip "0x")
@@ -42,13 +42,13 @@ const (
 	WsDialAddr   = "polygon-mainnet.infura.io:443"
 	WsPath       = "/ws/v3/a2a3139d2ab24d59bed2dc3643664126"
 	WsHost       = "polygon-mainnet.infura.io"
-	MaxFrameSize = 1 << 20 // 1MB frame size - 4x increase for high-volume streams
-	FrameCap     = 1 << 17 // 131,072 frames - 4x increase for massive buffering
+	MaxFrameSize = 1 << 20 // 1MB frame size - high-volume stream capacity
+	FrameCap     = 1 << 17 // 131,072 frames - massive buffering capacity
 )
 
 // System initialization
 const (
-	ShardChannelBufferSize = 1 << 10 // 1,024 entries - 4x increase for heavy distribution
+	ShardChannelBufferSize = 1 << 10 // 1,024 entries - heavy distribution support
 )
 
 // Architecture-specific presets for easy deployment configuration
