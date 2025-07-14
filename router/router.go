@@ -817,41 +817,25 @@ type keccakRandomState struct {
 // Most operational state is owned exclusively by individual cores, while global state
 // consists primarily of read-only routing tables established during initialization.
 
+//go:notinheap
+//go:align 64
 var (
 	// PER-CORE EXCLUSIVE STATE
 	// Each processing core owns these structures exclusively, eliminating the need
 	// for synchronization primitives and enabling lock-free operation.
-	//
-	//go:notinheap
-	//go:align 64
 	coreExecutors [constants.MaxSupportedCores]*ArbitrageCoreExecutor
-
-	//go:notinheap
-	//go:align 64
-	coreRings [constants.MaxSupportedCores]*ring24.Ring
+	coreRings     [constants.MaxSupportedCores]*ring24.Ring
 
 	// GLOBAL ROUTING INFRASTRUCTURE (READ-ONLY AFTER INITIALIZATION)
 	// These routing tables are populated during system initialization and remain
 	// immutable during operation, enabling safe concurrent access without locking.
-	//
-	//go:notinheap
-	//go:align 64
 	pairToCoreAssignment [constants.PairRoutingTableCapacity]uint64
-
-	//go:notinheap
-	//go:align 64
-	pairShardBuckets map[PairID][]PairShardBucket
+	pairShardBuckets     map[PairID][]PairShardBucket
 
 	// ADDRESS RESOLUTION TABLES (READ-ONLY AFTER INITIALIZATION)
 	// The address lookup system provides O(1) contract-address-to-pair-ID mapping
 	// using Robin Hood hashing for predictable performance characteristics.
-	//
-	//go:notinheap
-	//go:align 64
 	pairAddressKeys [constants.AddressTableCapacity]AddressKey
-
-	//go:notinheap
-	//go:align 64
 	addressToPairID [constants.AddressTableCapacity]PairID
 )
 
