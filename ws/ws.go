@@ -126,8 +126,10 @@ const upgradeRequestLen = len(upgradeRequestTemplate)
 const subscribePayloadLen = len(subscribePayload)
 const subscribeFrameLen = 8 + subscribePayloadLen
 
-// Pre-allocated error instances
+//go:notinheap
+//go:align 64
 var (
+	// Pre-allocated error instances
 	errUpgradeFailed    = errors.New("upgrade failed")
 	errHandshakeTimeout = errors.New("handshake timeout")
 	errFrameTooLarge    = errors.New("frame too large")
