@@ -7,7 +7,7 @@ const (
 	MaxSupportedCores   = 64      // Maximum CPU cores for parallelization
 	DefaultRingSize     = 1 << 16 // 65,536 entries for inter-core buffers
 	DefaultLocalIdxSize = 1 << 16 // 65,536 entries for local indexing
-	MaxCyclesPerShard   = 1 << 16 // 65,536 cycles per shard for cache locality
+	MaxCyclesPerShard   = 1 << 18 // 262,144 cycles per shard for optimal tick distribution
 )
 
 // Memory management limits
