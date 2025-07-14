@@ -1,3 +1,5 @@
+// ws.go — Extreme performance WebSocket processor trading safety for 22+ TB/s speed
+
 /*
 ================================================================================
                           EXTREME PERFORMANCE WEBSOCKET PROCESSOR
