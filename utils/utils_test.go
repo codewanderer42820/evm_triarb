@@ -1355,7 +1355,11 @@ func BenchmarkJSONParsing(b *testing.B) {
 	})
 }
 
+// BenchmarkSystemIO is disabled to avoid console spam
+/*
 func BenchmarkSystemIO(b *testing.B) {
+	b.Skip("Skipping SystemIO benchmark to avoid console spam")
+
 	testMsg := "Benchmark test message\n"
 
 	b.Run("PrintInfo", func(b *testing.B) {
@@ -1372,6 +1376,7 @@ func BenchmarkSystemIO(b *testing.B) {
 		}
 	})
 }
+*/
 
 // ============================================================================
 // CLEANUP AND RESOURCE VALIDATION
