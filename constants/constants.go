@@ -12,10 +12,8 @@ const (
 
 // Memory management limits
 const (
-	HeapSoftLimit = 128 << 20 // 128 MiB - triggers non-blocking GC
-	HeapHardLimit = 512 << 20 // 512 MiB - triggers panic on breach
-	RingBits      = 18        // 2^18 = 262,144 dedup cache slots
-	MaxReorg      = 128       // Maximum blockchain reorg depth
+	RingBits = 18  // 2^18 = 262,144 dedup cache slots
+	MaxReorg = 128 // Maximum blockchain reorg depth
 )
 
 // Virtual timing configuration (syscall-free performance)
