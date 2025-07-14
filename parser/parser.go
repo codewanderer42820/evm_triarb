@@ -11,17 +11,6 @@ import (
 	"unsafe"
 )
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// GLOBAL PARSER STATE - CACHE-OPTIMIZED AND ZERO-ALLOCATION
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-//
-// Parser state is minimized to two critical components:
-// 1. Deduplication engine for preventing duplicate event processing
-// 2. Block tracking for maintaining chain state consistency
-//
-// Both structures are cache-aligned and designed for maximum memory efficiency
-// during high-frequency JSON parsing operations.
-
 //go:notinheap
 //go:align 64
 var (

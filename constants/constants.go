@@ -1,4 +1,5 @@
 // constants.go — System-wide constants for high-performance arbitrage detection
+
 package constants
 
 // Core system limits

@@ -153,17 +153,6 @@ type WebSocketProcessor struct {
 	subscribeFrame [128]byte // Subscribe frame
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// WEBSOCKET GLOBAL STATE - EXTREME PERFORMANCE OPTIMIZATION
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-//
-// The WebSocket processor uses a single global instance to achieve maximum performance
-// through cache locality and zero-allocation operation. This design sacrifices thread
-// safety for absolute speed in single-threaded event loop architectures.
-
-// Global processor instance - Cache-optimized for maximum memory throughput
-// 128MB buffer aligned to page boundaries for optimal memory access patterns
-//
 //go:notinheap
 //go:align 16384  // Page-aligned for 16KB pages (ARM64 optimization)
 var processor WebSocketProcessor

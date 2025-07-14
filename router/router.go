@@ -809,14 +809,6 @@ type keccakRandomState struct {
 	hasher  hash.Hash // 24B - INFRASTRUCTURE: Reusable Keccak-256 hasher instance
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// GLOBAL SYSTEM STATE - CACHE-OPTIMIZED AND NUMA-AWARE
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-//
-// Global state is minimized and carefully partitioned to prevent cross-core contention.
-// Most operational state is owned exclusively by individual cores, while global state
-// consists primarily of read-only routing tables established during initialization.
-
 //go:notinheap
 //go:align 64
 var (

@@ -4,20 +4,6 @@ package control
 
 import "main/constants"
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CONTROL GLOBAL STATE - SYSCALL-FREE COORDINATION AND VIRTUAL TIMING
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-//
-// The control package manages global coordination flags and provides syscall-free
-// virtual timing for high-frequency operations. All variables are cache-aligned
-// to prevent false sharing between cores accessing control state.
-//
-// PERFORMANCE OBJECTIVES:
-// - Zero syscall overhead for timing operations
-// - Sub-nanosecond flag access for coordination
-// - Branchless algorithms for predictable performance
-// - Cache-optimized layout for multi-core scaling
-
 //go:notinheap
 //go:align 64
 var (

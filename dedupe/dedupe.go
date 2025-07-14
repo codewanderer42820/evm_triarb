@@ -7,34 +7,6 @@ import (
 	"main/utils"
 )
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// DEDUPE GLOBAL STATE - ULTRA-HIGH FREQUENCY CACHE OPTIMIZATION
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-//
-// The dedupe package operates as a pure algorithmic module without global state.
-// All deduplication state is contained within Deduper instances that are owned
-// by calling modules (such as the parser).
-//
-// DESIGN PHILOSOPHY:
-// - Zero global variables for maximum thread safety
-// - All state encapsulated in caller-owned structures
-// - Cache-optimal data structures with explicit alignment
-// - Sub-5ns deduplication operations through direct-mapped caching
-//
-// PERFORMANCE CHARACTERISTICS:
-// - O(1) duplicate detection via bit manipulation
-// - 32-byte cache-aligned entries for optimal memory access
-// - 64-byte structure alignment prevents false sharing
-// - Mathematical hash collision resolution
-//
-// MEMORY LAYOUT:
-// - dedupeEntry: 32-byte alignment (half cache line)
-// - Deduper: 64-byte alignment (full cache line boundary)
-// - Direct-mapped cache using power-of-2 indexing
-
-// No global variables in dedupe package - all state is caller-owned
-// This ensures perfect thread safety and eliminates global coordination overhead
-
 // dedupeEntry - 32-byte cache entry optimized for CPU cache lines
 //
 //go:notinheap
