@@ -341,12 +341,6 @@ func (q *PooledQuantumQueue) unlink(h Handle) {
 	entry := q.entry(h)
 	b := Handle(entry.Tick)
 
-	// Prefetch next node
-	if entry.Next != nilIdx {
-		_ = *(*Entry)(unsafe.Pointer(uintptr(unsafe.Pointer(q.entry(0))) +
-			uintptr(entry.Next)*unsafe.Sizeof(Entry{})))
-	}
-
 	// Remove from doubly-linked chain
 	if entry.Prev != nilIdx {
 		q.entry(entry.Prev).Next = entry.Next
@@ -416,12 +410,6 @@ func (q *PooledQuantumQueue) unlink(h Handle) {
 func (q *PooledQuantumQueue) linkAtHead(h Handle, tick int64) {
 	entry := q.entry(h)
 	b := Handle(uint64(tick))
-
-	// Prefetch bucket head
-	if q.buckets[b] != nilIdx {
-		_ = *(*Entry)(unsafe.Pointer(uintptr(unsafe.Pointer(q.entry(0))) +
-			uintptr(q.buckets[b])*unsafe.Sizeof(Entry{})))
-	}
 
 	// Insert at head of bucket chain
 	entry.Tick = tick
@@ -535,10 +523,6 @@ func (q *PooledQuantumQueue) PeepMin() (Handle, int64, uint64) {
 	// Reconstruct bucket index
 	b := Handle((uint64(g) << 12) | (uint64(l) << 6) | uint64(t))
 	h := q.buckets[b]
-
-	// Prefetch minimum entry
-	_ = *(*Entry)(unsafe.Pointer(uintptr(unsafe.Pointer(q.entry(0))) +
-		uintptr(h)*unsafe.Sizeof(Entry{})))
 
 	// Return handle, tick, and data from minimum entry
 	entry := q.entry(h)

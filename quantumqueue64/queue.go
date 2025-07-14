@@ -4,7 +4,6 @@ package quantumqueue64
 import (
 	"errors"
 	"math/bits"
-	"unsafe"
 )
 
 const (
@@ -166,12 +165,6 @@ func (q *QuantumQueue64) unlink(h Handle) {
 	n := &q.arena[h]
 	b := idx32(n.tick)
 
-	// Prefetch next node
-	if n.next != nilIdx {
-		_ = *(*node)(unsafe.Pointer(uintptr(unsafe.Pointer(&q.arena[0])) +
-			uintptr(n.next)*unsafe.Sizeof(node{})))
-	}
-
 	// Remove from chain
 	if n.prev != nilIdx {
 		q.arena[n.prev].next = n.next
@@ -217,12 +210,6 @@ func (q *QuantumQueue64) unlink(h Handle) {
 func (q *QuantumQueue64) linkAtHead(h Handle, tick int64) {
 	n := &q.arena[h]
 	b := idx32(uint64(tick))
-
-	// Prefetch bucket head
-	if q.buckets[b] != nilIdx {
-		_ = *(*node)(unsafe.Pointer(uintptr(unsafe.Pointer(&q.arena[0])) +
-			uintptr(q.buckets[b])*unsafe.Sizeof(node{})))
-	}
 
 	// Insert at head
 	n.tick = tick
@@ -288,10 +275,6 @@ func (q *QuantumQueue64) PeepMin() (Handle, int64, uint64) {
 	// Reconstruct bucket index
 	b := idx32((uint64(g) << 12) | (uint64(l) << 6) | uint64(t))
 	h := q.buckets[b]
-
-	// Prefetch minimum entry
-	_ = *(*node)(unsafe.Pointer(uintptr(unsafe.Pointer(&q.arena[0])) +
-		uintptr(h)*unsafe.Sizeof(node{})))
 
 	return h, q.arena[h].tick, q.arena[h].data
 }
