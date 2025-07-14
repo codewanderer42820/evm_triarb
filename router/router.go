@@ -121,12 +121,14 @@ type ArbitrageEngine struct {
 	priorityQueues []pooledquantumqueue.PooledQuantumQueue // 24B - WARM: Priority queues per trading pair
 	sharedArena    []pooledquantumqueue.Entry              // 24B - WARM: Single shared memory pool for all queues
 	nextHandle     pooledquantumqueue.Handle               // 8B - WARM: Simple sequential handle allocation
+	_              [8]byte                                 // 8B - PADDING: Alignment optimization
 
 	// TIER 4: COOL PATH (Occasional profitable cycle extraction)
 	extractedCycles [32]ExtractedCycle // 1024B - COOL: Pre-allocated buffer for extracted cycles
 
 	// TIER 5: COLD PATH (Rare configuration and control operations)
 	shutdownChannel <-chan struct{} // 8B - COLD: Graceful shutdown coordination channel
+	_               [56]byte        // 56B - PADDING: Alignment optimization
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
