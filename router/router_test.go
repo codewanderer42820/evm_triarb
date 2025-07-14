@@ -277,11 +277,22 @@ func (b *TestExecutorBuilder) WithCoreID(coreID int) *TestExecutorBuilder {
 }
 
 func (b *TestExecutorBuilder) Build() *ArbitrageCoreExecutor {
-	// PHASE 1: INITIALIZE UNIFIED CORE ARENA
-	totalArenaEntries := uint64(b.poolSize)
+	// PHASE 1: CALCULATE REQUIRED ARENA SIZE
+	// Each cycle needs 1 handle, so total handles needed = numQueues * cyclesPerQueue
+	// Add significant buffer to prevent exhaustion
+	requiredHandles := b.numQueues * b.cyclesPerQueue
+	totalArenaEntries := uint64(requiredHandles * 3) // 3x buffer
+	if totalArenaEntries < uint64(b.poolSize) {
+		totalArenaEntries = uint64(b.poolSize)
+	}
+	if totalArenaEntries < 1024 {
+		totalArenaEntries = 1024 // Minimum size
+	}
+
+	// PHASE 2: INITIALIZE UNIFIED CORE ARENA
 	initializeCoreArena(b.coreID, totalArenaEntries)
 
-	// PHASE 2: CREATE EXECUTOR WITH CORE ID
+	// PHASE 3: CREATE EXECUTOR WITH CORE ID
 	executor := &ArbitrageCoreExecutor{
 		pairToQueueIndex:   localidx.New(constants.DefaultLocalIdxSize),
 		isReverseDirection: b.isReverse,
@@ -292,7 +303,7 @@ func (b *TestExecutorBuilder) Build() *ArbitrageCoreExecutor {
 		queueArenas:        calculateArenaPartitions(totalArenaEntries, b.numQueues),
 	}
 
-	// PHASE 3: INITIALIZE QUEUES WITH PROPER ARENA PARTITIONING
+	// PHASE 4: INITIALIZE QUEUES WITH PROPER ARENA PARTITIONING
 	coreArena := coreArenas[b.coreID] // Get the unified core arena
 
 	for i := 0; i < b.numQueues; i++ {
@@ -305,15 +316,26 @@ func (b *TestExecutorBuilder) Build() *ArbitrageCoreExecutor {
 		newQueue := pooledquantumqueue.New(arena.arenaPtr)
 		executor.priorityQueues[i] = *newQueue
 
-		// PHASE 4: POPULATE QUEUE WITH TEST CYCLES
+		// PHASE 5: POPULATE QUEUE WITH TEST CYCLES
 		handleAllocator := coreHandleAllocators[b.coreID] // Get per-core handle allocator
 
 		for j := 0; j < b.cyclesPerQueue; j++ {
-			// Proper handle allocation
+			// Proper handle allocation with error checking
 			globalHandle, available := handleAllocator.AllocateHandle()
 			if !available {
-				break // Pool exhausted
+				// This should not happen with proper arena sizing, but handle gracefully
+				fmt.Printf("WARNING: Handle allocation failed for core %d, queue %d, cycle %d\n", b.coreID, i, j)
+				break
 			}
+
+			// CRITICAL FIX: Convert global handle to queue-relative handle
+			// Global handle is an index into the entire core arena
+			// Queue-relative handle is an index into this queue's partition
+			if uint64(globalHandle) < arena.arenaOffset {
+				fmt.Printf("ERROR: Global handle %d is less than arena offset %d\n", globalHandle, arena.arenaOffset)
+				break
+			}
+			queueRelativeHandle := pooledquantumqueue.Handle(uint64(globalHandle) - arena.arenaOffset)
 
 			// Create cycle state
 			cycleIndex := len(executor.cycleStates)
@@ -327,22 +349,27 @@ func (b *TestExecutorBuilder) Build() *ArbitrageCoreExecutor {
 			randBits := cycleHash & 0xFFFF
 			initPriority := int64(196608 + randBits)
 
-			// Insert into queue
-			executor.priorityQueues[i].Push(initPriority, globalHandle, uint64(cycleIndex))
+			// Insert into queue using queue-relative handle
+			executor.priorityQueues[i].Push(initPriority, queueRelativeHandle, uint64(cycleIndex))
 
-			// Setup fanout entries
-			if len(executor.fanoutTables[i]) < 5 { // Limit fanout entries
+			// Setup fanout entries (limit to prevent excessive fanout tables)
+			if len(executor.fanoutTables[i]) < 5 {
 				executor.fanoutTables[i] = append(executor.fanoutTables[i], FanoutEntry{
 					cycleStateIndex: uint64(cycleIndex),
 					edgeIndex:       uint64(j % 3),
 					queue:           &executor.priorityQueues[i],
-					queueHandle:     globalHandle, // Use global handle
+					queueHandle:     queueRelativeHandle, // FIXED: Use queue-relative handle
 				})
 			}
 		}
 
 		// Setup pair mapping
 		executor.pairToQueueIndex.Put(uint32(i+1), uint32(i))
+
+		// Verify queue was populated correctly
+		if executor.priorityQueues[i].Empty() && b.cyclesPerQueue > 0 {
+			fmt.Printf("ERROR: Queue %d is empty despite requesting %d cycles\n", i, b.cyclesPerQueue)
+		}
 	}
 
 	return executor
@@ -1258,9 +1285,15 @@ func TestFanoutProcessingLogic(t *testing.T) {
 
 		// Properly allocate handles using the per-core allocator
 		handleAllocator := coreHandleAllocators[executor.coreID]
-		handle0, _ := handleAllocator.AllocateHandle()
-		handle1, _ := handleAllocator.AllocateHandle()
-		handle2, _ := handleAllocator.AllocateHandle()
+		globalHandle0, _ := handleAllocator.AllocateHandle()
+		globalHandle1, _ := handleAllocator.AllocateHandle()
+		globalHandle2, _ := handleAllocator.AllocateHandle()
+
+		// FIXED: Convert global handles to queue-relative handles
+		arena := &executor.queueArenas[0]
+		handle0 := pooledquantumqueue.Handle(uint64(globalHandle0) - arena.arenaOffset)
+		handle1 := pooledquantumqueue.Handle(uint64(globalHandle1) - arena.arenaOffset)
+		handle2 := pooledquantumqueue.Handle(uint64(globalHandle2) - arena.arenaOffset)
 
 		// Set up fanout table
 		executor.fanoutTables[0] = []FanoutEntry{
@@ -1286,7 +1319,7 @@ func TestFanoutProcessingLogic(t *testing.T) {
 
 		executor.pairToQueueIndex.Put(1, 0)
 
-		// Add cycles to queue
+		// Add cycles to queue using queue-relative handles
 		executor.priorityQueues[0].Push(quantizeTickToInt64(6.0), handle0, 0)
 		executor.priorityQueues[0].Push(quantizeTickToInt64(1.0), handle1, 1)
 		executor.priorityQueues[0].Push(quantizeTickToInt64(-1.0), handle2, 2)
@@ -2244,9 +2277,9 @@ func TestCompleteSystemWithHandleManagement(t *testing.T) {
 		fixture.EXPECT_TRUE(ok1, "Core 8 should be able to allocate handles")
 		fixture.EXPECT_TRUE(ok2, "Core 9 should be able to allocate handles")
 
-		// Handles can be the same value but refer to different memory spaces
-		// This is correct behavior - handles are core-local
-		fixture.EXPECT_TRUE(handle1 >= 0, "Core 8 handle should be valid")
-		fixture.EXPECT_TRUE(handle2 >= 0, "Core 9 handle should be valid")
+		// FIXED: Remove redundant >= 0 checks for uint64 (handles are always >= 0)
+		// Instead, check that handles are valid (not the nil sentinel value)
+		fixture.EXPECT_TRUE(handle1 != pooledquantumqueue.Handle(^uint64(0)), "Core 8 handle should be valid")
+		fixture.EXPECT_TRUE(handle2 != pooledquantumqueue.Handle(^uint64(0)), "Core 9 handle should be valid")
 	})
 }
