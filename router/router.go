@@ -122,7 +122,7 @@ type ArbitrageEngine struct {
 	nextHandle     pooledquantumqueue.Handle               // 8B - WARM: Simple sequential handle allocation
 
 	// TIER 4: COOL PATH (Occasional profitable cycle extraction)
-	extractedCycles [128]ExtractedCycle // 4096B - COOL: Pre-allocated buffer for extracted cycles
+	extractedCycles [32]ExtractedCycle // 1024B - COOL: Pre-allocated buffer for extracted cycles
 
 	// TIER 5: COLD PATH (Rare configuration and control operations)
 	shutdownChannel <-chan struct{} // 8B - COLD: Graceful shutdown coordination channel
