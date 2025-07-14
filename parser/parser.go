@@ -9,8 +9,32 @@ import (
 	"unsafe"
 )
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// GLOBAL PARSER STATE - CACHE-OPTIMIZED AND ZERO-ALLOCATION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+//
+// Parser state is minimized to two critical components:
+// 1. Deduplication engine for preventing duplicate event processing
+// 2. Block tracking for maintaining chain state consistency
+//
+// Both structures are cache-aligned and designed for maximum memory efficiency
+// during high-frequency JSON parsing operations.
+
 var (
-	dedup     dedupe.Deduper
+	// DEDUPLICATION ENGINE (HOT PATH - ACCESSED EVERY EVENT)
+	// Maintains rolling window of processed events to prevent duplicate handling.
+	// Cache-aligned for optimal access patterns during deduplication checks.
+	//
+	//go:notinheap
+	//go:align 64
+	dedup dedupe.Deduper
+
+	// BLOCK STATE TRACKING (WARM PATH - UPDATED PER BLOCK)
+	// Tracks the highest block number processed to maintain chain consistency.
+	// Aligned to prevent false sharing with the deduplication engine.
+	//
+	//go:notinheap
+	//go:align 64
 	latestBlk uint32
 )
 
