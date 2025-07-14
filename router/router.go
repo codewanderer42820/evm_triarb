@@ -1171,7 +1171,6 @@ func finalizeQueueInitialization(executor *ArbitrageCoreExecutor, collectedShard
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func collectShardData(executor *ArbitrageCoreExecutor, shard *PairShardBucket,
