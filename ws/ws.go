@@ -157,10 +157,6 @@ type WebSocketProcessor struct {
 //go:align 16384  // Page-aligned for 16KB pages (ARM64 optimization)
 var processor WebSocketProcessor
 
-const BufferSize = 134217728    // 128MB buffer (128 * 1024 * 1024)
-const HandshakeBufferSize = 512 // Handshake buffer
-const MaxFrameHeaderSize = 10   // Maximum WebSocket frame header size
-
 // init builds pre-computed protocol frames
 //
 //go:norace
