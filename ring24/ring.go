@@ -8,7 +8,7 @@ import (
 // slot - 32-byte ring entry (half cache line)
 //
 //go:notinheap
-//go:align 64
+//go:align 32
 type slot struct {
 	val [24]byte // Fixed payload
 	seq uint64   // Availability signal
