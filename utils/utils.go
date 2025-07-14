@@ -1,3 +1,5 @@
+// utils.go — SIMD-optimized utilities achieving CPU cache-speed throughput
+
 package utils
 
 import (
