@@ -314,7 +314,6 @@
 package router
 
 import (
-	"fmt"
 	"hash"
 	"math/bits"
 	"runtime"
@@ -1582,7 +1581,7 @@ func (a AddressKey) isEqual(b AddressKey) bool {
 //
 // PERFORMANCE CONSIDERATIONS:
 //
-// • Zero-allocation string conversion for numeric values
+// • Zero-allocation string conversion for numeric values using custom Ftoa
 // • Direct system call logging to avoid buffering overhead
 // • Conditional compilation to eliminate overhead in production builds
 //
@@ -1611,12 +1610,12 @@ func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
 	// PROFITABILITY BREAKDOWN
 	//
 	// Provide detailed tick value information for profitability analysis and
-	// debugging of opportunity detection logic.
-	tick0Str := fmt.Sprintf("%.6f", cycle.tickValues[0])
-	tick1Str := fmt.Sprintf("%.6f", cycle.tickValues[1])
-	tick2Str := fmt.Sprintf("%.6f", cycle.tickValues[2])
-	newTickStr := fmt.Sprintf("%.6f", newTick)
-	totalProfitStr := fmt.Sprintf("%.6f", newTick+cycle.tickValues[0]+cycle.tickValues[1]+cycle.tickValues[2])
+	// debugging of opportunity detection logic using zero-allocation Ftoa.
+	tick0Str := utils.Ftoa(cycle.tickValues[0])
+	tick1Str := utils.Ftoa(cycle.tickValues[1])
+	tick2Str := utils.Ftoa(cycle.tickValues[2])
+	newTickStr := utils.Ftoa(newTick)
+	totalProfitStr := utils.Ftoa(newTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2])
 
 	debug.DropMessage("  tick0", tick0Str)
 	debug.DropMessage("  tick1", tick1Str)
