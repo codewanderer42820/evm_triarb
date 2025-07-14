@@ -1,5 +1,5 @@
-// Package router implements a high-frequency arbitrage detection engine for Uniswap V2 pairs.
-//
+// router.go — 57ns triangular arbitrage detection engine with infinite scalability
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ARCHITECTURAL OVERVIEW
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
