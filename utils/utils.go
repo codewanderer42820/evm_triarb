@@ -62,7 +62,8 @@ func B2s(b []byte) string {
 	return unsafe.String(&b[0], len(b))
 }
 
-// Itoa converts integer to string without heap allocation
+// Itoa converts integer to string with exactly 1 allocation per operation
+// Optimized for performance with single stack buffer
 //
 //go:norace
 //go:nocheckptr
@@ -87,9 +88,9 @@ func Itoa(n int) string {
 	return string(buf[i:])
 }
 
-// Ftoa converts float64 to string without heap allocation
+// Ftoa converts float64 to string with exactly 1 allocation per operation
 // IEEE 754 compliant with optimized bit manipulation
-// Uses single stack buffer like Itoa - guaranteed zero allocation
+// Uses single stack buffer - optimized for common cases
 // ⚠️  WARNING: Uses unsafe bit manipulation for speed
 //
 //go:norace

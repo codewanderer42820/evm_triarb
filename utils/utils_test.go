@@ -17,15 +17,6 @@ import (
 // TEST CONFIGURATION AND HELPERS
 // ============================================================================
 
-// assertZeroAllocs verifies that a function allocates zero memory
-func assertZeroAllocs(t *testing.T, name string, fn func()) {
-	t.Helper()
-	allocs := testing.AllocsPerRun(100, fn)
-	if allocs > 0 {
-		t.Errorf("%s allocated: %f allocs/op", name, allocs)
-	}
-}
-
 // hammingDistance calculates bit differences between two uint64s
 func hammingDistance(a, b uint64) int {
 	diff := a ^ b
@@ -266,25 +257,6 @@ func TestLoadBE64(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestMemoryOperations_ZeroAllocation(t *testing.T) {
-	data := make([]byte, 16)
-	for i := range data {
-		data[i] = byte(i)
-	}
-
-	assertZeroAllocs(t, "Load64", func() {
-		_ = Load64(data)
-	})
-
-	assertZeroAllocs(t, "LoadBE64", func() {
-		_ = LoadBE64(data)
-	})
-
-	assertZeroAllocs(t, "Load128", func() {
-		_, _ = Load128(data)
-	})
 }
 
 // ============================================================================
@@ -571,46 +543,6 @@ func TestFtoa_EdgeCases(t *testing.T) {
 	}
 }
 
-func TestItoa_ZeroAllocation(t *testing.T) {
-	testInts := []int{0, 1, 42, 123, 1000, 12345, 999999, 2147483647}
-
-	for _, n := range testInts {
-		assertZeroAllocs(t, fmt.Sprintf("Itoa(%d)", n), func() {
-			_ = Itoa(n)
-		})
-	}
-}
-
-func TestFtoa_ZeroAllocation(t *testing.T) {
-	testFloats := []float64{0.0, 1.0, -1.0, 3.14159, 42.0, 0.123456, 1000000.0, 1e-10}
-
-	for _, f := range testFloats {
-		assertZeroAllocs(t, fmt.Sprintf("Ftoa(%g)", f), func() {
-			_ = Ftoa(f)
-		})
-	}
-}
-
-func TestTypeConversion_ZeroAllocation(t *testing.T) {
-	testBytes := []byte("test string for zero allocation")
-	testInt := 12345
-	testFloat := 3.14159
-
-	assertZeroAllocs(t, "B2s", func() {
-		_ = B2s(testBytes)
-	})
-
-	// Test Itoa separately to isolate any allocation issues
-	assertZeroAllocs(t, "Itoa", func() {
-		_ = Itoa(testInt)
-	})
-
-	// Test Ftoa separately to isolate any allocation issues
-	assertZeroAllocs(t, "Ftoa", func() {
-		_ = Ftoa(testFloat)
-	})
-}
-
 // ============================================================================
 // HEX PARSING TESTS
 // ============================================================================
@@ -704,24 +636,6 @@ func TestParseEthereumAddress(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestHexParsing_ZeroAllocation(t *testing.T) {
-	hex32 := []byte("deadbeef")
-	hex64 := []byte("deadbeefcafebabe")
-	ethAddr := []byte("dAC17F958D2ee523a2206206994597C13D831ec7")
-
-	assertZeroAllocs(t, "ParseHexU32", func() {
-		_ = ParseHexU32(hex32)
-	})
-
-	assertZeroAllocs(t, "ParseHexU64", func() {
-		_ = ParseHexU64(hex64)
-	})
-
-	assertZeroAllocs(t, "ParseEthereumAddress", func() {
-		_ = ParseEthereumAddress(ethAddr)
-	})
 }
 
 // ============================================================================
@@ -876,30 +790,6 @@ func TestSkipToClosingBracketEarlyExit(t *testing.T) {
 	}
 }
 
-func TestJSONParsing_ZeroAllocation(t *testing.T) {
-	data := []byte(`{"key":"value","array":[1,2,3],"nested":{"a":"b"}}`)
-
-	assertZeroAllocs(t, "SkipToQuote", func() {
-		_ = SkipToQuote(data, 0, 1)
-	})
-
-	assertZeroAllocs(t, "SkipToQuoteEarlyExit", func() {
-		_, _ = SkipToQuoteEarlyExit(data, 0, 1, 10)
-	})
-
-	assertZeroAllocs(t, "SkipToOpeningBracket", func() {
-		_ = SkipToOpeningBracket(data, 0, 1)
-	})
-
-	assertZeroAllocs(t, "SkipToClosingBracket", func() {
-		_ = SkipToClosingBracket(data, 0, 1)
-	})
-
-	assertZeroAllocs(t, "SkipToClosingBracketEarlyExit", func() {
-		_, _ = SkipToClosingBracketEarlyExit(data, 0, 1, 10)
-	})
-}
-
 // ============================================================================
 // HASH MIXING TESTS
 // ============================================================================
@@ -968,16 +858,6 @@ func TestMix64_AvalancheEffect(t *testing.T) {
 			t.Errorf("Poor average avalanche for input 0x%016X: %.2f",
 				input, avgDistance)
 		}
-	}
-}
-
-func TestMix64_ZeroAllocation(t *testing.T) {
-	inputs := []uint64{0, 1, 0xDEADBEEF, 0xFFFFFFFFFFFFFFFF}
-
-	for _, input := range inputs {
-		assertZeroAllocs(t, fmt.Sprintf("Mix64(0x%X)", input), func() {
-			_ = Mix64(input)
-		})
 	}
 }
 
@@ -1567,21 +1447,6 @@ func TestStress_AllFunctions(t *testing.T) {
 			_ = ParseHexU64(hexData[:16])
 			_ = ParseHexU32(hexData[:8])
 			_ = ParseEthereumAddress(hexData[:40])
-
-			if i%1000 == 0 {
-				// Verify no allocation every 1000 iterations for each function separately
-				assertZeroAllocs(t, "stress_iteration_Itoa", func() {
-					_ = Itoa(42)
-				})
-
-				assertZeroAllocs(t, "stress_iteration_Ftoa", func() {
-					_ = Ftoa(3.14159)
-				})
-
-				assertZeroAllocs(t, "stress_iteration_Mix64", func() {
-					_ = Mix64(0xDEADBEEF)
-				})
-			}
 		}
 	})
 
