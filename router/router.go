@@ -80,10 +80,10 @@ type ArbitrageCycleState struct {
 //go:notinheap
 //go:align 32
 type CycleFanoutEntry struct {
-	cycleIndex  uint64                                 // 8B - ULTRA-HOT: Direct array index for cycle access
-	edgeIndex   uint64                                 // 8B - HOT: Position within cycle for tick update
-	queue       *pooledquantumqueue.PooledQuantumQueue // 8B - HOT: Priority queue for cycle reordering
-	queueHandle pooledquantumqueue.Handle              // 8B - HOT: Queue manipulation identifier
+	cycleIndex  uint64                    // 8B - ULTRA-HOT: Direct array index for cycle access
+	edgeIndex   uint64                    // 8B - HOT: Position within cycle for tick update
+	queueIndex  uint64                    // 8B - HOT: Index into engine.priorityQueues array
+	queueHandle pooledquantumqueue.Handle // 8B - HOT: Queue manipulation identifier
 }
 
 // ExtractedCycle provides temporary storage for cycles extracted during profitability analysis.
