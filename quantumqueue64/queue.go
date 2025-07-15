@@ -26,9 +26,9 @@ type idx32 = Handle
 type node struct {
 	tick int64   // 8B - Active tick or -1 if free
 	data uint64  // 8B - Compact payload (vs 48 bytes in QuantumQueue)
-	prev Handle  // 4B - Previous in chain
-	_    [4]byte // 4B - Alignment padding
 	next Handle  // 4B - Next in chain or freelist
+	_    [4]byte // 4B - Alignment padding
+	prev Handle  // 4B - Previous in chain
 	_    [4]byte // 4B - Alignment padding
 }
 

@@ -26,8 +26,8 @@ type idx32 = Handle
 type node struct {
 	tick int64    // 8B - Active tick or -1 if free
 	data [48]byte // 48B - User payload (3/4 cache line)
-	prev Handle   // 4B - Previous in chain
 	next Handle   // 4B - Next in chain or freelist
+	prev Handle   // 4B - Previous in chain
 }
 
 // groupBlock - 2-level bitmap for O(1) minimum finding

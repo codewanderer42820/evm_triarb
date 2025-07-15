@@ -137,8 +137,8 @@ const nilIdx Handle = ^Handle(0) // Sentinel value for unlinked entries
 type Entry struct {
 	Tick int64  // 8B - Active tick or -1 if free
 	Data uint64 // 8B - Compact payload
-	Prev Handle // 8B - Previous in chain
 	Next Handle // 8B - Next in chain
+	Prev Handle // 8B - Previous in chain
 }
 
 // groupBlock implements 2-level bitmap hierarchy for O(1) minimum finding.
