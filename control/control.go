@@ -40,8 +40,8 @@ var (
 	// - Affected by system load and scheduling
 	// - ±20-50% accuracy depending on conditions
 	// - Suitable for rough intervals, not precise timing
-	lastActivityCount uint64 // Poll counter value at last market activity
 	pollCounter       uint64 // Monotonic counter incremented per cooldown check
+	lastActivityCount uint64 // Poll counter value at last market activity
 
 	// ACTIVITY FLAGS (READ BY ALL CORES, WRITTEN BY WEBSOCKET)
 	// Binary flags enable wait-free coordination without atomic operations.
