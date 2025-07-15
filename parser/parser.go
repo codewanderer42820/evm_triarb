@@ -42,7 +42,11 @@ var (
 	// BLOCK STATE TRACKING (WARM PATH - UPDATED PER BLOCK)
 	// Tracks the highest block number processed to maintain chain consistency.
 	// Aligned to prevent false sharing with the deduplication engine.
+
+	// Ensure latestBlk doesn't share cache line with dedup
+	_         [64]byte // Force new cache line
 	latestBlk uint32
+	_         [60]byte // Pad rest of cache line
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
