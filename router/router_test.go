@@ -949,10 +949,10 @@ func TestHighVolumeStressTest(t *testing.T) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ROUTER-SPECIFIC BENCHMARKS
+// ISOLATED ROUTER-SPECIFIC BENCHMARKS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-func BenchmarkDispatchPriceUpdate(b *testing.B) {
+func BenchmarkDispatchPriceUpdateProducerOnly(b *testing.B) {
 	cleanup := testSetup(nil)
 	defer cleanup()
 
@@ -970,12 +970,66 @@ func BenchmarkDispatchPriceUpdate(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		DispatchPriceUpdate(logView)
-		// Clear ring to prevent overflow
-		coreRings[0].Pop()
+
+		// Minimal cleanup only when needed to prevent infinite retry
+		if i%1000 == 999 { // Only every 1000 iterations
+			b.StopTimer()
+			for coreRings[0].Pop() != nil {
+			} // Clear ring
+			b.StartTimer()
+		}
 	}
 }
 
-func BenchmarkDispatchPriceUpdateMultiCore(b *testing.B) {
+func BenchmarkDispatchPriceUpdateCacheCold(b *testing.B) {
+	cleanup := testSetup(nil)
+	defer cleanup()
+
+	// Setup
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
+	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
+	coreRings[0] = ring24.New(constants.DefaultRingSize)
+
+	// Generate different data for each iteration (cache-cold)
+	testEvents := make([]*types.LogView, 1000)
+	for i := range testEvents {
+		// Create different reserve values with proper 64-char length
+		baseReserve1 := "0000000000000000000000000000000000000000000000056bc75e2d630eb187"
+
+		// Vary the second reserve - ensure exactly 64 hex chars
+		variation := i % 0xFFFF // 16-bit variation
+		reserve2 := "00000000000000000000000000000000000000000000152d02c7e14af6" +
+			strconv.FormatInt(int64(variation), 16) // This creates variable length
+
+		// Pad to exactly 64 characters
+		for len(reserve2) < 64 {
+			reserve2 = "0" + reserve2
+		}
+		// Truncate if too long
+		if len(reserve2) > 64 {
+			reserve2 = reserve2[:64]
+		}
+
+		syncData := "0x" + baseReserve1 + reserve2
+		testEvents[i] = createTestLogView(TestAddressETH_DAI, syncData)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		event := testEvents[i%len(testEvents)]
+		DispatchPriceUpdate(event)
+
+		// Minimal cleanup to prevent infinite retry
+		if i%1000 == 999 {
+			b.StopTimer()
+			for coreRings[0].Pop() != nil {
+			}
+			b.StartTimer()
+		}
+	}
+}
+
+func BenchmarkDispatchPriceUpdateMultiCoreProducerOnly(b *testing.B) {
 	cleanup := testSetup(nil)
 	defer cleanup()
 
@@ -997,35 +1051,164 @@ func BenchmarkDispatchPriceUpdateMultiCore(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		DispatchPriceUpdate(logView)
-		// Clear all rings to prevent overflow
-		for j := 0; j < numCores; j++ {
-			coreRings[j].Pop()
+
+		// Minimal cleanup only when needed to prevent infinite retry
+		if i%1000 == 999 { // Only every 1000 iterations
+			b.StopTimer()
+			for j := 0; j < numCores; j++ {
+				for coreRings[j].Pop() != nil {
+				} // Clear all rings
+			}
+			b.StartTimer()
 		}
 	}
 }
 
-func BenchmarkAddressLookup(b *testing.B) {
+func BenchmarkAddressLookupIsolated(b *testing.B) {
 	cleanup := testSetup(nil)
 	defer cleanup()
 
-	// Setup multiple addresses using standard library
-	for i := 0; i < 1000; i++ {
-		addr := "1" + strconv.Itoa(1000000000000000000+i) // Generate unique addresses
-		if len(addr) < 40 {
-			// Pad to 40 characters
-			for len(addr) < 40 {
-				addr = "0" + addr
-			}
-		}
-		RegisterTradingPairAddress([]byte(addr), TradingPairID(i+1000))
-	}
-
+	// Setup single address to isolate lookup performance
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
 	testAddr := []byte(TestAddressETH_DAI[2:])
-	RegisterTradingPairAddress(testAddr, TestPairETH_DAI)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		lookupPairByAddress(testAddr)
+	}
+}
+
+func BenchmarkAddressLookupVariations(b *testing.B) {
+	cleanup := testSetup(nil)
+	defer cleanup()
+
+	// Setup multiple addresses with different cache behavior
+	addresses := [][]byte{
+		[]byte(TestAddressETH_DAI[2:]),
+		[]byte(TestAddressDAI_USDC[2:]),
+		[]byte(TestAddressUSDC_ETH[2:]),
+		[]byte(TestAddressWBTC_ETH[2:]),
+		[]byte(TestAddressUNI_ETH[2:]),
+	}
+
+	for i, addr := range addresses {
+		RegisterTradingPairAddress(addr, TradingPairID(i+1000))
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		addr := addresses[i%len(addresses)]
+		lookupPairByAddress(addr)
+	}
+}
+
+func BenchmarkPackEthereumAddressVariations(b *testing.B) {
+	// Different addresses to break cache locality
+	addresses := [][]byte{
+		[]byte(TestAddressETH_DAI[2:]),
+		[]byte(TestAddressDAI_USDC[2:]),
+		[]byte(TestAddressUSDC_ETH[2:]),
+		[]byte(TestAddressWBTC_ETH[2:]),
+		[]byte(TestAddressUNI_ETH[2:]),
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		addr := addresses[i%len(addresses)]
+		packEthereumAddress(addr)
+	}
+}
+
+func BenchmarkCountHexLeadingZerosRealData(b *testing.B) {
+	// Real Uniswap reserve patterns - create exactly 32 hex chars each
+	realPatterns := [][]byte{
+		[]byte("0000000000000000000000000000000000000000000000056bc75e2d630eb187"), // 64 chars
+		[]byte("00000000000000000000000000000000000000000000152d02c7e14af6800000"), // 64 chars
+		[]byte("0000000000000000000000000000000000000000000000000000000000000000"), // 64 chars
+		[]byte("000000000000000000000000000000000000ffffffffffffffffffffffffffff"), // 64 chars
+		[]byte("0000000000000000000000000000000000000001a784379d99db42000000000"),  // 63 chars - need to pad
+	}
+
+	// Ensure all patterns are exactly 64 chars, then extract 32-char segments
+	testSegments := make([][]byte, len(realPatterns))
+	for i, pattern := range realPatterns {
+		// Pad to 64 chars if needed
+		padded := string(pattern)
+		for len(padded) < 64 {
+			padded = "0" + padded
+		}
+		// Take last 32 chars (second reserve portion)
+		testSegments[i] = []byte(padded[32:64])
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		segment := testSegments[i%len(testSegments)]
+		countHexLeadingZeros(segment) // Each segment is exactly 32 chars
+	}
+}
+
+func BenchmarkRouterDispatchPureOverhead(b *testing.B) {
+	cleanup := testSetup(nil)
+	defer cleanup()
+
+	// Setup but with NO ring buffers - measure pure routing logic
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
+	// Deliberately don't setup core rings to isolate address lookup + message creation
+
+	syncData := "0x" +
+		"0000000000000000000000000000000000000000000000056bc75e2d630eb187" +
+		"00000000000000000000000000000000000000000000152d02c7e14af6800000"
+
+	logView := createTestLogView(TestAddressETH_DAI, syncData)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// This will fail at ring push but measure everything before that
+		func() {
+			defer func() { recover() }() // Swallow the panic from missing ring
+			DispatchPriceUpdate(logView)
+		}()
+	}
+}
+
+func BenchmarkPureAddressLookupChain(b *testing.B) {
+	cleanup := testSetup(nil)
+	defer cleanup()
+
+	// Setup hash table
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
+
+	// Pre-extract the address for pure lookup
+	testAddr := []byte(TestAddressETH_DAI[2:])
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Pure lookup chain: pack → hash → lookup
+		packed := packEthereumAddress(testAddr)
+		hash := hashPackedAddressToIndex(packed)
+		_ = hash // Use the hash
+		pairID := lookupPairByAddress(testAddr)
+		_ = pairID // Use the result
+	}
+}
+
+func BenchmarkIsolatedHexParsing(b *testing.B) {
+	// Real hex data from Uniswap
+	hexData := []byte("0x0000000000000000000000000000000000000000000000056bc75e2d630eb18700000000000000000000000000000000000000000000152d02c7e14af6800000")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Extract exactly what DispatchPriceUpdate does
+		leadingZerosA := countHexLeadingZeros(hexData[34:66])  // First reserve analysis
+		leadingZerosB := countHexLeadingZeros(hexData[98:130]) // Second reserve analysis
+
+		// Branchless min calculation
+		cond := leadingZerosA - leadingZerosB
+		mask := cond >> 31
+		minZeros := leadingZerosB ^ ((leadingZerosA ^ leadingZerosB) & mask)
+
+		_ = minZeros // Use result
 	}
 }
 
