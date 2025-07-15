@@ -464,7 +464,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 
 		// PRIORITY RECALCULATION
 		newPriority := quantizeTickValue(cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2])
-		fanoutEntry.queue.MoveTick(fanoutEntry.queueHandle, newPriority)
+		engine.priorityQueues[fanoutEntry.queueIndex].MoveTick(fanoutEntry.queueHandle, newPriority)
 	}
 }
 
