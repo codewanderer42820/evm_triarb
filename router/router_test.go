@@ -949,7 +949,7 @@ func TestHighVolumeStressTest(t *testing.T) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// BENCHMARK TESTS
+// ROUTER-SPECIFIC BENCHMARKS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 func BenchmarkDispatchPriceUpdate(b *testing.B) {
@@ -972,6 +972,35 @@ func BenchmarkDispatchPriceUpdate(b *testing.B) {
 		DispatchPriceUpdate(logView)
 		// Clear ring to prevent overflow
 		coreRings[0].Pop()
+	}
+}
+
+func BenchmarkDispatchPriceUpdateMultiCore(b *testing.B) {
+	cleanup := testSetup(nil)
+	defer cleanup()
+
+	// Setup multiple cores
+	numCores := 8
+	for i := 0; i < numCores; i++ {
+		coreRings[i] = ring24.New(constants.DefaultRingSize)
+		RegisterPairToCoreRouting(TestPairETH_DAI, uint8(i))
+	}
+
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
+
+	syncData := "0x" +
+		"0000000000000000000000000000000000000000000000056bc75e2d630eb187" +
+		"00000000000000000000000000000000000000000000152d02c7e14af6800000"
+
+	logView := createTestLogView(TestAddressETH_DAI, syncData)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		DispatchPriceUpdate(logView)
+		// Clear all rings to prevent overflow
+		for j := 0; j < numCores; j++ {
+			coreRings[j].Pop()
+		}
 	}
 }
 
@@ -1000,6 +1029,58 @@ func BenchmarkAddressLookup(b *testing.B) {
 	}
 }
 
+func BenchmarkAddressLookupCollisions(b *testing.B) {
+	cleanup := testSetup(nil)
+	defer cleanup()
+
+	// Create addresses that will cause hash collisions
+	collisionAddresses := make([][]byte, 100)
+	for i := 0; i < 100; i++ {
+		addr := "1000000000000000000000000000000000000" + strconv.Itoa(i+100)
+		collisionAddresses[i] = []byte(addr)
+		RegisterTradingPairAddress(collisionAddresses[i], TradingPairID(i+2000))
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		lookupPairByAddress(collisionAddresses[i%len(collisionAddresses)])
+	}
+}
+
+func BenchmarkAddressRegistration(b *testing.B) {
+	cleanup := testSetup(nil)
+	defer cleanup()
+
+	// Pre-generate addresses
+	addresses := make([][]byte, b.N)
+	pairIDs := make([]TradingPairID, b.N)
+
+	for i := 0; i < b.N; i++ {
+		addr := "a" + strconv.Itoa(1000000000000000000+i)
+		if len(addr) < 40 {
+			for len(addr) < 40 {
+				addr = "0" + addr
+			}
+		}
+		addresses[i] = []byte(addr)
+		pairIDs[i] = TradingPairID(i + 5000)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		RegisterTradingPairAddress(addresses[i], pairIDs[i])
+	}
+}
+
+func BenchmarkPackEthereumAddress(b *testing.B) {
+	testAddr := []byte(TestAddressETH_DAI[2:])
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		packEthereumAddress(testAddr)
+	}
+}
+
 func BenchmarkCountHexLeadingZeros(b *testing.B) {
 	testData := []byte("0000000000000000000000000000000000000000000000056bc75e2d630eb187")
 
@@ -1007,6 +1088,172 @@ func BenchmarkCountHexLeadingZeros(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		countHexLeadingZeros(testData)
 	}
+}
+
+func BenchmarkCountHexLeadingZerosVariations(b *testing.B) {
+	testCases := [][]byte{
+		[]byte("00000000000000000000000000000000"), // All zeros
+		[]byte("0000000000000000123456789abcdef0"), // 16 leading zeros
+		[]byte("00000000123456789abcdef012345678"), // 8 leading zeros
+		[]byte("0000123456789abcdef0123456789abc"), // 4 leading zeros
+		[]byte("123456789abcdef0123456789abcdef0"), // No leading zeros
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		testCase := testCases[i%len(testCases)]
+		countHexLeadingZeros(testCase)
+	}
+}
+
+func BenchmarkQuantizeTickValue(b *testing.B) {
+	testValues := []float64{
+		-128.0, -64.0, -32.0, -16.0, -8.0, -4.0, -2.0, -1.0, -0.5, 0.0,
+		0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0,
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		quantizeTickValue(testValues[i%len(testValues)])
+	}
+}
+
+func BenchmarkFullRouterPipeline(b *testing.B) {
+	cleanup := testSetup(nil)
+	defer cleanup()
+
+	// Setup complete router system
+	addresses := []string{TestAddressETH_DAI, TestAddressDAI_USDC, TestAddressUSDC_ETH}
+	pairs := []TradingPairID{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH}
+
+	for i, addr := range addresses {
+		RegisterTradingPairAddress([]byte(addr[2:]), pairs[i])
+		RegisterPairToCoreRouting(pairs[i], 0)
+	}
+
+	coreRings[0] = ring24.New(constants.DefaultRingSize)
+
+	// Pre-generate test data
+	testEvents := make([]*types.LogView, 100)
+	for i := range testEvents {
+		addr := addresses[i%len(addresses)]
+		syncData := "0x" +
+			"0000000000000000000000000000000000000000000000056bc75e2d630eb187" +
+			"00000000000000000000000000000000000000000000152d02c7e14af6800000"
+		testEvents[i] = createTestLogView(addr, syncData)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		event := testEvents[i%len(testEvents)]
+		DispatchPriceUpdate(event)
+
+		// Clear ring buffer
+		coreRings[0].Pop()
+	}
+}
+
+func BenchmarkHashAddressToIndex(b *testing.B) {
+	testAddresses := [][]byte{
+		[]byte(TestAddressETH_DAI[2:]),
+		[]byte(TestAddressDAI_USDC[2:]),
+		[]byte(TestAddressUSDC_ETH[2:]),
+		[]byte(TestAddressWBTC_ETH[2:]),
+		[]byte(TestAddressUNI_ETH[2:]),
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		addr := testAddresses[i%len(testAddresses)]
+		hashAddressToIndex(addr)
+	}
+}
+
+func BenchmarkHashPackedAddressToIndex(b *testing.B) {
+	testAddresses := []PackedAddress{
+		packEthereumAddress([]byte(TestAddressETH_DAI[2:])),
+		packEthereumAddress([]byte(TestAddressDAI_USDC[2:])),
+		packEthereumAddress([]byte(TestAddressUSDC_ETH[2:])),
+		packEthereumAddress([]byte(TestAddressWBTC_ETH[2:])),
+		packEthereumAddress([]byte(TestAddressUNI_ETH[2:])),
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		addr := testAddresses[i%len(testAddresses)]
+		hashPackedAddressToIndex(addr)
+	}
+}
+
+func BenchmarkPackedAddressEqual(b *testing.B) {
+	addr1 := packEthereumAddress([]byte(TestAddressETH_DAI[2:]))
+	addr2 := packEthereumAddress([]byte(TestAddressDAI_USDC[2:]))
+	addr3 := packEthereumAddress([]byte(TestAddressETH_DAI[2:])) // Same as addr1
+
+	addrs := []PackedAddress{addr1, addr2, addr3}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		a := addrs[i%len(addrs)]
+		a.isEqual(addr1)
+	}
+}
+
+func BenchmarkPriceUpdateMessageCreation(b *testing.B) {
+	var messages []*PriceUpdateMessage
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		msg := &PriceUpdateMessage{
+			pairID:      TradingPairID(i + 1000),
+			forwardTick: float64(i) * 0.001,
+			reverseTick: -float64(i) * 0.001,
+		}
+		messages = append(messages, msg)
+
+		// Clear periodically to avoid memory growth
+		if len(messages) > 1000 {
+			messages = messages[:0]
+		}
+	}
+}
+
+func BenchmarkConcurrentDispatch(b *testing.B) {
+	if testing.Short() {
+		b.Skip("Skipping concurrency benchmark in short mode")
+	}
+
+	cleanup := testSetup(nil)
+	defer cleanup()
+
+	// Setup
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
+	for i := 0; i < 8; i++ {
+		RegisterPairToCoreRouting(TestPairETH_DAI, uint8(i))
+		coreRings[i] = ring24.New(constants.DefaultRingSize)
+	}
+
+	syncData := "0x" +
+		"0000000000000000000000000000000000000000000000056bc75e2d630eb187" +
+		"00000000000000000000000000000000000000000000152d02c7e14af6800000"
+
+	logView := createTestLogView(TestAddressETH_DAI, syncData)
+
+	b.Run("SingleThreaded", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			DispatchPriceUpdate(logView)
+			// Clear all rings
+			for j := 0; j < 8; j++ {
+				coreRings[j].Pop()
+			}
+		}
+	})
+
+	// Skip the problematic multi-threaded test for now
+	b.Run("MultiThreaded-Disabled", func(b *testing.B) {
+		b.Skip("Concurrent dispatch test disabled due to race conditions in global state")
+	})
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
