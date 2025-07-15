@@ -56,9 +56,9 @@ type CycleIndex uint64
 //go:notinheap
 //go:align 8
 type PriceUpdateMessage struct {
-	pairID      TradingPairID // 8B - HOT: Pair identifier for routing and queue lookup
-	forwardTick float64       // 8B - HOT: Logarithmic price ratio for forward direction
-	reverseTick float64       // 8B - HOT: Logarithmic price ratio for reverse direction
+	pairID      TradingPairID // 8B - ULTRA-HOT: First access for routing lookup
+	forwardTick float64       // 8B - HOT: Used when !isReverseDirection
+	reverseTick float64       // 8B - HOT: Used when isReverseDirection
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -70,8 +70,8 @@ type PriceUpdateMessage struct {
 //go:notinheap
 //go:align 64
 type ArbitrageCycleState struct {
-	tickValues [3]float64       // 24B - ULTRA-HOT: Logarithmic price ratios for profitability calculation
-	pairIDs    [3]TradingPairID // 24B - WARM: Pair identifiers for cycle reconstruction and debugging
+	tickValues [3]float64       // 24B - ULTRA-HOT: First access for profitability calculation
+	pairIDs    [3]TradingPairID // 24B - COLD: Only used for logging/debugging
 	_          [16]byte         // 16B - PADDING: Alignment to 64-byte cache line boundary
 }
 
@@ -80,10 +80,10 @@ type ArbitrageCycleState struct {
 //go:notinheap
 //go:align 32
 type CycleFanoutEntry struct {
-	cycleIndex  uint64                    // 8B - ULTRA-HOT: Direct array index for cycle access
-	edgeIndex   uint64                    // 8B - HOT: Position within cycle for tick update
-	queueIndex  uint64                    // 8B - HOT: Index into engine.priorityQueues array
-	queueHandle pooledquantumqueue.Handle // 8B - HOT: Queue manipulation identifier
+	cycleIndex  uint64 // 8B - ULTRA-HOT: First access for cycle lookup
+	edgeIndex   uint64 // 8B - ULTRA-HOT: Second access for tick update
+	queueIndex  uint64 // 8B - HOT: Third access for queue lookup
+	queueHandle uint64 // 8B - HOT: Fourth access for queue operations (using uint64 for 8B alignment)
 }
 
 // ExtractedCycle provides temporary storage for cycles extracted during profitability analysis.
@@ -91,10 +91,10 @@ type CycleFanoutEntry struct {
 //go:notinheap
 //go:align 32
 type ExtractedCycle struct {
-	cycleIndex   CycleIndex                // 8B - HOT: Array index for cycle state access
-	originalTick int64                     // 8B - HOT: Original tick value for queue reinsertion
-	queueHandle  pooledquantumqueue.Handle // 8B - HOT: Queue manipulation identifier
-	_            [8]byte                   // 8B - PADDING: 32-byte boundary alignment
+	cycleIndex   uint64  // 8B - ULTRA-HOT: First access for cycle lookup
+	originalTick int64   // 8B - HOT: Second access for reinsertion priority
+	queueHandle  uint64  // 8B - HOT: Third access for queue operations (using uint64 for 8B alignment)
+	_            [8]byte // 8B - PADDING: 32-byte boundary alignment
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -107,28 +107,26 @@ type ExtractedCycle struct {
 //go:notinheap
 //go:align 64
 type ArbitrageEngine struct {
-	// TIER 1: ULTRA-HOT PATH (Every tick update - millions per second)
-	isReverseDirection bool          // 1B - ULTRA-HOT: Direction flag checked on every tick update
-	_                  [7]byte       // 7B - PADDING: Alignment optimization
-	pairToQueueLookup  localidx.Hash // 52B + 12B padding = 64B - ULTRA-HOT: Pair-to-queue mapping for O(1) lookup performance
+	// CACHE LINE 1: ULTRA-HOT - Every tick access
+	isReverseDirection bool          // 1B - ULTRA-HOT: First access for direction check
+	_                  [7]byte       // 7B - PADDING: 8-byte alignment
+	pairToQueueLookup  localidx.Hash // 64B - ULTRA-HOT: Second access for queue lookup
 
-	// TIER 2: HOT PATH (Frequent cycle processing operations)
-	priorityQueues []pooledquantumqueue.PooledQuantumQueue // 24B - HOT: Priority queues per trading pair
-	sharedArena    []pooledquantumqueue.Entry              // 24B - HOT: Single shared memory pool for all queues
-	_              [8]byte                                 // 8B - PADDING: Fills remainder of cache line after Hash spillover
+	// CACHE LINE 2: HOT - Queue operations
+	priorityQueues []pooledquantumqueue.PooledQuantumQueue // 24B - HOT: Third access for queue ops
+	sharedArena    []pooledquantumqueue.Entry              // 24B - HOT: Fourth access (rarely direct)
+	cycleStates    []ArbitrageCycleState                   // 24B - HOT: Fifth access for tick updates
+	_              [8]byte                                 // 8B - PADDING: Cache line completion
 
-	// TIER 3: WARM PATH (Moderate frequency queue operations)
-	cycleStates      []ArbitrageCycleState // 24B - HOT: Complete arbitrage cycle state storage
-	cycleFanoutTable [][]CycleFanoutEntry  // 24B - HOT: Pair-to-cycle mappings for fanout operations
-	_                [16]byte              // 16B - PADDING: Alignment optimization
+	// CACHE LINE 3: WARM - Fanout operations
+	cycleFanoutTable [][]CycleFanoutEntry // 24B - WARM: Sixth access for fanout propagation
+	extractedCycles  [32]ExtractedCycle   // 1024B - COOL: Seventh access (extraction buffer)
+	_                [16]byte             // 16B - PADDING: Alignment optimization
 
-	// TIER 4: COOL PATH (Occasional profitable cycle extraction)
-	extractedCycles [32]ExtractedCycle // 1024B - COOL: Pre-allocated buffer for extracted cycles
-
-	// TIER 5: COLD PATH (Rare configuration and control operations)
-	nextHandle      pooledquantumqueue.Handle // 8B - COLD: Simple sequential handle allocation (init only)
-	shutdownChannel <-chan struct{}           // 8B - COLD: Graceful shutdown coordination channel
-	_               [48]byte                  // 48B - PADDING: Alignment optimization
+	// CACHE LINE N: COLD - Initialization only
+	nextHandle      uint64          // 8B - COLD: Handle allocation (init only)
+	shutdownChannel <-chan struct{} // 8B - COLD: Shutdown coordination
+	_               [48]byte        // 48B - PADDING: Alignment optimization
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -211,7 +209,7 @@ var (
 func (engine *ArbitrageEngine) allocateQueueHandle() pooledquantumqueue.Handle {
 	handle := engine.nextHandle
 	engine.nextHandle++
-	return handle
+	return pooledquantumqueue.Handle(handle)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -359,7 +357,6 @@ func lookupPairByAddress(address42HexBytes []byte) TradingPairID {
 	// INITIAL HASH CALCULATION
 	i := hashAddressToIndex(address42HexBytes)
 	dist := uint64(0) // Track probe distance for Robin Hood termination
-	capacityMask := uint64(constants.AddressTableMask)
 
 	for {
 		currentPairID := addressToPairMap[i]
@@ -380,13 +377,13 @@ func lookupPairByAddress(address42HexBytes []byte) TradingPairID {
 
 		// ROBIN HOOD EARLY TERMINATION
 		currentKeyHash := hashPackedAddressToIndex(currentKey)
-		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & capacityMask
+		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & uint64(constants.AddressTableMask)
 		if currentDist < dist {
 			return 0 // Early termination - key not present
 		}
 
 		// PROBE CONTINUATION
-		i = (i + 1) & capacityMask
+		i = (i + 1) & uint64(constants.AddressTableMask)
 		dist++
 	}
 }
@@ -434,7 +431,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 
 		// OPPORTUNITY NOTIFICATION
 		if isProfitable {
-			// logArbitrageOpportunity(cycle, currentTick)
+			// emitArbitrageOpportunity(cycle, currentTick)
 		}
 
 		// EXTRACTION TERMINATION CONDITIONS
@@ -444,9 +441,9 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 
 		// TEMPORARY CYCLE STORAGE
 		engine.extractedCycles[cycleCount] = ExtractedCycle{
-			cycleIndex:   cycleIndex,
+			cycleIndex:   uint64(cycleIndex),
 			originalTick: queueTick,
-			queueHandle:  handle,
+			queueHandle:  uint64(handle),
 		}
 		cycleCount++
 
@@ -456,8 +453,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 	// STAGE 4: CYCLE REINSERTION
 	for i := 0; i < cycleCount; i++ {
 		cycle := &engine.extractedCycles[i]
-		cycleIndexUint64 := uint64(cycle.cycleIndex)
-		queue.Push(cycle.originalTick, cycle.queueHandle, cycleIndexUint64)
+		queue.Push(cycle.originalTick, pooledquantumqueue.Handle(cycle.queueHandle), cycle.cycleIndex)
 	}
 
 	// STAGE 5: FANOUT UPDATE PROPAGATION
@@ -471,7 +467,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 		// PRIORITY RECALCULATION
 		tickSum := cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
 		newPriority := int64((tickSum + tickClampingBound) * quantizationScale)
-		engine.priorityQueues[fanoutEntry.queueIndex].MoveTick(fanoutEntry.queueHandle, newPriority)
+		engine.priorityQueues[fanoutEntry.queueIndex].MoveTick(pooledquantumqueue.Handle(fanoutEntry.queueHandle), newPriority)
 	}
 }
 
@@ -549,14 +545,14 @@ func (a PackedAddress) isEqual(b PackedAddress) bool {
 // COOL PATH: MONITORING AND OBSERVABILITY (SORTED BY USAGE)
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// logArbitrageOpportunity provides detailed logging for profitable arbitrage cycles.
+// emitArbitrageOpportunity provides detailed logging for profitable arbitrage cycles.
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func logArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
+func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
 	debug.DropMessage("[ARBITRAGE_OPPORTUNITY]", "")
 
 	debug.DropMessage("  pair0", utils.Itoa(int(cycle.pairIDs[0])))
@@ -591,8 +587,6 @@ func RegisterTradingPairAddress(address42HexBytes []byte, pairID TradingPairID) 
 	key := packEthereumAddress(address42HexBytes)
 	i := hashAddressToIndex(address42HexBytes)
 	dist := uint64(0)
-	capacityMask := uint64(constants.AddressTableMask)
-	tableCapacity := uint64(constants.AddressTableCapacity)
 
 	for {
 		currentPairID := addressToPairMap[i]
@@ -610,7 +604,7 @@ func RegisterTradingPairAddress(address42HexBytes []byte, pairID TradingPairID) 
 
 		currentKey := packedAddressKeys[i]
 		currentKeyHash := hashPackedAddressToIndex(currentKey)
-		currentDist := (i + tableCapacity - currentKeyHash) & capacityMask
+		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & uint64(constants.AddressTableMask)
 
 		if currentDist < dist {
 			key, packedAddressKeys[i] = packedAddressKeys[i], key
@@ -618,7 +612,7 @@ func RegisterTradingPairAddress(address42HexBytes []byte, pairID TradingPairID) 
 			dist = currentDist
 		}
 
-		i = (i + 1) & capacityMask
+		i = (i + 1) & uint64(constants.AddressTableMask)
 		dist++
 	}
 }
@@ -679,8 +673,7 @@ func (rng *CryptoRandomGenerator) generateRandomUint64() uint64 {
 //go:inline
 //go:registerparams
 func (rng *CryptoRandomGenerator) generateRandomInt(upperBound int) int {
-	modulus := uint64(upperBound)
-	return int(rng.generateRandomUint64() % modulus)
+	return int(rng.generateRandomUint64() % uint64(upperBound))
 }
 
 // shuffleCycleEdges performs deterministic Fisher-Yates shuffling for load balancing.
@@ -695,8 +688,7 @@ func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
 		return
 	}
 	var seedInput [8]byte
-	pairIDMixed := utils.Mix64(uint64(pairID))
-	*(*uint64)(unsafe.Pointer(&seedInput[0])) = pairIDMixed
+	*(*uint64)(unsafe.Pointer(&seedInput[0])) = utils.Mix64(uint64(pairID))
 	rng := newCryptoRandomGenerator(seedInput[:])
 
 	for i := len(cycleEdges) - 1; i > 0; i-- {
@@ -714,20 +706,18 @@ func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
 func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard)
 	temporaryEdges := make(map[TradingPairID][]CycleEdge, len(arbitrageTriangles)*3)
-	maxCyclesPerShard := constants.MaxCyclesPerShard
 
 	for _, triangle := range arbitrageTriangles {
 		for i := 0; i < 3; i++ {
-			edgeIndex := uint64(i)
 			temporaryEdges[triangle[i]] = append(temporaryEdges[triangle[i]],
-				CycleEdge{cyclePairs: triangle, edgeIndex: edgeIndex})
+				CycleEdge{cyclePairs: triangle, edgeIndex: uint64(i)})
 		}
 	}
 
 	for pairID, cycleEdges := range temporaryEdges {
 		shuffleCycleEdges(cycleEdges, pairID)
-		for offset := 0; offset < len(cycleEdges); offset += maxCyclesPerShard {
-			endOffset := offset + maxCyclesPerShard
+		for offset := 0; offset < len(cycleEdges); offset += constants.MaxCyclesPerShard {
+			endOffset := offset + constants.MaxCyclesPerShard
 			if endOffset > len(cycleEdges) {
 				endOffset = len(cycleEdges)
 			}
@@ -788,7 +778,6 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 	for _, shard := range workloadShards {
 		queueIndex, _ := engine.pairToQueueLookup.Get(uint32(shard.pairID))
 		queue := &engine.priorityQueues[queueIndex]
-		queueIndexUint64 := uint64(queueIndex)
 
 		for _, cycleEdge := range shard.cycleEdges {
 			// Simple sequential handle allocation
@@ -799,15 +788,14 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 				pairIDs: cycleEdge.cyclePairs,
 			})
 			cycleIndex := CycleIndex(len(engine.cycleStates) - 1)
-			cycleIndexUint64 := uint64(cycleIndex)
 
 			// Generate distributed initialization priority
-			cycleHash := utils.Mix64(cycleIndexUint64)
+			cycleHash := utils.Mix64(uint64(cycleIndex))
 			randBits := cycleHash & 0xFFFF
 			initPriority := int64(196608 + randBits)
 
 			// Insert into queue
-			queue.Push(initPriority, handle, cycleIndexUint64)
+			queue.Push(initPriority, handle, uint64(cycleIndex))
 
 			// Create fanout entries for the two other pairs in the cycle
 			otherEdge1 := (cycleEdge.edgeIndex + 1) % 3
@@ -816,10 +804,10 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			for _, edgeIdx := range [...]uint64{otherEdge1, otherEdge2} {
 				engine.cycleFanoutTable[queueIndex] = append(engine.cycleFanoutTable[queueIndex],
 					CycleFanoutEntry{
-						cycleIndex:  cycleIndexUint64,
+						cycleIndex:  uint64(cycleIndex),
 						edgeIndex:   edgeIdx,
-						queueIndex:  queueIndexUint64,
-						queueHandle: handle,
+						queueIndex:  uint64(queueIndex),
+						queueHandle: uint64(handle),
 					})
 			}
 		}
@@ -858,9 +846,7 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	var allShards []PairWorkloadShard
 	for shard := range shardInput {
 		// Create or extend queue for this pair
-		pairIDUint32 := uint32(shard.pairID)
-		priorityQueuesLen := uint32(len(engine.priorityQueues))
-		queueIndex := engine.pairToQueueLookup.Put(pairIDUint32, priorityQueuesLen)
+		queueIndex := engine.pairToQueueLookup.Put(uint32(shard.pairID), uint32(len(engine.priorityQueues)))
 		if int(queueIndex) == len(engine.priorityQueues) {
 			// Create placeholder queue (will be replaced in initialization)
 			engine.priorityQueues = append(engine.priorityQueues, pooledquantumqueue.PooledQuantumQueue{})
@@ -892,9 +878,8 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 	// RESOURCE ALLOCATION STRATEGY
 	coreCount := runtime.NumCPU() - 1
-	maxSupportedCores := constants.MaxSupportedCores
-	if coreCount > maxSupportedCores {
-		coreCount = maxSupportedCores
+	if coreCount > constants.MaxSupportedCores {
+		coreCount = constants.MaxSupportedCores
 	}
 	coreCount &^= 1                    // Ensure even number for direction pairing
 	forwardCoreCount := coreCount >> 1 // Half dedicated to forward direction
@@ -904,9 +889,8 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 
 	// WORKER CORE DEPLOYMENT
 	shardChannels := make([]chan PairWorkloadShard, coreCount)
-	shardChannelBufferSize := constants.ShardChannelBufferSize
 	for i := range shardChannels {
-		shardChannels[i] = make(chan PairWorkloadShard, shardChannelBufferSize)
+		shardChannels[i] = make(chan PairWorkloadShard, constants.ShardChannelBufferSize)
 		go launchArbitrageWorker(i, forwardCoreCount, shardChannels[i])
 	}
 
@@ -916,15 +900,13 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 		for _, shard := range shardBuckets {
 			forwardCore := currentCore % forwardCoreCount
 			reverseCore := forwardCore + forwardCoreCount
-			forwardCoreShift := uint8(forwardCore)
-			reverseCoreShift := uint8(reverseCore)
 
 			// DUAL-DIRECTION SHARD ASSIGNMENT
 			shardChannels[forwardCore] <- shard
 			shardChannels[reverseCore] <- shard
 
 			// ROUTING TABLE POPULATION
-			routingMask := uint64(1<<forwardCoreShift | 1<<reverseCoreShift)
+			routingMask := uint64(1<<uint8(forwardCore) | 1<<uint8(reverseCore))
 			for _, cycleEdge := range shard.cycleEdges {
 				for _, pairID := range cycleEdge.cyclePairs {
 					pairToCoreRouting[pairID] |= routingMask
