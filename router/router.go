@@ -1002,8 +1002,15 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			// Create cycle state with main pair tick as zero
 			cycleState := ArbitrageCycleState{
 				pairIDs: cycleEdge.cyclePairs,
-				// tickValues[cycleEdge.edgeIndex] remains zero (main pair)
+				tickValues: [3]float64{
+					64.0, // Initialize to max unprofitable
+					64.0, // Initialize to max unprofitable
+					64.0, // Initialize to max unprofitable
+				},
 			}
+
+			// Set the main pair's tick to 0 (overwrite the default)
+			cycleState.tickValues[cycleEdge.edgeIndex] = 0.0
 
 			engine.cycleStates = append(engine.cycleStates, cycleState)
 			cycleIndex := CycleIndex(len(engine.cycleStates) - 1)
