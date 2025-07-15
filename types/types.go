@@ -54,18 +54,33 @@ type LogView struct {
 	// This field is accessed on every event to determine routing
 	Addr []byte
 
-	// Data contains the non-indexed event parameters as hex-encoded bytes.
-	// Format: "0x" followed by hex data (variable length, multiple of 2)
-	// For Uniswap V2 Sync events, this contains two 256-bit reserve values
-	// Example: "0x0000000000000000000000000000000000000000007c34bdf6cfe2d5772d68d10000000000000000000000000000000000000000000000000020dfffa7b4a402"
-	Data []byte
-
 	// Topics contains the indexed event parameters with brackets stripped.
 	// Format: Comma-separated hex strings without the JSON array brackets "[" and "]"
 	// For Uniswap V2 Sync events, this is just the event signature hash
 	// Example: "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"
 	// Note: Original JSON array brackets have been removed during parsing
 	Topics []byte
+
+	// Data contains the non-indexed event parameters as hex-encoded bytes.
+	// Format: "0x" followed by hex data (variable length, multiple of 2)
+	// For Uniswap V2 Sync events, this contains two 256-bit reserve values
+	// Example: "0x0000000000000000000000000000000000000000007c34bdf6cfe2d5772d68d10000000000000000000000000000000000000000000000000020dfffa7b4a402"
+	Data []byte
+
+	// ═══════════════════════════════════════════════════════════════════
+	// FINGERPRINT FIELDS - Persistent after buffer invalidation
+	// ═══════════════════════════════════════════════════════════════════
+
+	// TagHi contains the upper 64 bits of the 128-bit event fingerprint.
+	// This fingerprint uniquely identifies the event and survives buffer reuse.
+	// Calculated from: Hash(BlkNum || TxIndex || LogIdx)
+	// Used for deduplication when events are received multiple times
+	TagHi uint64
+
+	// TagLo contains the lower 64 bits of the 128-bit event fingerprint.
+	// Together with TagHi, provides a globally unique event identifier
+	// that remains valid even after the WebSocket buffer is reused
+	TagLo uint64
 
 	// ═══════════════════════════════════════════════════════════════════
 	// METADATA FIELDS - Second cache line (occasionally accessed)
@@ -90,26 +105,11 @@ type LogView struct {
 	TxIndex []byte
 
 	// ═══════════════════════════════════════════════════════════════════
-	// FINGERPRINT FIELDS - Persistent after buffer invalidation
-	// ═══════════════════════════════════════════════════════════════════
-
-	// TagHi contains the upper 64 bits of the 128-bit event fingerprint.
-	// This fingerprint uniquely identifies the event and survives buffer reuse.
-	// Calculated from: Hash(BlkNum || TxIndex || LogIdx)
-	// Used for deduplication when events are received multiple times
-	TagHi uint64
-
-	// TagLo contains the lower 64 bits of the 128-bit event fingerprint.
-	// Together with TagHi, provides a globally unique event identifier
-	// that remains valid even after the WebSocket buffer is reused
-	TagLo uint64
-
-	// ═══════════════════════════════════════════════════════════════════
 	// PADDING - Ensures optimal memory alignment
 	// ═══════════════════════════════════════════════════════════════════
 
 	// Cache line padding to prevent false sharing between LogView instances
 	// This ensures each LogView occupies exactly 3 cache lines (192 bytes)
 	// Critical for performance when multiple cores process events in parallel
-	_ [32]byte
+	_ [40]byte
 }
