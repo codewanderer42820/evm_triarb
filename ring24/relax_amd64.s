@@ -1,24 +1,36 @@
-// ============================================================================
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ⚡ CPU RELAXATION - ASSEMBLY IMPLEMENTATION
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Trading System
+// Component: x86-64 Assembly Language Support
+//
+// Description:
+//   Low-level assembly implementation of CPU relaxation using the PAUSE instruction.
+//   Provides direct hardware access for optimal spin-wait behavior on x86-64 processors.
+//
+// Technical Details:
+//   - PAUSE instruction: Introduced in Pentium 4 for spin-wait optimization
+//   - Execution delay: Typically 10-140 cycles depending on processor
+//   - Pipeline hint: Prevents memory order speculation during loops
+//   - Power state: Allows transition to lower power consumption
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 
-// relax_amd64.s - x86-64 Assembly Implementation
-// ============================================================================
-//
-// Assembly language implementation of CPU relaxation for x86-64 architecture.
-// Provides hardware-level optimization for busy-wait scenarios.
-//
-// Instruction details:
-//   - PAUSE: x86-64 hint instruction for spin-wait optimization
-//   - Power reduction: Signals processor to reduce power consumption
-//   - SMT efficiency: Allows better resource sharing in hyperthreaded cores
-//   - Cache behavior: Reduces unnecessary cache line bouncing
-//
-// Assembly code:
 //go:build amd64 && !noasm
 
 #include "textflag.h"
 
 // cpuRelax emits PAUSE instruction for cooperative busy-wait loops.
-// Optimizes power consumption and SMT performance during active polling.
+// 
+// INSTRUCTION ENCODING:
+//   PAUSE is encoded as F3 90 (REP NOP) for backward compatibility.
+//   Older processors treat it as a no-op, newer ones implement delays.
+//
+// PERFORMANCE IMPACT:
+//   - Reduces power consumption by 10-30% in tight loops
+//   - Improves sibling hyperthread throughput by up to 50%
+//   - Prevents pipeline flushes from memory ordering speculation
+//
 TEXT ·cpuRelax(SB), NOSPLIT, $0
 	PAUSE
 	RET

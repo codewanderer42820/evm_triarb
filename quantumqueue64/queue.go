@@ -1,4 +1,22 @@
-// quantumqueue64 - ISR-grade compact priority queue with O(1) operations
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ⚡ COMPACT QUANTUM PRIORITY QUEUE
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Trading System
+// Component: Memory-Optimized Priority Queue
+//
+// Description:
+//   Compact variant of the quantum priority queue using 64-bit payloads instead of 48-byte
+//   arrays. Reduces memory footprint by 50% while maintaining O(1) operation guarantees through
+//   the same hierarchical bitmap indexing system.
+//
+// Design Trade-offs:
+//   - Reduced payload size (8 bytes vs 48 bytes) for memory efficiency
+//   - Same algorithmic complexity and bitmap hierarchy
+//   - Optimized for scenarios where payload is a pointer or small value
+//   - 32-byte nodes fit two per cache line vs one per line
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
 package quantumqueue64
 
 import (
@@ -6,33 +24,72 @@ import (
 	"math/bits"
 )
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// CONFIGURATION CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
 const (
-	GroupCount  = 64                                 // Top-level summary groups
-	LaneCount   = 64                                 // Lanes per group
-	BucketCount = GroupCount * LaneCount * LaneCount // Total tick resolution: 262,144
-	CapItems    = 1 << 16                            // Maximum concurrent entries
+	// GroupCount defines top-level groups in the three-tier bitmap hierarchy.
+	// Each group summarizes the state of 64 lanes.
+	GroupCount = 64
+
+	// LaneCount specifies lanes per group in the hierarchy.
+	// Each lane tracks 64 individual priority buckets.
+	LaneCount = 64
+
+	// BucketCount represents the total number of addressable priorities.
+	// Provides 262,144 distinct priority levels (64 × 64 × 64).
+	BucketCount = GroupCount * LaneCount * LaneCount
+
+	// CapItems defines maximum queue capacity.
+	// Limited to 64K entries for efficient 32-bit handle addressing.
+	CapItems = 1 << 16
 )
 
-// Handle represents arena index for queue entries
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// TYPE DEFINITIONS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Handle represents an index into the queue's arena.
+// 32-bit handles provide sufficient addressing for 64K entries.
 type Handle uint32
 
-const nilIdx Handle = ^Handle(0) // Sentinel for null links
+// nilIdx serves as a sentinel value for invalid handles and empty links.
+// Uses maximum uint32 value to distinguish from valid indices.
+const nilIdx Handle = ^Handle(0)
+
+// idx32 provides type consistency for internal indexing operations.
 type idx32 = Handle
 
-// node - 32-byte queue entry optimized for cache efficiency
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// COMPACT NODE STRUCTURE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// node represents a memory-efficient queue entry at 32 bytes.
+// Half the size of standard QuantumQueue nodes, allowing two nodes per cache line.
+//
+// MEMORY LAYOUT:
+//   - tick: Priority value or -1 when free
+//   - data: Compact 64-bit payload (vs 48 bytes in standard variant)
+//   - next/prev: Doubly-linked list pointers with padding for alignment
 //
 //go:notinheap
 //go:align 32
 type node struct {
 	tick int64   // 8B - Active tick or -1 if free
-	data uint64  // 8B - Compact payload (vs 48 bytes in QuantumQueue)
+	data uint64  // 8B - Compact payload
 	next Handle  // 4B - Next in chain or freelist
 	_    [4]byte // 4B - Alignment padding
 	prev Handle  // 4B - Previous in chain
 	_    [4]byte // 4B - Alignment padding
 }
 
-// groupBlock - 2-level bitmap for O(1) minimum finding
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// BITMAP HIERARCHY (SHARED DESIGN)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// groupBlock implements the hierarchical bitmap structure for O(1) minimum finding.
+// Identical to the standard QuantumQueue implementation for consistency.
 //
 //go:notinheap
 //go:align 64
@@ -42,7 +99,17 @@ type groupBlock struct {
 	_         [56]byte          // 56B - Cache line padding
 }
 
-// QuantumQueue64 - High-performance priority queue with 50% smaller footprint
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// MAIN QUEUE STRUCTURE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// QuantumQueue64 implements a memory-efficient priority queue with compact payloads.
+// Uses 50% less memory than standard QuantumQueue while maintaining same performance.
+//
+// MEMORY SAVINGS:
+//   - Node size: 32 bytes vs 64 bytes (50% reduction)
+//   - Arena size: 2MB vs 4MB for 64K entries
+//   - Better cache utilization with 2 nodes per cache line
 //
 //go:notinheap
 //go:align 64
@@ -56,12 +123,17 @@ type QuantumQueue64 struct {
 	_ [48]byte // 48B - Cache isolation
 
 	// Large data structures
-	arena   [CapItems]node         // Fixed allocation pool (2MB vs 4MB)
+	arena   [CapItems]node         // Compact allocation pool (2MB)
 	buckets [BucketCount]Handle    // Per-tick chain heads
 	groups  [GroupCount]groupBlock // Hierarchical bitmaps
 }
 
-// New creates a queue with initialized freelist and empty buckets
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// INITIALIZATION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// New creates a queue with initialized freelist and empty buckets.
+// Follows the same initialization pattern as standard QuantumQueue.
 //
 //go:norace
 //go:nocheckptr
@@ -71,7 +143,7 @@ type QuantumQueue64 struct {
 func New() *QuantumQueue64 {
 	q := &QuantumQueue64{freeHead: 0}
 
-	// Initialize freelist chain
+	// Build freelist chain through all nodes
 	for i := Handle(0); i < CapItems-1; i++ {
 		q.arena[i].next = i + 1
 		q.arena[i].tick = -1
@@ -83,7 +155,7 @@ func New() *QuantumQueue64 {
 	q.arena[CapItems-1].tick = -1
 	q.arena[CapItems-1].prev = nilIdx
 
-	// Initialize empty buckets
+	// Clear all bucket heads
 	for i := range q.buckets {
 		q.buckets[i] = nilIdx
 	}
@@ -91,8 +163,12 @@ func New() *QuantumQueue64 {
 	return q
 }
 
-// Borrow allocates a handle without capacity checking
-// ⚠️  FOOTGUN: No exhaustion validation
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// HANDLE MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Borrow allocates a handle without capacity validation.
+// Assumes caller has verified availability for maximum speed.
 //
 //go:norace
 //go:nocheckptr
@@ -103,14 +179,15 @@ func (q *QuantumQueue64) Borrow() (Handle, error) {
 	h := q.freeHead
 	q.freeHead = q.arena[h].next
 
-	// Reset node state
+	// Initialize to clean state
 	n := &q.arena[h]
 	n.tick, n.prev, n.next = -1, nilIdx, nilIdx
 
 	return h, nil
 }
 
-// BorrowSafe allocates with exhaustion checking
+// BorrowSafe provides allocation with exhaustion checking.
+// Safer variant that validates capacity before allocation.
 //
 //go:norace
 //go:nocheckptr
@@ -132,7 +209,12 @@ func (q *QuantumQueue64) BorrowSafe() (Handle, error) {
 	return h, nil
 }
 
-// Size returns current entry count
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// QUERY OPERATIONS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Size returns the current number of entries.
+// Maintained incrementally for O(1) access.
 //
 //go:norace
 //go:nocheckptr
@@ -143,7 +225,8 @@ func (q *QuantumQueue64) Size() int {
 	return q.size
 }
 
-// Empty checks if queue contains entries
+// Empty checks if the queue contains entries.
+// Convenience method for state checking.
 //
 //go:norace
 //go:nocheckptr
@@ -154,7 +237,12 @@ func (q *QuantumQueue64) Empty() bool {
 	return q.size == 0
 }
 
-// unlink removes entry and updates bitmap summaries
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// INTERNAL OPERATIONS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// unlink removes an entry and maintains bitmap consistency.
+// Handles the full complexity of hierarchical bitmap updates.
 //
 //go:norace
 //go:nocheckptr
@@ -165,7 +253,7 @@ func (q *QuantumQueue64) unlink(h Handle) {
 	n := &q.arena[h]
 	b := idx32(n.tick)
 
-	// Remove from chain
+	// Update doubly-linked list
 	if n.prev != nilIdx {
 		q.arena[n.prev].next = n.next
 	} else {
@@ -175,11 +263,12 @@ func (q *QuantumQueue64) unlink(h Handle) {
 		q.arena[n.next].prev = n.prev
 	}
 
-	// Update summaries if bucket empty
+	// Maintain bitmap hierarchy if bucket empty
 	if q.buckets[b] == nilIdx {
-		g := uint64(n.tick) >> 12       // Group index
-		l := (uint64(n.tick) >> 6) & 63 // Lane index
-		bb := uint64(n.tick) & 63       // Bucket index
+		// Extract hierarchical indices
+		g := uint64(n.tick) >> 12       // Group
+		l := (uint64(n.tick) >> 6) & 63 // Lane
+		bb := uint64(n.tick) & 63       // Bucket
 
 		gb := &q.groups[g]
 		gb.l2[l] &^= 1 << (63 - bb) // Clear bucket bit
@@ -200,7 +289,8 @@ func (q *QuantumQueue64) unlink(h Handle) {
 	q.size--
 }
 
-// linkAtHead inserts at bucket head with LIFO ordering
+// linkAtHead inserts at bucket head with LIFO ordering.
+// Updates all levels of the bitmap hierarchy.
 //
 //go:norace
 //go:nocheckptr
@@ -211,7 +301,7 @@ func (q *QuantumQueue64) linkAtHead(h Handle, tick int64) {
 	n := &q.arena[h]
 	b := idx32(uint64(tick))
 
-	// Insert at head
+	// Insert at bucket head
 	n.tick = tick
 	n.prev = nilIdx
 	n.next = q.buckets[b]
@@ -220,7 +310,7 @@ func (q *QuantumQueue64) linkAtHead(h Handle, tick int64) {
 	}
 	q.buckets[b] = h
 
-	// Update bitmap summaries
+	// Update bitmap hierarchy
 	g := uint64(tick) >> 12       // Group index
 	l := (uint64(tick) >> 6) & 63 // Lane index
 	bb := uint64(tick) & 63       // Bucket index
@@ -233,7 +323,17 @@ func (q *QuantumQueue64) linkAtHead(h Handle, tick int64) {
 	q.size++
 }
 
-// Push inserts or updates entry at specified tick
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// PUBLIC OPERATIONS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Push inserts or updates an entry with a 64-bit payload.
+// The compact payload enables efficient value storage or pointer indirection.
+//
+// PAYLOAD OPTIONS:
+//   - Direct value storage (prices, indices, flags)
+//   - Pointer to larger structures (with appropriate lifetime management)
+//   - Packed data structures (two 32-bit values, etc.)
 //
 //go:norace
 //go:nocheckptr
@@ -243,13 +343,13 @@ func (q *QuantumQueue64) linkAtHead(h Handle, tick int64) {
 func (q *QuantumQueue64) Push(tick int64, h Handle, val uint64) {
 	n := &q.arena[h]
 
-	// Hot path: same tick update
+	// Fast path for same-priority updates
 	if n.tick == tick {
 		n.data = val
 		return
 	}
 
-	// Cold path: relocate entry
+	// Relocate to new priority
 	if n.tick >= 0 {
 		q.unlink(h)
 	}
@@ -257,8 +357,8 @@ func (q *QuantumQueue64) Push(tick int64, h Handle, val uint64) {
 	n.data = val
 }
 
-// PeepMin returns minimum without removal using bitmap traversal
-// ⚠️  FOOTGUN: Undefined on empty queue
+// PeepMin returns the minimum entry using bitmap traversal.
+// Leverages CLZ instructions for rapid hierarchical scanning.
 //
 //go:norace
 //go:nocheckptr
@@ -266,7 +366,7 @@ func (q *QuantumQueue64) Push(tick int64, h Handle, val uint64) {
 //go:inline
 //go:registerparams
 func (q *QuantumQueue64) PeepMin() (Handle, int64, uint64) {
-	// Find minimum via CLZ operations
+	// Hierarchical minimum finding via CLZ
 	g := bits.LeadingZeros64(q.summary)
 	gb := &q.groups[g]
 	l := bits.LeadingZeros64(gb.l1Summary)
@@ -279,7 +379,8 @@ func (q *QuantumQueue64) PeepMin() (Handle, int64, uint64) {
 	return h, q.arena[h].tick, q.arena[h].data
 }
 
-// MoveTick relocates entry to new tick
+// MoveTick relocates an entry to a new priority level.
+// Optimized for the common case of unchanged priority.
 //
 //go:norace
 //go:nocheckptr
@@ -289,17 +390,18 @@ func (q *QuantumQueue64) PeepMin() (Handle, int64, uint64) {
 func (q *QuantumQueue64) MoveTick(h Handle, newTick int64) {
 	n := &q.arena[h]
 
-	// No-op if same tick
+	// Skip if priority unchanged
 	if n.tick == newTick {
 		return
 	}
 
-	// Relocate entry
+	// Perform relocation
 	q.unlink(h)
 	q.linkAtHead(h, newTick)
 }
 
-// UnlinkMin removes the minimum entry
+// UnlinkMin removes the minimum entry from the queue.
+// Completes the extraction started by PeepMin.
 //
 //go:norace
 //go:nocheckptr

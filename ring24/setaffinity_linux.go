@@ -1,4 +1,20 @@
-// setaffinity_linux.go - Linux CPU affinity via sched_setaffinity(2)
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ⚡ CPU AFFINITY - LINUX IMPLEMENTATION
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Trading System
+// Component: Linux Thread-to-CPU Binding
+//
+// Description:
+//   Linux-specific CPU affinity control using the sched_setaffinity system call.
+//   Binds threads to specific CPU cores for predictable performance and optimal
+//   cache locality in NUMA systems.
+//
+// System Requirements:
+//   - Linux kernel 2.5.8 or later
+//   - Appropriate permissions for CPU affinity control
+//   - Physical CPU cores matching requested indices
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 
 //go:build linux && !tinygo
 
@@ -9,7 +25,13 @@ import (
 	"unsafe"
 )
 
-// Pre-computed CPU masks for cores 0-63
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// PRE-COMPUTED CPU MASKS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// cpuMasks contains pre-computed affinity masks for cores 0-63.
+// Each mask has a single bit set corresponding to the target CPU.
+// Pre-computation eliminates runtime bit manipulation overhead.
 var cpuMasks = [...][1]uintptr{
 	{1 << 0}, {1 << 1}, {1 << 2}, {1 << 3}, {1 << 4}, {1 << 5}, {1 << 6}, {1 << 7},
 	{1 << 8}, {1 << 9}, {1 << 10}, {1 << 11}, {1 << 12}, {1 << 13}, {1 << 14}, {1 << 15},
@@ -21,7 +43,26 @@ var cpuMasks = [...][1]uintptr{
 	{1 << 56}, {1 << 57}, {1 << 58}, {1 << 59}, {1 << 60}, {1 << 61}, {1 << 62}, {1 << 63},
 }
 
-// setAffinity pins current thread to specified CPU core
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// AFFINITY CONTROL
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// setAffinity pins the current OS thread to a specific CPU core.
+// This ensures consistent cache behavior and predictable NUMA performance.
+//
+// PARAMETERS:
+//
+//	cpu: Target CPU core index (0-based)
+//
+// IMPLEMENTATION:
+//
+//	Uses direct system call to avoid CGO overhead and ensure
+//	minimal latency in the critical path.
+//
+// ERROR HANDLING:
+//
+//	Silently ignores errors to maintain performance.
+//	Invalid CPU indices are bounds-checked and ignored.
 //
 //go:norace
 //go:nocheckptr
@@ -29,15 +70,19 @@ var cpuMasks = [...][1]uintptr{
 //go:inline
 //go:registerparams
 func setAffinity(cpu int) {
-	// Validate CPU index
+	// Validate CPU index bounds
 	if cpu < 0 || cpu >= len(cpuMasks) {
 		return
 	}
 
-	// Get pre-computed mask
+	// Retrieve pre-computed affinity mask
 	mask := &cpuMasks[cpu]
 
-	// Direct syscall for minimum overhead
+	// Direct system call for minimal overhead
+	// Parameters:
+	//   - pid: 0 indicates current thread
+	//   - cpusetsize: Size of CPU mask in bytes
+	//   - mask: Pointer to CPU mask bitmap
 	_, _, _ = syscall.RawSyscall(
 		syscall.SYS_SCHED_SETAFFINITY,
 		0,                               // Current thread

@@ -1,13 +1,37 @@
-// relax_stub.go - CPU relaxation no-op for non-x86 platforms
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ⚡ CPU RELAXATION - FALLBACK IMPLEMENTATION
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Trading System
+// Component: Cross-Platform Compatibility Layer
 //
-// Provides API compatibility for architectures without PAUSE instruction.
-// Completely eliminated by compiler inlining.
+// Description:
+//   Fallback implementation for architectures without specialized spin-wait instructions.
+//   Provides API compatibility while allowing platform-specific optimizations where available.
+//
+// Compilation Targets:
+//   - Non-x86 architectures (ARM, RISC-V, etc.)
+//   - Builds with assembly disabled (noasm tag)
+//   - Platforms without PAUSE instruction support
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 
 //go:build !amd64 || noasm
 
 package ring24
 
-// cpuRelax no-op for architecture compatibility
+// cpuRelax provides a no-op implementation for architectural compatibility.
+// On platforms without specialized spin-wait instructions, this function
+// compiles to nothing, allowing the same API across all architectures.
+//
+// OPTIMIZATION NOTES:
+//
+//	The empty function body combined with inline directive ensures
+//	complete elimination during compilation, adding zero overhead.
+//
+// PLATFORM BEHAVIOR:
+//   - ARM: Could use WFE (Wait For Event) if implemented
+//   - RISC-V: Could use PAUSE instruction if available
+//   - Others: Pure spinning without hints
 //
 //go:norace
 //go:nocheckptr
@@ -16,4 +40,5 @@ package ring24
 //go:registerparams
 func cpuRelax() {
 	// No-op implementation
+	// Compiler eliminates this entirely when inlined
 }
