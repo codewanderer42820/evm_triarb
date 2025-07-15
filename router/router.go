@@ -203,7 +203,6 @@ var (
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (engine *ArbitrageEngine) allocateQueueHandle() pooledquantumqueue.Handle {
@@ -220,7 +219,6 @@ func (engine *ArbitrageEngine) allocateQueueHandle() pooledquantumqueue.Handle {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func DispatchPriceUpdate(logView *types.LogView) {
@@ -310,7 +308,6 @@ func DispatchPriceUpdate(logView *types.LogView) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func countHexLeadingZeros(segment []byte) int {
@@ -347,7 +344,6 @@ func countHexLeadingZeros(segment []byte) int {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func lookupPairByAddress(address42HexBytes []byte) TradingPairID {
@@ -397,7 +393,6 @@ func lookupPairByAddress(address42HexBytes []byte) TradingPairID {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage) {
@@ -475,7 +470,6 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func quantizeTickValue(tickValue float64) int64 {
@@ -490,7 +484,6 @@ func quantizeTickValue(tickValue float64) int64 {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func packEthereumAddress(address40HexChars []byte) PackedAddress {
@@ -509,7 +502,6 @@ func packEthereumAddress(address40HexChars []byte) PackedAddress {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func hashAddressToIndex(address40HexChars []byte) uint64 {
@@ -521,7 +513,6 @@ func hashAddressToIndex(address40HexChars []byte) uint64 {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func hashPackedAddressToIndex(key PackedAddress) uint64 {
@@ -532,7 +523,6 @@ func hashPackedAddressToIndex(key PackedAddress) uint64 {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (a PackedAddress) isEqual(b PackedAddress) bool {
@@ -549,7 +539,6 @@ func (a PackedAddress) isEqual(b PackedAddress) bool {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
@@ -580,7 +569,6 @@ func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func RegisterTradingPairAddress(address42HexBytes []byte, pairID TradingPairID) {
@@ -621,7 +609,6 @@ func RegisterTradingPairAddress(address42HexBytes []byte, pairID TradingPairID) 
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func RegisterPairToCoreRouting(pairID TradingPairID, coreID uint8) {
@@ -636,7 +623,6 @@ func RegisterPairToCoreRouting(pairID TradingPairID, coreID uint8) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func newCryptoRandomGenerator(initialSeed []byte) *CryptoRandomGenerator {
@@ -651,7 +637,6 @@ func newCryptoRandomGenerator(initialSeed []byte) *CryptoRandomGenerator {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (rng *CryptoRandomGenerator) generateRandomUint64() uint64 {
@@ -669,7 +654,6 @@ func (rng *CryptoRandomGenerator) generateRandomUint64() uint64 {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (rng *CryptoRandomGenerator) generateRandomInt(upperBound int) int {
@@ -680,7 +664,6 @@ func (rng *CryptoRandomGenerator) generateRandomInt(upperBound int) int {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
@@ -725,6 +708,11 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 				PairWorkloadShard{pairID: pairID, cycleEdges: cycleEdges[offset:endOffset]})
 		}
 	}
+
+	// Immediately release temporary structures with aggressive GC
+	temporaryEdges = nil
+	runtime.GC()
+	runtime.GC()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -736,7 +724,6 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWorkloadShard) {
@@ -744,20 +731,48 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		return
 	}
 
-	// PHASE 1: CALCULATE EXACT ARENA SIZE NEEDED
+	// PHASE 1: CALCULATE EXACT SIZES FOR ALL STRUCTURES
 	totalCycles := 0
+	totalQueues := len(engine.priorityQueues) // Already determined from shard collection
+	totalFanoutEntries := 0
+
 	for _, shard := range workloadShards {
 		totalCycles += len(shard.cycleEdges)
+		// Each cycle creates 2 fanout entries (for the other 2 pairs)
+		totalFanoutEntries += len(shard.cycleEdges) * 2
 	}
 
-	// Exact sizing - no runtime resizing needed
-	arenaSize := uint64(totalCycles)
-
-	// PHASE 2: ALLOCATE SINGLE SHARED ARENA FOR ALL QUEUES
-	engine.sharedArena = make([]pooledquantumqueue.Entry, arenaSize)
+	// PHASE 2: ALLOCATE ALL STRUCTURES WITH EXACT SIZES
+	// Arena for queue operations
+	engine.sharedArena = make([]pooledquantumqueue.Entry, totalCycles)
 	engine.nextHandle = 0
 
-	// Initialize all arena entries to unlinked state
+	// Cycle states storage with exact capacity
+	engine.cycleStates = make([]ArbitrageCycleState, 0, totalCycles)
+
+	// Pre-allocate fanout table structure with exact sizes
+	engine.cycleFanoutTable = make([][]CycleFanoutEntry, totalQueues)
+	fanoutEntriesPerQueue := make([]int, totalQueues)
+
+	// Calculate exact fanout entries per queue
+	for _, shard := range workloadShards {
+		queueIndex, _ := engine.pairToQueueLookup.Get(uint32(shard.pairID))
+		fanoutEntriesPerQueue[queueIndex] += len(shard.cycleEdges) * 2
+	}
+
+	// Allocate fanout slices with exact capacity
+	for i := 0; i < totalQueues; i++ {
+		if fanoutEntriesPerQueue[i] > 0 {
+			engine.cycleFanoutTable[i] = make([]CycleFanoutEntry, 0, fanoutEntriesPerQueue[i])
+		}
+	}
+
+	// Release temporary sizing array with aggressive GC
+	fanoutEntriesPerQueue = nil
+	runtime.GC()
+	runtime.GC()
+
+	// PHASE 3: INITIALIZE ARENA ENTRIES
 	nilHandle := pooledquantumqueue.Handle(^uint64(0))
 	for i := range engine.sharedArena {
 		engine.sharedArena[i].Tick = -1        // Mark as unlinked
@@ -766,7 +781,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		engine.sharedArena[i].Data = 0         // Clear data
 	}
 
-	// PHASE 3: CREATE QUEUES USING SHARED ARENA
+	// PHASE 4: CREATE QUEUES USING SHARED ARENA
 	arenaPtr := unsafe.Pointer(&engine.sharedArena[0])
 	for i := range engine.priorityQueues {
 		// All queues share the same arena pointer - much simpler!
@@ -774,7 +789,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		engine.priorityQueues[i] = *newQueue
 	}
 
-	// PHASE 4: POPULATE QUEUES WITH CYCLE DATA
+	// PHASE 5: POPULATE STRUCTURES WITH EXACT ALLOCATION
 	for _, shard := range workloadShards {
 		queueIndex, _ := engine.pairToQueueLookup.Get(uint32(shard.pairID))
 		queue := &engine.priorityQueues[queueIndex]
@@ -783,7 +798,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			// Simple sequential handle allocation
 			handle := engine.allocateQueueHandle()
 
-			// Create cycle state entry
+			// Append to pre-sized cycle states
 			engine.cycleStates = append(engine.cycleStates, ArbitrageCycleState{
 				pairIDs: cycleEdge.cyclePairs,
 			})
@@ -802,6 +817,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			otherEdge2 := (cycleEdge.edgeIndex + 2) % 3
 
 			for _, edgeIdx := range [...]uint64{otherEdge1, otherEdge2} {
+				// Append to pre-sized fanout table
 				engine.cycleFanoutTable[queueIndex] = append(engine.cycleFanoutTable[queueIndex],
 					CycleFanoutEntry{
 						cycleIndex:  uint64(cycleIndex),
@@ -813,13 +829,14 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		}
 	}
 
-	debug.DropMessage("CLEAN_QUEUE_INIT",
-		"Initialized "+utils.Itoa(len(engine.priorityQueues))+" queues with "+
-			utils.Itoa(int(arenaSize))+" shared arena entries")
+	debug.DropMessage("ZERO_FRAG_INIT",
+		"Initialized "+utils.Itoa(totalQueues)+" queues, "+
+			utils.Itoa(totalCycles)+" cycles, "+
+			utils.Itoa(totalFanoutEntries)+" fanout entries - zero fragmentation")
 }
 
 // launchArbitrageWorker initializes and operates a processing core for arbitrage detection.
-// CLEAN: Simple shard collection, clean initialization, no complex handle management.
+// ZERO FRAGMENTATION: Delay all allocations until exact sizes are known.
 //
 //go:norace
 //go:nocheckptr
@@ -830,33 +847,51 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 
 	shutdownChannel := make(chan struct{})
 
-	// CORE ENGINE INITIALIZATION
+	// PHASE 1: COLLECT ALL SHARDS AND CALCULATE EXACT SIZES
+	var allShards []PairWorkloadShard
+	uniquePairs := make(map[TradingPairID]bool)
+
+	for shard := range shardInput {
+		allShards = append(allShards, shard)
+		uniquePairs[shard.pairID] = true
+	}
+
+	totalUniquePairs := len(uniquePairs)
+
+	// Release temporary map immediately with aggressive GC
+	uniquePairs = nil
+	runtime.GC()
+	runtime.GC()
+
+	// PHASE 2: CORE ENGINE INITIALIZATION WITH EXACT ALLOCATIONS
 	engine := &ArbitrageEngine{
 		pairToQueueLookup:  localidx.New(constants.DefaultLocalIdxSize),
 		isReverseDirection: coreID >= forwardCoreCount,
-		cycleStates:        make([]ArbitrageCycleState, 0),
-		cycleFanoutTable:   nil,
-		priorityQueues:     nil,
 		shutdownChannel:    shutdownChannel,
+
+		// Pre-allocate with exact sizes to prevent fragmentation
+		priorityQueues:   make([]pooledquantumqueue.PooledQuantumQueue, 0, totalUniquePairs),
+		cycleFanoutTable: nil, // Will be allocated in initializeArbitrageQueues
+		cycleStates:      nil, // Will be allocated in initializeArbitrageQueues
 	}
 	coreEngines[coreID] = engine
 	coreRings[coreID] = ring24.New(constants.DefaultRingSize)
 
-	// PHASE 1: COLLECT ALL SHARDS FROM CHANNEL
-	var allShards []PairWorkloadShard
-	for shard := range shardInput {
+	// PHASE 3: BUILD QUEUE MAPPING WITH EXACT CAPACITY
+	for _, shard := range allShards {
 		// Create or extend queue for this pair
 		queueIndex := engine.pairToQueueLookup.Put(uint32(shard.pairID), uint32(len(engine.priorityQueues)))
 		if int(queueIndex) == len(engine.priorityQueues) {
 			// Create placeholder queue (will be replaced in initialization)
 			engine.priorityQueues = append(engine.priorityQueues, pooledquantumqueue.PooledQuantumQueue{})
-			engine.cycleFanoutTable = append(engine.cycleFanoutTable, nil)
 		}
-		allShards = append(allShards, shard)
 	}
 
-	// PHASE 2: CLEAN QUEUE INITIALIZATION WITH ALL COLLECTED SHARDS
+	// PHASE 4: ZERO-FRAGMENTATION INITIALIZATION WITH ALL EXACT SIZES
 	initializeArbitrageQueues(engine, allShards)
+
+	// Release workload shards after initialization complete - NO GC until after ring consumer starts
+	allShards = nil
 
 	// CONTROL SYSTEM INTEGRATION
 	stopFlag, hotFlag := control.Flags()
@@ -872,7 +907,6 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
@@ -920,4 +954,9 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 	for _, channel := range shardChannels {
 		close(channel)
 	}
+
+	// Release global workload shards after distribution with aggressive GC
+	pairWorkloadShards = nil
+	runtime.GC()
+	runtime.GC()
 }
