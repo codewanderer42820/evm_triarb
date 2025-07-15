@@ -217,17 +217,21 @@ type CryptoRandomGenerator struct {
 //go:notinheap
 //go:align 64
 var (
-	// ULTRA-HOT: Per-core state accessed continuously
-	coreEngines [constants.MaxSupportedCores]*ArbitrageEngine // One arbitrage engine per CPU core
-	coreRings   [constants.MaxSupportedCores]*ring24.Ring     // Lock-free message passing between cores
+	// CACHE LINE GROUP 1: Address lookup (accessed together)
+	addressToPairMap  [constants.AddressTableCapacity]TradingPairID
+	packedAddressKeys [constants.AddressTableCapacity]PackedAddress
 
-	// HOT: Global routing infrastructure (read-only after initialization)
-	pairToCoreRouting  [constants.PairRoutingTableCapacity]uint64 // Maps pairs to CPU cores using bitmasks
-	pairWorkloadShards map[TradingPairID][]PairWorkloadShard      // Groups cycles by trading pair for distribution
+	// CACHE LINE GROUP 2: Routing (accessed after address lookup)
+	pairToCoreRouting [constants.PairRoutingTableCapacity]uint64
 
-	// WARM: Address resolution tables (read-only after initialization)
-	packedAddressKeys [constants.AddressTableCapacity]PackedAddress // Optimized representations of Ethereum addresses
-	addressToPairMap  [constants.AddressTableCapacity]TradingPairID // Maps Ethereum addresses to trading pair IDs
+	// CACHE LINE GROUP 3: Ring buffers (accessed after routing)
+	coreRings [constants.MaxSupportedCores]*ring24.Ring
+
+	// COLD: Only accessed during arbitrage processing
+	coreEngines [constants.MaxSupportedCores]*ArbitrageEngine
+
+	// COLD: Only during init
+	pairWorkloadShards map[TradingPairID][]PairWorkloadShard
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
