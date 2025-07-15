@@ -18,7 +18,9 @@
 
 package control
 
-import "main/constants"
+import (
+	"main/constants"
+)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // GLOBAL COORDINATION STATE
