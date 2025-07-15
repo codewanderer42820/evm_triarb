@@ -746,8 +746,8 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		totalCycles += len(shard.cycleEdges)
 	}
 
-	// Add 50% buffer for growth, ensure minimum size
-	arenaSize := uint64((totalCycles * 3) / 2)
+	// Exact sizing - no runtime resizing needed
+	arenaSize := uint64(totalCycles)
 	if arenaSize < 1024 {
 		arenaSize = 1024
 	}
