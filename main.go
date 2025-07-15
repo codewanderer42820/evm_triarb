@@ -4,6 +4,8 @@
 // Project: High-Frequency Arbitrage Detection System
 // Component: Main Entry Point & Orchestration
 //
+// 🇯🇵 MADE IN JAPAN. INSPIRED BY JAPANESE ENGINEERING. FROM NIIKAPPU HIDAKA HOKKAIDO 🇯🇵
+//
 // Description:
 //   Orchestrates a complete arbitrage detection pipeline for Ethereum DEX trading, processing
 //   WebSocket event streams with nanosecond-scale latency. Loads arbitrage cycles and trading
