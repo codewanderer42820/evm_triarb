@@ -1172,7 +1172,7 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 
 			// Build the routing table that determines which cores receive price updates
 			// Use bitmasks to efficiently represent multi-core routing
-			routingMask := uint64(1<<uint8(forwardCore) | 1<<uint8(reverseCore))
+			routingMask := uint64(1<<forwardCore | 1<<reverseCore)
 			for _, cycleEdge := range shard.cycleEdges {
 				// Add routing entries for all pairs in all cycles in this shard
 				for _, pairID := range cycleEdge.cyclePairs {
