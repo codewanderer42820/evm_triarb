@@ -135,26 +135,26 @@ type ExtractedCycle struct {
 //go:notinheap
 //go:align 64
 type ArbitrageEngine struct {
-	// CACHE LINE 1: ULTRA-HOT - Accessed on every price update
-	isReverseDirection bool          // 1B - Determines which tick value to use from price updates
-	_                  [7]byte       // 7B - Padding for 8-byte alignment
-	pairToQueueLookup  localidx.Hash // 64B - Maps trading pair IDs to their queue indices
+	// CACHE LINE 1: Queue lookup (64B)
+	pairToQueueLookup localidx.Hash // 64B - Most frequently accessed
 
-	// CACHE LINE 2: HOT - Accessed during queue operations
-	priorityQueues []pooledquantumqueue.PooledQuantumQueue // 24B - One priority queue per trading pair
-	sharedArena    []pooledquantumqueue.Entry              // 24B - Memory pool for all queue operations
-	cycleStates    []ArbitrageCycleState                   // 24B - Current state of all arbitrage cycles
-	_              [8]byte                                 // 8B - Cache line completion padding
+	// CACHE LINE 2: Core processing data (64B)
+	priorityQueues     []pooledquantumqueue.PooledQuantumQueue // 24B
+	cycleStates        []ArbitrageCycleState                   // 24B
+	isReverseDirection bool                                    // 1B
+	_                  [15]byte                                // Padding
 
-	// CACHE LINE 3: WARM - Accessed during fanout operations
-	cycleFanoutTable [][]CycleFanoutEntry // 24B - Maps queue indices to cycles that need updating
-	extractedCycles  [32]ExtractedCycle   // 1024B - Temporary buffer for extracted cycles
-	_                [16]byte             // 16B - Alignment padding
+	// CACHE LINE 3: Fanout data (64B)
+	cycleFanoutTable [][]CycleFanoutEntry       // 24B
+	sharedArena      []pooledquantumqueue.Entry // 24B
+	_                [16]byte                   // Padding
 
-	// CACHE LINE N: COLD - Used only during initialization
-	nextHandle      pooledquantumqueue.Handle // 8B - Next available handle for queue entry allocation
-	shutdownChannel <-chan struct{}           // 8B - Coordinates graceful engine termination
-	_               [48]byte                  // 48B - Final alignment padding
+	// CACHE LINE 4+: Temporary extraction buffer (rarely used)
+	extractedCycles [32]ExtractedCycle // 1024B
+
+	// COLD: Init only
+	nextHandle      pooledquantumqueue.Handle
+	shutdownChannel <-chan struct{}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
