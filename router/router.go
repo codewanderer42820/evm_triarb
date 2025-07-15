@@ -233,6 +233,7 @@ var (
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (engine *ArbitrageEngine) allocateQueueHandle() pooledquantumqueue.Handle {
@@ -254,6 +255,7 @@ func (engine *ArbitrageEngine) allocateQueueHandle() pooledquantumqueue.Handle {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func DispatchPriceUpdate(logView *types.LogView) {
@@ -359,6 +361,7 @@ func DispatchPriceUpdate(logView *types.LogView) {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func countHexLeadingZeros(segment []byte) int {
@@ -402,6 +405,7 @@ func countHexLeadingZeros(segment []byte) int {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func lookupPairByAddress(address42HexBytes []byte) TradingPairID {
@@ -458,6 +462,7 @@ func lookupPairByAddress(address42HexBytes []byte) TradingPairID {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage) {
@@ -556,6 +561,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func quantizeTickValue(tickValue float64) int64 {
@@ -572,6 +578,7 @@ func quantizeTickValue(tickValue float64) int64 {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func packEthereumAddress(address40HexChars []byte) PackedAddress {
@@ -592,6 +599,7 @@ func packEthereumAddress(address40HexChars []byte) PackedAddress {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func hashAddressToIndex(address40HexChars []byte) uint64 {
@@ -607,6 +615,7 @@ func hashAddressToIndex(address40HexChars []byte) uint64 {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func hashPackedAddressToIndex(key PackedAddress) uint64 {
@@ -619,6 +628,7 @@ func hashPackedAddressToIndex(key PackedAddress) uint64 {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (a PackedAddress) isEqual(b PackedAddress) bool {
@@ -636,6 +646,7 @@ func (a PackedAddress) isEqual(b PackedAddress) bool {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
@@ -672,6 +683,7 @@ func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func RegisterTradingPairAddress(address42HexBytes []byte, pairID TradingPairID) {
@@ -723,6 +735,7 @@ func RegisterTradingPairAddress(address42HexBytes []byte, pairID TradingPairID) 
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func RegisterPairToCoreRouting(pairID TradingPairID, coreID uint8) {
@@ -739,6 +752,7 @@ func RegisterPairToCoreRouting(pairID TradingPairID, coreID uint8) {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func newCryptoRandomGenerator(initialSeed []byte) *CryptoRandomGenerator {
@@ -763,6 +777,7 @@ func newCryptoRandomGenerator(initialSeed []byte) *CryptoRandomGenerator {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (rng *CryptoRandomGenerator) generateRandomUint64() uint64 {
@@ -787,6 +802,7 @@ func (rng *CryptoRandomGenerator) generateRandomUint64() uint64 {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (rng *CryptoRandomGenerator) generateRandomInt(upperBound int) int {
@@ -799,6 +815,7 @@ func (rng *CryptoRandomGenerator) generateRandomInt(upperBound int) int {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
