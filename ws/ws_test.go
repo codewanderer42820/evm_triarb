@@ -871,6 +871,204 @@ func TestSpinUntilCompleteMessage(t *testing.T) {
 	})
 
 	t.Run("error_conditions", func(t *testing.T) {
+		t.Run("header_read_error", func(t *testing.T) {
+			conn := newMockConn()
+			conn.readErr = fmt.Errorf("connection lost")
+
+			_, err := SpinUntilCompleteMessage(conn)
+			if err == nil || !strings.Contains(err.Error(), "connection lost") {
+				t.Errorf("Expected connection lost error, got: %v", err)
+			}
+		})
+
+		t.Run("header_incomplete", func(t *testing.T) {
+			// When trying to read 2 bytes but only 1 available and then EOF
+			conn := newMockConn()
+			conn.readFunc = func(b []byte) (int, error) {
+				if len(b) >= 2 {
+					// Only fill 1 byte then return EOF
+					b[0] = 0x81
+					return 1, io.EOF
+				}
+				return 0, io.EOF
+			}
+
+			_, err := SpinUntilCompleteMessage(conn)
+			if err == nil {
+				t.Error("Expected error but got none")
+			}
+		})
+
+		t.Run("extended_length_16bit_error", func(t *testing.T) {
+			// Test the exact error path in case 126
+			conn := newMockConn()
+			conn.readFunc = func(b []byte) (int, error) {
+				if len(b) == 2 {
+					// First read: return header with 16-bit length
+					b[0] = 0x81 // FIN=1, opcode=1
+					b[1] = 126  // 16-bit extended length
+					return 2, nil
+				} else if len(b) >= 2 {
+					// Second read: this should be for headerBuf[2:4]
+					// Return error to trigger the error path
+					return 0, fmt.Errorf("network error")
+				}
+				return 0, io.EOF
+			}
+
+			_, err := SpinUntilCompleteMessage(conn)
+			if err == nil {
+				t.Error("Expected error from 16-bit length read")
+			}
+			if !strings.Contains(err.Error(), "network error") {
+				t.Errorf("Expected network error, got: %v", err)
+			}
+		})
+
+		t.Run("extended_length_64bit_error", func(t *testing.T) {
+			// Test the exact error path in case 127
+			conn := newMockConn()
+			conn.readFunc = func(b []byte) (int, error) {
+				if len(b) == 2 {
+					// First read: return header with 64-bit length
+					b[0] = 0x82 // FIN=1, opcode=2 (binary)
+					b[1] = 127  // 64-bit extended length
+					return 2, nil
+				} else if len(b) >= 8 {
+					// Second read: this should be for headerBuf[2:10]
+					// Return error to trigger the error path
+					return 0, fmt.Errorf("connection reset")
+				}
+				return 0, io.EOF
+			}
+
+			_, err := SpinUntilCompleteMessage(conn)
+			if err == nil {
+				t.Error("Expected error from 64-bit length read")
+			}
+			if !strings.Contains(err.Error(), "connection reset") {
+				t.Errorf("Expected connection reset error, got: %v", err)
+			}
+		})
+
+		t.Run("extended_length_16bit_eof", func(t *testing.T) {
+			// Test EOF during 16-bit length read
+			conn := newMockConn()
+			readCount := 0
+			conn.readFunc = func(b []byte) (int, error) {
+				readCount++
+				if readCount == 1 && len(b) == 2 {
+					// First read: header
+					b[0] = 0x81
+					b[1] = 126
+					return 2, nil
+				} else if readCount == 2 {
+					// Second read: EOF during extended length
+					return 0, io.EOF
+				}
+				return 0, fmt.Errorf("unexpected read")
+			}
+
+			_, err := SpinUntilCompleteMessage(conn)
+			if err != io.EOF {
+				t.Errorf("Expected EOF, got: %v", err)
+			}
+		})
+
+		t.Run("extended_length_16bit_read_failure", func(t *testing.T) {
+			// Specifically test the error path in case 126
+			conn := newMockConn()
+			readCount := 0
+
+			conn.readFunc = func(b []byte) (int, error) {
+				readCount++
+
+				// First read: 2-byte header
+				if readCount == 1 {
+					b[0] = 0x81 // FIN=1, TEXT
+					b[1] = 126  // 16-bit extended length
+					return 2, nil
+				}
+
+				// Second read: attempt to read 2 bytes for extended length
+				// This is the conn.Read(headerBuf[2:4]) call
+				if readCount == 2 {
+					return 0, fmt.Errorf("read error during 16-bit length")
+				}
+
+				return 0, io.EOF
+			}
+
+			_, err := SpinUntilCompleteMessage(conn)
+			if err == nil {
+				t.Error("Expected error but got none")
+			}
+			if !strings.Contains(err.Error(), "read error during 16-bit length") {
+				t.Errorf("Wrong error: %v", err)
+			}
+		})
+
+		t.Run("extended_length_64bit_read_failure", func(t *testing.T) {
+			// Specifically test the error path in case 127
+			conn := newMockConn()
+			readCount := 0
+
+			conn.readFunc = func(b []byte) (int, error) {
+				readCount++
+
+				// First read: 2-byte header
+				if readCount == 1 {
+					b[0] = 0x82 // FIN=1, BINARY
+					b[1] = 127  // 64-bit extended length
+					return 2, nil
+				}
+
+				// Second read: attempt to read 8 bytes for extended length
+				// This is the conn.Read(headerBuf[2:10]) call
+				if readCount == 2 {
+					return 0, fmt.Errorf("read error during 64-bit length")
+				}
+
+				return 0, io.EOF
+			}
+
+			_, err := SpinUntilCompleteMessage(conn)
+			if err == nil {
+				t.Error("Expected error but got none")
+			}
+			if !strings.Contains(err.Error(), "read error during 64-bit length") {
+				t.Errorf("Wrong error: %v", err)
+			}
+		})
+
+		t.Run("payload_read_error", func(t *testing.T) {
+			callCount := 0
+			conn := newMockConn()
+			conn.readFunc = func(b []byte) (int, error) {
+				callCount++
+				switch callCount {
+				case 1:
+					// First call: return header for 10-byte payload
+					if len(b) >= 2 {
+						b[0] = 0x81 // FIN=1, opcode=1 (text frame)
+						b[1] = 10   // 10 bytes payload
+						return 2, nil
+					}
+					return 0, fmt.Errorf("buffer too small")
+				case 2:
+					// Second call: fail during payload read
+					return 0, fmt.Errorf("payload read failed")
+				default:
+					return 0, fmt.Errorf("too many calls")
+				}
+			}
+
+			_, err := SpinUntilCompleteMessage(conn)
+			if err == nil || !strings.Contains(err.Error(), "payload read failed") {
+				t.Errorf("Expected payload read failed error, got: %v", err)
+			}
+		})
+
 		t.Run("frame_too_large", func(t *testing.T) {
 			// Create header for frame larger than buffer
 			frame := []byte{0x82, 127} // Binary frame, 64-bit length
