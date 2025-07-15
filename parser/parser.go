@@ -22,6 +22,7 @@ import (
 	"main/constants"
 	"main/debug"
 	"main/dedupe"
+	"main/router"
 	"main/types"
 	"main/utils"
 	"unsafe"
@@ -207,7 +208,11 @@ func HandleFrame(p []byte) {
 	// Check for duplicates using rolling window deduplication
 	// Only emit events that haven't been processed recently
 	if dedup.Check(blk32, tx32, log32, v.TagHi, v.TagLo, latestBlk) {
-		emitLog(&v)
+		// Direct dispatch to arbitrage detection router
+		router.DispatchPriceUpdate(&v)
+
+		// Optional debug output (can be commented out in production)
+		// emitLog(&v)
 	}
 }
 
