@@ -907,7 +907,6 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // initializeArbitrageQueues allocates shared arena and initializes all queues with cycle data.
-// CLEAN: Simple shared arena allocation, sequential handle assignment, zero complex partitioning.
 //
 //go:norace
 //go:nocheckptr
