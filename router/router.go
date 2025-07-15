@@ -136,8 +136,9 @@ type ExtractedCycle struct {
 //go:notinheap
 //go:align 64
 type ArbitrageEngine struct {
-	// CACHE LINE 1: Queue lookup (64B)
-	pairToQueueLookup localidx.Hash // 64B - Most frequently accessed
+	// CACHE LINE 1: Primary lookups (64B)
+	pairToQueueLookup localidx.Hash // 32B - Only pairs with queues
+	pairToFanoutIndex localidx.Hash // 32B - ALL pairs (with queues + fanout-only)
 
 	// CACHE LINE 2: Core processing data (64B)
 	priorityQueues     []pooledquantumqueue.PooledQuantumQueue // 24B
@@ -479,7 +480,7 @@ func lookupPairByAddress(address42HexBytes []byte) TradingPairID {
 //go:registerparams
 func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage) {
 	// Select the appropriate tick value based on this core's processing direction
-	// Forward cores use forwardTick, reverse cores use reverseTick for bidirectional arbitrage
+	// This branch is highly predictable since each core has a fixed direction
 	var currentTick float64
 	if !engine.isReverseDirection {
 		currentTick = update.forwardTick
@@ -487,80 +488,77 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 		currentTick = update.reverseTick
 	}
 
-	// Find the priority queue that handles cycles involving this trading pair
-	// Each pair has its own queue containing all cycles that include that pair
-	queueIndex, _ := engine.pairToQueueLookup.Get(uint32(update.pairID))
-	queue := &engine.priorityQueues[queueIndex]
+	// Two lookups, but both are predictable Robin Hood accesses
+	queueIndex, hasQueue := engine.pairToQueueLookup.Get(uint32(update.pairID))
+	fanoutIndex, _ := engine.pairToFanoutIndex.Get(uint32(update.pairID))
 
-	// Extract profitable cycles from the queue for opportunity detection
-	// We temporarily remove cycles to avoid processing them multiple times in one update
-	cycleCount := 0
-	extractedCyclesLen := len(engine.extractedCycles)
+	// Process queue if exists (predictable branch - consistent per pair)
+	if hasQueue {
+		queue := &engine.priorityQueues[queueIndex]
 
-	for {
-		// Stop if we've processed all cycles or reached our extraction limit
-		if queue.Empty() {
-			break
+		// Extract profitable cycles from the queue for opportunity detection
+		cycleCount := 0
+		extractedCyclesLen := len(engine.extractedCycles)
+
+		for {
+			// Stop if we've processed all cycles or reached our extraction limit
+			if queue.Empty() {
+				break
+			}
+
+			// Examine the most profitable cycle without removing it yet
+			handle, queueTick, cycleData := queue.PeepMin()
+			cycleIndex := CycleIndex(cycleData)
+			cycle := &engine.cycleStates[cycleIndex]
+
+			// Calculate total profitability by adding the new tick to existing cycle ticks
+			// The main pair's tick is always zero in storage, so we add currentTick
+			totalProfitability := currentTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
+			isProfitable := totalProfitability < 0
+
+			// Report profitable opportunities for potential execution
+			if isProfitable {
+				emitArbitrageOpportunity(cycle, currentTick)
+			}
+
+			// Stop extracting if we hit a non-profitable cycle or reached our extraction limit
+			if !isProfitable || cycleCount == extractedCyclesLen {
+				break
+			}
+
+			// Store the cycle's current state so we can restore it after processing
+			engine.extractedCycles[cycleCount] = ExtractedCycle{
+				cycleIndex:   cycleIndex,
+				originalTick: queueTick,
+				queueHandle:  handle,
+			}
+			cycleCount++
+
+			// Temporarily remove the cycle from the queue
+			queue.UnlinkMin(handle)
 		}
 
-		// Examine the most profitable cycle without removing it yet
-		// The queue is ordered by profitability, so we check from most to least profitable
-		handle, queueTick, cycleData := queue.PeepMin()
-		cycleIndex := CycleIndex(cycleData)
-		cycle := &engine.cycleStates[cycleIndex]
-
-		// Calculate total profitability by adding the new tick to existing cycle ticks
-		// Remember: one of the tickValues is intentionally zero (the queue's primary pair)
-		// Negative total means profitable arbitrage opportunity
-		totalProfitability := currentTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
-		isProfitable := totalProfitability < 0
-
-		// Report profitable opportunities for potential execution
-		if isProfitable {
-			emitArbitrageOpportunity(cycle, currentTick)
+		// Restore all extracted cycles back to the queue with their original priorities
+		for i := 0; i < cycleCount; i++ {
+			cycle := &engine.extractedCycles[i]
+			queue.Push(cycle.originalTick, cycle.queueHandle, uint64(cycle.cycleIndex))
 		}
-
-		// Stop extracting if we hit a non-profitable cycle or reached our extraction limit
-		// Since cycles are ordered by profitability, all remaining cycles will be less profitable
-		if !isProfitable || cycleCount == extractedCyclesLen {
-			break
-		}
-
-		// Store the cycle's current state so we can restore it after processing
-		// This preserves the cycle for future profitability checks
-		engine.extractedCycles[cycleCount] = ExtractedCycle{
-			cycleIndex:   cycleIndex,
-			originalTick: queueTick,
-			queueHandle:  handle,
-		}
-		cycleCount++
-
-		// Temporarily remove the cycle from the queue
-		queue.UnlinkMin(handle)
 	}
 
-	// Restore all extracted cycles back to the queue with their original priorities
-	// This ensures cycles remain available for future price updates
-	for i := 0; i < cycleCount; i++ {
-		cycle := &engine.extractedCycles[i]
-		queue.Push(cycle.originalTick, cycle.queueHandle, uint64(cycle.cycleIndex))
-	}
-
-	// Update all arbitrage cycles that include the pair whose price changed
-	// Each price change affects multiple cycles, so we propagate the update to all of them
+	// Always process fanout (no branch - might be empty slice)
 	tickClampingBound := constants.TickClampingBound
 	quantizationScale := constants.QuantizationScale
 
-	for _, fanoutEntry := range engine.cycleFanoutTable[queueIndex] {
+	for _, fanoutEntry := range engine.cycleFanoutTable[fanoutIndex] {
 		// Get the specific cycle that needs updating
 		cycle := &engine.cycleStates[fanoutEntry.cycleIndex]
 
 		// Update the tick value for this pair's position within the cycle
-		// edgeIndex tells us which of the three positions (0, 1, 2) to update
+		// This is NOT the main pair position, so we store the actual tick value
 		cycle.tickValues[fanoutEntry.edgeIndex] = currentTick
 
 		// Recalculate the cycle's priority based on its new total profitability
-		// This keeps the priority queues properly ordered for efficient extraction
+		// Note: One of these tick values is always zero (the main pair's position)
 		tickSum := cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
 		newPriority := int64((tickSum + tickClampingBound) * quantizationScale)
 
@@ -918,119 +916,131 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		return
 	}
 
-	// Calculate exact memory requirements for all data structures before allocation
-	// This prevents memory fragmentation and ensures optimal performance
-	totalCycles := 0
-	totalQueues := len(engine.priorityQueues) // Already determined from shard collection
-	totalFanoutEntries := 0
+	// First, identify all unique pairs across all cycles
+	allPairs := make(map[TradingPairID]bool)
+	pairsWithQueues := make(map[TradingPairID]bool)
 
-	// Count the total number of cycles and calculate fanout requirements
+	// Identify which pairs have their own cycles (need queues)
 	for _, shard := range workloadShards {
-		totalCycles += len(shard.cycleEdges)
-		// Each cycle creates exactly 2 fanout entries (for the other 2 pairs in the triangle)
-		totalFanoutEntries += len(shard.cycleEdges) * 2
-	}
-
-	// Allocate all memory structures with exact sizes to prevent reallocation
-	// This is the core of the zero-fragmentation approach
-
-	// Arena for all queue operations - shared by all queues on this core
-	engine.sharedArena = make([]pooledquantumqueue.Entry, totalCycles)
-	engine.nextHandle = 0 // Start handle allocation from zero
-
-	// Cycle states storage - pre-allocate with exact capacity needed
-	engine.cycleStates = make([]ArbitrageCycleState, 0, totalCycles)
-
-	// Pre-allocate the fanout table structure with exact sizes per queue
-	engine.cycleFanoutTable = make([][]CycleFanoutEntry, totalQueues)
-	fanoutEntriesPerQueue := make([]int, totalQueues)
-
-	// Calculate exactly how many fanout entries each queue will need
-	for _, shard := range workloadShards {
-		queueIndex, _ := engine.pairToQueueLookup.Get(uint32(shard.pairID))
-		fanoutEntriesPerQueue[queueIndex] += len(shard.cycleEdges) * 2
-	}
-
-	// Allocate each queue's fanout slice with exact capacity to prevent reallocation
-	for i := 0; i < totalQueues; i++ {
-		if fanoutEntriesPerQueue[i] > 0 {
-			engine.cycleFanoutTable[i] = make([]CycleFanoutEntry, 0, fanoutEntriesPerQueue[i])
+		pairsWithQueues[shard.pairID] = true
+		// Also track ALL pairs that appear in any cycle
+		for _, cycleEdge := range shard.cycleEdges {
+			for i := 0; i < 3; i++ {
+				allPairs[cycleEdge.cyclePairs[i]] = true
+			}
 		}
 	}
 
-	// Release temporary sizing array and force garbage collection
-	fanoutEntriesPerQueue = nil
-	runtime.GC()
-	runtime.GC()
+	// Calculate exact memory requirements
+	totalCycles := 0
+	totalQueues := len(pairsWithQueues) // Only pairs with cycles get queues
+	totalFanoutEntries := 0
 
-	// Initialize all arena entries with safe default values
-	nilHandle := pooledquantumqueue.Handle(^uint64(0)) // Maximum uint64 value as "nil"
-	for i := range engine.sharedArena {
-		engine.sharedArena[i].Tick = -1        // Mark as unlinked from any queue
-		engine.sharedArena[i].Prev = nilHandle // Clear previous pointer
-		engine.sharedArena[i].Next = nilHandle // Clear next pointer
-		engine.sharedArena[i].Data = 0         // Clear associated data
+	// Count cycles
+	for _, shard := range workloadShards {
+		totalCycles += len(shard.cycleEdges)
 	}
 
-	// Create all priority queues using the shared arena
-	// This is much simpler than complex partitioning - all queues share one memory pool
+	// Initialize fanout index for ALL pairs (including fanout-only)
+	fanoutIndex := uint32(0)
+	for pairID := range allPairs {
+		engine.pairToFanoutIndex.Put(uint32(pairID), fanoutIndex)
+		fanoutIndex++
+	}
+	totalFanoutSlots := int(fanoutIndex)
+
+	// Allocate shared arena and cycle states
+	engine.sharedArena = make([]pooledquantumqueue.Entry, totalCycles)
+	engine.nextHandle = 0
+	engine.cycleStates = make([]ArbitrageCycleState, 0, totalCycles)
+
+	// Allocate priority queues ONLY for pairs with cycles
+	engine.priorityQueues = make([]pooledquantumqueue.PooledQuantumQueue, totalQueues)
+
+	// Allocate fanout table for ALL pairs
+	engine.cycleFanoutTable = make([][]CycleFanoutEntry, totalFanoutSlots)
+
+	// Initialize arena entries
+	nilHandle := pooledquantumqueue.Handle(^uint64(0))
+	for i := range engine.sharedArena {
+		engine.sharedArena[i].Tick = -1
+		engine.sharedArena[i].Prev = nilHandle
+		engine.sharedArena[i].Next = nilHandle
+		engine.sharedArena[i].Data = 0
+	}
+
+	// Initialize priority queues
 	arenaPtr := unsafe.Pointer(&engine.sharedArena[0])
 	for i := range engine.priorityQueues {
 		newQueue := pooledquantumqueue.New(arenaPtr)
 		engine.priorityQueues[i] = *newQueue
 	}
 
-	// Populate all data structures with the actual cycle information
+	// Assign queue indices only to pairs with cycles
+	queueIdx := uint32(0)
+	for pairID := range pairsWithQueues {
+		engine.pairToQueueLookup.Put(uint32(pairID), queueIdx)
+		queueIdx++
+	}
+
+	// Process workload shards and create cycles
 	for _, shard := range workloadShards {
-		// Find the queue that handles cycles for this trading pair
+		// Get queue index for this pair (guaranteed to exist)
 		queueIndex, _ := engine.pairToQueueLookup.Get(uint32(shard.pairID))
 		queue := &engine.priorityQueues[queueIndex]
 
-		// Process each cycle edge in this shard
 		for _, cycleEdge := range shard.cycleEdges {
-			// Allocate a handle using simple sequential allocation
 			handle := engine.allocateQueueHandle()
 
-			// Add the cycle state to our pre-sized array
-			engine.cycleStates = append(engine.cycleStates, ArbitrageCycleState{
-				pairIDs: cycleEdge.cyclePairs, // Store the three pairs that form this cycle
-				// tickValues initialized to zero by default - one will remain zero for optimization
-			})
+			// Create cycle state with main pair tick as zero
+			cycleState := ArbitrageCycleState{
+				pairIDs: cycleEdge.cyclePairs,
+				// tickValues[cycleEdge.edgeIndex] remains zero (main pair)
+			}
+
+			engine.cycleStates = append(engine.cycleStates, cycleState)
 			cycleIndex := CycleIndex(len(engine.cycleStates) - 1)
 
-			// Generate a distributed initialization priority to spread cycles across the queue
-			// This prevents all cycles from clustering at one priority level
+			// Generate initial priority
 			cycleHash := utils.Mix64(uint64(cycleIndex))
-			randBits := cycleHash & 0xFFFF           // Extract 16 bits for randomness
-			initPriority := int64(196608 + randBits) // Base priority + random offset
+			randBits := cycleHash & 0xFFFF
+			initPriority := int64(196608 + randBits)
 
-			// Insert the cycle into its priority queue
+			// Insert into queue
 			queue.Push(initPriority, handle, uint64(cycleIndex))
 
-			// Create fanout entries for the other two pairs in this arbitrage triangle
-			// When those pairs' prices change, this cycle needs to be updated accordingly
-			otherEdge1 := (cycleEdge.edgeIndex + 1) % 3 // Next pair in the cycle
-			otherEdge2 := (cycleEdge.edgeIndex + 2) % 3 // Third pair in the cycle
+			// Create fanout entries for the OTHER pairs in the triangle
+			for edgeIdx := uint64(0); edgeIdx < 3; edgeIdx++ {
+				if edgeIdx == cycleEdge.edgeIndex {
+					continue // Skip the main pair
+				}
 
-			// Add fanout entries for both other pairs in the triangle
-			for _, edgeIdx := range [...]uint64{otherEdge1, otherEdge2} {
-				// Append to the pre-sized fanout table for this queue
-				engine.cycleFanoutTable[queueIndex] = append(engine.cycleFanoutTable[queueIndex],
+				otherPairID := cycleEdge.cyclePairs[edgeIdx]
+				otherFanoutIndex, exists := engine.pairToFanoutIndex.Get(uint32(otherPairID))
+				if !exists {
+					panic("Fanout index should exist for all pairs")
+				}
+
+				// Add fanout entry to the OTHER pair's fanout table
+				engine.cycleFanoutTable[otherFanoutIndex] = append(
+					engine.cycleFanoutTable[otherFanoutIndex],
 					CycleFanoutEntry{
-						queueHandle: handle,             // Direct handle for efficient updates
-						cycleIndex:  uint64(cycleIndex), // Which cycle to update
-						queueIndex:  uint64(queueIndex), // Which queue contains the cycle
-						edgeIndex:   edgeIdx,            // Which position in the cycle
+						queueHandle: handle,
+						cycleIndex:  uint64(cycleIndex),
+						queueIndex:  uint64(queueIndex), // Queue where cycle lives
+						edgeIndex:   edgeIdx,            // Position in the cycle
 					})
+				totalFanoutEntries++
 			}
 		}
 	}
 
-	// Log successful initialization with zero fragmentation achieved
+	// Log initialization success
 	debug.DropMessage("ZERO_FRAG_INIT",
 		"Initialized "+utils.Itoa(totalQueues)+" queues, "+
 			utils.Itoa(totalCycles)+" cycles, "+
-			utils.Itoa(totalFanoutEntries)+" fanout entries - zero fragmentation")
+			utils.Itoa(totalFanoutEntries)+" fanout entries, "+
+			utils.Itoa(totalFanoutSlots)+" fanout slots - zero fragmentation")
 }
 
 // launchArbitrageWorker initializes and operates a processing core for arbitrage detection.
@@ -1053,51 +1063,26 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	// Collect all workload shards assigned to this core before allocating any memory
 	// This zero-fragmentation approach ensures we know exact requirements upfront
 	var allShards []PairWorkloadShard
-	uniquePairs := make(map[TradingPairID]bool)
 
 	// Receive all shards from the distribution channel
 	for shard := range shardInput {
 		allShards = append(allShards, shard)
-		uniquePairs[shard.pairID] = true // Track unique pairs for queue allocation
 	}
-
-	// Calculate the exact number of unique pairs this core will handle
-	totalUniquePairs := len(uniquePairs)
-
-	// Immediately release the temporary map and force garbage collection
-	uniquePairs = nil
-	runtime.GC()
-	runtime.GC()
 
 	// Initialize the core processing engine with exact memory allocations
 	// This prevents any memory fragmentation during the operational phase
 	engine := &ArbitrageEngine{
 		pairToQueueLookup:  localidx.New(constants.DefaultLocalIdxSize),
-		isReverseDirection: coreID >= forwardCoreCount, // Second half of cores handle reverse direction
+		pairToFanoutIndex:  localidx.New(constants.DefaultLocalIdxSize * 2), // Larger for all pairs
+		isReverseDirection: coreID >= forwardCoreCount,
 		shutdownChannel:    shutdownChannel,
-
-		// Pre-allocate slices with exact capacities to prevent reallocation
-		priorityQueues:   make([]pooledquantumqueue.PooledQuantumQueue, 0, totalUniquePairs),
-		cycleFanoutTable: nil, // Will be allocated in initializeArbitrageQueues with exact sizes
-		cycleStates:      nil, // Will be allocated in initializeArbitrageQueues with exact sizes
 	}
 
 	// Register this engine in the global core array for message routing
 	coreEngines[coreID] = engine
 	coreRings[coreID] = ring24.New(constants.DefaultRingSize)
 
-	// Build the mapping from trading pairs to queue indices with exact capacity
-	for _, shard := range allShards {
-		// Create or get the queue index for this pair
-		queueIndex := engine.pairToQueueLookup.Put(uint32(shard.pairID), uint32(len(engine.priorityQueues)))
-		if int(queueIndex) == len(engine.priorityQueues) {
-			// Add a placeholder queue that will be properly initialized later
-			engine.priorityQueues = append(engine.priorityQueues, pooledquantumqueue.PooledQuantumQueue{})
-		}
-	}
-
 	// Perform zero-fragmentation initialization of all queue structures
-	// This calculates exact sizes and allocates everything in one shot
 	initializeArbitrageQueues(engine, allShards)
 
 	// Release the workload shards now that initialization is complete
@@ -1109,9 +1094,6 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 
 	// Log successful core initialization
 	debug.DropMessage("CORE_READY", "Core "+utils.Itoa(coreID)+" initialized")
-
-	// NOTE: WaitGroup.Done() is called by the defer at the beginning of this function
-	// This ensures proper signaling even if initialization fails
 
 	// Start the main processing loop - this is the core's primary work function
 	// PinnedConsumer runs a tight loop consuming messages from the ring buffer
