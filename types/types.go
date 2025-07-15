@@ -45,20 +45,21 @@ type LogView struct {
 
 	// Addr contains the Ethereum contract address that emitted this event.
 	// Format: "0x" followed by 40 hexadecimal characters (lowercase)
-	// Example: "0xdac17f958d2ee523a2206206994597c13d831ec7"
+	// Example: "0x882df4b0fb50a229c3b4124eb18c759911485bfb"
 	// This field is accessed on every event to determine routing
 	Addr []byte
 
 	// Data contains the non-indexed event parameters as hex-encoded bytes.
 	// Format: "0x" followed by hex data (variable length, multiple of 2)
 	// For Uniswap V2 Sync events, this contains two 256-bit reserve values
-	// Example: "0x00000000000000000000000000000000000000000000152d02c7e14af6800000..."
+	// Example: "0x0000000000000000000000000000000000000000007c34bdf6cfe2d5772d68d10000000000000000000000000000000000000000000000000020dfffa7b4a402"
 	Data []byte
 
-	// Topics contains the indexed event parameters as a JSON array.
-	// Format: JSON array of hex strings, each 32 bytes (256 bits)
-	// First topic is always the event signature hash (Keccak-256)
-	// Example: ["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"]
+	// Topics contains the indexed event parameters with brackets stripped.
+	// Format: Comma-separated hex strings without the JSON array brackets "[" and "]"
+	// For Uniswap V2 Sync events, this is just the event signature hash
+	// Example: "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"
+	// Note: Original JSON array brackets have been removed during parsing
 	Topics []byte
 
 	// ═══════════════════════════════════════════════════════════════════
@@ -67,19 +68,19 @@ type LogView struct {
 
 	// BlkNum contains the block number where this event was emitted.
 	// Format: "0x" followed by hex number (variable length)
-	// Example: "0x1234567" (block 19,088,743 in decimal)
+	// Example: "0x468dcc3" (block 74,185,923 in decimal)
 	// Used for event ordering and chain reorganization detection
 	BlkNum []byte
 
 	// LogIdx contains the index of this log within its block.
 	// Format: "0x" followed by hex number (variable length)
-	// Example: "0x5" (5th event in the block)
+	// Example: "0x2bf" (703rd event in the block)
 	// Combined with BlkNum provides unique event identification
 	LogIdx []byte
 
 	// TxIndex contains the index of the transaction within its block.
 	// Format: "0x" followed by hex number (variable length)
-	// Example: "0xa" (10th transaction in the block)
+	// Example: "0x9e" (158th transaction in the block)
 	// Used for correlating events from the same transaction
 	TxIndex []byte
 

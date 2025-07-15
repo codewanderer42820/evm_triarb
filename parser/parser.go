@@ -144,7 +144,7 @@ func HandleFrame(p []byte) {
 
 	// Check duplicates and emit
 	if dedup.Check(blk32, tx32, log32, v.TagHi, v.TagLo, latestBlk) {
-		// emitLog(&v)
+		emitLog(&v)
 	}
 }
 
