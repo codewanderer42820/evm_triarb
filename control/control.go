@@ -31,11 +31,6 @@ import "main/constants"
 //go:notinheap
 //go:align 64
 var (
-	// ACTIVITY FLAGS (READ BY ALL CORES, WRITTEN BY WEBSOCKET)
-	// Binary flags enable wait-free coordination without atomic operations.
-	// Single-writer (WebSocket) multiple-reader (cores) access pattern.
-	hot  uint32 // Market activity indicator: 1 = active trading, 0 = idle market
-	stop uint32 // Shutdown coordinator: 1 = graceful termination, 0 = normal operation
 
 	// VIRTUAL TIMING STATE (SYSCALL-FREE PERFORMANCE MONITORING)
 	// Approximates elapsed time using CPU poll counts instead of time.Now() calls.
@@ -48,6 +43,14 @@ var (
 	// - Suitable for rough intervals, not precise timing
 	lastActivityCount uint64 // Poll counter value at last market activity
 	pollCounter       uint64 // Monotonic counter incremented per cooldown check
+
+	// ACTIVITY FLAGS (READ BY ALL CORES, WRITTEN BY WEBSOCKET)
+	// Binary flags enable wait-free coordination without atomic operations.
+	// Single-writer (WebSocket) multiple-reader (cores) access pattern.
+	hot  uint32   // Market activity indicator: 1 = active trading, 0 = idle market
+	_    [44]byte // Pad to 64B
+	stop uint32   // Shutdown coordinator: 1 = graceful termination, 0 = normal operation
+	_    [60]byte // Pad rest
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
