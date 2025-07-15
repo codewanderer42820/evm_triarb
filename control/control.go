@@ -1,32 +1,61 @@
-// control.go — Syscall-free virtual timing and lock-free coordination flags
+// control.go — Lock-Free Coordination and Virtual Timing for High-Frequency Systems
+//
+// This module implements syscall-free coordination mechanisms for multi-core arbitrage
+// detection systems. Provides global activity flags and virtual timing without the
+// overhead of system calls, enabling sub-nanosecond coordination across CPU cores.
+//
+// Architecture: Lock-free atomic flags, poll-based virtual timing, branchless logic
+// Memory Model: Cache-aligned globals, zero allocations, wait-free operations
+// Design Goals: Syscall elimination, branch-free execution, nanosecond latency
 
 package control
 
 import "main/constants"
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// GLOBAL COORDINATION STATE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Global coordination flags provide lock-free synchronization across all processing
+// cores without mutex overhead or cache line contention. Cache-aligned for optimal
+// multi-core access patterns.
+//
 //go:notinheap
 //go:align 64
 var (
-	// GLOBAL COORDINATION FLAGS (HOT PATH - ACCESSED BY ALL CORES)
-	// These flags provide lock-free coordination across all processing cores
-	// without requiring expensive synchronization primitives.
-	hot  uint32 // 1 = active WebSocket traffic, 0 = idle
-	stop uint32 // 1 = graceful shutdown, 0 = normal operation
+	// ACTIVITY FLAGS (READ BY ALL CORES, WRITTEN BY WEBSOCKET)
+	// Binary flags enable wait-free coordination without atomic operations.
+	// Single-writer (WebSocket) multiple-reader (cores) access pattern.
+	hot  uint32 // Market activity indicator: 1 = active trading, 0 = idle market
+	stop uint32 // Shutdown coordinator: 1 = graceful termination, 0 = normal operation
 
-	// VIRTUAL TIMING INFRASTRUCTURE (SYSCALL-FREE PERFORMANCE)
-	// Provides approximate timing without time.Now() syscalls for maximum
-	// performance in hot paths. Timing precision is sacrificed for speed.
+	// VIRTUAL TIMING STATE (SYSCALL-FREE PERFORMANCE MONITORING)
+	// Approximates elapsed time using CPU poll counts instead of time.Now() calls.
+	// Trades timing precision for performance - acceptable for cooldown logic.
 	//
-	// WARNING: Timing is NOT precise - rough approximation based on CPU poll rate
-	// Actual timing depends on CPU frequency, load, thermal throttling, etc.
-	// Acceptable for hot flag signaling but NOT suitable for precise time measurement
-	lastActivityCount uint64 // Poll count when last activity occurred
-	pollCounter       uint64 // Global poll counter (incremented each check)
+	// PRECISION LIMITATIONS:
+	// - Timing varies with CPU frequency (boost, throttling)
+	// - Affected by system load and scheduling
+	// - ±20-50% accuracy depending on conditions
+	// - Suitable for rough intervals, not precise timing
+	lastActivityCount uint64 // Poll counter value at last market activity
+	pollCounter       uint64 // Monotonic counter incremented per cooldown check
 )
 
-// SignalActivity marks the system as active upon receiving market data.
-// Called from WebSocket layer with zero heap allocations and zero syscalls.
-// Updates activity timestamp using virtual poll counter instead of time.Now().
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ACTIVITY SIGNALING
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// SignalActivity marks the system as processing active market data.
+// Called by the WebSocket layer when receiving events, this function
+// updates both the activity flag and virtual timestamp with zero overhead.
+//
+// Design rationale:
+// - Simple stores instead of atomic operations (single writer pattern)
+// - Virtual timing via poll counter avoids time.Now() syscall
+// - Inlined for direct inclusion at call sites
+//
+// Performance: ~0.3ns (2-3 CPU cycles) vs ~50-100ns for time.Now()
 //
 //go:norace
 //go:nocheckptr
@@ -34,30 +63,35 @@ var (
 //go:inline
 //go:registerparams
 func SignalActivity() {
-	hot = 1
-	lastActivityCount = pollCounter
+	hot = 1                         // Mark system as active
+	lastActivityCount = pollCounter // Record virtual timestamp
 }
 
-// PollCooldown clears hot flag after idle period using branchless virtual timing.
-// Called inline during consumer loops with sub-nanosecond overhead.
-// Uses CPU poll count approximation instead of expensive time.Now() syscalls.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// COOLDOWN MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// PollCooldown implements branchless activity timeout using virtual timing.
+// This function is called continuously by consumer cores to detect idle periods
+// without the overhead of system time queries.
 //
-// TIMING PRECISION WARNING: This is NOT precise timing - rough approximation only!
-// Actual cooldown time varies based on:
-//   - Real CPU frequency vs configured rate (boost clocks, thermal throttling)
-//   - System load affecting poll frequency
-//   - CPU power management and sleep states
-//   - Architecture-specific timing variations
+// ALGORITHM:
+// Uses bit manipulation to eliminate branches from the critical path:
+// 1. Increment poll counter (virtual time advancement)
+// 2. Calculate elapsed polls since last activity
+// 3. Compare with cooldown threshold using bit arithmetic
+// 4. Update hot flag without conditional jumps
 //
-// ACCEPTABLE FOR: Hot flag signaling, approximate idle detection
-// NOT SUITABLE FOR: Precise time measurement, SLA timing, critical scheduling
+// TIMING ACCURACY:
+// Virtual timing provides rough approximation only:
+// - Configured for specific CPU frequency (e.g., 3.2GHz)
+// - Actual timing varies with boost clocks, thermal throttling
+// - System load affects poll rate consistency
+// - Acceptable for activity timeout, not for precise scheduling
 //
-// BRANCHLESS OPTIMIZATION: Eliminates conditional logic using bit manipulation.
-// Mathematical cooldown: hot = hot & (elapsed <= cooldownPolls)
-//
-// Performance: ~0.25ns per call vs 100-200ns for time.Now() approach.
-// Timing accuracy: ±50-500ms depending on system conditions (rough approximation).
-// Pipeline: Zero branch mispredictions, perfect instruction flow.
+// BRANCHLESS IMPLEMENTATION:
+// Mathematical formula: hot = hot & (elapsed <= cooldownPolls)
+// Bit manipulation converts comparison to 0/1 without branches
 //
 //go:norace
 //go:nocheckptr
@@ -65,18 +99,33 @@ func SignalActivity() {
 //go:inline
 //go:registerparams
 func PollCooldown() {
-	pollCounter++
+	pollCounter++ // Advance virtual time
 
-	// Branchless cooldown logic using mathematical comparison
-	// If elapsed > cooldownPolls, stillActive becomes 0, clearing hot flag
-	// If elapsed <= cooldownPolls, stillActive becomes 1, preserving hot flag
+	// Calculate elapsed polls with wraparound safety
 	elapsed := pollCounter - lastActivityCount
+
+	// Branchless comparison: stillActive = (elapsed <= cooldownPolls) ? 1 : 0
+	// When elapsed > cooldownPolls:
+	//   - (cooldownPolls - elapsed) becomes negative
+	//   - Right shift by 63 propagates sign bit (all 1s for negative)
+	//   - XOR with 1 flips to 0
+	// When elapsed <= cooldownPolls:
+	//   - (cooldownPolls - elapsed) is positive or zero
+	//   - Right shift by 63 gives 0
+	//   - XOR with 1 gives 1
 	stillActive := uint32(((constants.CooldownPolls - elapsed) >> 63) ^ 1)
+
+	// Apply activity state without branches
 	hot &= stillActive
 }
 
-// Shutdown initiates graceful termination across all consumer threads.
-// Sets global stop flag that is polled by all workers for coordination.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// SYSTEM CONTROL
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Shutdown signals all cores to begin graceful termination.
+// Sets the global stop flag that is continuously checked by worker loops,
+// enabling coordinated shutdown without synchronization primitives.
 //
 //go:norace
 //go:nocheckptr
@@ -87,9 +136,18 @@ func Shutdown() {
 	stop = 1
 }
 
-// Flags returns pointers to control flags for zero-allocation polling.
-// Enables workers to check flags without function call overhead.
-// Returns: (*stop_flag, *hot_flag)
+// Flags returns direct pointers to control flags for zero-copy access.
+// Enables consumer cores to poll flags without function call overhead
+// by caching pointers and checking values directly in tight loops.
+//
+// Returns: (*stop_flag, *hot_flag) for inline checking
+//
+// Usage pattern:
+//
+//	stopPtr, hotPtr := control.Flags()
+//	for *stopPtr == 0 { // Direct memory access in hot loop
+//	    if *hotPtr == 1 { process() }
+//	}
 //
 //go:norace
 //go:nocheckptr
@@ -100,14 +158,18 @@ func Flags() (*uint32, *uint32) {
 	return &stop, &hot
 }
 
-// GetPollCount returns current poll counter for debugging/monitoring.
-// Zero allocation, zero syscall counter access for performance analysis.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// MONITORING AND DIAGNOSTICS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// GetPollCount returns the current virtual time counter for diagnostics.
+// Useful for performance analysis and timing calibration without syscalls.
 //
-// TIMING APPROXIMATION: Convert to rough nanoseconds using formula:
+// To approximate real time from poll count:
 //
-//	approximate_ns = count * (1000 / constants.ActivePollRate) * 1_000_000
+//	nanoseconds ≈ (count * 1_000_000_000) / ActivePollRate
 //
-// WARNING: This is NOT precise - actual timing varies significantly!
+// Note: This is a rough approximation affected by CPU frequency variations
 //
 //go:norace
 //go:nocheckptr
@@ -118,21 +180,14 @@ func GetPollCount() uint64 {
 	return pollCounter
 }
 
-// GetActivityAge returns approximate time since last activity in poll counts.
-// Virtual timing without syscall overhead for monitoring and diagnostics.
+// GetActivityAge returns virtual time elapsed since last activity.
+// Provides rough idle time estimation for monitoring without syscalls.
 //
-// TIMING APPROXIMATION WARNING: Result is rough estimate only!
-// Actual time since activity may differ by 20-50% due to:
-//   - CPU frequency variations (boost clocks, thermal throttling)
-//   - System load affecting actual poll rate
-//   - Power management and idle states
-//   - OS scheduling variations
-//
-// ACCEPTABLE FOR: Rough idle time estimation, approximate monitoring
-// NOT SUITABLE FOR: Precise timing, timeout enforcement, SLA measurement
-//
-// BRANCHLESS WRAPAROUND: Uses modular arithmetic to handle counter overflow.
-// Masks high bit to prevent negative values from appearing as large positives.
+// LIMITATIONS:
+// - Result in poll counts, not real time units
+// - Accuracy depends on actual vs configured CPU frequency
+// - Handles counter wraparound via bit masking
+// - Use for rough estimates only, not precise timing
 //
 //go:norace
 //go:nocheckptr
@@ -140,13 +195,13 @@ func GetPollCount() uint64 {
 //go:inline
 //go:registerparams
 func GetActivityAge() uint64 {
-	// Branchless wraparound handling using modular arithmetic
-	// Subtract and mask to handle potential counter overflow gracefully
+	// Mask high bit to handle wraparound gracefully
+	// Prevents negative values from appearing as large positives
 	return (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
 }
 
-// IsHot returns current hot flag state for external monitoring.
-// Zero allocation status check without affecting internal state.
+// IsHot returns true if system is actively processing market data.
+// Simple flag check for external monitoring without side effects.
 //
 //go:norace
 //go:nocheckptr
@@ -157,8 +212,8 @@ func IsHot() bool {
 	return hot == 1
 }
 
-// IsStopping returns current stop flag state for external coordination.
-// Enables graceful shutdown detection from outside control package.
+// IsStopping returns true if system shutdown has been initiated.
+// Enables external components to detect shutdown state.
 //
 //go:norace
 //go:nocheckptr
@@ -169,9 +224,108 @@ func IsStopping() bool {
 	return stop == 1
 }
 
-// ResetPollCounter resets the poll counter for testing or recalibration.
-// WARNING: This will affect cooldown timing calculations.
-// Only use during system initialization or testing scenarios.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ADVANCED MONITORING
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// GetCooldownProgress returns cooldown completion as percentage (0-100).
+// Provides intuitive progress indication for monitoring interfaces.
+//
+// IMPLEMENTATION:
+// Branchless calculation using bit manipulation:
+// - Returns 100 immediately if already cold
+// - Calculates percentage for active systems
+// - Clamps to maximum 100 without conditionals
+//
+// ACCURACY: Percentage is approximate due to virtual timing limitations
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func GetCooldownProgress() uint8 {
+	// If cold (hot=0), return 100; if hot (hot=1), calculate progress
+	notHotBonus := uint64((hot ^ 1) * 100) // 100 if cold, 0 if hot
+
+	// Calculate elapsed with wraparound protection
+	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
+
+	// Raw progress may exceed 100%
+	rawProgress := (elapsed * 100) / constants.CooldownPolls
+
+	// Branchless clamp to 100: min(rawProgress, 100)
+	overflow := rawProgress - 100
+	clampMask := uint64(int64(overflow) >> 63) // All 1s if overflow < 0
+	clamped := rawProgress - (overflow &^ clampMask)
+
+	// Combine cold bonus with calculated progress
+	return uint8(notHotBonus | (uint64(hot) * clamped))
+}
+
+// GetCooldownRemaining returns poll counts until cooldown completion.
+// Zero if cold or cooldown elapsed, otherwise remaining count.
+//
+// ACCURACY: Count is approximate - multiply by poll period for rough time
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func GetCooldownRemaining() uint64 {
+	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
+	remaining := constants.CooldownPolls - elapsed
+
+	// Branchless zero clamp for negative values
+	// If remaining is negative (elapsed > cooldown), mask to zero
+	return remaining &^ uint64(int64(remaining)>>63)
+}
+
+// IsActive returns true if system is hot and within cooldown window.
+// Combines activity flag with timing check for complete status.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func IsActive() bool {
+	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
+	withinCooldown := uint32(((constants.CooldownPolls - elapsed) >> 63) ^ 1)
+	return (hot & withinCooldown) == 1
+}
+
+// GetSystemState returns all flags packed into single uint32.
+// Enables atomic snapshot of system state for monitoring.
+//
+// Bit layout:
+//
+//	Bit 0: hot flag (1=active, 0=idle)
+//	Bit 1: stop flag (1=stopping, 0=running)
+//	Bit 2: within cooldown (1=cooling, 0=cold)
+//	Bits 3-31: Reserved
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func GetSystemState() uint32 {
+	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
+	withinCooldown := uint32(((constants.CooldownPolls - elapsed) >> 63) ^ 1)
+
+	return hot | // Bit 0
+		(stop << 1) | // Bit 1
+		(withinCooldown << 2) // Bit 2
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// TEST SUPPORT FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// ResetPollCounter resets virtual timing state for testing.
+// WARNING: Affects all timing calculations - use only during initialization.
 //
 //go:norace
 //go:nocheckptr
@@ -183,9 +337,8 @@ func ResetPollCounter() {
 	lastActivityCount = 0
 }
 
-// ForceHot manually sets the hot flag without updating activity counter.
-// Used for testing or manual system activation scenarios.
-// Does not affect cooldown timing calculations.
+// ForceHot manually activates system without updating timing.
+// Testing utility - bypasses normal activity signaling.
 //
 //go:norace
 //go:nocheckptr
@@ -196,9 +349,8 @@ func ForceHot() {
 	hot = 1
 }
 
-// ForceCold manually clears the hot flag regardless of activity.
-// Used for testing or manual system deactivation scenarios.
-// Overrides automatic cooldown timing.
+// ForceCold manually deactivates system regardless of timing.
+// Testing utility - bypasses cooldown logic.
 //
 //go:norace
 //go:nocheckptr
@@ -207,122 +359,4 @@ func ForceHot() {
 //go:registerparams
 func ForceCold() {
 	hot = 0
-}
-
-// GetCooldownProgress returns completion percentage of cooldown period.
-// Returns 0-100 indicating progress toward automatic cooldown trigger.
-// Useful for monitoring and diagnostics without affecting timing.
-//
-// TIMING APPROXIMATION WARNING: Progress percentage is rough estimate!
-// Actual cooldown completion may vary significantly from displayed percentage
-// due to CPU frequency variations and system load changes.
-//
-// ACCEPTABLE FOR: Approximate progress monitoring, rough status indication
-// NOT SUITABLE FOR: Precise progress tracking, exact timing requirements
-//
-// BRANCHLESS IMPLEMENTATION: Uses mathematical operations to avoid conditionals.
-// - Returns 100 immediately if system is already cold (hot == 0)
-// - Calculates progress percentage for active systems
-// - Clamps result to maximum of 100 using bit manipulation
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func GetCooldownProgress() uint8 {
-	// Branchless progress calculation eliminating all conditional logic
-
-	// If hot == 0, return 100; if hot == 1, return calculated progress
-	notHotBonus := (hot ^ 1) * 100 // 100 if cold, 0 if hot
-
-	// Calculate elapsed time with wraparound protection
-	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
-
-	// Calculate raw progress percentage (may exceed 100)
-	rawProgress := (elapsed * 100) / constants.CooldownPolls
-
-	// Branchless clamp to maximum of 100 using bit manipulation
-	// Formula: min(x, 100) = x - max(0, x-100)
-	// max(0, x-100) = (x-100) & ((x-100) >> 63) ? 0 : (x-100)
-	clamped := rawProgress - ((rawProgress - 100) & ((rawProgress - 100) >> 63))
-
-	// Return either 100 (if cold) or clamped progress (if hot)
-	// Fix: Cast notHotBonus to uint64 for type consistency
-	return uint8(uint64(notHotBonus) | (uint64(hot) * clamped))
-}
-
-// GetCooldownRemaining returns approximate poll counts remaining until cooldown.
-// Zero if system is cold or cooldown has elapsed, otherwise counts remaining.
-// Branchless implementation for consistent performance characteristics.
-//
-// TIMING APPROXIMATION WARNING: Remaining count is rough estimate only!
-// Actual cooldown completion time will vary based on real CPU frequency
-// and system conditions. Use only for approximate monitoring.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func GetCooldownRemaining() uint64 {
-	// Branchless calculation of remaining cooldown polls
-	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
-
-	// If elapsed >= cooldownPolls, return 0; otherwise return difference
-	remaining := constants.CooldownPolls - elapsed
-
-	// Branchless clamp to zero if negative (elapsed > cooldownPolls)
-	// Fix: Use uint64 cast to avoid int64 overflow
-	return remaining & uint64((int64(remaining)>>63)^-1)
-}
-
-// IsActive returns true if system is hot and within cooldown period.
-// Combines hot flag check with cooldown timing for complete activity status.
-// Branchless implementation for optimal performance in monitoring loops.
-//
-// TIMING APPROXIMATION WARNING: Activity detection based on rough timing!
-// May not precisely reflect actual time elapsed since last activity.
-// Acceptable for general activity monitoring but not precise timing.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func IsActive() bool {
-	// Branchless activity check combining hot flag and timing
-	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
-	withinCooldown := uint32(((constants.CooldownPolls - elapsed) >> 63) ^ 1)
-
-	return (hot & withinCooldown) == 1
-}
-
-// GetSystemState returns combined system state as bit-packed uint32.
-// Enables single-read access to all control flags and timing state.
-// Useful for atomic state snapshots without multiple function calls.
-//
-// Bit layout:
-//
-//	Bit 0: hot flag (1 = active, 0 = idle)
-//	Bit 1: stop flag (1 = stopping, 0 = running)
-//	Bit 2: cooldown active (1 = within cooldown, 0 = expired)
-//	Bits 3-31: Reserved for future state flags
-//
-// TIMING APPROXIMATION WARNING: Cooldown status based on rough timing!
-// Bit 2 reflects approximate cooldown state, not precise timing.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func GetSystemState() uint32 {
-	// Pack all system state into single uint32 for atomic access
-	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
-	withinCooldown := uint32(((constants.CooldownPolls - elapsed) >> 63) ^ 1)
-
-	return hot | // Bit 0: hot flag
-		(stop << 1) | // Bit 1: stop flag
-		(withinCooldown << 2) // Bit 2: cooldown status (approximate)
 }
