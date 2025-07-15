@@ -20,6 +20,7 @@ package router
 
 import (
 	"hash"
+	"math"
 	"math/bits"
 	"runtime"
 	"sync"
@@ -479,14 +480,17 @@ func lookupPairByAddress(address42HexBytes []byte) TradingPairID {
 //go:inline
 //go:registerparams
 func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage) {
-	// Select the appropriate tick value based on this core's processing direction
-	// This branch is highly predictable since each core has a fixed direction
-	var currentTick float64
-	if !engine.isReverseDirection {
-		currentTick = update.forwardTick
-	} else {
-		currentTick = update.reverseTick
+	// Branchless tick selection based on core direction
+	// Convert bool to uint64: false = 0, true = 1
+	directionBit := uint64(0)
+	if engine.isReverseDirection {
+		directionBit = 1
 	}
+
+	tickBits := math.Float64bits(update.forwardTick)
+	reverseBits := math.Float64bits(update.reverseTick)
+	mask := -directionBit // Creates either 0x0000... or 0xFFFF...
+	currentTick := math.Float64frombits((tickBits &^ mask) | (reverseBits & mask))
 
 	// Two lookups, but both are predictable Robin Hood accesses
 	queueIndex, hasQueue := engine.pairToQueueLookup.Get(uint32(update.pairID))

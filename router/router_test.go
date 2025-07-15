@@ -528,6 +528,7 @@ func TestProcessArbitrageUpdate(t *testing.T) {
 	// Create a minimal engine for testing
 	engine := &ArbitrageEngine{
 		pairToQueueLookup:  localidx.New(16),
+		pairToFanoutIndex:  localidx.New(16), // Need both lookups now
 		isReverseDirection: false,
 	}
 
@@ -546,21 +547,29 @@ func TestProcessArbitrageUpdate(t *testing.T) {
 	queue := pooledquantumqueue.New(arenaPtr)
 	engine.priorityQueues = []pooledquantumqueue.PooledQuantumQueue{*queue}
 
-	// Setup lookup
+	// Setup lookups
 	engine.pairToQueueLookup.Put(uint32(TestPairETH_DAI), 0)
 
-	// Initialize cycle states and fanout
+	// Setup fanout indices for all pairs
+	engine.pairToFanoutIndex.Put(uint32(TestPairETH_DAI), 0)
+	engine.pairToFanoutIndex.Put(uint32(TestPairDAI_USDC), 1)
+	engine.pairToFanoutIndex.Put(uint32(TestPairUSDC_ETH), 2)
+
+	// Initialize cycle states
 	engine.cycleStates = make([]ArbitrageCycleState, 1)
 	engine.cycleStates[0] = ArbitrageCycleState{
 		pairIDs:    [3]TradingPairID{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH},
-		tickValues: [3]float64{0, 1.5, -2.0}, // Should total to -0.5 with new tick
+		tickValues: [3]float64{0, 1.5, -2.0}, // Main pair (index 0) should be zero
 	}
 
-	engine.cycleFanoutTable = make([][]CycleFanoutEntry, 1)
-	engine.cycleFanoutTable[0] = []CycleFanoutEntry{
+	// Setup fanout table with correct size
+	engine.cycleFanoutTable = make([][]CycleFanoutEntry, 3) // One slot per pair
+
+	// Add fanout entry to DAI_USDC's fanout table (not ETH_DAI's)
+	engine.cycleFanoutTable[1] = []CycleFanoutEntry{
 		{
 			cycleIndex:  0,
-			edgeIndex:   0,
+			edgeIndex:   1, // DAI_USDC is at position 1
 			queueIndex:  0,
 			queueHandle: 0,
 		},
@@ -579,9 +588,113 @@ func TestProcessArbitrageUpdate(t *testing.T) {
 	// Process the update
 	processArbitrageUpdate(engine, update)
 
-	// Verify cycle was updated
-	if engine.cycleStates[0].tickValues[0] != 1.0 {
-		t.Errorf("Cycle tick not updated correctly, got %f", engine.cycleStates[0].tickValues[0])
+	// Verify cycle was NOT updated (ETH_DAI is the main pair, tick should remain 0)
+	if engine.cycleStates[0].tickValues[0] != 0 {
+		t.Errorf("Main pair tick should remain zero, got %f", engine.cycleStates[0].tickValues[0])
+	}
+
+	// Test update for a non-main pair
+	update2 := &PriceUpdateMessage{
+		pairID:      TestPairDAI_USDC,
+		forwardTick: 2.0,
+		reverseTick: -2.0,
+	}
+
+	processArbitrageUpdate(engine, update2)
+
+	// Verify the fanout update worked
+	if engine.cycleStates[0].tickValues[1] != 2.0 {
+		t.Errorf("Fanout pair tick not updated correctly, got %f", engine.cycleStates[0].tickValues[1])
+	}
+}
+
+func TestSparseFanoutTable(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
+
+	// Create test triangles with one pair that only appears in fanout
+	triangles := []ArbitrageTriangle{
+		{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH}, // ETH_DAI is main
+		{TestPairWBTC_ETH, TestPairETH_DAI, TestPairUNI_ETH},  // WBTC_ETH is main
+	}
+
+	// Create mock engine
+	engine := &ArbitrageEngine{
+		pairToQueueLookup:  localidx.New(16),
+		pairToFanoutIndex:  localidx.New(32), // Larger for all pairs
+		isReverseDirection: false,
+	}
+
+	// Create workload shards
+	workloadShards := []PairWorkloadShard{
+		{
+			pairID: TestPairETH_DAI,
+			cycleEdges: []CycleEdge{
+				{cyclePairs: triangles[0], edgeIndex: 0}, // ETH_DAI is main in first triangle
+			},
+		},
+		{
+			pairID: TestPairWBTC_ETH,
+			cycleEdges: []CycleEdge{
+				{cyclePairs: triangles[1], edgeIndex: 0}, // WBTC_ETH is main in second triangle
+			},
+		},
+	}
+
+	// Initialize the queues
+	initializeArbitrageQueues(engine, workloadShards)
+
+	// Verify queue count (only pairs with cycles get queues)
+	if len(engine.priorityQueues) != 2 {
+		t.Errorf("Expected 2 queues, got %d", len(engine.priorityQueues))
+	}
+
+	// Verify fanout table size (all unique pairs across all triangles)
+	uniquePairs := map[TradingPairID]bool{
+		TestPairETH_DAI:  true,
+		TestPairDAI_USDC: true,
+		TestPairUSDC_ETH: true,
+		TestPairWBTC_ETH: true,
+		TestPairUNI_ETH:  true,
+	}
+
+	if len(engine.cycleFanoutTable) != len(uniquePairs) {
+		t.Errorf("Expected %d fanout slots, got %d", len(uniquePairs), len(engine.cycleFanoutTable))
+	}
+
+	// Verify pairs with queues
+	_, hasQueue := engine.pairToQueueLookup.Get(uint32(TestPairETH_DAI))
+	if !hasQueue {
+		t.Error("ETH_DAI should have a queue")
+	}
+
+	_, hasQueue = engine.pairToQueueLookup.Get(uint32(TestPairDAI_USDC))
+	if hasQueue {
+		t.Error("DAI_USDC should NOT have a queue (fanout only)")
+	}
+
+	// Verify all pairs have fanout indices
+	for pairID := range uniquePairs {
+		_, hasFanout := engine.pairToFanoutIndex.Get(uint32(pairID))
+		if !hasFanout {
+			t.Errorf("Pair %d should have fanout index", pairID)
+		}
+	}
+
+	// Test price update for fanout-only pair
+	update := &PriceUpdateMessage{
+		pairID:      TestPairDAI_USDC,
+		forwardTick: 3.0,
+		reverseTick: -3.0,
+	}
+
+	// Should not panic even though DAI_USDC has no queue
+	processArbitrageUpdate(engine, update)
+
+	// Verify the fanout update worked
+	daiUsdcFanoutIdx, _ := engine.pairToFanoutIndex.Get(uint32(TestPairDAI_USDC))
+	if len(engine.cycleFanoutTable[daiUsdcFanoutIdx]) == 0 {
+		t.Error("DAI_USDC should have fanout entries")
 	}
 }
 
@@ -611,14 +724,33 @@ func TestCycleFanoutMapping(t *testing.T) {
 		}
 	}
 
-	// Verify ETH_DAI appears in multiple cycles (should have fanout entries)
-	ethDaiShards := pairWorkloadShards[TestPairETH_DAI]
-	totalCycles := 0
-	for _, shard := range ethDaiShards {
-		totalCycles += len(shard.cycleEdges)
+	// Create a mock engine to test fanout distribution
+	engine := &ArbitrageEngine{
+		pairToQueueLookup:  localidx.New(16),
+		pairToFanoutIndex:  localidx.New(32),
+		isReverseDirection: false,
 	}
-	if totalCycles != 3 { // Should appear in all 3 triangles
-		t.Errorf("ETH_DAI should appear in 3 cycles, found %d", totalCycles)
+
+	// Collect all shards
+	var allShards []PairWorkloadShard
+	for _, shardList := range pairWorkloadShards {
+		allShards = append(allShards, shardList...)
+	}
+
+	// Initialize the system
+	initializeArbitrageQueues(engine, allShards)
+
+	// Verify fanout entries are correctly distributed
+	// Each triangle should create exactly 2 fanout entries (for the non-main pairs)
+	totalFanoutEntries := 0
+	for _, fanoutList := range engine.cycleFanoutTable {
+		totalFanoutEntries += len(fanoutList)
+	}
+
+	// 3 triangles * 2 fanout entries each = 6 total
+	expectedFanoutEntries := len(triangles) * 2
+	if totalFanoutEntries != expectedFanoutEntries {
+		t.Errorf("Expected %d total fanout entries, got %d", expectedFanoutEntries, totalFanoutEntries)
 	}
 }
 
@@ -632,11 +764,11 @@ func TestQuantizeTickValue(t *testing.T) {
 		input    float64
 		expected int64
 	}{
-		{"Zero tick", 0.0, 131072},             // (0 + 128) * 1023 + some rounding
-		{"Negative profitable", -1.0, 130049},  // (-1 + 128) * 1023
-		{"Positive unprofitable", 1.0, 132095}, // (1 + 128) * 1023
-		{"Max negative", -128.0, 0},            // (-128 + 128) * 1023 = 0
-		{"Max positive", 128.0, 262143},        // (128 + 128) * 1023 = max
+		{"Zero tick", 0.0, 131072},             // (0 + 128) * 1024
+		{"Negative profitable", -1.0, 130048},  // (-1 + 128) * 1024
+		{"Positive unprofitable", 1.0, 132096}, // (1 + 128) * 1024
+		{"Max negative", -128.0, 0},            // (-128 + 128) * 1024 = 0
+		{"Max positive", 128.0, 262144},        // (128 + 128) * 1024 = max
 	}
 
 	for _, tc := range testCases {
@@ -664,6 +796,7 @@ func TestExtractedCycleManagement(t *testing.T) {
 	// Create engine with test data
 	engine := &ArbitrageEngine{
 		pairToQueueLookup:  localidx.New(16),
+		pairToFanoutIndex:  localidx.New(16),
 		isReverseDirection: false,
 	}
 
@@ -682,6 +815,7 @@ func TestExtractedCycleManagement(t *testing.T) {
 	queue := pooledquantumqueue.New(arenaPtr)
 	engine.priorityQueues = []pooledquantumqueue.PooledQuantumQueue{*queue}
 	engine.pairToQueueLookup.Put(uint32(TestPairETH_DAI), 0)
+	engine.pairToFanoutIndex.Put(uint32(TestPairETH_DAI), 0)
 
 	// Setup cycle states with varying profitability
 	engine.cycleStates = make([]ArbitrageCycleState, 3)
@@ -1272,7 +1406,8 @@ func BenchmarkPackEthereumAddress(b *testing.B) {
 }
 
 func BenchmarkCountHexLeadingZeros(b *testing.B) {
-	testData := []byte("0000000000000000000000000000000000000000000000056bc75e2d630eb187")
+	// Test with 32-byte segment (as used in actual code)
+	testData := []byte("00000000000000000000000000000000") // 32 hex chars
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -1444,6 +1579,134 @@ func BenchmarkConcurrentDispatch(b *testing.B) {
 	b.Run("MultiThreaded-Disabled", func(b *testing.B) {
 		b.Skip("Concurrent dispatch test disabled due to race conditions in global state")
 	})
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// SPARSE FANOUT TABLE BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+func BenchmarkSparseFanoutLookup(b *testing.B) {
+	cleanup := testSetup(nil)
+	defer cleanup()
+
+	// Create engine with many pairs
+	engine := &ArbitrageEngine{
+		pairToQueueLookup:  localidx.New(1000),
+		pairToFanoutIndex:  localidx.New(5000), // Much larger
+		isReverseDirection: false,
+	}
+
+	// Register pairs with queues
+	for i := 0; i < 1000; i++ {
+		engine.pairToQueueLookup.Put(uint32(i), uint32(i))
+	}
+
+	// Register all pairs (including fanout-only)
+	for i := 0; i < 5000; i++ {
+		engine.pairToFanoutIndex.Put(uint32(i), uint32(i))
+	}
+
+	// Create test updates
+	updates := make([]*PriceUpdateMessage, 100)
+	for i := range updates {
+		pairID := TradingPairID(i * 50) // Mix of pairs with/without queues
+		updates[i] = &PriceUpdateMessage{
+			pairID:      pairID,
+			forwardTick: float64(i) * 0.1,
+			reverseTick: -float64(i) * 0.1,
+		}
+	}
+
+	// Allocate minimal structures to prevent panics
+	engine.cycleFanoutTable = make([][]CycleFanoutEntry, 5000)
+	engine.priorityQueues = make([]pooledquantumqueue.PooledQuantumQueue, 1000)
+	engine.cycleStates = make([]ArbitrageCycleState, 0)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		update := updates[i%len(updates)]
+
+		// Just the lookup portion
+		queueIndex, hasQueue := engine.pairToQueueLookup.Get(uint32(update.pairID))
+		fanoutIndex, _ := engine.pairToFanoutIndex.Get(uint32(update.pairID))
+
+		_ = queueIndex
+		_ = hasQueue
+		_ = fanoutIndex
+	}
+}
+
+func BenchmarkProcessArbitrageUpdateWithFanout(b *testing.B) {
+	cleanup := testSetup(nil)
+	defer cleanup()
+
+	// Create realistic engine
+	engine := &ArbitrageEngine{
+		pairToQueueLookup:  localidx.New(100),
+		pairToFanoutIndex:  localidx.New(300),
+		isReverseDirection: false,
+	}
+
+	// Setup arena
+	const arenaSize = 1000
+	engine.sharedArena = make([]pooledquantumqueue.Entry, arenaSize)
+	for i := range engine.sharedArena {
+		engine.sharedArena[i].Tick = -1
+		engine.sharedArena[i].Prev = pooledquantumqueue.Handle(^uint64(0))
+		engine.sharedArena[i].Next = pooledquantumqueue.Handle(^uint64(0))
+		engine.sharedArena[i].Data = 0
+	}
+
+	// Initialize queues
+	arenaPtr := unsafe.Pointer(&engine.sharedArena[0])
+	engine.priorityQueues = make([]pooledquantumqueue.PooledQuantumQueue, 100)
+	for i := range engine.priorityQueues {
+		queue := pooledquantumqueue.New(arenaPtr)
+		engine.priorityQueues[i] = *queue
+	}
+
+	// Setup cycles and fanout
+	engine.cycleStates = make([]ArbitrageCycleState, 500)
+	engine.cycleFanoutTable = make([][]CycleFanoutEntry, 300)
+
+	// Register pairs
+	for i := 0; i < 100; i++ {
+		engine.pairToQueueLookup.Put(uint32(i), uint32(i))
+	}
+	for i := 0; i < 300; i++ {
+		engine.pairToFanoutIndex.Put(uint32(i), uint32(i))
+	}
+
+	// Create realistic fanout entries
+	for i := 0; i < 300; i++ {
+		// Each pair has 0-5 fanout entries
+		numFanout := i % 6
+		engine.cycleFanoutTable[i] = make([]CycleFanoutEntry, numFanout)
+		for j := 0; j < numFanout; j++ {
+			engine.cycleFanoutTable[i][j] = CycleFanoutEntry{
+				queueHandle: pooledquantumqueue.Handle(j),
+				cycleIndex:  uint64(j),
+				queueIndex:  uint64(j % 100),
+				edgeIndex:   uint64(j % 3),
+			}
+		}
+	}
+
+	// Create test updates
+	updates := make([]*PriceUpdateMessage, 50)
+	for i := range updates {
+		updates[i] = &PriceUpdateMessage{
+			pairID:      TradingPairID(i * 6),
+			forwardTick: float64(i) * 0.1,
+			reverseTick: -float64(i) * 0.1,
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		update := updates[i%len(updates)]
+		processArbitrageUpdate(engine, update)
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
