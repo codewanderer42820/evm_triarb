@@ -803,7 +803,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 					CycleFanoutEntry{
 						cycleIndex:  uint64(cycleIndex),
 						edgeIndex:   edgeIdx,
-						queue:       queue,
+						queueIndex:  uint64(queueIndex),
 						queueHandle: handle,
 					})
 			}
