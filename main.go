@@ -353,7 +353,6 @@ func printCyclesInfo(cycles []router.ArbitrageTriangle) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func main() {
