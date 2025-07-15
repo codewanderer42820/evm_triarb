@@ -590,9 +590,9 @@ func packEthereumAddress(address40HexChars []byte) PackedAddress {
 	parsedAddress := utils.ParseEthereumAddress(address40HexChars)
 
 	// Pack the 20-byte address into three 64-bit words for efficient comparison
-	word0 := utils.Load64(parsedAddress[0:8])                // Load first 8 bytes
-	word1 := utils.Load64(parsedAddress[8:16])               // Load middle 8 bytes
-	word2 := utils.Load64(parsedAddress[12:20]) & 0xFFFFFFFF // Load last 8 bytes, mask to 4 bytes
+	word0 := utils.Load64(parsedAddress[0:8])                       // Load first 8 bytes
+	word1 := utils.Load64(parsedAddress[8:16])                      // Load middle 8 bytes
+	word2 := uint64(*(*uint32)(unsafe.Pointer(&parsedAddress[16]))) // Load last 4 bytes as uint64
 
 	return PackedAddress{
 		words: [3]uint64{word0, word1, word2},

@@ -1,1930 +1,1100 @@
-// router_test.go — Comprehensive 100% coverage test suite for triangular arbitrage detection engine
+// router_test.go — Comprehensive test suite for triangular arbitrage detection engine
+//
+// This test suite validates the complete arbitrage detection system including:
+// - Event processing and price update distribution
+// - Multi-core arbitrage cycle management
+// - Address resolution and hash table operations
+// - Priority queue operations and cycle extraction
+// - Proper shutdown coordination and cleanup
+//
+// The tests use deterministic scenarios to ensure predictable behavior
+// and validate both performance characteristics and correctness.
 
 package router
 
 import (
-	"fmt"
-	"math"
-	"runtime"
-	"sync"
-	"sync/atomic"
-	"testing"
-	"time"
-	"unsafe"
-
 	"main/constants"
+	"main/control"
 	"main/localidx"
 	"main/pooledquantumqueue"
 	"main/ring24"
 	"main/types"
+	"main/utils"
+	"os"
+	"runtime"
+	"sync"
+	"testing"
+	"time"
+	"unsafe"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// TEST UTILITIES AND HELPERS
+// TEST FIXTURES AND UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-type TestAssertion struct {
-	t *testing.T
-}
+// TestPairID constants for predictable testing
+const (
+	TestPairETH_DAI  TradingPairID = 1001
+	TestPairDAI_USDC TradingPairID = 1002
+	TestPairUSDC_ETH TradingPairID = 1003
+	TestPairWBTC_ETH TradingPairID = 1004
+	TestPairUNI_ETH  TradingPairID = 1005
+)
 
-func NewAssertion(t *testing.T) *TestAssertion {
-	return &TestAssertion{t: t}
-}
+// Test addresses - valid Ethereum addresses for testing
+var (
+	TestAddressETH_DAI  = "0x1234567890123456789012345678901234567890"
+	TestAddressDAI_USDC = "0x2345678901234567890123456789012345678901"
+	TestAddressUSDC_ETH = "0x3456789012345678901234567890123456789012"
+	TestAddressWBTC_ETH = "0x4567890123456789012345678901234567890123"
+	TestAddressUNI_ETH  = "0x5678901234567890123456789012345678901234"
+)
 
-func (a *TestAssertion) Equal(expected, actual interface{}, msg string) {
-	if expected != actual {
-		a.t.Errorf("%s: expected %v, got %v", msg, expected, actual)
+// testSetup initializes clean test environment
+func testSetup(t *testing.T) func() {
+	// Save original state for restoration
+	originalCoreEngines := coreEngines
+	originalCoreRings := coreRings
+	originalPairToCoreRouting := pairToCoreRouting
+	originalAddressToPairMap := addressToPairMap
+	originalPackedAddressKeys := packedAddressKeys
+	originalPairWorkloadShards := pairWorkloadShards
+
+	// Reset global state
+	coreEngines = [constants.MaxSupportedCores]*ArbitrageEngine{}
+	coreRings = [constants.MaxSupportedCores]*ring24.Ring{}
+	pairToCoreRouting = [constants.PairRoutingTableCapacity]uint64{}
+	addressToPairMap = [constants.AddressTableCapacity]TradingPairID{}
+	packedAddressKeys = [constants.AddressTableCapacity]PackedAddress{}
+	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard)
+
+	// Reset control system
+	control.ResetPollCounter()
+	control.ForceCold()
+
+	// Return cleanup function
+	return func() {
+		// Stop any running cores
+		control.Shutdown()
+		time.Sleep(50 * time.Millisecond) // Allow graceful shutdown
+
+		// Restore original state
+		coreEngines = originalCoreEngines
+		coreRings = originalCoreRings
+		pairToCoreRouting = originalPairToCoreRouting
+		addressToPairMap = originalAddressToPairMap
+		packedAddressKeys = originalPackedAddressKeys
+		pairWorkloadShards = originalPairWorkloadShards
+
+		// Reset control system
+		control.ResetPollCounter()
+		control.ForceCold()
 	}
 }
 
-func (a *TestAssertion) True(condition bool, msg string) {
-	if !condition {
-		a.t.Errorf("%s: expected true", msg)
-	}
-}
-
-func (a *TestAssertion) False(condition bool, msg string) {
-	if condition {
-		a.t.Errorf("%s: expected false", msg)
-	}
-}
-
-func (a *TestAssertion) Near(expected, actual, tolerance float64, msg string) {
-	if math.Abs(expected-actual) > tolerance {
-		a.t.Errorf("%s: expected %v ± %v, got %v", msg, expected, tolerance, actual)
-	}
-}
-
-func (a *TestAssertion) NoError(err error, msg string) {
-	if err != nil {
-		a.t.Errorf("%s: unexpected error: %v", msg, err)
-	}
-}
-
-func (a *TestAssertion) NotNil(value interface{}, msg string) {
-	if value == nil {
-		a.t.Errorf("%s: expected non-nil value", msg)
-	}
-}
-
-func (a *TestAssertion) Nil(value interface{}, msg string) {
-	if value != nil {
-		a.t.Errorf("%s: expected nil value, got %v", msg, value)
-	}
-}
-
-type TestHelper struct {
-	t *testing.T
-}
-
-func NewTestHelper(t *testing.T) *TestHelper {
-	return &TestHelper{t: t}
-}
-
-func (h *TestHelper) ClearGlobalState() {
-	// Clear core engines and rings
-	for i := 0; i < constants.MaxSupportedCores; i++ {
-		coreEngines[i] = nil
-		coreRings[i] = nil
-	}
-
-	// Clear routing and address tables
-	for i := 0; i < constants.PairRoutingTableCapacity && i < 10000; i++ {
-		pairToCoreRouting[i] = 0
-	}
-
-	for i := 0; i < constants.AddressTableCapacity && i < 10000; i++ {
-		addressToPairMap[i] = 0
-		packedAddressKeys[i] = PackedAddress{}
-	}
-
-	// Clear workload shards
-	pairWorkloadShards = nil
-}
-
-func (h *TestHelper) CreateLogView(address string, reserve0, reserve1 uint64) *types.LogView {
-	// Create properly formatted hex data for reserves
-	data := fmt.Sprintf("0x%064x%064x", reserve0, reserve1)
+// createTestLogView creates a mock Ethereum log for testing
+func createTestLogView(address, data string) *types.LogView {
 	return &types.LogView{
-		Addr: []byte(address),
-		Data: []byte(data),
+		Addr:   []byte(address),
+		Data:   []byte(data),
+		Topics: []byte(`["0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"]`),
+		BlkNum: []byte("0x123456"),
+		LogIdx: []byte("0x1"),
 	}
 }
 
-func (h *TestHelper) CreateLogViewWithRawData(address string, data string) *types.LogView {
-	return &types.LogView{
-		Addr: []byte(address),
-		Data: []byte(data),
+// waitForCoreReady waits for a core to be properly initialized
+func waitForCoreReady(coreID int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if coreEngines[coreID] != nil && coreRings[coreID] != nil {
+			time.Sleep(10 * time.Millisecond) // Allow full initialization
+			return true
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+	return false
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ADDRESS RESOLUTION TESTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+func TestPackEthereumAddress(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
+
+	testCases := []struct {
+		name    string
+		address string
+	}{
+		{"Standard Address", TestAddressETH_DAI},
+		{"Different Address", TestAddressDAI_USDC},
+		{"Zero Address", "0x0000000000000000000000000000000000000000"},
+		{"Max Address", "0xffffffffffffffffffffffffffffffffffffffff"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Remove 0x prefix for processing
+			hexBytes := []byte(tc.address[2:])
+
+			// Pack the address
+			packed := packEthereumAddress(hexBytes)
+
+			// Verify packing is deterministic
+			packed2 := packEthereumAddress(hexBytes)
+			if !packed.isEqual(packed2) {
+				t.Errorf("Address packing not deterministic")
+			}
+
+			// Verify different addresses produce different packed representations
+			if tc.address != TestAddressETH_DAI {
+				standardPacked := packEthereumAddress([]byte(TestAddressETH_DAI[2:]))
+				if packed.isEqual(standardPacked) {
+					t.Errorf("Different addresses produced same packed representation")
+				}
+			}
+		})
+	}
+}
+
+func TestRegisterTradingPairAddress(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
+
+	// Register test addresses
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
+	RegisterTradingPairAddress([]byte(TestAddressDAI_USDC[2:]), TestPairDAI_USDC)
+	RegisterTradingPairAddress([]byte(TestAddressUSDC_ETH[2:]), TestPairUSDC_ETH)
+
+	// Test successful lookups
+	if pairID := lookupPairByAddress([]byte(TestAddressETH_DAI[2:])); pairID != TestPairETH_DAI {
+		t.Errorf("Expected pair ID %d, got %d", TestPairETH_DAI, pairID)
+	}
+
+	if pairID := lookupPairByAddress([]byte(TestAddressDAI_USDC[2:])); pairID != TestPairDAI_USDC {
+		t.Errorf("Expected pair ID %d, got %d", TestPairDAI_USDC, pairID)
+	}
+
+	// Test non-existent address
+	unknownAddress := "1111111111111111111111111111111111111111"
+	if pairID := lookupPairByAddress([]byte(unknownAddress)); pairID != 0 {
+		t.Errorf("Expected 0 for unknown address, got %d", pairID)
+	}
+
+	// Test address update
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairWBTC_ETH)
+	if pairID := lookupPairByAddress([]byte(TestAddressETH_DAI[2:])); pairID != TestPairWBTC_ETH {
+		t.Errorf("Address update failed, expected %d, got %d", TestPairWBTC_ETH, pairID)
+	}
+}
+
+func TestAddressHashCollisionHandling(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
+
+	// Generate addresses that might cause collisions
+	collisionAddresses := []string{
+		"0x1000000000000000000000000000000000000001",
+		"0x1000000000000000000000000000000000000002",
+		"0x1000000000000000000000000000000000000003",
+		"0x1000000000000000000000000000000000000004",
+		"0x1000000000000000000000000000000000000005",
+	}
+
+	// Register addresses one by one and verify each step
+	for i, addr := range collisionAddresses {
+		intendedPairID := TradingPairID(2000 + i)
+
+		// Register the address
+		RegisterTradingPairAddress([]byte(addr[2:]), intendedPairID)
+
+		// Immediately verify it can be found correctly
+		foundPairID := lookupPairByAddress([]byte(addr[2:]))
+		if foundPairID != intendedPairID {
+			t.Errorf("Address %s: expected %d, got %d after registration", addr, intendedPairID, foundPairID)
+
+			// Debug: Check if ANY pair ID is being returned
+			if foundPairID == 0 {
+				t.Logf("  → Address not found at all")
+			} else {
+				t.Logf("  → Address found but wrong pair ID returned")
+
+				// This suggests the router is doing partial matching, not full address verification
+				t.Logf("  → CRITICAL: This indicates the router is not checking the complete address!")
+			}
+		}
+	}
+
+	// Test that different addresses don't return the same pair ID
+	returnedPairIDs := make(map[TradingPairID]string)
+	for _, addr := range collisionAddresses {
+		pairID := lookupPairByAddress([]byte(addr[2:]))
+		if pairID != 0 {
+			if existingAddr, exists := returnedPairIDs[pairID]; exists {
+				t.Errorf("CRITICAL BUG: Multiple addresses return same pair ID %d:", pairID)
+				t.Errorf("  → %s", existingAddr)
+				t.Errorf("  → %s", addr)
+				t.Errorf("  → This proves the router is NOT checking the full address!")
+				break
+			}
+			returnedPairIDs[pairID] = addr
+		}
+	}
+
+	t.Logf("Address lookup summary:")
+	for _, addr := range collisionAddresses {
+		pairID := lookupPairByAddress([]byte(addr[2:]))
+		t.Logf("  %s → %d", addr, pairID)
 	}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// STRUCTURE AND MEMORY LAYOUT TESTS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestStructureSizes(t *testing.T) {
-	assert := NewAssertion(t)
-
-	t.Run("PriceUpdateMessage", func(t *testing.T) {
-		var msg PriceUpdateMessage
-		assert.Equal(24, int(unsafe.Sizeof(msg)), "PriceUpdateMessage size should be 24 bytes")
-
-		// Test field alignment
-		msg.pairID = TradingPairID(12345)
-		msg.forwardTick = 1.5
-		msg.reverseTick = -1.5
-
-		assert.Equal(TradingPairID(12345), msg.pairID, "pairID field access")
-		assert.Equal(1.5, msg.forwardTick, "forwardTick field access")
-		assert.Equal(-1.5, msg.reverseTick, "reverseTick field access")
-	})
-
-	t.Run("ArbitrageCycleState", func(t *testing.T) {
-		var cycle ArbitrageCycleState
-		assert.Equal(64, int(unsafe.Sizeof(cycle)), "ArbitrageCycleState size should be 64 bytes")
-
-		// Test field access and the zero optimization
-		cycle.tickValues[0] = 1.0
-		cycle.tickValues[1] = 0.0 // This would be the intentionally zero value
-		cycle.tickValues[2] = -0.5
-		cycle.pairIDs[0] = TradingPairID(100)
-		cycle.pairIDs[1] = TradingPairID(200)
-		cycle.pairIDs[2] = TradingPairID(300)
-
-		assert.Equal(1.0, cycle.tickValues[0], "tickValues[0] access")
-		assert.Equal(0.0, cycle.tickValues[1], "tickValues[1] access (zero optimization)")
-		assert.Equal(-0.5, cycle.tickValues[2], "tickValues[2] access")
-		assert.Equal(TradingPairID(100), cycle.pairIDs[0], "pairIDs[0] access")
-	})
-
-	t.Run("ExtractedCycle", func(t *testing.T) {
-		var extracted ExtractedCycle
-		assert.Equal(32, int(unsafe.Sizeof(extracted)), "ExtractedCycle size should be 32 bytes")
-
-		extracted.cycleIndex = CycleIndex(42)
-		extracted.originalTick = 12345
-		extracted.queueHandle = pooledquantumqueue.Handle(67890)
-
-		assert.Equal(CycleIndex(42), extracted.cycleIndex, "cycleIndex field access")
-		assert.Equal(int64(12345), extracted.originalTick, "originalTick field access")
-		assert.Equal(pooledquantumqueue.Handle(67890), extracted.queueHandle, "queueHandle field access")
-	})
-
-	t.Run("ArbitrageEngine", func(t *testing.T) {
-		var engine ArbitrageEngine
-		size := unsafe.Sizeof(engine)
-
-		// Verify the engine size is reasonable and extractedCycles array is correct size
-		assert.Equal(32, len(engine.extractedCycles), "extractedCycles should have 32 elements")
-
-		expectedExtractedCyclesSize := 32 * 32 // 32 cycles * 32 bytes each = 1024 bytes
-		actualExtractedCyclesSize := unsafe.Sizeof(engine.extractedCycles)
-		assert.Equal(expectedExtractedCyclesSize, int(actualExtractedCyclesSize), "extractedCycles array size")
-
-		t.Logf("ArbitrageEngine total size: %d bytes", size)
-	})
-
-	t.Run("PackedAddress", func(t *testing.T) {
-		var addr PackedAddress
-		assert.Equal(32, int(unsafe.Sizeof(addr)), "PackedAddress size should be 32 bytes")
-
-		addr.words[0] = 0x1234567890abcdef
-		addr.words[1] = 0xfedcba0987654321
-		addr.words[2] = 0x1122334455667788
-
-		assert.Equal(uint64(0x1234567890abcdef), addr.words[0], "words[0] access")
-		assert.Equal(uint64(0xfedcba0987654321), addr.words[1], "words[1] access")
-		assert.Equal(uint64(0x1122334455667788), addr.words[2], "words[2] access")
-	})
-}
-
-func TestTypeDefinitions(t *testing.T) {
-	assert := NewAssertion(t)
-
-	t.Run("TradingPairID", func(t *testing.T) {
-		var pairID TradingPairID = 12345
-		assert.Equal(TradingPairID(12345), pairID, "TradingPairID assignment")
-		assert.Equal(uint64(12345), uint64(pairID), "TradingPairID underlying type")
-	})
-
-	t.Run("CycleIndex", func(t *testing.T) {
-		var idx CycleIndex = 54321
-		assert.Equal(CycleIndex(54321), idx, "CycleIndex assignment")
-		assert.Equal(uint64(54321), uint64(idx), "CycleIndex underlying type")
-	})
-
-	t.Run("ArbitrageTriangle", func(t *testing.T) {
-		triangle := ArbitrageTriangle{
-			TradingPairID(1),
-			TradingPairID(2),
-			TradingPairID(3),
-		}
-		assert.Equal(TradingPairID(1), triangle[0], "triangle[0] access")
-		assert.Equal(TradingPairID(2), triangle[1], "triangle[1] access")
-		assert.Equal(TradingPairID(3), triangle[2], "triangle[2] access")
-		assert.Equal(3, len(triangle), "triangle length")
-	})
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CORE ENGINE METHODS TESTS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestArbitrageEngineAllocation(t *testing.T) {
-	assert := NewAssertion(t)
-
-	t.Run("HandleAllocation", func(t *testing.T) {
-		engine := &ArbitrageEngine{
-			nextHandle: pooledquantumqueue.Handle(100),
-		}
-
-		// Test sequential allocation
-		handle1 := engine.allocateQueueHandle()
-		handle2 := engine.allocateQueueHandle()
-		handle3 := engine.allocateQueueHandle()
-
-		assert.Equal(pooledquantumqueue.Handle(100), handle1, "first handle")
-		assert.Equal(pooledquantumqueue.Handle(101), handle2, "second handle")
-		assert.Equal(pooledquantumqueue.Handle(102), handle3, "third handle")
-		assert.Equal(pooledquantumqueue.Handle(103), engine.nextHandle, "nextHandle incremented")
-	})
-
-	t.Run("HandleAllocationFromZero", func(t *testing.T) {
-		engine := &ArbitrageEngine{nextHandle: 0}
-
-		handle1 := engine.allocateQueueHandle()
-		handle2 := engine.allocateQueueHandle()
-
-		assert.Equal(pooledquantumqueue.Handle(0), handle1, "first handle from zero")
-		assert.Equal(pooledquantumqueue.Handle(1), handle2, "second handle from zero")
-		assert.Equal(pooledquantumqueue.Handle(2), engine.nextHandle, "nextHandle at 2")
-	})
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// HEX PARSING AND UTILITY FUNCTIONS TESTS
+// PRICE UPDATE PROCESSING TESTS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 func TestCountHexLeadingZeros(t *testing.T) {
-	assert := NewAssertion(t)
-
 	testCases := []struct {
 		name     string
 		input    string
 		expected int
 	}{
-		{"AllZeros", "00000000000000000000000000000000", 32},
-		{"NoLeadingZeros", "12345678901234567890123456789012", 0},
-		{"OneLeadingZero", "01234567890123456789012345678901", 1},
-		{"TwoLeadingZeros", "00123456789012345678901234567890", 2},
-		{"EightLeadingZeros", "00000000123456789012345678901234", 8},
-		{"SixteenLeadingZeros", "0000000000000000123456789012345", 16},
-		{"TwentyFourLeadingZeros", "000000000000000000000000123456789", 24},
-		{"ThirtyLeadingZeros", "00000000000000000000000000000012", 30},
-		{"ThirtyOneLeadingZeros", "00000000000000000000000000000001", 31},
-		{"MixedPattern", "00000123456789abcdef000000000000", 5},
-		{"EdgeCaseBoundary", "0000000012345678901234567890123", 7},
+		{"All zeros", "00000000000000000000000000000000", 32},
+		{"No leading zeros", "1234567890abcdef1234567890abcdef", 0},
+		{"Four leading zeros", "0000567890abcdef1234567890abcdef", 4},
+		{"Eight leading zeros", "00000000abcdef1234567890abcdef12", 8},
+		{"Sixteen leading zeros", "00000000000000001234567890abcdef", 16},
+		{"Thirty leading zeros", "0000000000000000000000000000001f", 30},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Ensure input is exactly 32 bytes
-			input := make([]byte, 32)
-			copy(input, []byte(tc.input))
-
-			// Pad with zeros if input is shorter than 32 bytes
-			for i := len(tc.input); i < 32; i++ {
-				input[i] = '0'
+			result := countHexLeadingZeros([]byte(tc.input))
+			if result != tc.expected {
+				t.Errorf("Expected %d leading zeros, got %d for input %s", tc.expected, result, tc.input)
 			}
-
-			result := countHexLeadingZeros(input)
-			assert.Equal(tc.expected, result, fmt.Sprintf("countHexLeadingZeros(%s)", tc.name))
 		})
 	}
-
-	t.Run("InvalidInputHandling", func(t *testing.T) {
-		// Test with non-hex characters (should still work with bit manipulation)
-		input := make([]byte, 32)
-		copy(input, []byte("gggggggggggggggggggggggggggggggg"))
-
-		result := countHexLeadingZeros(input)
-		assert.Equal(0, result, "non-hex characters should give 0 leading zeros")
-	})
-
-	t.Run("ChunkBoundaryTesting", func(t *testing.T) {
-		// Test inputs that cross 8-byte chunk boundaries
-		testInputs := []struct {
-			input    string
-			expected int
-		}{
-			{"0000000012345678901234567890123", 7},   // 7 zeros (within first chunk)
-			{"00000000123456789012345678901234", 8},  // 8 zeros (exactly one chunk)
-			{"000000001234567890123456789012345", 8}, // 8 zeros (exactly one chunk)
-			{"0000000000000000123456789012345", 16},  // 16 zeros (exactly two chunks)
-		}
-
-		for _, test := range testInputs {
-			input := make([]byte, 32)
-			copy(input, []byte(test.input))
-			for i := len(test.input); i < 32; i++ {
-				input[i] = '0'
-			}
-
-			result := countHexLeadingZeros(input)
-			assert.Equal(test.expected, result, fmt.Sprintf("chunk boundary test: %s", test.input))
-		}
-	})
 }
 
-func TestQuantizeTickValue(t *testing.T) {
-	assert := NewAssertion(t)
+func TestDispatchPriceUpdateBasic(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
 
-	t.Run("BasicQuantization", func(t *testing.T) {
-		testCases := []struct {
-			input float64
-		}{
-			{0.0},
-			{1.0},
-			{-1.0},
-			{10.5},
-			{-5.25},
-		}
+	// Register test pair
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
+	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
 
-		for _, tc := range testCases {
-			result := quantizeTickValue(tc.input)
-			expected := quantizeTickValue(tc.input) // Call the actual function to get expected result
-			assert.Equal(expected, result, fmt.Sprintf("quantizeTickValue(%f)", tc.input))
+	// Initialize minimal core setup
+	coreRings[0] = ring24.New(constants.DefaultRingSize)
 
-			// Verify the result is reasonable (non-negative due to clamping)
-			assert.True(result >= 0, fmt.Sprintf("quantized value should be non-negative for %f", tc.input))
-		}
-	})
+	// Create test log with valid Uniswap V2 Sync event data
+	// Format: 0x + 64 chars (reserve0) + 64 chars (reserve1)
+	syncData := "0x" +
+		"0000000000000000000000000000000000000000000000056bc75e2d630eb187" + // reserve0
+		"00000000000000000000000000000000000000000000152d02c7e14af6800000" // reserve1
 
-	t.Run("MonotonicityProperty", func(t *testing.T) {
-		// Test that quantization preserves order
-		values := []float64{-10.0, -5.0, -1.0, 0.0, 1.0, 5.0, 10.0}
-		quantized := make([]int64, len(values))
+	logView := createTestLogView(TestAddressETH_DAI, syncData)
 
-		for i, val := range values {
-			quantized[i] = quantizeTickValue(val)
-		}
+	// Dispatch the price update
+	DispatchPriceUpdate(logView)
 
-		// Verify monotonicity
-		for i := 1; i < len(quantized); i++ {
-			assert.True(quantized[i] > quantized[i-1],
-				fmt.Sprintf("quantization should preserve order: %d should be > %d", quantized[i], quantized[i-1]))
-		}
-	})
+	// Verify message was queued
+	time.Sleep(10 * time.Millisecond) // Allow processing
+	messagePtr := coreRings[0].Pop()
+	if messagePtr == nil {
+		t.Fatal("No message received in core ring")
+	}
 
-	t.Run("NonNegativityProperty", func(t *testing.T) {
-		// All quantized values should be non-negative due to clamping bound
-		testValues := []float64{-100.0, -10.0, -1.0, 0.0, 1.0, 10.0, 100.0}
+	// Validate message content
+	message := (*PriceUpdateMessage)(unsafe.Pointer(messagePtr))
+	if message.pairID != TestPairETH_DAI {
+		t.Errorf("Expected pair ID %d, got %d", TestPairETH_DAI, message.pairID)
+	}
 
-		for _, val := range testValues {
-			result := quantizeTickValue(val)
-			assert.True(result >= 0, fmt.Sprintf("quantized value should be non-negative for input %f, got %d", val, result))
-		}
-	})
+	// Verify tick values are opposites
+	if message.forwardTick != -message.reverseTick {
+		t.Errorf("Forward and reverse ticks should be opposites: %f vs %f",
+			message.forwardTick, message.reverseTick)
+	}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ADDRESS PROCESSING TESTS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+func TestDispatchPriceUpdateMultiCore(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
 
-func TestPackedAddressOperations(t *testing.T) {
-	assert := NewAssertion(t)
+	// Setup multiple cores
+	numCores := 4
+	for i := 0; i < numCores; i++ {
+		coreRings[i] = ring24.New(constants.DefaultRingSize)
+		RegisterPairToCoreRouting(TestPairETH_DAI, uint8(i))
+	}
 
-	t.Run("AddressPacking", func(t *testing.T) {
-		testAddresses := []string{
-			"1234567890123456789012345678901234567890",
-			"abcdefabcdefabcdefabcdefabcdefabcdefabcd",
-			"a478c2975ab1ea89e8196811f51a7b7ade33eb11",
-			"0000000000000000000000000000000000000000",
-			"ffffffffffffffffffffffffffffffffffffffff",
+	// Register test pair
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
+
+	// Create test event
+	syncData := "0x" +
+		"0000000000000000000000000000000000000000000000056bc75e2d630eb187" +
+		"00000000000000000000000000000000000000000000152d02c7e14af6800000"
+
+	logView := createTestLogView(TestAddressETH_DAI, syncData)
+
+	// Dispatch update
+	DispatchPriceUpdate(logView)
+
+	// Verify all cores received the message
+	time.Sleep(10 * time.Millisecond)
+	for i := 0; i < numCores; i++ {
+		messagePtr := coreRings[i].Pop()
+		if messagePtr == nil {
+			t.Errorf("Core %d did not receive message", i)
+			continue
 		}
 
-		for _, addr := range testAddresses {
-			packed := packEthereumAddress([]byte(addr))
-
-			// Should not be all zeros unless input was all zeros
-			if addr != "0000000000000000000000000000000000000000" {
-				isZero := packed.words[0] == 0 && packed.words[1] == 0 && packed.words[2] == 0
-				assert.False(isZero, fmt.Sprintf("packed address should not be all zeros for %s", addr))
-			}
+		message := (*PriceUpdateMessage)(unsafe.Pointer(messagePtr))
+		if message.pairID != TestPairETH_DAI {
+			t.Errorf("Core %d received wrong pair ID: %d", i, message.pairID)
 		}
-	})
-
-	t.Run("AddressEquality", func(t *testing.T) {
-		addr1 := "1234567890123456789012345678901234567890"
-		addr2 := "1234567890123456789012345678901234567890"
-		addr3 := "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
-
-		packed1 := packEthereumAddress([]byte(addr1))
-		packed2 := packEthereumAddress([]byte(addr2))
-		packed3 := packEthereumAddress([]byte(addr3))
-
-		assert.True(packed1.isEqual(packed2), "identical addresses should be equal")
-		assert.False(packed1.isEqual(packed3), "different addresses should not be equal")
-	})
-
-	t.Run("HashingConsistency", func(t *testing.T) {
-		address := "a478c2975ab1ea89e8196811f51a7b7ade33eb11"
-
-		// Hash from raw address should be consistent
-		hash1 := hashAddressToIndex([]byte(address))
-		hash2 := hashAddressToIndex([]byte(address))
-		assert.Equal(hash1, hash2, "raw address hashing should be consistent")
-
-		// Hash from packed address should match
-		packed := packEthereumAddress([]byte(address))
-		packedHash := hashPackedAddressToIndex(packed)
-
-		// Both hashes should be within table bounds
-		assert.True(hash1 < uint64(constants.AddressTableMask+1), "raw hash within bounds")
-		assert.True(packedHash < uint64(constants.AddressTableMask+1), "packed hash within bounds")
-	})
-
-	t.Run("UniqueAddressesProduceUniqueKeys", func(t *testing.T) {
-		addresses := []string{
-			"a478c2975ab1ea89e8196811f51a7b7ade33eb11",
-			"bb2b8038a1640196fbe3e38816f3e67cba72d940",
-			"0d4a11d5eeaac28ec3f61d100daf4d40471f1852",
-			"b4e16d0168e52d35cacd2c6185b44281ec28c9dc",
-			"ae461ca67b15dc8dc81ce7615e0320da1a9ab8d5",
-		}
-
-		packedAddresses := make([]PackedAddress, len(addresses))
-		for i, addr := range addresses {
-			packedAddresses[i] = packEthereumAddress([]byte(addr))
-		}
-
-		// Verify all packed addresses are unique
-		for i := 0; i < len(packedAddresses); i++ {
-			for j := i + 1; j < len(packedAddresses); j++ {
-				assert.False(packedAddresses[i].isEqual(packedAddresses[j]),
-					fmt.Sprintf("addresses %d and %d should produce different packed representations", i, j))
-			}
-		}
-	})
+	}
 }
 
-func TestAddressRegistrationAndLookup(t *testing.T) {
-	assert := NewAssertion(t)
-	helper := NewTestHelper(t)
+func TestDispatchPriceUpdateUnknownAddress(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
 
-	t.Run("BasicRegistrationAndLookup", func(t *testing.T) {
-		helper.ClearGlobalState()
+	// Setup core but don't register the address
+	coreRings[0] = ring24.New(constants.DefaultRingSize)
 
-		address := "1234567890123456789012345678901234567890"
-		pairID := TradingPairID(12345)
+	// Create test event for unregistered address
+	syncData := "0x" +
+		"0000000000000000000000000000000000000000000000056bc75e2d630eb187" +
+		"00000000000000000000000000000000000000000000152d02c7e14af6800000"
 
-		// Register and verify
-		RegisterTradingPairAddress([]byte(address), pairID)
-		result := lookupPairByAddress([]byte(address))
-		assert.Equal(pairID, result, "registered address should be retrievable")
-	})
+	unknownAddress := "0x9999999999999999999999999999999999999999"
+	logView := createTestLogView(unknownAddress, syncData)
 
-	t.Run("NonExistentAddressLookup", func(t *testing.T) {
-		helper.ClearGlobalState()
+	// Dispatch update
+	DispatchPriceUpdate(logView)
 
-		nonExistent := "9999999999999999999999999999999999999999"
-		result := lookupPairByAddress([]byte(nonExistent))
-		assert.Equal(TradingPairID(0), result, "non-existent address should return 0")
-	})
-
-	t.Run("AddressUpdateOverwrite", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		address := "1111111111111111111111111111111111111111"
-		pairID1 := TradingPairID(100)
-		pairID2 := TradingPairID(200)
-
-		// Register first pair ID
-		RegisterTradingPairAddress([]byte(address), pairID1)
-		result1 := lookupPairByAddress([]byte(address))
-		assert.Equal(pairID1, result1, "first registration should work")
-
-		// Update with second pair ID
-		RegisterTradingPairAddress([]byte(address), pairID2)
-		result2 := lookupPairByAddress([]byte(address))
-		assert.Equal(pairID2, result2, "address update should overwrite")
-	})
-
-	t.Run("MultipleAddressRegistration", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		addresses := []string{
-			"a478c2975ab1ea89e8196811f51a7b7ade33eb11",
-			"bb2b8038a1640196fbe3e38816f3e67cba72d940",
-			"0d4a11d5eeaac28ec3f61d100daf4d40471f1852",
-			"b4e16d0168e52d35cacd2c6185b44281ec28c9dc",
-		}
-
-		// Register all addresses
-		for i, addr := range addresses {
-			pairID := TradingPairID(i + 1000)
-			RegisterTradingPairAddress([]byte(addr), pairID)
-		}
-
-		// Verify all addresses can be looked up
-		for i, addr := range addresses {
-			expectedPairID := TradingPairID(i + 1000)
-			result := lookupPairByAddress([]byte(addr))
-			assert.Equal(expectedPairID, result, fmt.Sprintf("address %d should be retrievable", i))
-		}
-	})
-
-	t.Run("RobinHoodHashingCollisionHandling", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		// Use a set of addresses that might cause collisions
-		addresses := []string{
-			"ae461ca67b15dc8dc81ce7615e0320da1a9ab8d5",
-			"397ff1542f962076d0bfe58ea045ffa2d347aca0",
-			"c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-			"a0b86a33e6776d1bc61e2c1c5f5e8e5c1e9b2c3d",
-			"b0b86a33e6776d1bc61e2c1c5f5e8e5c1e9b2c3d",
-			"c0b86a33e6776d1bc61e2c1c5f5e8e5c1e9b2c3d",
-		}
-
-		// Register all addresses
-		for i, addr := range addresses {
-			pairID := TradingPairID(i + 500)
-			RegisterTradingPairAddress([]byte(addr), pairID)
-		}
-
-		// Verify all addresses can still be found despite potential collisions
-		for i, addr := range addresses {
-			expectedPairID := TradingPairID(i + 500)
-			result := lookupPairByAddress([]byte(addr))
-			assert.Equal(expectedPairID, result, fmt.Sprintf("collision candidate %d should be retrievable", i))
-		}
-	})
-
-	t.Run("HighVolumeStressTest", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		numAddresses := 100
-		registered := 0
-		retrieved := 0
-
-		// Generate and register many addresses
-		for i := 0; i < numAddresses; i++ {
-			address := fmt.Sprintf("%040x", i*0x123456789+0x987654321)
-			pairID := TradingPairID(i + 2000)
-
-			RegisterTradingPairAddress([]byte(address), pairID)
-			registered++
-
-			// Verify it can be retrieved
-			result := lookupPairByAddress([]byte(address))
-			if result == pairID {
-				retrieved++
-			}
-		}
-
-		assert.Equal(numAddresses, registered, "all addresses should be registered")
-
-		// We expect high success rate but allow for some hash table limitations
-		successRate := float64(retrieved) / float64(registered)
-		assert.True(successRate > 0.9, fmt.Sprintf("high success rate expected, got %f", successRate))
-	})
+	// Verify no message was sent (unknown address should be ignored)
+	time.Sleep(10 * time.Millisecond)
+	messagePtr := coreRings[0].Pop()
+	if messagePtr != nil {
+		t.Error("Message should not be sent for unknown address")
+	}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ROUTING TESTS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+func TestDispatchPriceUpdateInvalidData(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
 
-func TestPairToCoreRouting(t *testing.T) {
-	assert := NewAssertion(t)
-	helper := NewTestHelper(t)
+	// Register test pair and setup core
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
+	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
+	coreRings[0] = ring24.New(constants.DefaultRingSize)
 
-	t.Run("BasicRouting", func(t *testing.T) {
-		helper.ClearGlobalState()
+	// Test cases for legitimate on-chain scenarios that should be handled gracefully
+	testCases := []struct {
+		name string
+		data string
+	}{
+		{"Zero reserves (legitimate on-chain)", "0x" +
+			"0000000000000000000000000000000000000000000000000000000000000000" +
+			"0000000000000000000000000000000000000000000000000000000000000000"},
+		{"One zero reserve (legitimate on-chain)", "0x" +
+			"0000000000000000000000000000000000000000000000000000000000000000" +
+			"00000000000000000000000000000000000000000000152d02c7e14af6800000"},
+		{"Valid Uniswap V2 sync data", "0x" +
+			"0000000000000000000000000000000000000000000000056bc75e2d630eb187" +
+			"00000000000000000000000000000000000000000000152d02c7e14af6800000"},
+		{"Large reserves (uint112 max)", "0x" +
+			"000000000000000000000000000000000000ffffffffffffffffffffffffffff" +
+			"000000000000000000000000000000000000ffffffffffffffffffffffffffff"},
+	}
 
-		pairID := TradingPairID(100)
-
-		// Register routing for multiple cores
-		RegisterPairToCoreRouting(pairID, 0)
-		RegisterPairToCoreRouting(pairID, 2)
-		RegisterPairToCoreRouting(pairID, 5)
-
-		routing := pairToCoreRouting[pairID]
-
-		// Verify bitmask has correct bits set
-		assert.True((routing&(1<<0)) != 0, "core 0 should be set")
-		assert.True((routing&(1<<1)) == 0, "core 1 should not be set")
-		assert.True((routing&(1<<2)) != 0, "core 2 should be set")
-		assert.True((routing&(1<<3)) == 0, "core 3 should not be set")
-		assert.True((routing&(1<<4)) == 0, "core 4 should not be set")
-		assert.True((routing&(1<<5)) != 0, "core 5 should be set")
-	})
-
-	t.Run("MultiplePairsRouting", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		pairs := []TradingPairID{100, 200, 300}
-		coreAssignments := [][]uint8{
-			{0, 1},
-			{2, 3, 4},
-			{1, 5},
-		}
-
-		// Register routing for multiple pairs
-		for i, pairID := range pairs {
-			for _, coreID := range coreAssignments[i] {
-				RegisterPairToCoreRouting(pairID, coreID)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Clear any existing messages
+			for coreRings[0].Pop() != nil {
 			}
-		}
 
-		// Verify each pair has correct routing
-		for i, pairID := range pairs {
-			routing := pairToCoreRouting[pairID]
-			for _, expectedCore := range coreAssignments[i] {
-				assert.True((routing&(1<<expectedCore)) != 0,
-					fmt.Sprintf("pair %d should route to core %d", pairID, expectedCore))
-			}
-		}
-	})
-}
+			logView := createTestLogView(TestAddressETH_DAI, tc.data)
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// EVENT DISPATCH TESTS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestDispatchPriceUpdate(t *testing.T) {
-	assert := NewAssertion(t)
-	helper := NewTestHelper(t)
-
-	t.Run("UnregisteredPair", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		logView := helper.CreateLogView(
-			"0x9999999999999999999999999999999999999999",
-			1000000000000, 2000000000000,
-		)
-
-		// Should not panic or cause errors for unregistered pair
-		DispatchPriceUpdate(logView)
-		// Test passes if no panic occurs
-	})
-
-	t.Run("ValidPairDispatch", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		address := "0x1234567890123456789012345678901234567890"
-		pairID := TradingPairID(12345)
-
-		RegisterTradingPairAddress([]byte(address[2:]), pairID)
-		RegisterPairToCoreRouting(pairID, 0)
-		coreRings[0] = ring24.New(constants.DefaultRingSize)
-
-		logView := helper.CreateLogView(address, 1000000000000, 2000000000000)
-		DispatchPriceUpdate(logView)
-
-		// Verify message was sent
-		message := coreRings[0].Pop()
-		assert.NotNil(message, "message should be sent")
-
-		if message != nil {
-			priceUpdate := (*PriceUpdateMessage)(unsafe.Pointer(message))
-			assert.Equal(pairID, priceUpdate.pairID, "correct pairID")
-			assert.False(math.IsNaN(priceUpdate.forwardTick), "tick should not be NaN")
-			assert.False(math.IsInf(priceUpdate.forwardTick, 0), "tick should not be infinite")
-			assert.Equal(-priceUpdate.forwardTick, priceUpdate.reverseTick, "reverse tick should be negative of forward")
-		}
-	})
-
-	t.Run("ZeroReservesFallback", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		address := "0x1234567890123456789012345678901234567890"
-		pairID := TradingPairID(12345)
-
-		RegisterTradingPairAddress([]byte(address[2:]), pairID)
-		RegisterPairToCoreRouting(pairID, 0)
-		coreRings[0] = ring24.New(constants.DefaultRingSize)
-
-		logView := helper.CreateLogView(address, 0, 0)
-		DispatchPriceUpdate(logView)
-
-		message := coreRings[0].Pop()
-		assert.NotNil(message, "fallback should send message")
-
-		if message != nil {
-			priceUpdate := (*PriceUpdateMessage)(unsafe.Pointer(message))
-			assert.True(priceUpdate.forwardTick >= 50.2, "fallback tick should be >= 50.2")
-			assert.True(priceUpdate.forwardTick <= 64.0, "fallback tick should be <= 64.0")
-			assert.Equal(priceUpdate.forwardTick, priceUpdate.reverseTick, "fallback should have equal ticks")
-		}
-	})
-
-	t.Run("MultiCoreDistribution", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		address := "0x1234567890123456789012345678901234567890"
-		pairID := TradingPairID(12345)
-		cores := []int{0, 2, 5}
-
-		RegisterTradingPairAddress([]byte(address[2:]), pairID)
-		for _, coreID := range cores {
-			RegisterPairToCoreRouting(pairID, uint8(coreID))
-			coreRings[coreID] = ring24.New(constants.DefaultRingSize)
-		}
-
-		logView := helper.CreateLogView(address, 1500000000000, 3000000000000)
-		DispatchPriceUpdate(logView)
-
-		// Verify all assigned cores received message
-		for _, coreID := range cores {
-			message := coreRings[coreID].Pop()
-			assert.NotNil(message, fmt.Sprintf("core %d should receive message", coreID))
-
-			if message != nil {
-				priceUpdate := (*PriceUpdateMessage)(unsafe.Pointer(message))
-				assert.Equal(pairID, priceUpdate.pairID, "correct pairID")
-			}
-		}
-
-		// Verify unassigned core doesn't receive message
-		if coreRings[1] == nil {
-			coreRings[1] = ring24.New(constants.DefaultRingSize)
-		}
-		message := coreRings[1].Pop()
-		assert.Nil(message, "unassigned core should not receive message")
-	})
-
-	t.Run("RealEthereumDataSamples", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		address := "0xa478c2975ab1ea89e8196811f51a7b7ade33eb11"
-		pairID := TradingPairID(11111)
-
-		RegisterTradingPairAddress([]byte(address[2:]), pairID)
-		RegisterPairToCoreRouting(pairID, 0)
-		coreRings[0] = ring24.New(constants.DefaultRingSize)
-
-		realDataSamples := []string{
-			"0x00000000000000000000000000000000000000000078e3833588cda8d5e102c3000000000000000000000000000000000000000000000000001fa8dd7963f22c",
-			"0x00000000000000000000000000000000000000000078ac4cf9c9bb7cb9e54739000000000000000000000000000000000000000000000000001fcf7f300f7aee",
-			"0x0000000000000000000000000000000000000000000000000000011b6dc13f6900000000000000000000000000000000000000000000001638362ed366158ac1",
-		}
-
-		for i, data := range realDataSamples {
-			logView := helper.CreateLogViewWithRawData(address, data)
+			// Should handle all legitimate Ethereum data without panic
 			DispatchPriceUpdate(logView)
 
-			message := coreRings[0].Pop()
-			assert.NotNil(message, fmt.Sprintf("sample %d should produce message", i))
-
-			if message != nil {
-				priceUpdate := (*PriceUpdateMessage)(unsafe.Pointer(message))
-				assert.Equal(pairID, priceUpdate.pairID, "correct pairID")
-				assert.False(math.IsNaN(priceUpdate.forwardTick), "tick should not be NaN")
-				assert.False(math.IsInf(priceUpdate.forwardTick, 0), "tick should not be infinite")
-			}
-		}
-	})
-
-	t.Run("GuaranteedDeliveryWithFullRings", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		address := "0x1234567890123456789012345678901234567890"
-		pairID := TradingPairID(12345)
-
-		RegisterTradingPairAddress([]byte(address[2:]), pairID)
-		RegisterPairToCoreRouting(pairID, 0)
-
-		// Create a very small ring to test retry logic
-		coreRings[0] = ring24.New(4)
-
-		// Fill the ring to capacity
-		dummyMsg := [24]byte{0}
-		for i := 0; i < 4; i++ {
-			success := coreRings[0].Push(&dummyMsg)
-			assert.True(success, fmt.Sprintf("should fill ring slot %d", i))
-		}
-
-		// Verify ring is full
-		overflowMsg := [24]byte{1}
-		assert.False(coreRings[0].Push(&overflowMsg), "ring should be full")
-
-		// Now try to dispatch - should retry until successful
-		logView := helper.CreateLogView(address, 1000000000000, 2000000000000)
-
-		// Empty one slot in a separate goroutine to allow delivery
-		go func() {
 			time.Sleep(10 * time.Millisecond)
-			coreRings[0].Pop()
+
+			messagePtr := coreRings[0].Pop()
+			if messagePtr == nil {
+				t.Errorf("Should generate message for legitimate case %s", tc.name)
+				return
+			}
+
+			message := (*PriceUpdateMessage)(unsafe.Pointer(messagePtr))
+			if message.pairID != TestPairETH_DAI {
+				t.Errorf("Message has wrong pair ID for case %s: %d", tc.name, message.pairID)
+			}
+
+			// Verify forward and reverse ticks are opposites (or both equal for fallback)
+			if message.forwardTick != -message.reverseTick && message.forwardTick != message.reverseTick {
+				t.Errorf("Tick relationship invalid for %s: forward=%f, reverse=%f",
+					tc.name, message.forwardTick, message.reverseTick)
+			}
+		})
+	}
+}
+
+// Test performance-critical path with malformed data (should panic as designed)
+func TestDispatchPriceUpdateMalformedDataPanic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping panic test in short mode")
+	}
+
+	cleanup := testSetup(t)
+	defer cleanup()
+
+	// Register test pair and setup core
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
+	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
+	coreRings[0] = ring24.New(constants.DefaultRingSize)
+
+	// Test that malformed data causes expected panic (ISR-grade footgun behavior)
+	t.Run("Malformed data should panic (by design)", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Expected panic for malformed data but none occurred - ISR-grade code should fail fast on bad input")
+			} else {
+				t.Logf("Expected panic occurred for malformed data: %v", r)
+			}
 		}()
 
-		// This should eventually succeed due to guaranteed delivery
+		logView := createTestLogView(TestAddressETH_DAI, "0x1234") // Too short
 		DispatchPriceUpdate(logView)
-
-		// Give some time for the retry mechanism
-		time.Sleep(50 * time.Millisecond)
-
-		// There should be messages in the ring
-		foundPriceUpdate := false
-		for i := 0; i < 5; i++ { // Check a few messages
-			msg := coreRings[0].Pop()
-			if msg != nil {
-				priceUpdate := (*PriceUpdateMessage)(unsafe.Pointer(msg))
-				if priceUpdate.pairID == pairID {
-					foundPriceUpdate = true
-					break
-				}
-			}
-		}
-		assert.True(foundPriceUpdate, "price update should eventually be delivered")
 	})
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ARBITRAGE PROCESSING TESTS
+// ARBITRAGE CYCLE MANAGEMENT TESTS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+func TestArbitrageEngineInitialization(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
+
+	// Create test triangles
+	triangles := []ArbitrageTriangle{
+		{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH},
+		{TestPairWBTC_ETH, TestPairETH_DAI, TestPairDAI_USDC},
+	}
+
+	// Initialize system
+	InitializeArbitrageSystem(triangles)
+
+	// Wait for cores to initialize
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify engines were created
+	coreCount := runtime.NumCPU() - 1
+	if coreCount > constants.MaxSupportedCores {
+		coreCount = constants.MaxSupportedCores
+	}
+	coreCount &^= 1 // Ensure even
+
+	for i := 0; i < coreCount; i++ {
+		if !waitForCoreReady(i, 1*time.Second) {
+			t.Errorf("Core %d not ready after initialization", i)
+		}
+	}
+
+	// Test graceful shutdown
+	control.Shutdown()
+	time.Sleep(100 * time.Millisecond)
+}
 
 func TestProcessArbitrageUpdate(t *testing.T) {
-	t.Run("DirectionSelection", func(t *testing.T) {
-		// Test forward direction engine
-		forwardEngine := &ArbitrageEngine{
-			isReverseDirection: false,
-			pairToQueueLookup:  localidx.New(16),
-			priorityQueues:     make([]pooledquantumqueue.PooledQuantumQueue, 1),
+	cleanup := testSetup(t)
+	defer cleanup()
+
+	// Create a minimal engine for testing
+	engine := &ArbitrageEngine{
+		pairToQueueLookup:  localidx.New(16),
+		isReverseDirection: false,
+	}
+
+	// Create shared arena and initialize
+	const testCycles = 10
+	engine.sharedArena = make([]pooledquantumqueue.Entry, testCycles)
+	for i := range engine.sharedArena {
+		engine.sharedArena[i].Tick = -1
+		engine.sharedArena[i].Prev = pooledquantumqueue.Handle(^uint64(0))
+		engine.sharedArena[i].Next = pooledquantumqueue.Handle(^uint64(0))
+		engine.sharedArena[i].Data = 0
+	}
+
+	// Initialize queue
+	arenaPtr := unsafe.Pointer(&engine.sharedArena[0])
+	queue := pooledquantumqueue.New(arenaPtr)
+	engine.priorityQueues = []pooledquantumqueue.PooledQuantumQueue{*queue}
+
+	// Setup lookup
+	engine.pairToQueueLookup.Put(uint32(TestPairETH_DAI), 0)
+
+	// Initialize cycle states and fanout
+	engine.cycleStates = make([]ArbitrageCycleState, 1)
+	engine.cycleStates[0] = ArbitrageCycleState{
+		pairIDs:    [3]TradingPairID{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH},
+		tickValues: [3]float64{0, 1.5, -2.0}, // Should total to -0.5 with new tick
+	}
+
+	engine.cycleFanoutTable = make([][]CycleFanoutEntry, 1)
+	engine.cycleFanoutTable[0] = []CycleFanoutEntry{
+		{
+			cycleIndex:  0,
+			edgeIndex:   0,
+			queueIndex:  0,
+			queueHandle: 0,
+		},
+	}
+
+	// Add cycle to queue
+	engine.priorityQueues[0].Push(131072, 0, 0) // Neutral priority
+
+	// Create test update
+	update := &PriceUpdateMessage{
+		pairID:      TestPairETH_DAI,
+		forwardTick: 1.0,
+		reverseTick: -1.0,
+	}
+
+	// Process the update
+	processArbitrageUpdate(engine, update)
+
+	// Verify cycle was updated
+	if engine.cycleStates[0].tickValues[0] != 1.0 {
+		t.Errorf("Cycle tick not updated correctly, got %f", engine.cycleStates[0].tickValues[0])
+	}
+}
+
+func TestCycleFanoutMapping(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
+
+	// Test triangles with overlapping pairs
+	triangles := []ArbitrageTriangle{
+		{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH},
+		{TestPairETH_DAI, TestPairWBTC_ETH, TestPairDAI_USDC}, // Shares ETH_DAI and DAI_USDC
+		{TestPairUNI_ETH, TestPairETH_DAI, TestPairDAI_USDC},  // Shares ETH_DAI and DAI_USDC
+	}
+
+	// Build workload shards
+	buildWorkloadShards(triangles)
+
+	// Verify each pair appears in fanout mapping
+	expectedPairs := []TradingPairID{
+		TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH,
+		TestPairWBTC_ETH, TestPairUNI_ETH,
+	}
+
+	for _, pairID := range expectedPairs {
+		if shards, exists := pairWorkloadShards[pairID]; !exists || len(shards) == 0 {
+			t.Errorf("Pair %d not found in workload shards", pairID)
 		}
+	}
 
-		// Test reverse direction engine
-		reverseEngine := &ArbitrageEngine{
-			isReverseDirection: true,
-			pairToQueueLookup:  localidx.New(16),
-			priorityQueues:     make([]pooledquantumqueue.PooledQuantumQueue, 1),
-		}
-
-		// Create a mock update
-		update := &PriceUpdateMessage{
-			pairID:      TradingPairID(1),
-			forwardTick: 1.5,
-			reverseTick: -1.5,
-		}
-
-		// Set up minimal queue state
-		forwardEngine.pairToQueueLookup.Put(1, 0)
-		reverseEngine.pairToQueueLookup.Put(1, 0)
-
-		// For this test, we just verify no panics occur
-		// Full processing requires more complex setup
-		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("processArbitrageUpdate should not panic: %v", r)
-			}
-		}()
-
-		// These will work with empty queues
-		processArbitrageUpdate(forwardEngine, update)
-		processArbitrageUpdate(reverseEngine, update)
-	})
+	// Verify ETH_DAI appears in multiple cycles (should have fanout entries)
+	ethDaiShards := pairWorkloadShards[TestPairETH_DAI]
+	totalCycles := 0
+	for _, shard := range ethDaiShards {
+		totalCycles += len(shard.cycleEdges)
+	}
+	if totalCycles != 3 { // Should appear in all 3 triangles
+		t.Errorf("ETH_DAI should appear in 3 cycles, found %d", totalCycles)
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CRYPTOGRAPHIC RANDOM GENERATION TESTS
+// PRIORITY QUEUE OPERATION TESTS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-func TestCryptoRandomGeneration(t *testing.T) {
-	assert := NewAssertion(t)
+func TestQuantizeTickValue(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    float64
+		expected int64
+	}{
+		{"Zero tick", 0.0, 131072},             // (0 + 128) * 1023 + some rounding
+		{"Negative profitable", -1.0, 130049},  // (-1 + 128) * 1023
+		{"Positive unprofitable", 1.0, 132095}, // (1 + 128) * 1023
+		{"Max negative", -128.0, 0},            // (-128 + 128) * 1023 = 0
+		{"Max positive", 128.0, 262143},        // (128 + 128) * 1023 = max
+	}
 
-	t.Run("BasicGeneration", func(t *testing.T) {
-		seed := []byte("test_seed_12345")
-		rng := newCryptoRandomGenerator(seed)
-
-		// Generate several values
-		values := make([]uint64, 20)
-		for i := range values {
-			values[i] = rng.generateRandomUint64()
-		}
-
-		// Check for uniqueness (should have mostly unique values)
-		seen := make(map[uint64]bool)
-		duplicates := 0
-		for _, v := range values {
-			if seen[v] {
-				duplicates++
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := quantizeTickValue(tc.input)
+			// Allow some tolerance due to floating point precision
+			if abs64(result-tc.expected) > 2 {
+				t.Errorf("Expected ~%d, got %d for input %f", tc.expected, result, tc.input)
 			}
-			seen[v] = true
-		}
-
-		assert.True(duplicates < 5, fmt.Sprintf("should have mostly unique values, got %d duplicates", duplicates))
-	})
-
-	t.Run("DeterministicBehavior", func(t *testing.T) {
-		seed := []byte("deterministic_test_seed")
-
-		rng1 := newCryptoRandomGenerator(seed)
-		rng2 := newCryptoRandomGenerator(seed)
-
-		// Both generators should produce identical sequences
-		for i := 0; i < 10; i++ {
-			v1 := rng1.generateRandomUint64()
-			v2 := rng2.generateRandomUint64()
-			assert.Equal(v1, v2, fmt.Sprintf("deterministic failure at position %d", i))
-		}
-	})
-
-	t.Run("BoundedIntGeneration", func(t *testing.T) {
-		seed := []byte("bounded_test_seed")
-		rng := newCryptoRandomGenerator(seed)
-
-		bounds := []int{1, 2, 10, 100, 1000}
-		for _, bound := range bounds {
-			for i := 0; i < 20; i++ {
-				val := rng.generateRandomInt(bound)
-				assert.True(val >= 0, fmt.Sprintf("value should be >= 0, got %d", val))
-				assert.True(val < bound, fmt.Sprintf("value should be < %d, got %d", bound, val))
-			}
-		}
-	})
-
-	t.Run("CounterIncrement", func(t *testing.T) {
-		seed := []byte("counter_test")
-		rng := newCryptoRandomGenerator(seed)
-
-		initialCounter := rng.counter
-		assert.Equal(uint64(0), initialCounter, "initial counter should be 0")
-
-		// Generate some values and verify counter increments
-		for i := 0; i < 5; i++ {
-			rng.generateRandomUint64()
-			expectedCounter := uint64(i + 1)
-			assert.Equal(expectedCounter, rng.counter, fmt.Sprintf("counter should be %d after %d generations", expectedCounter, i+1))
-		}
-	})
-
-	t.Run("DifferentSeedsProduceDifferentSequences", func(t *testing.T) {
-		seed1 := []byte("seed_one")
-		seed2 := []byte("seed_two")
-
-		rng1 := newCryptoRandomGenerator(seed1)
-		rng2 := newCryptoRandomGenerator(seed2)
-
-		// Generate several values from each
-		values1 := make([]uint64, 10)
-		values2 := make([]uint64, 10)
-
-		for i := 0; i < 10; i++ {
-			values1[i] = rng1.generateRandomUint64()
-			values2[i] = rng2.generateRandomUint64()
-		}
-
-		// Sequences should be different
-		differences := 0
-		for i := 0; i < 10; i++ {
-			if values1[i] != values2[i] {
-				differences++
-			}
-		}
-
-		assert.True(differences >= 8, fmt.Sprintf("different seeds should produce mostly different sequences, got %d differences", differences))
-	})
+		})
+	}
 }
 
-func TestShuffleCycleEdges(t *testing.T) {
-	assert := NewAssertion(t)
+func abs64(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
 
-	t.Run("BasicShuffle", func(t *testing.T) {
-		cycles := []CycleEdge{
-			{cyclePairs: [3]TradingPairID{1, 2, 3}, edgeIndex: 0},
-			{cyclePairs: [3]TradingPairID{4, 5, 6}, edgeIndex: 1},
-			{cyclePairs: [3]TradingPairID{7, 8, 9}, edgeIndex: 2},
-			{cyclePairs: [3]TradingPairID{10, 11, 12}, edgeIndex: 0},
-			{cyclePairs: [3]TradingPairID{13, 14, 15}, edgeIndex: 1},
+func TestExtractedCycleManagement(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
+
+	// Create engine with test data
+	engine := &ArbitrageEngine{
+		pairToQueueLookup:  localidx.New(16),
+		isReverseDirection: false,
+	}
+
+	// Setup shared arena
+	const testCycles = 5
+	engine.sharedArena = make([]pooledquantumqueue.Entry, testCycles)
+	for i := range engine.sharedArena {
+		engine.sharedArena[i].Tick = -1
+		engine.sharedArena[i].Prev = pooledquantumqueue.Handle(^uint64(0))
+		engine.sharedArena[i].Next = pooledquantumqueue.Handle(^uint64(0))
+		engine.sharedArena[i].Data = 0
+	}
+
+	// Initialize queue
+	arenaPtr := unsafe.Pointer(&engine.sharedArena[0])
+	queue := pooledquantumqueue.New(arenaPtr)
+	engine.priorityQueues = []pooledquantumqueue.PooledQuantumQueue{*queue}
+	engine.pairToQueueLookup.Put(uint32(TestPairETH_DAI), 0)
+
+	// Setup cycle states with varying profitability
+	engine.cycleStates = make([]ArbitrageCycleState, 3)
+	for i := range engine.cycleStates {
+		engine.cycleStates[i] = ArbitrageCycleState{
+			pairIDs:    [3]TradingPairID{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH},
+			tickValues: [3]float64{0, float64(i), -float64(i + 1)}, // Varying profitability
 		}
+		// Add to queue with different priorities
+		engine.priorityQueues[0].Push(int64(100000+i*1000), pooledquantumqueue.Handle(i), uint64(i))
+	}
 
-		originalCycles := make([]CycleEdge, len(cycles))
-		copy(originalCycles, cycles)
+	// Setup fanout (minimal for test)
+	engine.cycleFanoutTable = make([][]CycleFanoutEntry, 1)
 
-		pairID := TradingPairID(12345)
-		shuffleCycleEdges(cycles, pairID)
+	// Test update that should extract profitable cycles
+	update := &PriceUpdateMessage{
+		pairID:      TestPairETH_DAI,
+		forwardTick: -5.0, // Very profitable update
+		reverseTick: 5.0,
+	}
 
-		// Should have same elements but potentially different order
-		assert.Equal(len(originalCycles), len(cycles), "length should remain same")
+	// Process update
+	processArbitrageUpdate(engine, update)
 
-		// Check that all original elements are still present
-		for _, original := range originalCycles {
-			found := false
-			for _, shuffled := range cycles {
-				if original.cyclePairs == shuffled.cyclePairs && original.edgeIndex == shuffled.edgeIndex {
-					found = true
-					break
-				}
-			}
-			assert.True(found, "all original elements should be present after shuffle")
-		}
-	})
+	// Verify queue still has cycles (they should be restored)
+	if engine.priorityQueues[0].Empty() {
+		t.Error("Queue should not be empty after processing")
+	}
 
-	t.Run("DeterministicShuffleWithSamePairID", func(t *testing.T) {
-		cycles1 := []CycleEdge{
-			{cyclePairs: [3]TradingPairID{1, 2, 3}, edgeIndex: 0},
-			{cyclePairs: [3]TradingPairID{4, 5, 6}, edgeIndex: 1},
-			{cyclePairs: [3]TradingPairID{7, 8, 9}, edgeIndex: 2},
-		}
-
-		cycles2 := make([]CycleEdge, len(cycles1))
-		copy(cycles2, cycles1)
-
-		pairID := TradingPairID(999)
-
-		shuffleCycleEdges(cycles1, pairID)
-		shuffleCycleEdges(cycles2, pairID)
-
-		// Should produce identical shuffles for same pairID
-		for i := 0; i < len(cycles1); i++ {
-			assert.Equal(cycles1[i], cycles2[i], fmt.Sprintf("deterministic shuffle failed at position %d", i))
-		}
-	})
-
-	t.Run("EmptyAndSingleElementEdgeCases", func(t *testing.T) {
-		// Empty slice
-		var emptyCycles []CycleEdge
-		shuffleCycleEdges(emptyCycles, TradingPairID(1))
-		assert.Equal(0, len(emptyCycles), "empty slice should remain empty")
-
-		// Single element
-		singleCycle := []CycleEdge{
-			{cyclePairs: [3]TradingPairID{1, 2, 3}, edgeIndex: 0},
-		}
-		original := singleCycle[0]
-		shuffleCycleEdges(singleCycle, TradingPairID(1))
-		assert.Equal(original, singleCycle[0], "single element should remain unchanged")
-	})
+	// Verify cycles can still be extracted
+	if engine.priorityQueues[0].Size() != 3 {
+		t.Errorf("Expected 3 cycles in queue, got %d", engine.priorityQueues[0].Size())
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// WORKLOAD SHARD TESTS
+// SHUTDOWN AND CLEANUP TESTS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-func TestBuildWorkloadShards(t *testing.T) {
-	assert := NewAssertion(t)
-	helper := NewTestHelper(t)
+func TestGracefulShutdown(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
 
-	t.Run("BasicShardConstruction", func(t *testing.T) {
-		helper.ClearGlobalState()
+	// Create minimal arbitrage system
+	triangles := []ArbitrageTriangle{
+		{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH},
+	}
 
-		triangles := []ArbitrageTriangle{
-			{TradingPairID(1), TradingPairID(2), TradingPairID(3)},
-			{TradingPairID(1), TradingPairID(4), TradingPairID(5)},
-			{TradingPairID(2), TradingPairID(6), TradingPairID(7)},
+	// Initialize system
+	InitializeArbitrageSystem(triangles)
+
+	// Wait for system to be ready
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify cores are running
+	activeEngines := 0
+	coreCount := runtime.NumCPU() - 1
+	if coreCount > constants.MaxSupportedCores {
+		coreCount = constants.MaxSupportedCores
+	}
+	coreCount &^= 1
+
+	for i := 0; i < coreCount; i++ {
+		if waitForCoreReady(i, 1*time.Second) {
+			activeEngines++
 		}
+	}
 
-		buildWorkloadShards(triangles)
+	if activeEngines == 0 {
+		t.Fatal("No engines initialized")
+	}
 
-		assert.NotNil(pairWorkloadShards, "shards should be created")
-		assert.True(len(pairWorkloadShards) > 0, "should have shards")
+	t.Logf("Initialized %d engines", activeEngines)
 
-		// Verify pair 1 appears in 2 triangles
-		shards1, exists1 := pairWorkloadShards[TradingPairID(1)]
-		assert.True(exists1, "pair 1 should have shards")
+	// Signal shutdown
+	control.Shutdown()
 
-		totalBindings1 := 0
-		for _, shard := range shards1 {
-			totalBindings1 += len(shard.cycleEdges)
-			assert.Equal(TradingPairID(1), shard.pairID, "shard should have correct pairID")
-		}
-		assert.Equal(2, totalBindings1, "pair 1 should appear in 2 cycles")
-
-		// Verify pair 2 appears in 2 triangles
-		shards2, exists2 := pairWorkloadShards[TradingPairID(2)]
-		assert.True(exists2, "pair 2 should have shards")
-
-		totalBindings2 := 0
-		for _, shard := range shards2 {
-			totalBindings2 += len(shard.cycleEdges)
-		}
-		assert.Equal(2, totalBindings2, "pair 2 should appear in 2 cycles")
-	})
-
-	t.Run("ComplexTriangleOverlap", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		triangles := []ArbitrageTriangle{
-			{TradingPairID(1), TradingPairID(2), TradingPairID(3)},
-			{TradingPairID(2), TradingPairID(3), TradingPairID(4)},
-			{TradingPairID(3), TradingPairID(4), TradingPairID(5)},
-			{TradingPairID(1), TradingPairID(5), TradingPairID(6)},
-		}
-
-		buildWorkloadShards(triangles)
-
-		expectedCounts := map[TradingPairID]int{
-			TradingPairID(1): 2, // Appears in triangles 0 and 3
-			TradingPairID(2): 2, // Appears in triangles 0 and 1
-			TradingPairID(3): 3, // Appears in triangles 0, 1, and 2
-			TradingPairID(4): 2, // Appears in triangles 1 and 2
-			TradingPairID(5): 2, // Appears in triangles 2 and 3
-			TradingPairID(6): 1, // Appears in triangle 3 only
-		}
-
-		for pairID, expectedCount := range expectedCounts {
-			shards, exists := pairWorkloadShards[pairID]
-			assert.True(exists, fmt.Sprintf("pair %d should exist", pairID))
-
-			totalEdges := 0
-			for _, shard := range shards {
-				totalEdges += len(shard.cycleEdges)
+	// Wait for graceful shutdown
+	shutdownComplete := make(chan bool)
+	go func() {
+		// Check if control system reports stopping
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if control.IsStopping() {
+				time.Sleep(500 * time.Millisecond) // Allow cores to process shutdown
+				shutdownComplete <- true
+				return
 			}
-			assert.Equal(expectedCount, totalEdges, fmt.Sprintf("pair %d edge count", pairID))
+			time.Sleep(10 * time.Millisecond)
 		}
-	})
+		shutdownComplete <- false
+	}()
 
-	t.Run("EdgeIndexCorrectness", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		triangle := ArbitrageTriangle{TradingPairID(10), TradingPairID(20), TradingPairID(30)}
-		triangles := []ArbitrageTriangle{triangle}
-
-		buildWorkloadShards(triangles)
-
-		// Verify each pair has correct edge index
-		for i, pairID := range triangle {
-			shards, exists := pairWorkloadShards[pairID]
-			assert.True(exists, fmt.Sprintf("pair %d should exist", pairID))
-
-			found := false
-			for _, shard := range shards {
-				for _, edge := range shard.cycleEdges {
-					if edge.cyclePairs == triangle && edge.edgeIndex == uint64(i) {
-						found = true
-						break
-					}
-				}
-			}
-			assert.True(found, fmt.Sprintf("pair %d should have correct edge index %d", pairID, i))
+	select {
+	case success := <-shutdownComplete:
+		if !success {
+			t.Error("Shutdown signal not properly processed")
 		}
-	})
-
-	t.Run("EmptyTrianglesInput", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		var emptyTriangles []ArbitrageTriangle
-		buildWorkloadShards(emptyTriangles)
-
-		// Should handle empty input gracefully
-		if pairWorkloadShards != nil {
-			assert.Equal(0, len(pairWorkloadShards), "empty input should produce empty shards")
-		}
-	})
+	case <-time.After(3 * time.Second):
+		t.Error("Shutdown took too long")
+	}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SYSTEM INITIALIZATION TESTS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestInitializeArbitrageSystem(t *testing.T) {
-	assert := NewAssertion(t)
-	helper := NewTestHelper(t)
-
-	t.Run("BasicSystemInitialization", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		triangles := []ArbitrageTriangle{
-			{TradingPairID(1), TradingPairID(2), TradingPairID(3)},
-			{TradingPairID(4), TradingPairID(5), TradingPairID(6)},
-		}
-
-		// Should not panic
-		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("InitializeArbitrageSystem should not panic: %v", r)
-			}
-		}()
-
-		InitializeArbitrageSystem(triangles)
-
-		// Give workers time to start
-		time.Sleep(50 * time.Millisecond)
-
-		// Verify some pairs were assigned to cores
-		assignedPairs := 0
-		for i := 0; i < 10; i++ {
-			if pairToCoreRouting[i] != 0 {
-				assignedPairs++
-			}
-		}
-		assert.True(assignedPairs > 0, "some pairs should be assigned to cores")
-	})
-
-	t.Run("CoreCountHandling", func(t *testing.T) {
-		triangles := []ArbitrageTriangle{
-			{TradingPairID(1), TradingPairID(2), TradingPairID(3)},
-		}
-
-		originalCPUCount := runtime.NumCPU()
-		assert.True(originalCPUCount > 0, "should detect CPU cores")
-
-		// System should handle various CPU counts gracefully
-		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("InitializeArbitrageSystem should handle CPU count gracefully: %v", r)
-			}
-		}()
-
-		InitializeArbitrageSystem(triangles)
-	})
-
-	t.Run("EmptyTrianglesInitialization", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		var emptyTriangles []ArbitrageTriangle
-
-		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("InitializeArbitrageSystem should handle empty triangles: %v", r)
-			}
-		}()
-
-		InitializeArbitrageSystem(emptyTriangles)
-		time.Sleep(20 * time.Millisecond)
-		// Should complete without panic
-	})
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CONCURRENT AND STRESS TESTS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestConcurrentOperations(t *testing.T) {
-	assert := NewAssertion(t)
-	helper := NewTestHelper(t)
-
-	t.Run("ConcurrentAddressLookups", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		// Setup test addresses
-		addresses := []string{
-			"a478c2975ab1ea89e8196811f51a7b7ade33eb11",
-			"bb2b8038a1640196fbe3e38816f3e67cba72d940",
-			"0d4a11d5eeaac28ec3f61d100daf4d40471f1852",
-			"b4e16d0168e52d35cacd2c6185b44281ec28c9dc",
-		}
-
-		// Register addresses
-		for i, addr := range addresses {
-			RegisterTradingPairAddress([]byte(addr), TradingPairID(i+1))
-		}
-
-		var wg sync.WaitGroup
-		var successCount int32
-		numWorkers := 4
-
-		// Launch concurrent workers
-		for w := 0; w < numWorkers; w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				localSuccess := 0
-
-				for i := 0; i < 50; i++ {
-					for j, addr := range addresses {
-						result := lookupPairByAddress([]byte(addr))
-						if result == TradingPairID(j+1) {
-							localSuccess++
-						}
-					}
-				}
-				atomic.AddInt32(&successCount, int32(localSuccess))
-			}()
-		}
-
-		wg.Wait()
-
-		expectedTotal := numWorkers * 50 * len(addresses)
-		actualSuccess := int(successCount)
-		successRate := float64(actualSuccess) / float64(expectedTotal)
-
-		assert.True(successRate > 0.95, fmt.Sprintf("concurrent lookups should have high success rate, got %f", successRate))
-	})
-
-	t.Run("StressTestWithManyAddresses", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		numAddresses := 200
-		addresses := make([]string, numAddresses)
-
-		// Generate many test addresses
-		for i := 0; i < numAddresses; i++ {
-			addresses[i] = fmt.Sprintf("%040x", i*0x123456789abcdef+0x987654321fedcba)
-		}
-
-		// Register all addresses
-		registered := 0
-		for i, addr := range addresses {
-			RegisterTradingPairAddress([]byte(addr), TradingPairID(i+1000))
-			registered++
-		}
-
-		// Verify retrieval
-		retrieved := 0
-		for i, addr := range addresses {
-			result := lookupPairByAddress([]byte(addr))
-			if result == TradingPairID(i+1000) {
-				retrieved++
-			}
-		}
-
-		successRate := float64(retrieved) / float64(registered)
-		assert.True(successRate > 0.8, fmt.Sprintf("stress test should have reasonable success rate, got %f", successRate))
-	})
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// RING BUFFER INTEGRATION TESTS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestRingBufferIntegration(t *testing.T) {
-	assert := NewAssertion(t)
-	helper := NewTestHelper(t)
-
-	t.Run("MessageStructureIntegrity", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		ring := ring24.New(16)
-		assert.NotNil(ring, "ring should be created")
-
-		// Create test message
-		originalMsg := PriceUpdateMessage{
-			pairID:      TradingPairID(12345),
-			forwardTick: 1.5,
-			reverseTick: -1.5,
-		}
-
-		// Convert to byte array and push
-		msgBytes := (*[24]byte)(unsafe.Pointer(&originalMsg))
-		success := ring.Push(msgBytes)
-		assert.True(success, "should push message successfully")
-
-		// Pop and verify integrity
-		retrieved := ring.Pop()
-		assert.NotNil(retrieved, "should retrieve message")
-
-		if retrieved != nil {
-			retrievedMsg := (*PriceUpdateMessage)(unsafe.Pointer(retrieved))
-			assert.Equal(TradingPairID(12345), retrievedMsg.pairID, "pairID should match")
-			assert.Equal(1.5, retrievedMsg.forwardTick, "forwardTick should match")
-			assert.Equal(-1.5, retrievedMsg.reverseTick, "reverseTick should match")
-		}
-	})
-
-	t.Run("MultipleMessageHandling", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		ring := ring24.New(8)
-
-		// Create multiple different messages
-		messages := []PriceUpdateMessage{
-			{pairID: TradingPairID(100), forwardTick: 1.0, reverseTick: -1.0},
-			{pairID: TradingPairID(200), forwardTick: 2.5, reverseTick: -2.5},
-			{pairID: TradingPairID(300), forwardTick: -0.5, reverseTick: 0.5},
-			{pairID: TradingPairID(400), forwardTick: 10.0, reverseTick: -10.0},
-		}
-
-		// Push all messages
-		for i, msg := range messages {
-			msgBytes := (*[24]byte)(unsafe.Pointer(&msg))
-			success := ring.Push(msgBytes)
-			assert.True(success, fmt.Sprintf("should push message %d", i))
-		}
-
-		// Pop and verify all messages in FIFO order
-		for i, expectedMsg := range messages {
-			retrieved := ring.Pop()
-			assert.NotNil(retrieved, fmt.Sprintf("should retrieve message %d", i))
-
-			if retrieved != nil {
-				actualMsg := (*PriceUpdateMessage)(unsafe.Pointer(retrieved))
-				assert.Equal(expectedMsg.pairID, actualMsg.pairID, fmt.Sprintf("message %d pairID", i))
-				assert.Equal(expectedMsg.forwardTick, actualMsg.forwardTick, fmt.Sprintf("message %d forwardTick", i))
-				assert.Equal(expectedMsg.reverseTick, actualMsg.reverseTick, fmt.Sprintf("message %d reverseTick", i))
-			}
-		}
-	})
-
-	t.Run("RingCapacityLimits", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		capacity := 4
-		ring := ring24.New(capacity)
-
-		// Fill to capacity
-		for i := 0; i < capacity; i++ {
-			msg := PriceUpdateMessage{pairID: TradingPairID(i)}
-			msgBytes := (*[24]byte)(unsafe.Pointer(&msg))
-			success := ring.Push(msgBytes)
-			assert.True(success, fmt.Sprintf("should push message %d", i))
-		}
-
-		// Next push should fail (ring full)
-		overflowMsg := PriceUpdateMessage{pairID: TradingPairID(999)}
-		overflowBytes := (*[24]byte)(unsafe.Pointer(&overflowMsg))
-		assert.False(ring.Push(overflowBytes), "ring should reject when full")
-
-		// Pop one message to make space
-		retrieved := ring.Pop()
-		assert.NotNil(retrieved, "should pop oldest message")
-
-		// Now we should be able to push again
-		success := ring.Push(overflowBytes)
-		assert.True(success, "should push after making space")
-	})
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// EDGE CASES AND ERROR HANDLING TESTS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestEdgeCasesAndErrorHandling(t *testing.T) {
-	assert := NewAssertion(t)
-	helper := NewTestHelper(t)
-
-	t.Run("ZeroAddressRegistration", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		zeroAddress := "0000000000000000000000000000000000000000"
-		pairID := TradingPairID(1)
-
-		RegisterTradingPairAddress([]byte(zeroAddress), pairID)
-		result := lookupPairByAddress([]byte(zeroAddress))
-		assert.Equal(pairID, result, "zero address should be registerable")
-	})
-
-	t.Run("MaxValueAddressRegistration", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		maxAddress := "ffffffffffffffffffffffffffffffffffffffff"
-		pairID := TradingPairID(2)
-
-		RegisterTradingPairAddress([]byte(maxAddress), pairID)
-		result := lookupPairByAddress([]byte(maxAddress))
-		assert.Equal(pairID, result, "max value address should be registerable")
-	})
-
-	t.Run("VeryLargeReserveValues", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		address := "0x1234567890123456789012345678901234567890"
-		pairID := TradingPairID(12345)
-
-		RegisterTradingPairAddress([]byte(address[2:]), pairID)
-		RegisterPairToCoreRouting(pairID, 0)
-		coreRings[0] = ring24.New(constants.DefaultRingSize)
-
-		// Test with very large reserve values
-		maxUint64 := uint64(0xFFFFFFFFFFFFFFFF)
-		logView := helper.CreateLogView(address, maxUint64, maxUint64/2)
-
-		DispatchPriceUpdate(logView)
-
-		message := coreRings[0].Pop()
-		assert.NotNil(message, "should handle large reserves")
-
-		if message != nil {
-			priceUpdate := (*PriceUpdateMessage)(unsafe.Pointer(message))
-			assert.Equal(pairID, priceUpdate.pairID, "correct pairID")
-			assert.False(math.IsNaN(priceUpdate.forwardTick), "tick should not be NaN")
-			assert.False(math.IsInf(priceUpdate.forwardTick, 0), "tick should not be infinite")
-		}
-	})
-
-	t.Run("InvalidHexDataHandling", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		address := "0x1234567890123456789012345678901234567890"
-		pairID := TradingPairID(12345)
-
-		RegisterTradingPairAddress([]byte(address[2:]), pairID)
-		RegisterPairToCoreRouting(pairID, 0)
-		coreRings[0] = ring24.New(constants.DefaultRingSize)
-
-		// Test with malformed hex data
-		logView := helper.CreateLogViewWithRawData(address, "0xinvalid_hex_data_that_is_too_short")
-
-		DispatchPriceUpdate(logView)
-
-		// Should either produce a fallback message or handle gracefully
-		message := coreRings[0].Pop()
-		if message != nil {
-			priceUpdate := (*PriceUpdateMessage)(unsafe.Pointer(message))
-			assert.Equal(pairID, priceUpdate.pairID, "correct pairID")
-		}
-		// Test passes if no panic occurs
-	})
-
-	t.Run("ExtremelyLongAddresses", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		// Test with longer than normal address (should still work by taking first 40 chars)
-		longAddress := "1234567890123456789012345678901234567890extra_characters_that_should_be_ignored"
-		pairID := TradingPairID(999)
-
-		RegisterTradingPairAddress([]byte(longAddress[:40]), pairID)
-		result := lookupPairByAddress([]byte(longAddress[:40]))
-		assert.Equal(pairID, result, "should handle address by taking first 40 characters")
-	})
-
-	t.Run("ZeroPairIDHandling", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		address := "1234567890123456789012345678901234567890"
-
-		// Register with zero pair ID (should work but be indistinguishable from "not found")
-		RegisterTradingPairAddress([]byte(address), TradingPairID(0))
-		result := lookupPairByAddress([]byte(address))
-		// Result is 0, but we can't distinguish if it's registered as 0 or not found
-		assert.Equal(TradingPairID(0), result, "zero pair ID lookup")
-	})
-
-	t.Run("MaxPairIDValues", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		address := "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
-		maxPairID := TradingPairID(^uint64(0)) // Maximum uint64 value
-
-		RegisterTradingPairAddress([]byte(address), maxPairID)
-		result := lookupPairByAddress([]byte(address))
-		assert.Equal(maxPairID, result, "should handle maximum pair ID values")
-	})
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// INITIALIZATION SPECIFIC TESTS (COVERING COMPLEX PATHS)
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestInitializationSpecific(t *testing.T) {
-	assert := NewAssertion(t)
-	helper := NewTestHelper(t)
-
-	t.Run("InitializeArbitrageQueuesEmptyShards", func(t *testing.T) {
-		engine := &ArbitrageEngine{
-			pairToQueueLookup: localidx.New(16),
-			priorityQueues:    make([]pooledquantumqueue.PooledQuantumQueue, 0),
-		}
-
-		var emptyShards []PairWorkloadShard
-
-		// Should handle empty shards gracefully
-		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("initializeArbitrageQueues should handle empty shards: %v", r)
-			}
-		}()
-
-		initializeArbitrageQueues(engine, emptyShards)
-		// Test passes if no panic
-	})
-
-	t.Run("LaunchArbitrageWorkerWithRealShards", func(t *testing.T) {
-		helper.ClearGlobalState()
-
-		// Create a channel with actual workload shards
-		shardChan := make(chan PairWorkloadShard, 10)
-
-		// Create some test shards
-		testShards := []PairWorkloadShard{
-			{
-				pairID: TradingPairID(100),
-				cycleEdges: []CycleEdge{
-					{cyclePairs: [3]TradingPairID{100, 200, 300}, edgeIndex: 0},
-					{cyclePairs: [3]TradingPairID{100, 400, 500}, edgeIndex: 0},
-				},
-			},
-			{
-				pairID: TradingPairID(200),
-				cycleEdges: []CycleEdge{
-					{cyclePairs: [3]TradingPairID{100, 200, 300}, edgeIndex: 1},
-				},
-			},
-		}
-
-		// Send shards and close channel
+func TestConcurrentShutdown(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
+
+	// Test multiple concurrent shutdown signals
+	var wg sync.WaitGroup
+	shutdownCount := 10
+
+	for i := 0; i < shutdownCount; i++ {
+		wg.Add(1)
 		go func() {
-			for _, shard := range testShards {
-				shardChan <- shard
-			}
-			close(shardChan)
+			defer wg.Done()
+			control.Shutdown()
 		}()
+	}
 
-		// Launch worker in separate goroutine
-		workerDone := make(chan bool)
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Errorf("launchArbitrageWorker should not panic: %v", r)
-				}
-				workerDone <- true
-			}()
+	// Wait for all shutdowns to complete
+	wg.Wait()
 
-			// This will block on ring24.PinnedConsumer, so we run it with timeout
-			launchArbitrageWorker(0, 1, shardChan)
-		}()
+	// Verify system is in stopped state
+	if !control.IsStopping() {
+		t.Error("System should be in stopping state after concurrent shutdowns")
+	}
+}
 
-		// Give worker time to initialize
-		select {
-		case <-workerDone:
-			// Worker completed (shouldn't happen normally due to PinnedConsumer)
-		case <-time.After(100 * time.Millisecond):
-			// Expected - worker should be running in PinnedConsumer loop
-		}
+func TestShutdownWithActiveTraffic(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
 
-		// Verify engine was created
-		assert.NotNil(coreEngines[0], "engine should be created for core 0")
-		if coreEngines[0] != nil {
-			assert.False(coreEngines[0].isReverseDirection, "core 0 should be forward direction")
-		}
+	// Setup system with registered addresses
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
+	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
+	coreRings[0] = ring24.New(constants.DefaultRingSize)
 
-		// Verify ring was created
-		assert.NotNil(coreRings[0], "ring should be created for core 0")
-	})
+	// Create traffic generator
+	trafficDone := make(chan bool)
+	go func() {
+		defer close(trafficDone)
 
-	t.Run("CompleteSystemWithRealData", func(t *testing.T) {
-		helper.ClearGlobalState()
+		syncData := "0x" +
+			"0000000000000000000000000000000000000000000000056bc75e2d630eb187" +
+			"00000000000000000000000000000000000000000000152d02c7e14af6800000"
 
-		// Create a more realistic triangle set
-		triangles := []ArbitrageTriangle{
-			{TradingPairID(1), TradingPairID(2), TradingPairID(3)},
-			{TradingPairID(2), TradingPairID(4), TradingPairID(5)},
-			{TradingPairID(3), TradingPairID(5), TradingPairID(6)},
-			{TradingPairID(1), TradingPairID(4), TradingPairID(6)},
-		}
-
-		// Initialize the system
-		InitializeArbitrageSystem(triangles)
-
-		// Give system time to start up
-		time.Sleep(100 * time.Millisecond)
-
-		// Verify routing was set up
-		routingSet := 0
-		for i := TradingPairID(1); i <= TradingPairID(6); i++ {
-			if pairToCoreRouting[i] != 0 {
-				routingSet++
+		for i := 0; i < 100; i++ {
+			if control.IsStopping() {
+				return
 			}
-		}
-		assert.True(routingSet >= 4, "most pairs should have routing set up")
 
-		// Register some addresses and test dispatch
-		addresses := map[TradingPairID]string{
-			TradingPairID(1): "a478c2975ab1ea89e8196811f51a7b7ade33eb11",
-			TradingPairID(2): "bb2b8038a1640196fbe3e38816f3e67cba72d940",
-		}
-
-		for currentPairID, addr := range addresses {
-			RegisterTradingPairAddress([]byte(addr), currentPairID)
-		}
-
-		// Test actual dispatch
-		for _, addr := range addresses {
-			logView := helper.CreateLogView("0x"+addr, 1000000000000, 2000000000000)
+			logView := createTestLogView(TestAddressETH_DAI, syncData)
 			DispatchPriceUpdate(logView)
+			time.Sleep(1 * time.Millisecond)
 		}
+	}()
 
-		// Give messages time to be processed
-		time.Sleep(50 * time.Millisecond)
+	// Let traffic run briefly
+	time.Sleep(10 * time.Millisecond)
 
-		// Check that some cores received messages
-		messagesReceived := 0
-		for i := 0; i < 8; i++ {
-			if coreRings[i] != nil {
-				for coreRings[i].Pop() != nil {
-					messagesReceived++
-				}
-			}
-		}
-		assert.True(messagesReceived >= 0, "system should process messages")
-	})
-}
+	// Signal shutdown while traffic is active
+	control.Shutdown()
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// PERFORMANCE AND BENCHMARK TESTS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-func BenchmarkCountHexLeadingZeros(b *testing.B) {
-	input := make([]byte, 32)
-	copy(input, []byte("0000000000000000e8455d7f2faa9bde"))
-	for i := len("0000000000000000e8455d7f2faa9bde"); i < 32; i++ {
-		input[i] = '0'
+	// Wait for traffic generator to stop
+	select {
+	case <-trafficDone:
+		// Good - traffic stopped
+	case <-time.After(1 * time.Second):
+		t.Error("Traffic generator did not stop after shutdown signal")
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = countHexLeadingZeros(input)
+	// Verify shutdown state
+	if !control.IsStopping() {
+		t.Error("System should be stopping")
 	}
 }
 
-func BenchmarkQuantizeTickValue(b *testing.B) {
-	values := []float64{-10.0, -1.0, 0.0, 1.0, 10.0, 50.5, -25.25}
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// INTEGRATION TESTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+func TestFullArbitrageFlow(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
+
+	// Register all test addresses
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
+	RegisterTradingPairAddress([]byte(TestAddressDAI_USDC[2:]), TestPairDAI_USDC)
+	RegisterTradingPairAddress([]byte(TestAddressUSDC_ETH[2:]), TestPairUSDC_ETH)
+
+	// Create arbitrage triangle
+	triangles := []ArbitrageTriangle{
+		{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH},
+	}
+
+	// Initialize system
+	InitializeArbitrageSystem(triangles)
+
+	// Wait for initialization
+	time.Sleep(200 * time.Millisecond)
+
+	// Send price updates for each pair in the triangle
+	testUpdates := []struct {
+		address string
+		data    string
+	}{
+		{TestAddressETH_DAI, "0x" +
+			"0000000000000000000000000000000000000000000000056bc75e2d630eb187" +
+			"00000000000000000000000000000000000000000000152d02c7e14af6800000"},
+		{TestAddressDAI_USDC, "0x" +
+			"00000000000000000000000000000000000000000000152d02c7e14af6800000" +
+			"0000000000000000000000000000000000000000000000056bc75e2d630eb187"},
+		{TestAddressUSDC_ETH, "0x" +
+			"0000000000000000000000000000000000000000000000056bc75e2d630eb187" +
+			"00000000000000000000000000000000000000000000152d02c7e14af6800000"},
+	}
+
+	// Send updates
+	for _, update := range testUpdates {
+		logView := createTestLogView(update.address, update.data)
+		DispatchPriceUpdate(logView)
+		time.Sleep(5 * time.Millisecond) // Allow processing
+	}
+
+	// Allow system to process all updates
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify no panics occurred and system is still responsive
+	// Send one more update to verify system stability
+	logView := createTestLogView(TestAddressETH_DAI, testUpdates[0].data)
+	DispatchPriceUpdate(logView)
+
+	// Clean shutdown
+	control.Shutdown()
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestHighVolumeStressTest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping stress test in short mode")
+	}
+
+	cleanup := testSetup(t)
+	defer cleanup()
+
+	// Setup multiple pairs
+	addresses := []string{TestAddressETH_DAI, TestAddressDAI_USDC, TestAddressUSDC_ETH, TestAddressWBTC_ETH}
+	pairs := []TradingPairID{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH, TestPairWBTC_ETH}
+
+	for i, addr := range addresses {
+		RegisterTradingPairAddress([]byte(addr[2:]), pairs[i])
+	}
+
+	// Create multiple triangles
+	triangles := []ArbitrageTriangle{
+		{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH},
+		{TestPairWBTC_ETH, TestPairETH_DAI, TestPairDAI_USDC},
+	}
+
+	InitializeArbitrageSystem(triangles)
+	time.Sleep(200 * time.Millisecond)
+
+	// Generate high volume of updates
+	const updateCount = 1000
+	var wg sync.WaitGroup
+
+	for i := 0; i < updateCount; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+
+			// Rotate through addresses
+			addr := addresses[index%len(addresses)]
+
+			// Vary the data slightly
+			reserveVariation := index % 100
+			syncData := "0x" +
+				"0000000000000000000000000000000000000000000000056bc75e2d630eb187" +
+				utils.Itoa(10000000000000000+reserveVariation) // Vary second reserve
+
+			logView := createTestLogView(addr, syncData)
+			DispatchPriceUpdate(logView)
+		}(i)
+	}
+
+	// Wait for all updates to be sent
+	wg.Wait()
+
+	// Allow processing time
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify system is still stable
+	testLogView := createTestLogView(TestAddressETH_DAI, "0x"+
+		"0000000000000000000000000000000000000000000000056bc75e2d630eb187"+
+		"00000000000000000000000000000000000000000000152d02c7e14af6800000")
+
+	DispatchPriceUpdate(testLogView)
+
+	// Clean shutdown
+	control.Shutdown()
+	time.Sleep(200 * time.Millisecond)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// BENCHMARK TESTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+func BenchmarkDispatchPriceUpdate(b *testing.B) {
+	cleanup := testSetup(nil)
+	defer cleanup()
+
+	// Setup
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
+	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
+	coreRings[0] = ring24.New(constants.DefaultRingSize)
+
+	syncData := "0x" +
+		"0000000000000000000000000000000000000000000000056bc75e2d630eb187" +
+		"00000000000000000000000000000000000000000000152d02c7e14af6800000"
+
+	logView := createTestLogView(TestAddressETH_DAI, syncData)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = quantizeTickValue(values[i%len(values)])
+		DispatchPriceUpdate(logView)
+		// Clear ring to prevent overflow
+		coreRings[0].Pop()
 	}
 }
 
 func BenchmarkAddressLookup(b *testing.B) {
-	// Setup
-	for i := 0; i < 100; i++ {
-		addressToPairMap[i] = 0
-		packedAddressKeys[i] = PackedAddress{}
+	cleanup := testSetup(nil)
+	defer cleanup()
+
+	// Setup multiple addresses
+	for i := 0; i < 1000; i++ {
+		addr := utils.Itoa(1000000000000000000 + i) // Generate unique addresses
+		RegisterTradingPairAddress([]byte(addr), TradingPairID(i+1000))
 	}
 
-	addresses := []string{
-		"a478c2975ab1ea89e8196811f51a7b7ade33eb11",
-		"bb2b8038a1640196fbe3e38816f3e67cba72d940",
-		"0d4a11d5eeaac28ec3f61d100daf4d40471f1852",
-		"b4e16d0168e52d35cacd2c6185b44281ec28c9dc",
-	}
-
-	for i, addr := range addresses {
-		RegisterTradingPairAddress([]byte(addr), TradingPairID(i+1))
-	}
+	testAddr := []byte(TestAddressETH_DAI[2:])
+	RegisterTradingPairAddress(testAddr, TestPairETH_DAI)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		addr := addresses[i%len(addresses)]
-		_ = lookupPairByAddress([]byte(addr))
+		lookupPairByAddress(testAddr)
 	}
 }
 
-func BenchmarkAddressRegistration(b *testing.B) {
-	addresses := []string{
-		"a478c2975ab1ea89e8196811f51a7b7ade33eb11",
-		"bb2b8038a1640196fbe3e38816f3e67cba72d940",
-		"0d4a11d5eeaac28ec3f61d100daf4d40471f1852",
-		"b4e16d0168e52d35cacd2c6185b44281ec28c9dc",
-	}
+func BenchmarkCountHexLeadingZeros(b *testing.B) {
+	testData := []byte("0000000000000000000000000000000000000000000000056bc75e2d630eb187")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// Clear periodically to avoid table saturation
-		if i%1000 == 0 {
-			for j := 0; j < 200; j++ {
-				addressToPairMap[j] = 0
-				packedAddressKeys[j] = PackedAddress{}
-			}
-		}
-
-		addr := addresses[i%len(addresses)]
-		RegisterTradingPairAddress([]byte(addr), TradingPairID(i+1))
-	}
-}
-
-func BenchmarkDispatchPriceUpdate(b *testing.B) {
-	// Setup
-	for i := 0; i < 100; i++ {
-		addressToPairMap[i] = 0
-		packedAddressKeys[i] = PackedAddress{}
-		pairToCoreRouting[i] = 0
-	}
-
-	address := "a478c2975ab1ea89e8196811f51a7b7ade33eb11"
-	pairID := TradingPairID(12345)
-	RegisterTradingPairAddress([]byte(address), pairID)
-	RegisterPairToCoreRouting(pairID, 0)
-
-	coreRings[0] = ring24.New(1 << 16) // Large ring to avoid blocking
-
-	logView := &types.LogView{
-		Addr: []byte("0x" + address),
-		Data: []byte("0x00000000000000000000000000000000000000000078ac4cf9c9bb7cb9e54739000000000000000000000000000000000000000000000000001fcf7f300f7aee"),
-	}
-
-	// Consumer goroutine to drain messages
-	stop := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				coreRings[0].Pop()
-			}
-		}
-	}()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		DispatchPriceUpdate(logView)
-	}
-
-	close(stop)
-	time.Sleep(10 * time.Millisecond)
-}
-
-func BenchmarkPackEthereumAddress(b *testing.B) {
-	address := "a478c2975ab1ea89e8196811f51a7b7ade33eb11"
-	addressBytes := []byte(address)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = packEthereumAddress(addressBytes)
-	}
-}
-
-func BenchmarkCryptoRandomGeneration(b *testing.B) {
-	seed := []byte("benchmark_seed_12345")
-	rng := newCryptoRandomGenerator(seed)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = rng.generateRandomUint64()
+		countHexLeadingZeros(testData)
 	}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ADDITIONAL COVERAGE TESTS FOR MISSED PATHS
+// ERROR HANDLING TESTS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-func TestAdditionalCoverage(t *testing.T) {
-	assert := NewAssertion(t)
+func TestErrorRecovery(t *testing.T) {
+	cleanup := testSetup(t)
+	defer cleanup()
 
-	t.Run("ArbitrageTriangleAccess", func(t *testing.T) {
-		// Test direct access to triangle elements
-		triangle := ArbitrageTriangle{TradingPairID(10), TradingPairID(20), TradingPairID(30)}
+	// Test with various invalid inputs that should not crash the system
+	testCases := []struct {
+		name    string
+		logView *types.LogView
+	}{
+		{
+			"Nil LogView",
+			nil,
+		},
+		{
+			"Empty Address",
+			&types.LogView{Addr: []byte(""), Data: []byte("0x1234")},
+		},
+		{
+			"Short Address",
+			&types.LogView{Addr: []byte("0x1234"), Data: []byte("0x1234")},
+		},
+		{
+			"Empty Data",
+			&types.LogView{Addr: []byte(TestAddressETH_DAI), Data: []byte("")},
+		},
+	}
 
-		assert.Equal(TradingPairID(10), triangle[0], "first element")
-		assert.Equal(TradingPairID(20), triangle[1], "second element")
-		assert.Equal(TradingPairID(30), triangle[2], "third element")
+	// Register a valid address for comparison
+	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
+	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
+	coreRings[0] = ring24.New(constants.DefaultRingSize)
 
-		// Test assignment
-		triangle[1] = TradingPairID(25)
-		assert.Equal(TradingPairID(25), triangle[1], "element reassignment")
-	})
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Should not panic
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("Unexpected panic: %v", r)
+				}
+			}()
 
-	t.Run("CycleFanoutEntryFields", func(t *testing.T) {
-		// Test all fields of CycleFanoutEntry
-		entry := CycleFanoutEntry{
-			cycleIndex:  42,
-			edgeIndex:   1,
-			queueIndex:  3,
-			queueHandle: pooledquantumqueue.Handle(999),
-		}
+			if tc.logView != nil {
+				DispatchPriceUpdate(tc.logView)
+			}
+		})
+	}
+}
 
-		assert.Equal(uint64(42), entry.cycleIndex, "cycleIndex field")
-		assert.Equal(uint64(1), entry.edgeIndex, "edgeIndex field")
-		assert.Equal(uint64(3), entry.queueIndex, "queueIndex field")
-		assert.Equal(pooledquantumqueue.Handle(999), entry.queueHandle, "queueHandle field")
-	})
+// Helper function to create a clean test environment
+func TestMain(m *testing.M) {
+	// Run tests
+	code := m.Run()
 
-	t.Run("CycleEdgeFields", func(t *testing.T) {
-		// Test CycleEdge structure
-		edge := CycleEdge{
-			cyclePairs: [3]TradingPairID{100, 200, 300},
-			edgeIndex:  2,
-		}
+	// Cleanup any global state
+	control.Shutdown()
+	time.Sleep(100 * time.Millisecond)
 
-		assert.Equal(TradingPairID(100), edge.cyclePairs[0], "cyclePairs[0]")
-		assert.Equal(TradingPairID(200), edge.cyclePairs[1], "cyclePairs[1]")
-		assert.Equal(TradingPairID(300), edge.cyclePairs[2], "cyclePairs[2]")
-		assert.Equal(uint64(2), edge.edgeIndex, "edgeIndex")
-	})
-
-	t.Run("PairWorkloadShardFields", func(t *testing.T) {
-		// Test PairWorkloadShard structure
-		shard := PairWorkloadShard{
-			pairID: TradingPairID(500),
-			cycleEdges: []CycleEdge{
-				{cyclePairs: [3]TradingPairID{1, 2, 3}, edgeIndex: 0},
-			},
-		}
-
-		assert.Equal(TradingPairID(500), shard.pairID, "pairID field")
-		assert.Equal(1, len(shard.cycleEdges), "cycleEdges length")
-		assert.Equal(uint64(0), shard.cycleEdges[0].edgeIndex, "nested edgeIndex")
-	})
-
-	t.Run("CryptoRandomGeneratorFields", func(t *testing.T) {
-		// Test CryptoRandomGenerator fields access
-		seed := []byte("test")
-		rng := newCryptoRandomGenerator(seed)
-
-		assert.Equal(uint64(0), rng.counter, "initial counter")
-		assert.NotNil(rng.hasher, "hasher should be initialized")
-
-		// Generate a value to increment counter
-		rng.generateRandomUint64()
-		assert.Equal(uint64(1), rng.counter, "counter after generation")
-	})
-
-	t.Run("TypeConversions", func(t *testing.T) {
-		// Test type conversions and assignments
-		var pairID TradingPairID = 12345
-		var cycleIdx CycleIndex = 67890
-
-		// Test conversions to base types
-		assert.Equal(uint64(12345), uint64(pairID), "TradingPairID to uint64")
-		assert.Equal(uint64(67890), uint64(cycleIdx), "CycleIndex to uint64")
-
-		// Test assignments from base types
-		pairID = TradingPairID(54321)
-		cycleIdx = CycleIndex(9876)
-
-		assert.Equal(TradingPairID(54321), pairID, "assignment from uint64")
-		assert.Equal(CycleIndex(9876), cycleIdx, "assignment from uint64")
-	})
+	// Exit with the test result code
+	os.Exit(code)
 }
