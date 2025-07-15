@@ -1017,10 +1017,10 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 				// Append to the pre-sized fanout table for this queue
 				engine.cycleFanoutTable[queueIndex] = append(engine.cycleFanoutTable[queueIndex],
 					CycleFanoutEntry{
-						cycleIndex:  uint64(cycleIndex), // Which cycle to update
-						edgeIndex:   edgeIdx,            // Which position in the cycle
-						queueIndex:  uint64(queueIndex), // Which queue contains the cycle
 						queueHandle: handle,             // Direct handle for efficient updates
+						cycleIndex:  uint64(cycleIndex), // Which cycle to update
+						queueIndex:  uint64(queueIndex), // Which queue contains the cycle
+						edgeIndex:   edgeIdx,            // Which position in the cycle
 					})
 			}
 		}
