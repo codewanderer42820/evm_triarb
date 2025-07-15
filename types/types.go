@@ -111,5 +111,5 @@ type LogView struct {
 	// Cache line padding to prevent false sharing between LogView instances
 	// This ensures each LogView occupies exactly 3 cache lines (192 bytes)
 	// Critical for performance when multiple cores process events in parallel
-	_ [40]byte
+	_ [32]byte
 }
