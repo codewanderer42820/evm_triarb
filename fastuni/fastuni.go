@@ -29,6 +29,8 @@ import (
 // ERROR DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+//go:notinheap
+//go:align 64
 var (
 	// ErrZeroValue indicates an invalid zero input where positive values are required.
 	// This typically occurs when calculating logarithms of token reserves.
