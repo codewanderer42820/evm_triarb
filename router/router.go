@@ -984,6 +984,12 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		queueIdx++
 	}
 
+	// Clean up temporary maps immediately after use
+	allPairs = nil
+	pairsWithQueues = nil
+	runtime.GC()
+	runtime.GC()
+
 	// Process workload shards and create cycles
 	for _, shard := range workloadShards {
 		// Get queue index for this pair (guaranteed to exist)
@@ -1088,6 +1094,8 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 
 	// Release the workload shards now that initialization is complete
 	allShards = nil
+	runtime.GC()
+	runtime.GC()
 
 	// Integrate with the control system for monitoring and shutdown coordination
 	stopFlag, hotFlag := control.Flags()
