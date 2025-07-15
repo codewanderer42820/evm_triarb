@@ -748,9 +748,6 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 
 	// Exact sizing - no runtime resizing needed
 	arenaSize := uint64(totalCycles)
-	if arenaSize < 1024 {
-		arenaSize = 1024
-	}
 
 	// PHASE 2: ALLOCATE SINGLE SHARED ARENA FOR ALL QUEUES
 	engine.sharedArena = make([]pooledquantumqueue.Entry, arenaSize)
