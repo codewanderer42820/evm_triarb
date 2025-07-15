@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	rtdebug "runtime/debug"
 	"strings"
 	"syscall"
 
@@ -64,9 +65,8 @@ func init() {
 	debug.DropMessage("GC_COMPLETE", "Forced garbage collection completed")
 
 	// Disable GC for maximum performance during operation
-	// rtdebug "runtime/debug"
-	// rtdebug.SetGCPercent(-1)
-	// debug.DropMessage("GC_DISABLED", "Garbage collector disabled for production operation")
+	rtdebug.SetGCPercent(-1)
+	debug.DropMessage("GC_DISABLED", "Garbage collector disabled for production operation")
 
 	debug.DropMessage("INIT_COMPLETE", "System ready")
 }
