@@ -80,10 +80,10 @@ type ArbitrageCycleState struct {
 //go:notinheap
 //go:align 32
 type CycleFanoutEntry struct {
-	cycleIndex  uint64 // 8B - ULTRA-HOT: First access for cycle lookup
-	edgeIndex   uint64 // 8B - ULTRA-HOT: Second access for tick update
-	queueIndex  uint64 // 8B - HOT: Third access for queue lookup
-	queueHandle uint64 // 8B - HOT: Fourth access for queue operations (using uint64 for 8B alignment)
+	cycleIndex  uint64                    // 8B - ULTRA-HOT: First access for cycle lookup
+	edgeIndex   uint64                    // 8B - ULTRA-HOT: Second access for tick update
+	queueIndex  uint64                    // 8B - HOT: Third access for queue lookup
+	queueHandle pooledquantumqueue.Handle // 8B - HOT: Fourth access for queue operations
 }
 
 // ExtractedCycle provides temporary storage for cycles extracted during profitability analysis.
@@ -91,10 +91,10 @@ type CycleFanoutEntry struct {
 //go:notinheap
 //go:align 32
 type ExtractedCycle struct {
-	cycleIndex   uint64  // 8B - ULTRA-HOT: First access for cycle lookup
-	originalTick int64   // 8B - HOT: Second access for reinsertion priority
-	queueHandle  uint64  // 8B - HOT: Third access for queue operations (using uint64 for 8B alignment)
-	_            [8]byte // 8B - PADDING: 32-byte boundary alignment
+	cycleIndex   CycleIndex                // 8B - ULTRA-HOT: First access for cycle lookup
+	originalTick int64                     // 8B - HOT: Second access for reinsertion priority
+	queueHandle  pooledquantumqueue.Handle // 8B - HOT: Third access for queue operations
+	_            [8]byte                   // 8B - PADDING: 32-byte boundary alignment
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -124,9 +124,9 @@ type ArbitrageEngine struct {
 	_                [16]byte             // 16B - PADDING: Alignment optimization
 
 	// CACHE LINE N: COLD - Initialization only
-	nextHandle      uint64          // 8B - COLD: Handle allocation (init only)
-	shutdownChannel <-chan struct{} // 8B - COLD: Shutdown coordination
-	_               [48]byte        // 48B - PADDING: Alignment optimization
+	nextHandle      pooledquantumqueue.Handle // 8B - COLD: Handle allocation (init only)
+	shutdownChannel <-chan struct{}           // 8B - COLD: Shutdown coordination
+	_               [48]byte                  // 48B - PADDING: Alignment optimization
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -209,7 +209,7 @@ var (
 func (engine *ArbitrageEngine) allocateQueueHandle() pooledquantumqueue.Handle {
 	handle := engine.nextHandle
 	engine.nextHandle++
-	return pooledquantumqueue.Handle(handle)
+	return handle
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -441,9 +441,9 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 
 		// TEMPORARY CYCLE STORAGE
 		engine.extractedCycles[cycleCount] = ExtractedCycle{
-			cycleIndex:   uint64(cycleIndex),
+			cycleIndex:   cycleIndex,
 			originalTick: queueTick,
-			queueHandle:  uint64(handle),
+			queueHandle:  handle,
 		}
 		cycleCount++
 
@@ -453,7 +453,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 	// STAGE 4: CYCLE REINSERTION
 	for i := 0; i < cycleCount; i++ {
 		cycle := &engine.extractedCycles[i]
-		queue.Push(cycle.originalTick, pooledquantumqueue.Handle(cycle.queueHandle), cycle.cycleIndex)
+		queue.Push(cycle.originalTick, cycle.queueHandle, uint64(cycle.cycleIndex))
 	}
 
 	// STAGE 5: FANOUT UPDATE PROPAGATION
@@ -467,7 +467,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 		// PRIORITY RECALCULATION
 		tickSum := cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
 		newPriority := int64((tickSum + tickClampingBound) * quantizationScale)
-		engine.priorityQueues[fanoutEntry.queueIndex].MoveTick(pooledquantumqueue.Handle(fanoutEntry.queueHandle), newPriority)
+		engine.priorityQueues[fanoutEntry.queueIndex].MoveTick(fanoutEntry.queueHandle, newPriority)
 	}
 }
 
@@ -807,7 +807,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 						cycleIndex:  uint64(cycleIndex),
 						edgeIndex:   edgeIdx,
 						queueIndex:  uint64(queueIndex),
-						queueHandle: uint64(handle),
+						queueHandle: handle,
 					})
 			}
 		}
