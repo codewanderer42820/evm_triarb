@@ -103,10 +103,10 @@ type ArbitrageCycleState struct {
 //go:notinheap
 //go:align 32
 type CycleFanoutEntry struct {
-	cycleIndex  uint64                    // 8B - Points to the specific arbitrage cycle that needs updating
-	edgeIndex   uint64                    // 8B - Which position (0, 1, or 2) within the cycle this pair occupies
-	queueIndex  uint64                    // 8B - Which priority queue contains this cycle
 	queueHandle pooledquantumqueue.Handle // 8B - Direct access to the cycle's position in the priority queue
+	cycleIndex  uint64                    // 8B - Points to the specific arbitrage cycle that needs updating
+	queueIndex  uint64                    // 8B - Which priority queue contains this cycle
+	edgeIndex   uint64                    // 8B - Which position (0, 1, or 2) within the cycle this pair occupies
 }
 
 // ExtractedCycle provides temporary storage for cycles extracted during profitability analysis.
