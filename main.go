@@ -281,7 +281,7 @@ func loadPoolsFromDatabase(dbPath string) error {
 		count++
 
 		// Periodic progress updates for large databases
-		if count%10000 == 0 {
+		if count%100000 == 0 {
 			progressStr := utils.Itoa(count)
 			debug.DropMessage("POOL_PROGRESS", progressStr+" pools loaded")
 		}
