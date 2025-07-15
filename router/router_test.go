@@ -496,7 +496,7 @@ func TestArbitrageEngineInitialization(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Verify engines were created
-	coreCount := runtime.NumCPU() - 1
+	coreCount := runtime.NumCPU() - 4 // Changed to match router.go which reserves 4 cores
 	if coreCount > constants.MaxSupportedCores {
 		coreCount = constants.MaxSupportedCores
 	}
@@ -731,7 +731,7 @@ func TestGracefulShutdown(t *testing.T) {
 
 	// Verify cores are running
 	activeEngines := 0
-	coreCount := runtime.NumCPU() - 1
+	coreCount := runtime.NumCPU() - 4 // Changed to match router.go which reserves 4 cores
 	if coreCount > constants.MaxSupportedCores {
 		coreCount = constants.MaxSupportedCores
 	}
