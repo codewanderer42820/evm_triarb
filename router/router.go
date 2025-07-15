@@ -1017,28 +1017,44 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			queue.Push(initPriority, handle, uint64(cycleIndex))
 
 			// Create fanout entries for the OTHER pairs in the triangle
-			for edgeIdx := uint64(0); edgeIdx < 3; edgeIdx++ {
-				if edgeIdx == cycleEdge.edgeIndex {
-					continue // Skip the main pair
-				}
+			otherEdge1 := (cycleEdge.edgeIndex + 1) % 3
+			otherEdge2 := (cycleEdge.edgeIndex + 2) % 3
 
-				otherPairID := cycleEdge.cyclePairs[edgeIdx]
-				otherFanoutIndex, exists := engine.pairToFanoutIndex.Get(uint32(otherPairID))
-				if !exists {
-					panic("Fanout index should exist for all pairs")
-				}
-
-				// Add fanout entry to the OTHER pair's fanout table
-				engine.cycleFanoutTable[otherFanoutIndex] = append(
-					engine.cycleFanoutTable[otherFanoutIndex],
-					CycleFanoutEntry{
-						queueHandle: handle,
-						cycleIndex:  uint64(cycleIndex),
-						queueIndex:  uint64(queueIndex), // Queue where cycle lives
-						edgeIndex:   edgeIdx,            // Position in the cycle
-					})
-				totalFanoutEntries++
+			// Process first other pair
+			otherPairID1 := cycleEdge.cyclePairs[otherEdge1]
+			otherFanoutIndex1, exists := engine.pairToFanoutIndex.Get(uint32(otherPairID1))
+			if !exists {
+				panic("Fanout index should exist for all pairs")
 			}
+
+			// Add fanout entry to the first OTHER pair's fanout table
+			engine.cycleFanoutTable[otherFanoutIndex1] = append(
+				engine.cycleFanoutTable[otherFanoutIndex1],
+				CycleFanoutEntry{
+					queueHandle: handle,
+					cycleIndex:  uint64(cycleIndex),
+					queueIndex:  uint64(queueIndex), // Queue where cycle lives
+					edgeIndex:   otherEdge1,         // Position in the cycle
+				})
+
+			// Process second other pair
+			otherPairID2 := cycleEdge.cyclePairs[otherEdge2]
+			otherFanoutIndex2, exists := engine.pairToFanoutIndex.Get(uint32(otherPairID2))
+			if !exists {
+				panic("Fanout index should exist for all pairs")
+			}
+
+			// Add fanout entry to the second OTHER pair's fanout table
+			engine.cycleFanoutTable[otherFanoutIndex2] = append(
+				engine.cycleFanoutTable[otherFanoutIndex2],
+				CycleFanoutEntry{
+					queueHandle: handle,
+					cycleIndex:  uint64(cycleIndex),
+					queueIndex:  uint64(queueIndex), // Queue where cycle lives
+					edgeIndex:   otherEdge2,         // Position in the cycle
+				})
+
+			totalFanoutEntries += 2
 		}
 	}
 
