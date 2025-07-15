@@ -1015,7 +1015,11 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			engine.cycleStates = append(engine.cycleStates, cycleState)
 			cycleIndex := CycleIndex(len(engine.cycleStates) - 1)
 
-			// Generate initial priority
+			// Generate initial priority with randomization to prevent queue clustering
+			// Although tick values are initialized to max unprofitable (128 total),
+			// we use arbitrary priority values to ensure cycles are distributed across
+			// the queue's hierarchical bitmap structure. This prevents initialization
+			// hotspots and ensures the O(1) operations work efficiently from the start.
 			cycleHash := utils.Mix64(uint64(cycleIndex))
 			randBits := cycleHash & 0xFFFF
 			initPriority := int64(196608 + randBits)
