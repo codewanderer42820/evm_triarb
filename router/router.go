@@ -101,7 +101,7 @@ type ArbitrageCycleState struct {
 // This structure maps each price update to the specific cycles and queues that need updating.
 //
 //go:notinheap
-//go:align 32
+//go:align 8
 type CycleFanoutEntry struct {
 	queueHandle pooledquantumqueue.Handle // 8B - Direct access to the cycle's position in the priority queue
 	cycleIndex  uint64                    // 8B - Points to the specific arbitrage cycle that needs updating
@@ -114,7 +114,7 @@ type CycleFanoutEntry struct {
 // priority queues. This structure remembers their original state for reinsertion.
 //
 //go:notinheap
-//go:align 32
+//go:align 8
 type ExtractedCycle struct {
 	cycleIndex   CycleIndex                // 8B - Which cycle was extracted from the queue
 	originalTick int64                     // 8B - The cycle's priority before extraction
@@ -166,7 +166,7 @@ type ArbitrageEngine struct {
 // for efficient comparison and hashing operations.
 //
 //go:notinheap
-//go:align 32
+//go:align 8
 type PackedAddress struct {
 	words [3]uint64 // 24B - 160-bit Ethereum address as three 64-bit values
 	_     [8]byte   // 8B - Padding for cache line optimization
