@@ -31,7 +31,6 @@ import "main/constants"
 //go:notinheap
 //go:align 64
 var (
-
 	// VIRTUAL TIMING STATE (SYSCALL-FREE PERFORMANCE MONITORING)
 	// Approximates elapsed time using CPU poll counts instead of time.Now() calls.
 	// Trades timing precision for performance - acceptable for cooldown logic.
