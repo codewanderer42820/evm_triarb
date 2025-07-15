@@ -130,14 +130,14 @@ const (
 const (
 	// WsDialAddr specifies the WebSocket endpoint for Polygon mainnet via Infura.
 	// Port 443 ensures compatibility with restrictive firewall configurations.
-	WsDialAddr = "polygon-mainnet.infura.io:443"
+	WsDialAddr = "mainnet.infura.io:443"
 
 	// WsPath contains the WebSocket path including the Infura project ID.
 	// This should be configured per deployment with appropriate credentials.
 	WsPath = "/ws/v3/a2a3139d2ab24d59bed2dc3643664126"
 
 	// WsHost identifies the target host for WebSocket handshake headers.
-	WsHost = "polygon-mainnet.infura.io"
+	WsHost = "mainnet.infura.io"
 
 	// MaxFrameSize limits individual WebSocket frame size to 1MB.
 	// Sufficient for event batching while preventing memory exhaustion.
