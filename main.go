@@ -64,6 +64,7 @@ func init() {
 	debug.DropMessage("GC_COMPLETE", "Forced garbage collection completed")
 
 	// Disable GC for maximum performance during operation
+	// rtdebug "runtime/debug"
 	// rtdebug.SetGCPercent(-1)
 	// debug.DropMessage("GC_DISABLED", "Garbage collector disabled for production operation")
 
