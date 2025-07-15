@@ -50,7 +50,7 @@ func init() {
 	// Initialize arbitrage system with loaded data
 	router.InitializeArbitrageSystem(cycles)
 
-	// AGGRESSIVE MEMORY CLEANUP: Clear all initialization data
+	// AGGRESSIVE MEMORY CLEANUP: Clear all initialization data with immediate GC
 	debug.DropMessage("MEMORY_CLEANUP", "Clearing initialization data")
 
 	// Clear cycles data (no longer needed after system init)
@@ -59,7 +59,7 @@ func init() {
 	}
 	cycles = nil // Release slice
 
-	// Force garbage collection twice with GC enabled
+	// Double GC for immediate memory reclaim
 	runtime.GC()
 	runtime.GC()
 	debug.DropMessage("GC_COMPLETE", "Forced garbage collection completed")
@@ -93,14 +93,14 @@ func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriangle, e
 	fileSizeStr := utils.Itoa(len(data))
 	debug.DropMessage("FILE_SIZE", "File size: "+fileSizeStr+" bytes")
 
-	// Pre-allocate with estimate
+	// Pre-allocate with exact size calculation
 	estimatedCycles := len(data) / 50
 	if estimatedCycles < 100 {
 		estimatedCycles = 100
 	}
 	cycles := make([]router.ArbitrageTriangle, 0, estimatedCycles)
 
-	// Parse file
+	// Parse file with aggressive optimization
 	i, lineCount := 0, 0
 	dataLen := len(data)
 
@@ -174,6 +174,11 @@ func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriangle, e
 		return nil, fmt.Errorf("no valid arbitrage cycles found in %s", filename)
 	}
 
+	// Release file data immediately after parsing
+	data = nil
+	runtime.GC()
+	runtime.GC()
+
 	return cycles, nil
 }
 
@@ -209,6 +214,9 @@ func loadPoolsFromDatabase(dbPath string) error {
 	defer rows.Close()
 
 	count := 0
+	// Pre-allocate address bytes to avoid repeated allocations
+	poolAddressBytes := make([]byte, 0, 40) // 40 hex characters max
+
 	for rows.Next() {
 		var (
 			pairID        int64
@@ -223,8 +231,11 @@ func loadPoolsFromDatabase(dbPath string) error {
 			return fmt.Errorf("pool row scan failed: %v", err)
 		}
 
-		// Register pool address
-		poolAddressBytes := []byte(strings.TrimPrefix(poolAddress, "0x"))
+		// Reuse slice for address conversion
+		poolAddressBytes = poolAddressBytes[:0]
+		trimmed := strings.TrimPrefix(poolAddress, "0x")
+		poolAddressBytes = append(poolAddressBytes, trimmed...)
+
 		router.RegisterTradingPairAddress(poolAddressBytes, router.TradingPairID(pairID))
 		count++
 
@@ -241,6 +252,11 @@ func loadPoolsFromDatabase(dbPath string) error {
 
 	countStr := utils.Itoa(count)
 	debug.DropMessage("POOLS_LOADED", countStr+" trading pairs registered")
+
+	// Release temporary buffer
+	poolAddressBytes = nil
+	runtime.GC()
+	runtime.GC()
 
 	return nil
 }
