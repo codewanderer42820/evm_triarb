@@ -1112,7 +1112,7 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 	// Determine the optimal number of CPU cores to use for arbitrage processing
 	// Reserve one core for system tasks and other processes
-	coreCount := runtime.NumCPU() - 1
+	coreCount := runtime.NumCPU() - 4
 	if coreCount > constants.MaxSupportedCores {
 		coreCount = constants.MaxSupportedCores // Respect system limits
 	}
