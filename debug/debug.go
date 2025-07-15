@@ -1,12 +1,20 @@
-// debug.go — Zero-Allocation Diagnostic Logging for High-Performance Systems
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 📊 ZERO-ALLOCATION DIAGNOSTICS
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Arbitrage Detection System
+// Component: Performance-Safe Logging
 //
-// This module provides logging utilities designed for use in performance-critical paths
-// where heap allocations must be avoided. Implements error and message logging with
-// guaranteed zero allocations and minimal overhead suitable for hot path usage.
+// Description:
+//   Diagnostic logging designed for hot paths where heap allocations are forbidden. Direct
+//   syscall writing with guaranteed zero allocations for production debugging.
 //
-// Architecture: Direct system call writing, no buffering, no string concatenation
-// Memory Model: Stack-only operation, no heap allocations, no temporary objects
-// Design Goals: Diagnostic capability without performance degradation
+// Performance Characteristics:
+//   - Allocations: Zero per log call
+//   - Overhead: Direct syscall only
+//   - Memory: Stack-only operation
+//   - Safety: Hot-path compatible
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package debug
 

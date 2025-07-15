@@ -1,13 +1,21 @@
-// main.go — High-Performance Arbitrage Detection System Entry Point
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 🚀 HIGH-PERFORMANCE ARBITRAGE DETECTION SYSTEM
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Arbitrage Detection System
+// Component: Main Entry Point & Orchestration
 //
-// This application orchestrates a complete arbitrage detection pipeline for Ethereum DEX trading,
-// processing WebSocket event streams with nanosecond-scale latency. The system loads arbitrage
-// cycles and trading pair mappings at startup, then maintains persistent connections to Ethereum
-// nodes for real-time event processing.
+// Description:
+//   Orchestrates a complete arbitrage detection pipeline for Ethereum DEX trading, processing
+//   WebSocket event streams with nanosecond-scale latency. Loads arbitrage cycles and trading
+//   pair mappings at startup, then maintains persistent connections for real-time processing.
 //
-// Architecture: Database-backed initialization, WebSocket event streaming, automatic recovery
-// Performance: Zero-allocation hot paths, disabled GC during operation, TCP/TLS optimizations
-// Fault tolerance: Automatic reconnection, graceful error handling, continuous operation
+// Performance Characteristics:
+//   - Startup: Database-backed initialization with aggressive cleanup
+//   - Runtime: Zero-allocation hot paths, disabled GC
+//   - Networking: TCP/TLS optimizations for minimal latency
+//   - Recovery: Automatic reconnection on failures
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package main
 

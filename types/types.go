@@ -1,15 +1,20 @@
-// types.go — Zero-copy event structure for nanosecond-scale processing
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 📦 ZERO-COPY EVENT STRUCTURES
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Arbitrage Detection System
+// Component: Core Data Types
 //
-// This package defines the core data structure for Ethereum event processing
-// in the arbitrage detection system. The LogView type provides zero-copy
-// access to WebSocket buffer data, eliminating allocation overhead in the
-// critical event processing path.
+// Description:
+//   Defines zero-copy data structures for Ethereum event processing. All fields reference the
+//   WebSocket buffer directly, eliminating allocation overhead in the critical event path.
 //
-// Design principles:
-//   - Zero allocations: All fields reference the WebSocket buffer directly
-//   - Cache alignment: 64-byte alignment prevents false sharing
-//   - Lifetime safety: Clear ownership model prevents use-after-free bugs
-//   - Hot/cold separation: Frequently accessed fields in first cache line
+// Performance Characteristics:
+//   - Allocations: Zero per event
+//   - Cache alignment: 64-byte boundaries
+//   - Memory safety: Clear lifetime rules
+//   - Access pattern: Hot/cold field separation
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package types
 

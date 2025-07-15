@@ -1,13 +1,21 @@
-// utils_test.go — Comprehensive Validation Suite for SIMD-Optimized Utilities
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 🧪 COMPREHENSIVE TEST SUITE: SIMD-OPTIMIZED UTILITIES
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Arbitrage Detection System
+// Component: Utilities Test Suite
 //
-// This test suite validates the complete utility library through exhaustive correctness
-// testing, performance benchmarks, edge case validation, and race condition detection.
-// Includes SIMD operation verification, IEEE 754 compliance testing, memory safety
-// validation, and cross-platform compatibility checks.
+// Description:
+//   Validates the complete utility library through exhaustive correctness testing, performance
+//   benchmarks, edge case validation, and race condition detection. Includes SIMD operation
+//   verification, IEEE 754 compliance testing, and cross-platform compatibility checks.
 //
-// Coverage: Memory operations, type conversions, hex parsing, JSON utilities, hash mixing
-// Benchmarks: SIMD throughput, allocation profiling, cache efficiency measurements
-// Validation: Bit-exact verification, boundary conditions, concurrent safety
+// Test Coverage:
+//   - Unit tests: Memory operations, type conversions, hex parsing, hash mixing
+//   - Integration tests: JSON utilities, IEEE 754 compliance
+//   - Benchmarks: SIMD throughput, allocation profiling, cache efficiency
+//   - Edge cases: Bit-exact verification, boundary conditions, concurrent safety
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package utils
 

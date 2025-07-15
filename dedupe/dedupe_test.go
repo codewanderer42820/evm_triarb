@@ -1,18 +1,21 @@
-// dedupe_test.go - Comprehensive test suite for high-performance deduplication cache
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 🧪 COMPREHENSIVE TEST SUITE: DEDUPLICATION CACHE
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Arbitrage Detection System
+// Component: Deduplication Engine Test Suite
 //
-// This test suite validates the correctness and performance of the deduplication system
-// used for preventing duplicate processing of Ethereum events. Tests cover cache behavior,
-// collision handling, staleness detection, and performance characteristics.
+// Description:
+//   Validates correctness and performance of the deduplication system for preventing duplicate
+//   processing of Ethereum events. Tests cover cache behavior, collision handling, staleness
+//   detection, and blockchain reorganization scenarios.
 //
-// Test categories:
-// - Unit tests: Core functionality, edge cases, boundary conditions
-// - Integration tests: Realistic blockchain scenarios, reorganization handling
-// - Performance tests: Benchmarks, memory efficiency, zero-allocation validation
-// - Statistical tests: Hash distribution, collision rates
+// Test Coverage:
+//   - Unit tests: Core functionality, edge cases, boundary conditions
+//   - Integration tests: Blockchain scenarios, reorganization handling
+//   - Benchmarks: Sub-5ns operations, memory efficiency, zero allocations
+//   - Edge cases: Hash distribution, collision rates, cache eviction patterns
 //
-// The tests ensure the deduper meets its design goals of sub-5ns operations with
-// zero allocations while correctly handling blockchain-specific requirements like
-// chain reorganizations and high-throughput event streams.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package dedupe
 

@@ -1,18 +1,21 @@
-// control_test.go - Comprehensive test suite for lock-free coordination and virtual timing
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 🧪 COMPREHENSIVE TEST SUITE: LOCK-FREE COORDINATION
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Arbitrage Detection System
+// Component: Control System Test Suite
 //
-// This test suite validates the control package's syscall-free coordination mechanisms
-// and virtual timing implementation. Tests cover flag operations, branchless logic,
-// timing approximations, and concurrent access patterns.
+// Description:
+//   Validates syscall-free coordination mechanisms and virtual timing implementation. Tests cover
+//   flag operations, branchless logic, timing approximations, and concurrent access patterns
+//   ensuring nanosecond-scale operations with zero allocations.
 //
-// Test categories:
-// - Unit tests: Core functionality, edge cases, branchless correctness
-// - Integration tests: Complete workflows, timing behavior
-// - Concurrency tests: Multi-threaded access patterns, race conditions
-// - Performance tests: Benchmarks, zero-allocation validation
+// Test Coverage:
+//   - Unit tests: Core functionality, edge cases, branchless correctness
+//   - Integration tests: Complete workflows, virtual timing behavior
+//   - Benchmarks: Flag operations, cooldown polling, state queries
+//   - Edge cases: Multi-threaded access, race conditions, overflow handling
 //
-// The tests ensure the control system meets its design goals of nanosecond-scale
-// operations with zero allocations while providing rough timing approximations
-// suitable for cooldown management.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package control
 

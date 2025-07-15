@@ -1,12 +1,20 @@
-// dedupe.go — High-Performance Duplicate Detection for Ethereum Event Streams
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 🛡️ HIGH-PERFORMANCE DEDUPLICATION CACHE
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Arbitrage Detection System
+// Component: Event Deduplication Engine
 //
-// This module implements a specialized deduplication cache for blockchain event processing
-// using direct-mapped cache architecture with Robin Hood collision resolution. Designed for
-// sub-5ns lookups while handling chain reorganizations and maintaining zero allocations.
+// Description:
+//   Direct-mapped cache for blockchain event deduplication with reorganization awareness.
+//   Provides O(1) duplicate detection while handling chain reorgs gracefully.
 //
-// Architecture: Direct-mapped cache, 128-bit fingerprints, staleness detection
-// Memory Model: Fixed-size array, stack allocation, cache-line aligned structures
-// Design Goals: O(1) operations, zero allocations, reorganization awareness
+// Performance Characteristics:
+//   - Lookup time: Sub-5ns operation
+//   - Memory: 2MB fixed-size cache
+//   - Allocations: Zero per check
+//   - Cache design: Direct-mapped with LRU eviction
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package dedupe
 

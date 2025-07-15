@@ -1,12 +1,20 @@
-// constants.go — System Configuration and Runtime Parameters
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ⚙️ SYSTEM CONFIGURATION & CONSTANTS
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Arbitrage Detection System
+// Component: Global Configuration Parameters
 //
-// This module defines all system-wide constants and configuration parameters for the
-// high-performance arbitrage detection system. Constants are organized by functional
-// area and include both compile-time values and runtime-computed lookup tables.
+// Description:
+//   Defines system-wide constants and runtime parameters optimized for high-frequency trading.
+//   Includes cache-aligned lookup tables and deployment profiles for different hardware.
 //
-// Organization: Grouped by subsystem (core, memory, networking, timing)
-// Optimization: Cache-aligned lookup tables for hot path access
-// Configuration: Supports multiple deployment profiles via compile-time selection
+// Configuration Categories:
+//   - Core limits: CPU scaling parameters
+//   - Memory: Cache sizes and buffers
+//   - Networking: WebSocket configuration
+//   - Timing: Virtual clock calibration
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package constants
 

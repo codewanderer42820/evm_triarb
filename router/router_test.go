@@ -1,13 +1,21 @@
-// router_test.go — Comprehensive Validation Suite for Nanosecond-Scale Arbitrage Detection
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 🧪 COMPREHENSIVE TEST SUITE: ARBITRAGE DETECTION ENGINE
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Arbitrage Detection System
+// Component: Router & Arbitrage Engine Test Suite
 //
-// This test suite validates the complete triangular arbitrage detection system through
-// isolated performance benchmarks, cache-cold scenario testing, and multi-core scaling
-// analysis. Includes address resolution correctness validation, SIMD parsing verification,
-// and zero-allocation memory discipline enforcement across all critical paths.
+// Description:
+//   Validates the complete triangular arbitrage detection system through isolated performance
+//   benchmarks, cache-cold scenario testing, and multi-core scaling analysis. Includes address
+//   resolution correctness, SIMD parsing verification, and zero-allocation enforcement.
 //
-// Coverage: Address hash collision handling, price update distribution, graceful shutdown
-// Benchmarks: Producer-only latency isolation, cache-cold performance, multi-core efficiency
-// Validation: Robin Hood displacement correctness, pooled queue operations, fanout mapping
+// Test Coverage:
+//   - Unit tests: Address hash collision handling, price update distribution
+//   - Integration tests: Full arbitrage flow, high-volume stress testing
+//   - Benchmarks: Producer-only latency, cache-cold performance, multi-core efficiency
+//   - Edge cases: Robin Hood displacement, pooled queue operations, fanout mapping
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package router
 

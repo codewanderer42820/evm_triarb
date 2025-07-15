@@ -1,3 +1,22 @@
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 🧪 COMPREHENSIVE TEST SUITE: JSON-RPC EVENT PARSER
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Arbitrage Detection System
+// Component: JSON Parser Test Suite
+//
+// Description:
+//   Validates zero-allocation JSON parsing for Ethereum events including Uniswap V2 Sync event
+//   processing, field extraction, deduplication logic, and error handling. Tests real-world
+//   scenarios from various Ethereum node providers.
+//
+// Test Coverage:
+//   - Unit tests: Field parsing, event validation, fingerprint generation
+//   - Integration tests: Real Ethereum node data, edge cases from mainnet
+//   - Benchmarks: Parsing performance, zero-allocation verification
+//   - Edge cases: Malformed data, reorganization handling, node variations
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
 package parser
 
 import (

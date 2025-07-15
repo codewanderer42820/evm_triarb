@@ -1,14 +1,20 @@
-// utils.go — SIMD-optimized utilities achieving CPU cache-speed throughput
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 🔧 SIMD-OPTIMIZED UTILITIES
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Arbitrage Detection System
+// Component: Performance-Critical Utility Functions
 //
-// This package provides ultra-low-latency utility functions for the arbitrage detection system,
-// focusing on zero-allocation operations and SIMD vectorization. All functions are designed
-// for hot-path usage with nanosecond-scale performance requirements.
+// Description:
+//   Ultra-low-latency utilities achieving CPU cache-speed throughput through SIMD vectorization
+//   and zero-allocation design. Core building blocks for nanosecond-scale operations.
 //
-// Performance characteristics:
-// - Memory operations: 0.3-0.5ns per load (CPU cache speed)
-// - Hex parsing: 1.2ns for 16-character parsing (SIMD vectorized)
-// - Type conversions: Single allocation per operation, stack-based
-// - Hash mixing: 2ns with full avalanche properties
+// Performance Characteristics:
+//   - Memory ops: 0.3-0.5ns per load
+//   - Hex parsing: 1.2ns for 16 chars (SIMD)
+//   - Type conversion: Single allocation
+//   - Hash mixing: 2ns with full avalanche
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package utils
 

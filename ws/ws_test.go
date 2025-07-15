@@ -1,13 +1,21 @@
-// ws_test.go — Comprehensive Test Suite for WebSocket Client Library
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 🧪 COMPREHENSIVE TEST SUITE: WEBSOCKET CLIENT
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Project: High-Frequency Arbitrage Detection System
+// Component: WebSocket Client Test Suite
 //
-// This test suite validates the WebSocket client implementation through exhaustive
-// unit tests, integration tests, performance benchmarks, and edge case scenarios.
-// Tests cover protocol compliance, frame parsing correctness, error handling,
-// memory safety, and performance characteristics under various conditions.
+// Description:
+//   Validates WebSocket client implementation through exhaustive unit tests, integration tests,
+//   performance benchmarks, and edge case scenarios. Tests cover protocol compliance, frame parsing
+//   correctness, error handling, memory safety, and performance under various conditions.
 //
-// Coverage: Frame parsing, handshake negotiation, control frame handling, fragmentation
-// Benchmarks: Zero-allocation verification, throughput testing, latency measurement
-// Validation: Protocol compliance, memory bounds checking, concurrent safety verification
+// Test Coverage:
+//   - Unit tests: Frame parsing, handshake negotiation, control frame handling
+//   - Integration tests: Complete session flow, stress scenarios
+//   - Benchmarks: Zero-allocation verification, throughput testing
+//   - Edge cases: Protocol compliance, memory bounds, concurrent safety
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package ws
 
