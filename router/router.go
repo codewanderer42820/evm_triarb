@@ -22,6 +22,7 @@ import (
 	"hash"
 	"math/bits"
 	"runtime"
+	"sync"
 	"unsafe"
 
 	"main/constants"
@@ -1034,13 +1035,16 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 }
 
 // launchArbitrageWorker initializes and operates a processing core for arbitrage detection.
-// ZERO FRAGMENTATION: Delay all allocations until exact sizes are known.
+// Signals completion via WaitGroup after all initialization is complete.
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
-func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairWorkloadShard) {
+func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairWorkloadShard, initWaitGroup *sync.WaitGroup) {
+	// Ensure we signal completion regardless of initialization outcome
+	defer initWaitGroup.Done()
+
 	// Lock this goroutine to the current OS thread for consistent NUMA locality and performance
 	runtime.LockOSThread()
 
@@ -1104,6 +1108,12 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	stopFlag, hotFlag := control.Flags()
 	control.SignalActivity() // Signal that this core is active and ready
 
+	// Log successful core initialization
+	debug.DropMessage("CORE_READY", "Core "+utils.Itoa(coreID)+" initialized")
+
+	// NOTE: WaitGroup.Done() is called by the defer at the beginning of this function
+	// This ensures proper signaling even if initialization fails
+
 	// Start the main processing loop - this is the core's primary work function
 	// PinnedConsumer runs a tight loop consuming messages from the ring buffer
 	ring24.PinnedConsumer(coreID, coreRings[coreID], stopFlag, hotFlag,
@@ -1114,7 +1124,7 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 }
 
 // InitializeArbitrageSystem orchestrates complete system bootstrap and activation.
-// CLEAN: Same as original, works with simplified queue initialization.
+// Blocks until all cores are fully initialized and ready for event processing.
 //
 //go:norace
 //go:nocheckptr
@@ -1122,7 +1132,7 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 //go:registerparams
 func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 	// Determine the optimal number of CPU cores to use for arbitrage processing
-	// Reserve one core for system tasks and other processes
+	// Reserve cores for system tasks and other processes
 	coreCount := runtime.NumCPU() - 4
 	if coreCount > constants.MaxSupportedCores {
 		coreCount = constants.MaxSupportedCores // Respect system limits
@@ -1134,13 +1144,17 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 	// This creates shards of cycles organized by trading pairs
 	buildWorkloadShards(arbitrageTriangles)
 
+	// Create synchronization mechanism for core initialization
+	var initWaitGroup sync.WaitGroup
+	initWaitGroup.Add(coreCount) // Wait for all cores to initialize
+
 	// Create communication channels and launch worker goroutines for each core
 	shardChannels := make([]chan PairWorkloadShard, coreCount)
 	for i := range shardChannels {
 		// Create buffered channels to prevent blocking during workload distribution
 		shardChannels[i] = make(chan PairWorkloadShard, constants.ShardChannelBufferSize)
-		// Launch a worker goroutine for this core
-		go launchArbitrageWorker(i, forwardCoreCount, shardChannels[i])
+		// Launch a worker goroutine for this core with synchronization
+		go launchArbitrageWorker(i, forwardCoreCount, shardChannels[i], &initWaitGroup)
 	}
 
 	// Distribute workload shards across all available CPU cores
@@ -1176,9 +1190,16 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 		close(channel)
 	}
 
+	// Wait for all cores to complete initialization
+	// This ensures the system is fully ready before returning
+	initWaitGroup.Wait()
+
 	// Clean up global workload data structures and force garbage collection
 	// These are no longer needed after distribution is complete
 	pairWorkloadShards = nil
 	runtime.GC()
 	runtime.GC()
+
+	// Log successful system initialization
+	debug.DropMessage("SYSTEM_READY", "All "+utils.Itoa(coreCount)+" cores initialized and ready for processing")
 }
