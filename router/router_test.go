@@ -460,11 +460,11 @@ func TestDispatchPriceUpdateMalformedDataPanic(t *testing.T) {
 	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
 	coreRings[0] = ring24.New(constants.DefaultRingSize)
 
-	// Test that malformed data causes expected panic (ISR-grade footgun behavior)
+	// Test that malformed data causes expected panic (performance-critical code should fail fast on bad input)
 	t.Run("Malformed data should panic (by design)", func(t *testing.T) {
 		defer func() {
 			if r := recover(); r == nil {
-				t.Error("Expected panic for malformed data but none occurred - ISR-grade code should fail fast on bad input")
+				t.Error("Expected panic for malformed data but none occurred - performance-critical code should fail fast on bad input")
 			} else {
 				t.Logf("Expected panic occurred for malformed data: %v", r)
 			}
@@ -1475,7 +1475,7 @@ func TestErrorRecovery(t *testing.T) {
 		}
 	})
 
-	// ISR-grade code is designed to fail fast on corrupted input
+	// Performance-critical code is designed to fail fast on corrupted input
 	// These tests validate that the system properly panics on malformed data
 	corruptedInputs := []struct {
 		name    string
@@ -1483,17 +1483,17 @@ func TestErrorRecovery(t *testing.T) {
 		reason  string
 	}{
 		{
-			"Empty Address - ISR fail-fast",
+			"Empty Address - fail-fast",
 			&types.LogView{Addr: []byte(""), Data: []byte("0x1234")},
 			"Empty address should cause bounds check failure",
 		},
 		{
-			"Short Address - ISR fail-fast",
+			"Short Address - fail-fast",
 			&types.LogView{Addr: []byte("0x1234"), Data: []byte("0x1234")},
 			"Short address should cause bounds check failure",
 		},
 		{
-			"Empty Data - ISR fail-fast",
+			"Empty Data - fail-fast",
 			&types.LogView{Addr: []byte(TestAddressETH_DAI), Data: []byte("")},
 			"Empty data should cause bounds check failure",
 		},
@@ -1501,12 +1501,12 @@ func TestErrorRecovery(t *testing.T) {
 
 	for _, tc := range corruptedInputs {
 		t.Run(tc.name, func(t *testing.T) {
-			// ISR-grade code should panic on corrupted input (by design)
+			// Performance-critical code should panic on corrupted input (by design)
 			defer func() {
 				if r := recover(); r == nil {
-					t.Errorf("ISR-grade code should fail fast on corrupted input: %s", tc.reason)
+					t.Errorf("Performance-critical code should fail fast on corrupted input: %s", tc.reason)
 				} else {
-					t.Logf("Expected ISR fail-fast panic for %s: %v", tc.name, r)
+					t.Logf("Expected fail-fast panic for %s: %v", tc.name, r)
 				}
 			}()
 
