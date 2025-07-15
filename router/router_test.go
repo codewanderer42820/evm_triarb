@@ -1,14 +1,13 @@
-// router_test.go — Comprehensive test suite for triangular arbitrage detection engine
+// router_test.go — Comprehensive Validation Suite for Nanosecond-Scale Arbitrage Detection
 //
-// This test suite validates the complete arbitrage detection system including:
-// - Event processing and price update distribution
-// - Multi-core arbitrage cycle management
-// - Address resolution and hash table operations
-// - Priority queue operations and cycle extraction
-// - Proper shutdown coordination and cleanup
+// This test suite validates the complete triangular arbitrage detection system through
+// isolated performance benchmarks, cache-cold scenario testing, and multi-core scaling
+// analysis. Includes address resolution correctness validation, SIMD parsing verification,
+// and zero-allocation memory discipline enforcement across all critical paths.
 //
-// The tests use deterministic scenarios to ensure predictable behavior
-// and validate both performance characteristics and correctness.
+// Coverage: Address hash collision handling, price update distribution, graceful shutdown
+// Benchmarks: Producer-only latency isolation, cache-cold performance, multi-core efficiency
+// Validation: Robin Hood displacement correctness, pooled queue operations, fanout mapping
 
 package router
 
