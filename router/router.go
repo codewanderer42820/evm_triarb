@@ -359,6 +359,7 @@ func lookupPairByAddress(address42HexBytes []byte) TradingPairID {
 	// INITIAL HASH CALCULATION
 	i := hashAddressToIndex(address42HexBytes)
 	dist := uint64(0) // Track probe distance for Robin Hood termination
+	capacityMask := uint64(constants.AddressTableMask)
 
 	for {
 		currentPairID := addressToPairMap[i]
@@ -379,13 +380,13 @@ func lookupPairByAddress(address42HexBytes []byte) TradingPairID {
 
 		// ROBIN HOOD EARLY TERMINATION
 		currentKeyHash := hashPackedAddressToIndex(currentKey)
-		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & uint64(constants.AddressTableMask)
+		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & capacityMask
 		if currentDist < dist {
 			return 0 // Early termination - key not present
 		}
 
 		// PROBE CONTINUATION
-		i = (i + 1) & uint64(constants.AddressTableMask)
+		i = (i + 1) & capacityMask
 		dist++
 	}
 }
@@ -417,6 +418,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 
 	// STAGE 3: PROFITABLE CYCLE EXTRACTION
 	cycleCount := 0
+	extractedCyclesLen := len(engine.extractedCycles)
 	for {
 		if queue.Empty() {
 			break
@@ -436,7 +438,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 		}
 
 		// EXTRACTION TERMINATION CONDITIONS
-		if !isProfitable || cycleCount == len(engine.extractedCycles) {
+		if !isProfitable || cycleCount == extractedCyclesLen {
 			break
 		}
 
@@ -454,16 +456,21 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 	// STAGE 4: CYCLE REINSERTION
 	for i := 0; i < cycleCount; i++ {
 		cycle := &engine.extractedCycles[i]
-		queue.Push(cycle.originalTick, cycle.queueHandle, uint64(cycle.cycleIndex))
+		cycleIndexUint64 := uint64(cycle.cycleIndex)
+		queue.Push(cycle.originalTick, cycle.queueHandle, cycleIndexUint64)
 	}
 
 	// STAGE 5: FANOUT UPDATE PROPAGATION
+	tickClampingBound := constants.TickClampingBound
+	quantizationScale := constants.QuantizationScale
+
 	for _, fanoutEntry := range engine.cycleFanoutTable[queueIndex] {
 		cycle := &engine.cycleStates[fanoutEntry.cycleIndex]
 		cycle.tickValues[fanoutEntry.edgeIndex] = currentTick
 
 		// PRIORITY RECALCULATION
-		newPriority := quantizeTickValue(cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2])
+		tickSum := cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
+		newPriority := int64((tickSum + tickClampingBound) * quantizationScale)
 		engine.priorityQueues[fanoutEntry.queueIndex].MoveTick(fanoutEntry.queueHandle, newPriority)
 	}
 }
@@ -584,6 +591,8 @@ func RegisterTradingPairAddress(address42HexBytes []byte, pairID TradingPairID) 
 	key := packEthereumAddress(address42HexBytes)
 	i := hashAddressToIndex(address42HexBytes)
 	dist := uint64(0)
+	capacityMask := uint64(constants.AddressTableMask)
+	tableCapacity := uint64(constants.AddressTableCapacity)
 
 	for {
 		currentPairID := addressToPairMap[i]
@@ -601,7 +610,7 @@ func RegisterTradingPairAddress(address42HexBytes []byte, pairID TradingPairID) 
 
 		currentKey := packedAddressKeys[i]
 		currentKeyHash := hashPackedAddressToIndex(currentKey)
-		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & uint64(constants.AddressTableMask)
+		currentDist := (i + tableCapacity - currentKeyHash) & capacityMask
 
 		if currentDist < dist {
 			key, packedAddressKeys[i] = packedAddressKeys[i], key
@@ -609,7 +618,7 @@ func RegisterTradingPairAddress(address42HexBytes []byte, pairID TradingPairID) 
 			dist = currentDist
 		}
 
-		i = (i + 1) & uint64(constants.AddressTableMask)
+		i = (i + 1) & capacityMask
 		dist++
 	}
 }
@@ -670,7 +679,8 @@ func (rng *CryptoRandomGenerator) generateRandomUint64() uint64 {
 //go:inline
 //go:registerparams
 func (rng *CryptoRandomGenerator) generateRandomInt(upperBound int) int {
-	return int(rng.generateRandomUint64() % uint64(upperBound))
+	modulus := uint64(upperBound)
+	return int(rng.generateRandomUint64() % modulus)
 }
 
 // shuffleCycleEdges performs deterministic Fisher-Yates shuffling for load balancing.
@@ -685,8 +695,10 @@ func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
 		return
 	}
 	var seedInput [8]byte
-	*(*uint64)(unsafe.Pointer(&seedInput[0])) = utils.Mix64(uint64(pairID))
+	pairIDMixed := utils.Mix64(uint64(pairID))
+	*(*uint64)(unsafe.Pointer(&seedInput[0])) = pairIDMixed
 	rng := newCryptoRandomGenerator(seedInput[:])
+
 	for i := len(cycleEdges) - 1; i > 0; i-- {
 		j := rng.generateRandomInt(i + 1)
 		cycleEdges[i], cycleEdges[j] = cycleEdges[j], cycleEdges[i]
@@ -702,18 +714,20 @@ func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
 func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard)
 	temporaryEdges := make(map[TradingPairID][]CycleEdge, len(arbitrageTriangles)*3)
+	maxCyclesPerShard := constants.MaxCyclesPerShard
 
 	for _, triangle := range arbitrageTriangles {
 		for i := 0; i < 3; i++ {
+			edgeIndex := uint64(i)
 			temporaryEdges[triangle[i]] = append(temporaryEdges[triangle[i]],
-				CycleEdge{cyclePairs: triangle, edgeIndex: uint64(i)})
+				CycleEdge{cyclePairs: triangle, edgeIndex: edgeIndex})
 		}
 	}
 
 	for pairID, cycleEdges := range temporaryEdges {
 		shuffleCycleEdges(cycleEdges, pairID)
-		for offset := 0; offset < len(cycleEdges); offset += constants.MaxCyclesPerShard {
-			endOffset := offset + constants.MaxCyclesPerShard
+		for offset := 0; offset < len(cycleEdges); offset += maxCyclesPerShard {
+			endOffset := offset + maxCyclesPerShard
 			if endOffset > len(cycleEdges) {
 				endOffset = len(cycleEdges)
 			}
@@ -740,7 +754,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		return
 	}
 
-	// PHASE 1: CALCULATE TOTAL ARENA SIZE NEEDED
+	// PHASE 1: CALCULATE EXACT ARENA SIZE NEEDED
 	totalCycles := 0
 	for _, shard := range workloadShards {
 		totalCycles += len(shard.cycleEdges)
@@ -754,17 +768,19 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 	engine.nextHandle = 0
 
 	// Initialize all arena entries to unlinked state
+	nilHandle := pooledquantumqueue.Handle(^uint64(0))
 	for i := range engine.sharedArena {
-		engine.sharedArena[i].Tick = -1                                    // Mark as unlinked
-		engine.sharedArena[i].Prev = pooledquantumqueue.Handle(^uint64(0)) // nilIdx
-		engine.sharedArena[i].Next = pooledquantumqueue.Handle(^uint64(0)) // nilIdx
-		engine.sharedArena[i].Data = 0                                     // Clear data
+		engine.sharedArena[i].Tick = -1        // Mark as unlinked
+		engine.sharedArena[i].Prev = nilHandle // Clear prev pointer
+		engine.sharedArena[i].Next = nilHandle // Clear next pointer
+		engine.sharedArena[i].Data = 0         // Clear data
 	}
 
 	// PHASE 3: CREATE QUEUES USING SHARED ARENA
+	arenaPtr := unsafe.Pointer(&engine.sharedArena[0])
 	for i := range engine.priorityQueues {
 		// All queues share the same arena pointer - much simpler!
-		newQueue := pooledquantumqueue.New(unsafe.Pointer(&engine.sharedArena[0]))
+		newQueue := pooledquantumqueue.New(arenaPtr)
 		engine.priorityQueues[i] = *newQueue
 	}
 
@@ -772,6 +788,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 	for _, shard := range workloadShards {
 		queueIndex, _ := engine.pairToQueueLookup.Get(uint32(shard.pairID))
 		queue := &engine.priorityQueues[queueIndex]
+		queueIndexUint64 := uint64(queueIndex)
 
 		for _, cycleEdge := range shard.cycleEdges {
 			// Simple sequential handle allocation
@@ -782,14 +799,15 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 				pairIDs: cycleEdge.cyclePairs,
 			})
 			cycleIndex := CycleIndex(len(engine.cycleStates) - 1)
+			cycleIndexUint64 := uint64(cycleIndex)
 
 			// Generate distributed initialization priority
-			cycleHash := utils.Mix64(uint64(cycleIndex))
+			cycleHash := utils.Mix64(cycleIndexUint64)
 			randBits := cycleHash & 0xFFFF
 			initPriority := int64(196608 + randBits)
 
 			// Insert into queue
-			queue.Push(initPriority, handle, uint64(cycleIndex))
+			queue.Push(initPriority, handle, cycleIndexUint64)
 
 			// Create fanout entries for the two other pairs in the cycle
 			otherEdge1 := (cycleEdge.edgeIndex + 1) % 3
@@ -798,9 +816,9 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			for _, edgeIdx := range [...]uint64{otherEdge1, otherEdge2} {
 				engine.cycleFanoutTable[queueIndex] = append(engine.cycleFanoutTable[queueIndex],
 					CycleFanoutEntry{
-						cycleIndex:  uint64(cycleIndex),
+						cycleIndex:  cycleIndexUint64,
 						edgeIndex:   edgeIdx,
-						queueIndex:  uint64(queueIndex),
+						queueIndex:  queueIndexUint64,
 						queueHandle: handle,
 					})
 			}
@@ -840,7 +858,9 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	var allShards []PairWorkloadShard
 	for shard := range shardInput {
 		// Create or extend queue for this pair
-		queueIndex := engine.pairToQueueLookup.Put(uint32(shard.pairID), uint32(len(engine.priorityQueues)))
+		pairIDUint32 := uint32(shard.pairID)
+		priorityQueuesLen := uint32(len(engine.priorityQueues))
+		queueIndex := engine.pairToQueueLookup.Put(pairIDUint32, priorityQueuesLen)
 		if int(queueIndex) == len(engine.priorityQueues) {
 			// Create placeholder queue (will be replaced in initialization)
 			engine.priorityQueues = append(engine.priorityQueues, pooledquantumqueue.PooledQuantumQueue{})
@@ -872,8 +892,9 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 	// RESOURCE ALLOCATION STRATEGY
 	coreCount := runtime.NumCPU() - 1
-	if coreCount > constants.MaxSupportedCores {
-		coreCount = constants.MaxSupportedCores
+	maxSupportedCores := constants.MaxSupportedCores
+	if coreCount > maxSupportedCores {
+		coreCount = maxSupportedCores
 	}
 	coreCount &^= 1                    // Ensure even number for direction pairing
 	forwardCoreCount := coreCount >> 1 // Half dedicated to forward direction
@@ -883,8 +904,9 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 
 	// WORKER CORE DEPLOYMENT
 	shardChannels := make([]chan PairWorkloadShard, coreCount)
+	shardChannelBufferSize := constants.ShardChannelBufferSize
 	for i := range shardChannels {
-		shardChannels[i] = make(chan PairWorkloadShard, constants.ShardChannelBufferSize)
+		shardChannels[i] = make(chan PairWorkloadShard, shardChannelBufferSize)
 		go launchArbitrageWorker(i, forwardCoreCount, shardChannels[i])
 	}
 
@@ -894,15 +916,18 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 		for _, shard := range shardBuckets {
 			forwardCore := currentCore % forwardCoreCount
 			reverseCore := forwardCore + forwardCoreCount
+			forwardCoreShift := uint8(forwardCore)
+			reverseCoreShift := uint8(reverseCore)
 
 			// DUAL-DIRECTION SHARD ASSIGNMENT
 			shardChannels[forwardCore] <- shard
 			shardChannels[reverseCore] <- shard
 
 			// ROUTING TABLE POPULATION
+			routingMask := uint64(1<<forwardCoreShift | 1<<reverseCoreShift)
 			for _, cycleEdge := range shard.cycleEdges {
 				for _, pairID := range cycleEdge.cyclePairs {
-					pairToCoreRouting[pairID] |= 1<<forwardCore | 1<<reverseCore
+					pairToCoreRouting[pairID] |= routingMask
 				}
 			}
 			currentCore++
