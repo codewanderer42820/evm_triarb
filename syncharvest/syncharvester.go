@@ -110,6 +110,10 @@ type PeakHarvester struct {
 	insertEventStmt    *sql.Stmt
 	updateReservesStmt *sql.Stmt
 	updateSyncStmt     *sql.Stmt
+
+	// Batch size adaptation tracking
+	consecutiveSuccesses int
+	consecutiveFailures  int
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -334,6 +338,10 @@ func NewPeakHarvester() (*PeakHarvester, error) {
 
 		// Pre-allocate buffers to avoid allocations during processing
 		reserveBuffer: [2]*big.Int{big.NewInt(0), big.NewInt(0)},
+
+		// Initialize batch adaptation counters
+		consecutiveSuccesses: 0,
+		consecutiveFailures:  0,
 	}
 
 	// Set up signal handling
@@ -593,25 +601,40 @@ func (h *PeakHarvester) executePeakSyncLoop(startBlock uint64) error {
 		success := h.processPeakBatch(current, batchEnd)
 
 		if success {
-			// SUCCESS: Immediately double the batch size (be aggressive)
-			oldBatchSize := batchSize
-			batchSize *= 2
-			debug.DropMessage("BATCH_INCREASE", fmt.Sprintf("Doubled batch size from %d to %d blocks after success", oldBatchSize, batchSize))
+			// SUCCESS: Reset failure counter and increment success counter
+			h.consecutiveFailures = 0
+			h.consecutiveSuccesses++
+
+			// Only double after 3 consecutive successes
+			if h.consecutiveSuccesses >= 3 {
+				oldBatchSize := batchSize
+				batchSize *= 2
+				h.consecutiveSuccesses = 0 // Reset counter after adapting
+				debug.DropMessage("BATCH_INCREASE", fmt.Sprintf("Doubled batch size from %d to %d blocks after 3 consecutive successes", oldBatchSize, batchSize))
+			} else {
+				debug.DropMessage("BATCH_SUCCESS", fmt.Sprintf("Success %d/3 - keeping batch size at %d blocks", h.consecutiveSuccesses, batchSize))
+			}
 
 			// Update progress and advance
 			h.lastProcessed = batchEnd
 			current = batchEnd + 1
 
 		} else {
-			// FAILURE: Immediately halve the batch size
-			oldBatchSize := batchSize
-			batchSize /= 2
-			if batchSize < 1 {
-				batchSize = 1 // Absolute minimum to prevent zero
-			}
-			debug.DropMessage("BATCH_DECREASE", fmt.Sprintf("Halved batch size from %d to %d blocks after failure", oldBatchSize, batchSize))
+			// FAILURE: Reset success counter and increment failure counter
+			h.consecutiveSuccesses = 0
+			h.consecutiveFailures++
 
-			// Don't advance the current position on failure - retry the same range with smaller batch
+			// Only halve after 3 consecutive failures
+			if h.consecutiveFailures >= 3 {
+				oldBatchSize := batchSize
+				batchSize /= 2
+				h.consecutiveFailures = 0 // Reset counter after adapting
+				debug.DropMessage("BATCH_DECREASE", fmt.Sprintf("Halved batch size from %d to %d blocks after 3 consecutive failures", oldBatchSize, batchSize))
+			} else {
+				debug.DropMessage("BATCH_FAILURE", fmt.Sprintf("Failure %d/3 - keeping batch size at %d blocks", h.consecutiveFailures, batchSize))
+			}
+
+			// Don't advance the current position on failure - retry the same range with same batch size
 		}
 
 		// Commit periodically for memory management
@@ -641,7 +664,7 @@ func (h *PeakHarvester) processPeakBatch(fromBlock, toBlock uint64) bool {
 	retryCount := 0
 
 	// Keep retrying until successful or we decide to give up
-	for retryCount < 3 {
+	for retryCount < 1 {
 		logs, err = h.rpcClient.GetLogs(h.ctx, fromBlock, toBlock, []string{}, []string{SyncEventSignature})
 		if err == nil {
 			break
