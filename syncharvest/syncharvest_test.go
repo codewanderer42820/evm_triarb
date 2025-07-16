@@ -954,14 +954,38 @@ func TestMetaFileCorruption(t *testing.T) {
 	// Mock server
 	server := mockRPCServer(t, map[string]interface{}{
 		"eth_blockNumber": "0xe4e1c0",
+		"eth_getLogs":     []Log{},
 	})
 	defer server.Close()
 
-	// Create harvester - should handle corrupted meta file
-	h, err := NewHarvester(server.URL)
-	if err != nil {
-		t.Fatalf("Failed to create harvester: %v", err)
+	// Create harvester manually to avoid real RPC connections
+	h := &Harvester{
+		dataClient: NewRPCClient(server.URL),
+		headClient: NewRPCClient(server.URL),
+		pairMap:    make(map[string]int64),
 	}
+
+	// Open databases
+	pairsDB, err := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.pairsDB = pairsDB
+
+	reservesDB, err := sql.Open("sqlite3", ReservesDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.reservesDB = reservesDB
+
+	// Initialize
+	if err := h.initReservesDB(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.loadPairMappings(); err != nil {
+		t.Fatal(err)
+	}
+
 	defer h.Close()
 
 	// Start should use default block since meta is corrupted
