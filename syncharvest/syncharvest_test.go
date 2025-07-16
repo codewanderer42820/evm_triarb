@@ -5,14 +5,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -33,7 +32,7 @@ type testSyncEvent struct {
 	PairAddress string
 	BlockNumber uint64
 	TxHash      string
-	LogIndex    uint
+	LogIndex    uint64
 	Reserve0    *big.Int
 	Reserve1    *big.Int
 }
@@ -130,7 +129,7 @@ func setupTestDB(t *testing.T) (*sql.DB, string, func()) {
 }
 
 // createTestLog creates a mock Ethereum log for testing
-func createTestLog(event testSyncEvent) types.Log {
+func createTestLog(event testSyncEvent) Log {
 	// Create sync event data (reserve0 + reserve1)
 	data := make([]byte, 64)
 	r0Bytes := event.Reserve0.Bytes()
@@ -140,13 +139,16 @@ func createTestLog(event testSyncEvent) types.Log {
 	copy(data[32-len(r0Bytes):32], r0Bytes)
 	copy(data[64-len(r1Bytes):64], r1Bytes)
 
-	return types.Log{
-		Address:     common.HexToAddress(event.PairAddress),
-		Topics:      []common.Hash{common.HexToHash(SyncEventSignature)},
-		Data:        data,
-		BlockNumber: event.BlockNumber,
-		TxHash:      common.HexToHash(event.TxHash),
-		Index:       event.LogIndex,
+	// Convert to hex string
+	dataHex := "0x" + hex.EncodeToString(data)
+
+	return Log{
+		Address:     event.PairAddress,
+		Topics:      []string{SyncEventSignature},
+		Data:        dataHex,
+		BlockNumber: fmt.Sprintf("0x%x", event.BlockNumber),
+		TxHash:      event.TxHash,
+		LogIndex:    fmt.Sprintf("0x%x", event.LogIndex),
 	}
 }
 
@@ -236,7 +238,7 @@ func TestProcessLogs(t *testing.T) {
 		{
 			PairAddress: "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc",
 			BlockNumber: 15000000,
-			TxHash:      "0x1234567890abcdef",
+			TxHash:      "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
 			LogIndex:    0,
 			Reserve0:    big.NewInt(1000000),
 			Reserve1:    big.NewInt(2000000),
@@ -244,14 +246,14 @@ func TestProcessLogs(t *testing.T) {
 		{
 			PairAddress: "0xa478c2975ab1ea89e8196811f51a7b7ade33eb11",
 			BlockNumber: 15000001,
-			TxHash:      "0xabcdef1234567890",
+			TxHash:      "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
 			LogIndex:    1,
 			Reserve0:    big.NewInt(3000000),
 			Reserve1:    big.NewInt(4000000),
 		},
 	}
 
-	logs := []types.Log{}
+	logs := []Log{}
 	for _, event := range testEvents {
 		logs = append(logs, createTestLog(event))
 	}
@@ -388,6 +390,41 @@ func TestGetLatestReserves(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
+// Helper Function Tests
+// -----------------------------------------------------------------------------
+
+func TestParseHexUint64(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected uint64
+		hasError bool
+	}{
+		{"0x1", 1, false},
+		{"0xff", 255, false},
+		{"0x1000", 4096, false},
+		{"0xe4e1c0", 15000000, false},
+		{"e4e1c0", 15000000, false}, // without 0x prefix
+		{"0x0", 0, false},
+		{"invalid", 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result, err := parseHexUint64(tt.input)
+			if tt.hasError && err == nil {
+				t.Errorf("Expected error for input %s", tt.input)
+			}
+			if !tt.hasError && err != nil {
+				t.Errorf("Unexpected error for input %s: %v", tt.input, err)
+			}
+			if !tt.hasError && result != tt.expected {
+				t.Errorf("Expected %d, got %d for input %s", tt.expected, result, tt.input)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
 // Integration Tests
 // -----------------------------------------------------------------------------
 
@@ -511,13 +548,13 @@ func BenchmarkProcessLogs(b *testing.B) {
 	}
 
 	// Create test logs
-	logs := make([]types.Log, 100)
+	logs := make([]Log, 100)
 	for i := 0; i < 100; i++ {
 		event := testSyncEvent{
 			PairAddress: fmt.Sprintf("0x%040d", i%1000),
 			BlockNumber: uint64(15000000 + i),
 			TxHash:      fmt.Sprintf("0x%064x", i),
-			LogIndex:    uint(i % 10),
+			LogIndex:    uint64(i % 10),
 			Reserve0:    big.NewInt(int64(1000000 * (i + 1))),
 			Reserve1:    big.NewInt(int64(2000000 * (i + 1))),
 		}
@@ -585,7 +622,7 @@ func ExampleHarvester_Start() {
 	// This example shows how to use the harvester
 
 	// Create harvester
-	harvester, err := NewHarvester("wss://mainnet.infura.io/ws/v3/YOUR_KEY")
+	harvester, err := NewHarvester("https://mainnet.infura.io/v3/YOUR_KEY")
 	if err != nil {
 		panic(err)
 	}

@@ -1,49 +1,87 @@
-// sync_harvester.go - Uniswap V2 Sync Event Harvester Module
+// sync_harvester.go - Uniswap V2 Sync Event Harvester Module (No External Dependencies)
 package syncharvest
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"math/big"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"main/constants"
-
-	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/ethclient"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 // -----------------------------------------------------------------------------
-// Additional Constants for Sync Harvesting
+// Constants
 // -----------------------------------------------------------------------------
 
 const (
-	// Add to constants.go if you prefer centralization
 	SyncEventBatchFloor  = uint64(100)
 	SyncEventBatchCeil   = uint64(10_000)
 	SyncEventCommitBatch = 100_000
 
-	// Sync event full signature
+	// Sync event signature (keccak256("Sync(uint112,uint112)"))
 	SyncEventSignature = "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"
 
 	// Database paths
 	ReservesDBPath   = "uniswap_v2_reserves.db"
 	ReservesMetaPath = "uniswap_v2_reserves.db.meta"
+
+	// RPC settings
+	HeadTTL = 12 * time.Second
 )
 
 // -----------------------------------------------------------------------------
 // Types
 // -----------------------------------------------------------------------------
+
+// RPCClient handles JSON-RPC communication
+type RPCClient struct {
+	url    string
+	client *http.Client
+}
+
+// RPCRequest represents a JSON-RPC request
+type RPCRequest struct {
+	JSONRPC string        `json:"jsonrpc"`
+	Method  string        `json:"method"`
+	Params  []interface{} `json:"params"`
+	ID      int           `json:"id"`
+}
+
+// RPCResponse represents a JSON-RPC response
+type RPCResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	Result  json.RawMessage `json:"result"`
+	Error   *RPCError       `json:"error"`
+	ID      int             `json:"id"`
+}
+
+// RPCError represents a JSON-RPC error
+type RPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// Log represents an Ethereum log entry
+type Log struct {
+	Address     string   `json:"address"`
+	Topics      []string `json:"topics"`
+	Data        string   `json:"data"`
+	BlockNumber string   `json:"blockNumber"`
+	TxHash      string   `json:"transactionHash"`
+	LogIndex    string   `json:"logIndex"`
+}
 
 // SyncEvent represents a Uniswap V2 Sync event with reserves
 type SyncEvent struct {
@@ -51,7 +89,7 @@ type SyncEvent struct {
 	PairAddress string `json:"pair_address"`
 	BlockNumber uint64 `json:"block_number"`
 	TxHash      string `json:"tx_hash"`
-	LogIndex    uint   `json:"log_index"`
+	LogIndex    uint64 `json:"log_index"`
 	Reserve0    string `json:"reserve0"`
 	Reserve1    string `json:"reserve1"`
 }
@@ -67,12 +105,93 @@ type PairReserve struct {
 }
 
 // -----------------------------------------------------------------------------
+// RPC Client Implementation
+// -----------------------------------------------------------------------------
+
+// NewRPCClient creates a new RPC client
+func NewRPCClient(url string) *RPCClient {
+	return &RPCClient{
+		url: url,
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+	}
+}
+
+// Call makes an RPC call
+func (c *RPCClient) Call(ctx context.Context, result interface{}, method string, params ...interface{}) error {
+	req := RPCRequest{
+		JSONRPC: "2.0",
+		Method:  method,
+		Params:  params,
+		ID:      1,
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.url, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var rpcResp RPCResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		return err
+	}
+
+	if rpcResp.Error != nil {
+		return fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+
+	return json.Unmarshal(rpcResp.Result, result)
+}
+
+// BlockNumber gets the latest block number
+func (c *RPCClient) BlockNumber(ctx context.Context) (uint64, error) {
+	var result string
+	if err := c.Call(ctx, &result, "eth_blockNumber"); err != nil {
+		return 0, err
+	}
+	return parseHexUint64(result)
+}
+
+// GetLogs retrieves logs matching the filter
+func (c *RPCClient) GetLogs(ctx context.Context, fromBlock, toBlock uint64, addresses []string, topics []string) ([]Log, error) {
+	params := map[string]interface{}{
+		"fromBlock": fmt.Sprintf("0x%x", fromBlock),
+		"toBlock":   fmt.Sprintf("0x%x", toBlock),
+		"topics":    []string{topics[0]}, // Only first topic for sync events
+	}
+
+	if len(addresses) > 0 {
+		params["address"] = addresses
+	}
+
+	var logs []Log
+	if err := c.Call(ctx, &logs, "eth_getLogs", params); err != nil {
+		return nil, err
+	}
+
+	return logs, nil
+}
+
+// -----------------------------------------------------------------------------
 // Harvester
 // -----------------------------------------------------------------------------
 
 type Harvester struct {
-	dataClient *ethclient.Client
-	headClient *ethclient.Client
+	dataClient *RPCClient
+	headClient *RPCClient
 	pairsDB    *sql.DB
 	reservesDB *sql.DB
 
@@ -87,18 +206,17 @@ type Harvester struct {
 
 // NewHarvester creates a new sync event harvester
 func NewHarvester(rpcURL string) (*Harvester, error) {
-	ctx := context.Background()
-
-	// Use the configured RPC endpoints
-	dataClient, err := ethclient.DialContext(ctx, rpcURL)
-	if err != nil {
-		return nil, fmt.Errorf("dial data RPC: %w", err)
-	}
+	// Create RPC clients
+	dataClient := NewRPCClient(rpcURL)
 
 	// Try public RPC for head, fall back to data RPC
-	headClient, err := ethclient.DialContext(ctx, "https://cloudflare-eth.com")
-	if err != nil {
-		log.Printf("warning: failed to dial head RPC: %v — falling back to data RPC", err)
+	headClient := NewRPCClient("https://cloudflare-eth.com")
+
+	// Test head client
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := headClient.BlockNumber(ctx); err != nil {
+		log.Printf("warning: failed to use head RPC: %v — falling back to data RPC", err)
 		headClient = dataClient
 	}
 
@@ -234,9 +352,9 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 	log.Printf("Starting sync event harvest from block %d", startBlock)
 
 	// Get all V2 pair addresses for filtering
-	addresses := make([]common.Address, 0, len(h.pairMap))
+	addresses := make([]string, 0, len(h.pairMap))
 	for addr := range h.pairMap {
-		addresses = append(addresses, common.HexToAddress(addr))
+		addresses = append(addresses, addr)
 	}
 
 	// Harvest loop
@@ -250,21 +368,14 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 		}
 
 		// Get latest block with caching
-		if time.Since(h.headTime) > constants.HeadTTL {
+		if time.Since(h.headTime) > HeadTTL {
 			latest, err := h.headClient.BlockNumber(ctx)
 			if err != nil {
 				// Try alternate RPC
 				if strings.Contains(err.Error(), "429") {
 					log.Printf("head RPC 429 — switching to fallback")
-					if altClient, altErr := ethclient.DialContext(ctx, "https://rpc.ankr.com/eth"); altErr == nil {
-						latest, err = altClient.BlockNumber(ctx)
-						if err == nil {
-							h.headClient.Close()
-							h.headClient = altClient
-						} else {
-							altClient.Close()
-						}
-					}
+					h.headClient = NewRPCClient("https://rpc.ankr.com/eth")
+					latest, err = h.headClient.BlockNumber(ctx)
 				}
 
 				if err != nil {
@@ -295,7 +406,7 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 
 		// Query logs in chunks to avoid query size limits
 		const chunkSize = 1000
-		var allLogs []types.Log
+		var allLogs []Log
 
 		for i := 0; i < len(addresses); i += chunkSize {
 			end := i + chunkSize
@@ -303,14 +414,7 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 				end = len(addresses)
 			}
 
-			query := ethereum.FilterQuery{
-				FromBlock: big.NewInt(int64(from)),
-				ToBlock:   big.NewInt(int64(to)),
-				Addresses: addresses[i:end],
-				Topics:    [][]common.Hash{{common.HexToHash(SyncEventSignature)}},
-			}
-
-			logs, err := h.dataClient.FilterLogs(ctx, query)
+			logs, err := h.dataClient.GetLogs(ctx, from, to, addresses[i:end], []string{SyncEventSignature})
 			if err != nil {
 				consecutiveNG++
 				consecutiveOK = 0
@@ -321,11 +425,16 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 					}
 					log.Printf("↓ batch %d due to errors", batch)
 				}
+				log.Printf("Error fetching logs: %v", err)
 				time.Sleep(2 * time.Second)
-				continue
+				break // Break inner loop to retry
 			}
 
 			allLogs = append(allLogs, logs...)
+		}
+
+		if len(allLogs) == 0 && consecutiveNG > 0 {
+			continue // Retry if we had errors
 		}
 
 		// Process logs
@@ -360,7 +469,7 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 }
 
 // processLogs processes a batch of sync event logs
-func (h *Harvester) processLogs(logs []types.Log) error {
+func (h *Harvester) processLogs(logs []Log) error {
 	if len(logs) == 0 {
 		return nil
 	}
@@ -391,26 +500,43 @@ func (h *Harvester) processLogs(logs []types.Log) error {
 	defer updateReserves.Close()
 
 	for _, lg := range logs {
+		// Parse hex data
+		data, err := hex.DecodeString(strings.TrimPrefix(lg.Data, "0x"))
+		if err != nil {
+			continue
+		}
+
 		// Parse reserves from log data
-		if len(lg.Data) != 64 {
+		if len(data) != 64 {
 			continue // Invalid sync event
 		}
 
-		reserve0 := new(big.Int).SetBytes(lg.Data[:32])
-		reserve1 := new(big.Int).SetBytes(lg.Data[32:])
+		reserve0 := new(big.Int).SetBytes(data[:32])
+		reserve1 := new(big.Int).SetBytes(data[32:])
 
-		pairAddr := strings.ToLower(lg.Address.Hex())
+		pairAddr := strings.ToLower(lg.Address)
 		pairID, ok := h.pairMap[pairAddr]
 		if !ok {
 			continue // Unknown pair
 		}
 
+		// Parse block number and log index
+		blockNum, err := parseHexUint64(lg.BlockNumber)
+		if err != nil {
+			continue
+		}
+
+		logIndex, err := parseHexUint64(lg.LogIndex)
+		if err != nil {
+			continue
+		}
+
 		// Insert sync event
-		_, err := insertEvent.Exec(
+		_, err = insertEvent.Exec(
 			pairID,
-			lg.BlockNumber,
-			lg.TxHash.Hex(),
-			lg.Index,
+			blockNum,
+			lg.TxHash,
+			logIndex,
 			reserve0.String(),
 			reserve1.String(),
 		)
@@ -424,7 +550,7 @@ func (h *Harvester) processLogs(logs []types.Log) error {
 			pairAddr,
 			reserve0.String(),
 			reserve1.String(),
-			lg.BlockNumber,
+			blockNum,
 		)
 		if err != nil {
 			return err
@@ -450,10 +576,6 @@ func (h *Harvester) writeMeta(f *os.File, block uint64) error {
 
 // Close cleanly shuts down the harvester
 func (h *Harvester) Close() error {
-	h.dataClient.Close()
-	if h.headClient != h.dataClient {
-		h.headClient.Close()
-	}
 	h.pairsDB.Close()
 	h.reservesDB.Close()
 	return nil
@@ -481,4 +603,26 @@ func (h *Harvester) GetLatestReserves() (map[string]*PairReserve, error) {
 	}
 
 	return reserves, rows.Err()
+}
+
+// -----------------------------------------------------------------------------
+// Helper Functions
+// -----------------------------------------------------------------------------
+
+// parseHexUint64 parses a hex string to uint64
+func parseHexUint64(s string) (uint64, error) {
+	s = strings.TrimPrefix(s, "0x")
+	n, err := hex.DecodeString(s)
+	if err != nil {
+		return 0, err
+	}
+
+	// Pad to 8 bytes if necessary
+	if len(n) < 8 {
+		padded := make([]byte, 8)
+		copy(padded[8-len(n):], n)
+		n = padded
+	}
+
+	return binary.BigEndian.Uint64(n[len(n)-8:]), nil
 }
