@@ -937,11 +937,9 @@ func TestRPCClient_GetLogs_EdgeCases(t *testing.T) {
 }
 
 func TestMetaFileCorruption(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "meta_corruption_test_*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
+	// Setup test database first
+	_, tmpDir, cleanup := setupTestDB(t)
+	defer cleanup()
 
 	oldWd, _ := os.Getwd()
 	os.Chdir(tmpDir)
@@ -1126,11 +1124,16 @@ func TestHarvester_Start_RPCErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
+	// Create harvester with the mock server (not a real RPC endpoint)
 	h, err := NewHarvester(server.URL)
 	if err != nil {
 		t.Fatalf("Failed to create harvester: %v", err)
 	}
 	defer h.Close()
+
+	// Override the clients to use our mock server
+	h.dataClient = NewRPCClient(server.URL)
+	h.headClient = h.dataClient
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
