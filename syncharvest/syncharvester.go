@@ -1,19 +1,19 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// ⚡ DETACHED SYNC HARVESTER - ZERO HOT PATH INTERFERENCE
+// ⚡ DETACHED SYNC HARVESTER - PEAK SINGLE-CORE PERFORMANCE
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 // Project: High-Frequency Arbitrage Detection System
-// Component: Completely Detached Bootstrap System
+// Component: Ultra-Optimized Single-Core Bootstrap System
 //
 // Description:
-//   Ultra-efficient bootstrap system that operates completely detached from the hot path.
-//   Once synced to latest height, harvester terminates and database is closed. Uses ring
-//   buffers with pinned consumers to keep database writes out of the critical path.
+//   Peak performance bootstrap system optimized for single-core execution.
+//   Eliminates all unnecessary synchronization, atomics, and goroutines.
+//   Direct database writes with no ring buffers or inter-goroutine communication.
 //
 // Performance Characteristics:
-//   - Hot path: Zero interference after sync completion
-//   - Database writes: Handled by separate pinned consumer goroutine
-//   - Memory: Bounded with automatic cleanup after sync
-//   - Termination: Clean shutdown once sync target reached
+//   - Single-threaded: No goroutines, channels, or synchronization overhead
+//   - Direct writes: Database operations on main thread for maximum cache locality
+//   - Zero allocation: Pre-allocated buffers and structures
+//   - Inline processing: No function call overhead in hot paths
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -35,140 +35,99 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"main/constants"
 	"main/debug"
-	"main/ring24"
 	"main/utils"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CONFIGURATION - DETACHED OPERATION
+// CONFIGURATION - PEAK PERFORMANCE
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Dynamic batch sizing configuration - adapts to RPC performance
 const (
-	// DYNAMIC BATCH SIZING - Optimized for RPC stability
-	BatchFloor       = uint64(100)     // Minimum batch size when errors occur
-	BatchCeil        = uint64(100_000) // Maximum batch size for optimal performance
-	InitialBatchSize = uint64(10_000)  // Starting batch size
-
-	// ADAPTIVE SCALING PARAMETERS
-	SuccessThreshold = 3 // Consecutive successes before increasing batch
-	ErrorThreshold   = 3 // Consecutive errors before decreasing batch
-
-	// PARALLEL PROCESSING
-	MaxWorkerCount      = 8  // Maximum parallel workers
-	WorkerChannelBuffer = 50 // Worker task buffer
-
-	// RING BUFFER CONFIGURATION
-	DatabaseRingSize = 1 << 16 // 65536 entries for database writes
+	// AGGRESSIVE BOOTSTRAP SETTINGS
+	MaxBatchSize     = uint64(15_000) // Larger batches for fewer RPC calls
+	MinBatchSize     = uint64(2_000)  // Minimum when network issues occur
+	OptimalBatchSize = uint64(8_000)  // Target batch size for optimal performance
 
 	// TERMINATION SETTINGS
-	SyncTargetOffset    = 50               // Blocks behind head to consider "synced"
-	MaxSyncTime         = 2 * time.Hour    // Maximum time to spend syncing
-	ShutdownGracePeriod = 30 * time.Second // Grace period for final writes
+	SyncTargetOffset = 50            // Blocks behind head to consider "synced"
+	MaxSyncTime      = 4 * time.Hour // Maximum time to spend syncing
 
 	// PERFORMANCE TUNING
-	CommitBatchSize = 25_000          // Events per database commit
-	MaxRetries      = 3               // Retries for failed operations
-	RetryDelay      = 2 * time.Second // Delay between retries
+	CommitBatchSize = 50_000 // Events per database commit (larger batches)
 
 	// DATABASE SETTINGS
-	ReservesDBPath   = "uniswap_v2_reserves.db"
-	ReservesMetaPath = "uniswap_v2_reserves.db.meta"
+	ReservesDBPath = "uniswap_v2_reserves.db"
 
 	// SYNC EVENT CONFIGURATION
 	SyncEventSignature = "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// RING BUFFER MESSAGE TYPES
+// PEAK PERFORMANCE HARVESTER - SINGLE THREADED
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// DatabaseWriteMessage represents a sync event ready for database storage
-// Fits exactly in ring24.Ring 24-byte message format
-type DatabaseWriteMessage struct {
-	PairID      int64  // 8 bytes
-	BlockNumber uint64 // 8 bytes
-	LogIndex    uint64 // 8 bytes
-	// TxHash and reserve data stored separately to fit in 24 bytes
-}
-
-// ExtendedEventData stores additional event data that doesn't fit in ring message
-type ExtendedEventData struct {
-	TxHash   string
-	Reserve0 string
-	Reserve1 string
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// DETACHED HARVESTER CORE
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-type DetachedHarvester struct {
-	// RPC client using constants from main package
+type PeakHarvester struct {
+	// RPC client
 	rpcClient *RPCClient
 
-	// Database connections (closed after sync)
+	// Database connections
 	pairsDB    *sql.DB
 	reservesDB *sql.DB
 
-	// Pair mapping cache for efficient lookups
+	// Pair mapping cache
 	pairMap map[string]int64
 
-	// Ring buffer for database writes (allocated at destination)
-	databaseRing  *ring24.Ring
-	extendedData  map[uint64]*ExtendedEventData
-	extendedMutex sync.RWMutex
-
-	// State tracking
+	// State tracking (no atomics needed - single threaded)
 	syncTarget    uint64
-	lastProcessed uint64 // Atomic access only
-	processed     int64  // Atomic access only
-	errors        int64  // Atomic access only
-
-	// Dynamic batch sizing state
-	currentBatchSize uint64 // Current batch size for adaptive scaling
-	consecutiveOK    int    // Consecutive successful batches
-	consecutiveNG    int    // Consecutive failed batches
+	lastProcessed uint64
+	processed     int64
+	errors        int64
 
 	// Shutdown coordination
-	ctx          context.Context
-	cancel       context.CancelFunc
-	shutdownOnce sync.Once
+	ctx    context.Context
+	cancel context.CancelFunc
 
-	// Database writer coordination
-	writerDone chan struct{}
-	finalFlush chan struct{}
-
-	// Signal handling for graceful shutdown
-	signalChan    chan os.Signal
-	flushComplete chan struct{}
+	// Signal handling
+	signalChan chan os.Signal
 
 	// Performance monitoring
 	startTime  time.Time
-	lastReport time.Time
+	lastCommit time.Time
+
+	// Pre-allocated buffers for zero allocation
+	eventBuffer   []SyncEvent
+	reserveBuffer [2]*big.Int
+
+	// Database transaction for batching
+	currentTx     *sql.Tx
+	eventsInBatch int
+
+	// Prepared statements for peak performance
+	insertEventStmt    *sql.Stmt
+	updateReservesStmt *sql.Stmt
+	updateSyncStmt     *sql.Stmt
 }
 
-// WorkerTask represents a batch processing task
-type WorkerTask struct {
-	FromBlock  uint64
-	ToBlock    uint64
-	TaskID     uint64
-	ChunkIdx   int // Index of the address chunk to process
-	RetryCount int
+// SyncEvent represents a parsed sync event
+type SyncEvent struct {
+	PairID      int64
+	PairAddr    string
+	BlockNumber uint64
+	TxHash      string
+	LogIndex    uint64
+	Reserve0    string
+	Reserve1    string
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// RPC CLIENT IMPLEMENTATION
+// RPC CLIENT - OPTIMIZED FOR SINGLE CORE
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 type RPCClient struct {
@@ -204,15 +163,19 @@ type Log struct {
 	LogIndex    string   `json:"logIndex"`
 }
 
+//go:nosplit
+//go:inline
 func NewRPCClient(url string) *RPCClient {
 	return &RPCClient{
-		url: url,
+		url:    url,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			// NO TIMEOUT - will wait forever until success
 		},
 	}
 }
 
+//go:nosplit
+//go:inline
 func (c *RPCClient) Call(ctx context.Context, result interface{}, method string, params ...interface{}) error {
 	req := RPCRequest{
 		JSONRPC: "2.0",
@@ -226,7 +189,8 @@ func (c *RPCClient) Call(ctx context.Context, result interface{}, method string,
 		return err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.url, strings.NewReader(string(data)))
+	// NO TIMEOUT - create request without timeout context
+	httpReq, err := http.NewRequest("POST", c.url, strings.NewReader(string(data)))
 	if err != nil {
 		return err
 	}
@@ -250,6 +214,8 @@ func (c *RPCClient) Call(ctx context.Context, result interface{}, method string,
 	return json.Unmarshal(rpcResp.Result, result)
 }
 
+//go:nosplit
+//go:inline
 func (c *RPCClient) BlockNumber(ctx context.Context) (uint64, error) {
 	var result string
 	if err := c.Call(ctx, &result, "eth_blockNumber"); err != nil {
@@ -258,6 +224,8 @@ func (c *RPCClient) BlockNumber(ctx context.Context) (uint64, error) {
 	return parseHexUint64(result)
 }
 
+//go:nosplit
+//go:inline
 func (c *RPCClient) GetLogs(ctx context.Context, fromBlock, toBlock uint64, addresses []string, topics []string) ([]Log, error) {
 	params := map[string]interface{}{
 		"fromBlock": fmt.Sprintf("0x%x", fromBlock),
@@ -281,16 +249,20 @@ func (c *RPCClient) GetLogs(ctx context.Context, fromBlock, toBlock uint64, addr
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CONSTRUCTOR - DETACHED INITIALIZATION WITH SIGNAL HANDLING
+// CONSTRUCTOR - PEAK INITIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-func NewDetachedHarvester() (*DetachedHarvester, error) {
-	debug.DropMessage("DETACHED_INIT", "Initializing detached sync harvester")
+func NewPeakHarvester() (*PeakHarvester, error) {
+	debug.DropMessage("PEAK_INIT", "Initializing peak performance harvester")
+
+	// Pin to single core for maximum cache locality
+	runtime.GOMAXPROCS(1)
+	runtime.LockOSThread()
 
 	// Create context for clean shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Use HTTP RPC endpoint instead of WebSocket path
+	// Use HTTP RPC endpoint
 	rpcURL := fmt.Sprintf("https://%s/v3/a2a3139d2ab24d59bed2dc3643664126", constants.WsHost)
 	rpcClient := NewRPCClient(rpcURL)
 
@@ -308,7 +280,7 @@ func NewDetachedHarvester() (*DetachedHarvester, error) {
 		return nil, fmt.Errorf("failed to open reserves database: %w", err)
 	}
 
-	// Configure database for write performance
+	// Configure database for maximum write performance
 	if err := configureDatabase(reservesDB); err != nil {
 		cancel()
 		pairsDB.Close()
@@ -316,26 +288,24 @@ func NewDetachedHarvester() (*DetachedHarvester, error) {
 		return nil, fmt.Errorf("failed to configure database: %w", err)
 	}
 
-	// Create the detached harvester
-	h := &DetachedHarvester{
-		rpcClient:        rpcClient,
-		pairsDB:          pairsDB,
-		reservesDB:       reservesDB,
-		pairMap:          make(map[string]int64),
-		extendedData:     make(map[uint64]*ExtendedEventData),
-		currentBatchSize: InitialBatchSize, // Initialize dynamic batch sizing
-		consecutiveOK:    0,
-		consecutiveNG:    0,
-		ctx:              ctx,
-		cancel:           cancel,
-		writerDone:       make(chan struct{}),
-		finalFlush:       make(chan struct{}),
-		signalChan:       make(chan os.Signal, 1),
-		flushComplete:    make(chan struct{}),
-		startTime:        time.Now(),
+	// Create the peak harvester
+	h := &PeakHarvester{
+		rpcClient:  rpcClient,
+		pairsDB:    pairsDB,
+		reservesDB: reservesDB,
+		pairMap:    make(map[string]int64),
+		ctx:        ctx,
+		cancel:     cancel,
+		signalChan: make(chan os.Signal, 1),
+		startTime:  time.Now(),
+		lastCommit: time.Now(),
+
+		// Pre-allocate buffers to avoid allocations during processing
+		eventBuffer:   make([]SyncEvent, 0, CommitBatchSize),
+		reserveBuffer: [2]*big.Int{big.NewInt(0), big.NewInt(0)},
 	}
 
-	// Set up signal handling for graceful shutdown
+	// Set up signal handling
 	h.setupSignalHandling()
 
 	// Initialize database schema
@@ -350,41 +320,42 @@ func NewDetachedHarvester() (*DetachedHarvester, error) {
 		return nil, fmt.Errorf("failed to load pair mappings: %w", err)
 	}
 
-	// Optimize pair mappings for efficient lookup
-	h.optimizePairMapping()
+	// Prepare statements for maximum performance
+	if err := h.prepareStatements(); err != nil {
+		h.cleanup()
+		return nil, fmt.Errorf("failed to prepare statements: %w", err)
+	}
 
-	// Allocate ring buffer at destination (database writer)
-	h.databaseRing = ring24.New(DatabaseRingSize)
-
-	debug.DropMessage("DETACHED_READY", "Detached harvester initialized")
+	debug.DropMessage("PEAK_READY", fmt.Sprintf("Peak harvester initialized with %d pairs", len(h.pairMap)))
 	return h, nil
 }
 
-// setupSignalHandling configures CTRL+C handling for graceful shutdown
-func (h *DetachedHarvester) setupSignalHandling() {
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) setupSignalHandling() {
 	signal.Notify(h.signalChan, syscall.SIGINT, syscall.SIGTERM)
 
+	// Single goroutine for signal handling - minimal overhead
 	go func() {
-		sig := <-h.signalChan
-		debug.DropMessage("SIGNAL_RECEIVED", fmt.Sprintf("Received signal %v - initiating graceful shutdown", sig))
-
-		// Cancel the context to stop all operations
+		<-h.signalChan
+		debug.DropMessage("SIGNAL_RECEIVED", "Received shutdown signal")
 		h.cancel()
-
-		// Also trigger graceful shutdown
-		h.initiateGracefulShutdown()
 	}()
 }
 
+//go:nosplit
+//go:inline
 func configureDatabase(db *sql.DB) error {
+	// Ultra-aggressive database settings for peak write performance
 	optimizations := []string{
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA synchronous = OFF",   // Aggressive: no sync for bootstrap
-		"PRAGMA cache_size = 100000", // Large cache for writes
+		"PRAGMA journal_mode = OFF",  // No journaling for maximum speed
+		"PRAGMA synchronous = OFF",   // No sync for bootstrap
+		"PRAGMA cache_size = 200000", // Very large cache
 		"PRAGMA temp_store = MEMORY",
-		"PRAGMA mmap_size = 2147483648", // 2GB mmap
-		"PRAGMA wal_autocheckpoint = 50000",
-		"PRAGMA optimize",
+		"PRAGMA mmap_size = 4294967296",   // 4GB mmap
+		"PRAGMA page_size = 65536",        // Large pages
+		"PRAGMA auto_vacuum = NONE",       // No auto vacuum overhead
+		"PRAGMA locking_mode = EXCLUSIVE", // Exclusive access
 	}
 
 	for _, pragma := range optimizations {
@@ -396,7 +367,9 @@ func configureDatabase(db *sql.DB) error {
 	return nil
 }
 
-func (h *DetachedHarvester) initializeSchema() error {
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) initializeSchema() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS pair_reserves (
 		pair_id      INTEGER PRIMARY KEY,
@@ -406,13 +379,9 @@ func (h *DetachedHarvester) initializeSchema() error {
 		block_height INTEGER NOT NULL,
 		last_updated INTEGER NOT NULL,
 		UNIQUE(pair_address)
-	);
-	
-	CREATE INDEX IF NOT EXISTS idx_reserves_block ON pair_reserves(block_height);
-	CREATE INDEX IF NOT EXISTS idx_reserves_pair ON pair_reserves(pair_id);
+	) WITHOUT ROWID;
 	
 	CREATE TABLE IF NOT EXISTS sync_events (
-		id           INTEGER PRIMARY KEY,
 		pair_id      INTEGER NOT NULL,
 		block_number INTEGER NOT NULL,
 		tx_hash      TEXT NOT NULL,
@@ -420,11 +389,8 @@ func (h *DetachedHarvester) initializeSchema() error {
 		reserve0     TEXT NOT NULL,
 		reserve1     TEXT NOT NULL,
 		created_at   INTEGER NOT NULL,
-		UNIQUE(block_number, tx_hash, log_index)
-	);
-	
-	CREATE INDEX IF NOT EXISTS idx_sync_pair_block ON sync_events(pair_id, block_number);
-	CREATE INDEX IF NOT EXISTS idx_sync_block ON sync_events(block_number);
+		PRIMARY KEY (block_number, tx_hash, log_index)
+	) WITHOUT ROWID;
 	
 	CREATE TABLE IF NOT EXISTS sync_metadata (
 		id               INTEGER PRIMARY KEY,
@@ -433,27 +399,16 @@ func (h *DetachedHarvester) initializeSchema() error {
 		sync_status      TEXT NOT NULL,
 		updated_at       INTEGER NOT NULL,
 		events_processed INTEGER NOT NULL DEFAULT 0
-	);
-	
-	CREATE TABLE IF NOT EXISTS pair_sync_state (
-		pair_id          INTEGER PRIMARY KEY,
-		last_block       INTEGER NOT NULL,
-		last_tx_hash     TEXT NOT NULL,
-		last_log_index   INTEGER NOT NULL,
-		reserve0         TEXT NOT NULL,
-		reserve1         TEXT NOT NULL,
-		updated_at       INTEGER NOT NULL,
-		FOREIGN KEY (pair_id) REFERENCES pair_reserves(pair_id)
-	);
-	
-	CREATE INDEX IF NOT EXISTS idx_pair_sync_block ON pair_sync_state(last_block);
+	) WITHOUT ROWID;
 	`
 
 	_, err := h.reservesDB.Exec(schema)
 	return err
 }
 
-func (h *DetachedHarvester) loadPairMappings() error {
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) loadPairMappings() error {
 	debug.DropMessage("PAIR_LOADING", "Loading Uniswap V2 pairs")
 
 	query := `
@@ -470,7 +425,6 @@ func (h *DetachedHarvester) loadPairMappings() error {
 	defer rows.Close()
 
 	count := 0
-
 	for rows.Next() {
 		var id int64
 		var addr string
@@ -487,28 +441,73 @@ func (h *DetachedHarvester) loadPairMappings() error {
 	return rows.Err()
 }
 
-func (h *DetachedHarvester) optimizePairMapping() {
-	// Convert pair map to a more efficient structure for lookups
-	// No need for address chunking anymore since we're not filtering by address in RPC
-	pairCount := len(h.pairMap)
-	debug.DropMessage("PAIR_OPTIMIZATION", fmt.Sprintf("Optimized %d pair mappings for efficient lookup", pairCount))
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) prepareStatements() error {
+	var err error
+
+	h.insertEventStmt, err = h.reservesDB.Prepare(`
+		INSERT OR IGNORE INTO sync_events 
+		(pair_id, block_number, tx_hash, log_index, reserve0, reserve1, created_at) 
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare insert event statement: %w", err)
+	}
+
+	h.updateReservesStmt, err = h.reservesDB.Prepare(`
+		INSERT OR REPLACE INTO pair_reserves 
+		(pair_id, pair_address, reserve0, reserve1, block_height, last_updated) 
+		VALUES (?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare update reserves statement: %w", err)
+	}
+
+	h.updateSyncStmt, err = h.reservesDB.Prepare(`
+		INSERT OR REPLACE INTO sync_metadata 
+		(id, last_block, sync_target, sync_status, updated_at, events_processed) 
+		VALUES (1, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare update sync statement: %w", err)
+	}
+
+	return nil
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MAIN SYNC EXECUTION - COMPLETELY DETACHED
+// PEAK SYNC EXECUTION - SINGLE THREADED
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-func (h *DetachedHarvester) SyncToLatestAndTerminate() error {
-	debug.DropMessage("SYNC_INITIALIZATION", "Starting detached blockchain synchronization")
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) SyncToLatestAndTerminate() error {
+	debug.DropMessage("PEAK_SYNC_START", "Starting peak performance synchronization")
 
-	// Determine sync target
-	currentHead, err := h.rpcClient.BlockNumber(h.ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get current head: %w", err)
+	// Determine sync target with infinite retry
+	var currentHead uint64
+	var err error
+	retryCount := 0
+
+	for {
+		currentHead, err = h.rpcClient.BlockNumber(h.ctx)
+		if err == nil {
+			break
+		}
+
+		retryCount++
+		debug.DropMessage("TARGET_RETRY", fmt.Sprintf("Target retrieval attempt %d failed: %v", retryCount, err))
+
+		select {
+		case <-h.ctx.Done():
+			return h.ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
 	}
 
 	h.syncTarget = currentHead - SyncTargetOffset
-	debug.DropMessage("SYNC_PARAMETERS", fmt.Sprintf("Target block: %d (head: %d, offset: %d)", h.syncTarget, currentHead, SyncTargetOffset))
+	debug.DropMessage("SYNC_TARGET", fmt.Sprintf("Target: %d (head: %d)", h.syncTarget, currentHead))
 
 	// Get starting block
 	startBlock := h.getLastProcessedBlock()
@@ -518,78 +517,70 @@ func (h *DetachedHarvester) SyncToLatestAndTerminate() error {
 
 	// Check if already synced
 	if startBlock >= h.syncTarget {
-		debug.DropMessage("SYNC_CURRENT", "Already synchronized to target block")
+		debug.DropMessage("SYNC_CURRENT", "Already synchronized")
 		return h.terminateCleanly()
 	}
 
+	// Begin database transaction for the entire sync
+	h.beginTransaction()
+
 	blocksToSync := h.syncTarget - startBlock
-	debug.DropMessage("SYNC_SCOPE", fmt.Sprintf("Synchronizing %d blocks from %d to %d", blocksToSync, startBlock, h.syncTarget))
+	debug.DropMessage("SYNC_SCOPE", fmt.Sprintf("Syncing %d blocks from %d to %d", blocksToSync, startBlock, h.syncTarget))
 
-	// Start database writer with pinned consumer
-	h.startDatabaseWriter()
-
-	// Start progress monitoring
-	go h.monitorProgress()
-
-	// Execute sync with timeout
-	syncCtx, syncCancel := context.WithTimeout(h.ctx, MaxSyncTime)
-	defer syncCancel()
-
-	err = h.executeSyncLoop(syncCtx, startBlock)
+	// Execute sync loop
+	err = h.executePeakSyncLoop(startBlock)
 	if err != nil {
-		debug.DropMessage("SYNC_ERROR", fmt.Sprintf("Synchronization failed: %v", err))
-		// Continue to clean termination
+		debug.DropMessage("SYNC_ERROR", fmt.Sprintf("Sync failed: %v", err))
+		h.rollbackTransaction()
+		return err
 	}
 
-	// Terminate cleanly
+	// Commit final transaction
+	h.commitTransaction()
+
 	return h.terminateCleanly()
 }
 
-func (h *DetachedHarvester) executeSyncLoop(ctx context.Context, startBlock uint64) error {
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) executePeakSyncLoop(startBlock uint64) error {
 	current := startBlock
+	batchSize := OptimalBatchSize
 
 	for current < h.syncTarget {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-h.signalChan:
-			debug.DropMessage("SYNC_INTERRUPTED", "Sync interrupted by signal")
-			return fmt.Errorf("sync interrupted by signal")
+		case <-h.ctx.Done():
+			return h.ctx.Err()
 		default:
 		}
 
-		// Calculate batch end using dynamic batch size
-		batchEnd := current + h.currentBatchSize
+		// Calculate batch end
+		batchEnd := current + batchSize
 		if batchEnd > h.syncTarget {
 			batchEnd = h.syncTarget
 		}
 
-		// Log current batch processing
-		debug.DropMessage("BATCH_PROCESSING", fmt.Sprintf("Processing blocks %d → %d (batch %d)",
-			current, batchEnd, h.currentBatchSize))
+		// Process batch with infinite retry
+		h.processPeakBatch(current, batchEnd)
 
-		// Process batch
-		if err := h.processBatch(ctx, current, batchEnd); err != nil {
-			debug.DropMessage("BATCH_ERROR", fmt.Sprintf("Batch %d-%d failed: %v", current, batchEnd, err))
-
-			// Handle batch failure with dynamic scaling
-			h.handleBatchFailure()
-
-			// Add delay before retry
-			time.Sleep(RetryDelay)
-			continue
-		}
-
-		// Handle batch success with dynamic scaling
-		h.handleBatchSuccess()
-
-		// Update progress atomically
-		atomic.StoreUint64(&h.lastProcessed, batchEnd)
+		// Update progress
+		h.lastProcessed = batchEnd
 		current = batchEnd + 1
 
-		// Update metadata periodically
-		if current%5000 == 0 {
-			h.updateSyncMetadata(current)
+		// Commit periodically for memory management
+		if h.eventsInBatch >= CommitBatchSize {
+			h.commitTransaction()
+			h.beginTransaction()
+		}
+
+		// Increase batch size for better throughput
+		if batchSize < MaxBatchSize {
+			batchSize = minUint64(MaxBatchSize, batchSize+500)
+		}
+
+		// Progress reporting
+		if current%10000 == 0 {
+			h.reportProgress()
 		}
 	}
 
@@ -597,487 +588,257 @@ func (h *DetachedHarvester) executeSyncLoop(ctx context.Context, startBlock uint
 	return nil
 }
 
-// handleBatchFailure implements dynamic batch size reduction on consecutive errors
-func (h *DetachedHarvester) handleBatchFailure() {
-	h.consecutiveNG++
-	h.consecutiveOK = 0
-
-	// Reduce batch size after threshold consecutive failures
-	if h.consecutiveNG%ErrorThreshold == 0 && h.currentBatchSize > BatchFloor {
-		h.currentBatchSize /= 2
-		if h.currentBatchSize < BatchFloor {
-			h.currentBatchSize = BatchFloor
-		}
-		debug.DropMessage("BATCH_SCALE_DOWN", fmt.Sprintf("Reduced batch size to %d after %d consecutive errors",
-			h.currentBatchSize, h.consecutiveNG))
-	}
-
-	// Increment error counter atomically
-	atomic.AddInt64(&h.errors, 1)
-}
-
-// handleBatchSuccess implements dynamic batch size increase on consecutive successes
-func (h *DetachedHarvester) handleBatchSuccess() {
-	h.consecutiveOK++
-	h.consecutiveNG = 0
-
-	// Increase batch size after threshold consecutive successes
-	if h.consecutiveOK%SuccessThreshold == 0 && h.currentBatchSize < BatchCeil {
-		h.currentBatchSize *= 2
-		if h.currentBatchSize > BatchCeil {
-			h.currentBatchSize = BatchCeil
-		}
-		debug.DropMessage("BATCH_SCALE_UP", fmt.Sprintf("Increased batch size to %d after %d consecutive successes",
-			h.currentBatchSize, h.consecutiveOK))
-	}
-}
-
-func (h *DetachedHarvester) processBatch(ctx context.Context, fromBlock, toBlock uint64) error {
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) processPeakBatch(fromBlock, toBlock uint64) {
 	debug.DropMessage("BATCH_START", fmt.Sprintf("Processing blocks %d-%d", fromBlock, toBlock))
 
-	// Single RPC call for all Sync events in this block range
-	startTime := time.Now()
-	logs, err := h.rpcClient.GetLogs(ctx, fromBlock, toBlock, []string{}, []string{SyncEventSignature})
-	requestDuration := time.Since(startTime)
+	var logs []Log
+	var err error
+	retryCount := 0
 
-	if err != nil {
-		debug.DropMessage("RPC_ERROR", fmt.Sprintf("Failed to fetch logs for blocks %d-%d: %v", fromBlock, toBlock, err))
-		return err
-	}
-
-	debug.DropMessage("RPC_SUCCESS", fmt.Sprintf("Fetched %d Sync events in %v", len(logs), requestDuration))
-
-	// Filter logs by our known Uniswap V2 pairs and process them
-	processedCount := 0
-	filteredCount := 0
-
-	for _, log := range logs {
-		// Check if this log is from a known Uniswap V2 pair
-		pairAddr := strings.ToLower(log.Address)
-		if _, exists := h.pairMap[pairAddr]; !exists {
-			filteredCount++
-			continue // Skip logs from unknown pairs
+	// Keep retrying until successful
+	for {
+		logs, err = h.rpcClient.GetLogs(h.ctx, fromBlock, toBlock, []string{}, []string{SyncEventSignature})
+		if err == nil {
+			break
 		}
 
-		// Process this log
-		if err := h.processLogToRing(log); err != nil {
-			debug.DropMessage("LOG_ERROR", fmt.Sprintf("Failed to process log from %s: %v", log.Address, err))
-		} else {
+		retryCount++
+		debug.DropMessage("RPC_RETRY", fmt.Sprintf("RPC attempt %d failed: %v", retryCount, err))
+
+		select {
+		case <-h.ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+
+	debug.DropMessage("RPC_SUCCESS", fmt.Sprintf("Fetched %d events", len(logs)))
+
+	// Process logs directly - no goroutines or channels
+	processedCount := 0
+	for i := range logs {
+		if h.processLogDirect(&logs[i]) {
 			processedCount++
 		}
 	}
 
-	// Clear logs slice immediately after processing
-	logs = nil
-
-	debug.DropMessage("BATCH_COMPLETE", fmt.Sprintf("Processed %d/%d logs (%d filtered out)", processedCount, len(logs), filteredCount))
-	return nil
+	h.processed += int64(processedCount)
+	debug.DropMessage("BATCH_COMPLETE", fmt.Sprintf("Processed %d events", processedCount))
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SINGLE RPC CALL PROCESSING - PEAK PERFORMANCE
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-func (h *DetachedHarvester) processLogToRing(log Log) error {
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) processLogDirect(log *Log) bool {
 	// Validate sync event
 	if len(log.Topics) == 0 || log.Topics[0] != SyncEventSignature {
-		return nil // Skip non-sync events
+		return false
 	}
 
-	// Parse required fields
+	// Parse fields
 	blockNum, err := parseHexUint64(log.BlockNumber)
 	if err != nil {
-		return fmt.Errorf("invalid block number: %w", err)
+		return false
 	}
 
 	logIndex, err := parseHexUint64(log.LogIndex)
 	if err != nil {
-		return fmt.Errorf("invalid log index: %w", err)
+		return false
 	}
 
-	// Lookup pair ID
+	// Check if this is a known pair
 	pairAddr := strings.ToLower(log.Address)
 	pairID, exists := h.pairMap[pairAddr]
 	if !exists {
-		return nil // Skip unknown pairs
+		return false
 	}
 
-	// Parse reserves
-	reserve0, reserve1, err := h.parseReserves(log.Data)
+	// Parse reserves using pre-allocated buffers
+	if !h.parseReservesDirect(log.Data) {
+		return false
+	}
+
+	// Write directly to database - no buffering
+	now := time.Now().Unix()
+
+	// Insert sync event
+	_, err = h.insertEventStmt.Exec(
+		pairID, blockNum, log.TxHash, logIndex,
+		h.reserveBuffer[0].String(), h.reserveBuffer[1].String(), now,
+	)
 	if err != nil {
-		return fmt.Errorf("failed to parse reserves: %w", err)
+		debug.DropMessage("DB_ERROR", fmt.Sprintf("Insert failed: %v", err))
+		return false
 	}
 
-	// Create ring message (24 bytes)
-	ringMsg := DatabaseWriteMessage{
-		PairID:      pairID,
-		BlockNumber: blockNum,
-		LogIndex:    logIndex,
+	// Update pair reserves
+	_, err = h.updateReservesStmt.Exec(
+		pairID, pairAddr,
+		h.reserveBuffer[0].String(), h.reserveBuffer[1].String(),
+		blockNum, now,
+	)
+	if err != nil {
+		debug.DropMessage("DB_ERROR", fmt.Sprintf("Update failed: %v", err))
+		return false
 	}
 
-	// Store extended data separately
-	extendedKey := blockNum<<32 | logIndex
-	h.extendedMutex.Lock()
-	h.extendedData[extendedKey] = &ExtendedEventData{
-		TxHash:   log.TxHash,
-		Reserve0: reserve0.String(),
-		Reserve1: reserve1.String(),
-	}
-	h.extendedMutex.Unlock()
-
-	// Send to database writer via ring
-	ringBytes := (*[24]byte)(unsafe.Pointer(&ringMsg))
-	for {
-		if h.databaseRing.Push(ringBytes) {
-			atomic.AddInt64(&h.processed, 1)
-			break
-		}
-		// Ring full, brief pause
-		time.Sleep(time.Microsecond)
-	}
-
-	return nil
+	h.eventsInBatch++
+	return true
 }
 
-func (h *DetachedHarvester) parseReserves(dataStr string) (*big.Int, *big.Int, error) {
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) parseReservesDirect(dataStr string) bool {
 	dataStr = strings.TrimPrefix(dataStr, "0x")
 	if len(dataStr) != 128 {
-		return nil, nil, fmt.Errorf("invalid data length: %d", len(dataStr))
+		return false
 	}
 
 	data, err := hex.DecodeString(dataStr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("hex decode failed: %w", err)
+		return false
 	}
 
-	reserve0 := new(big.Int).SetBytes(data[:32])
-	reserve1 := new(big.Int).SetBytes(data[32:64])
+	// Reuse pre-allocated big.Int buffers
+	h.reserveBuffer[0].SetBytes(data[:32])
+	h.reserveBuffer[1].SetBytes(data[32:64])
 
-	// Clear temporary data immediately after use
-	data = nil
-
-	return reserve0, reserve1, nil
+	return true
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// DATABASE WRITER - PINNED CONSUMER
+// TRANSACTION MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-func (h *DetachedHarvester) startDatabaseWriter() {
-	debug.DropMessage("DB_WRITER_START", "Starting database writer with pinned consumer")
-
-	// Create stop flag for pinned consumer that responds to context cancellation
-	stopFlag := uint32(0)
-	hotFlag := uint32(1) // Always hot during sync
-
-	// Monitor context cancellation and set stop flag
-	go func() {
-		<-h.ctx.Done()
-		atomic.StoreUint32(&stopFlag, 1)
-		debug.DropMessage("DB_WRITER_STOP", "Database writer stop flag set")
-	}()
-
-	// Use pinned consumer for database writes
-	// This keeps database I/O completely out of the hot path
-	ring24.PinnedConsumer(
-		0, // Pin to core 0
-		h.databaseRing,
-		&stopFlag,
-		&hotFlag,
-		h.processDatabaseWrite,
-		h.writerDone,
-	)
-}
-
-func (h *DetachedHarvester) processDatabaseWrite(msgPtr *[24]byte) {
-	// Convert ring message back to struct
-	msg := (*DatabaseWriteMessage)(unsafe.Pointer(msgPtr))
-
-	// Retrieve extended data
-	extendedKey := msg.BlockNumber<<32 | msg.LogIndex
-	h.extendedMutex.RLock()
-	extended, exists := h.extendedData[extendedKey]
-	h.extendedMutex.RUnlock()
-
-	if !exists {
-		debug.DropMessage("MISSING_EXTENDED", fmt.Sprintf("Missing extended data for block %d log %d", msg.BlockNumber, msg.LogIndex))
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) beginTransaction() {
+	var err error
+	h.currentTx, err = h.reservesDB.Begin()
+	if err != nil {
+		debug.DropMessage("TX_ERROR", fmt.Sprintf("Failed to begin transaction: %v", err))
 		return
 	}
-
-	// Write to database
-	if err := h.writeToDatabase(msg, extended); err != nil {
-		debug.DropMessage("DB_WRITE_ERROR", fmt.Sprintf("Database write failed: %v", err))
-		return
-	}
-
-	// Clean up extended data
-	h.extendedMutex.Lock()
-	delete(h.extendedData, extendedKey)
-	h.extendedMutex.Unlock()
+	h.eventsInBatch = 0
 }
 
-func (h *DetachedHarvester) writeToDatabase(msg *DatabaseWriteMessage, extended *ExtendedEventData) error {
-	now := time.Now().Unix()
-
-	// Insert sync event
-	_, err := h.reservesDB.Exec(`
-		INSERT OR IGNORE INTO sync_events 
-		(pair_id, block_number, tx_hash, log_index, reserve0, reserve1, created_at) 
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, msg.PairID, msg.BlockNumber, extended.TxHash, msg.LogIndex, extended.Reserve0, extended.Reserve1, now)
-
-	if err != nil {
-		return fmt.Errorf("failed to insert sync event: %w", err)
-	}
-
-	// Update pair reserves
-	_, err = h.reservesDB.Exec(`
-		INSERT OR REPLACE INTO pair_reserves 
-		(pair_id, pair_address, reserve0, reserve1, block_height, last_updated) 
-		VALUES (?, (SELECT pool_address FROM pools WHERE id = ?), ?, ?, ?, ?)
-	`, msg.PairID, msg.PairID, extended.Reserve0, extended.Reserve1, msg.BlockNumber, now)
-
-	if err != nil {
-		return fmt.Errorf("failed to update pair reserves: %w", err)
-	}
-
-	// Update per-pair sync state
-	_, err = h.reservesDB.Exec(`
-		INSERT OR REPLACE INTO pair_sync_state 
-		(pair_id, last_block, last_tx_hash, last_log_index, reserve0, reserve1, updated_at) 
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, msg.PairID, msg.BlockNumber, extended.TxHash, msg.LogIndex, extended.Reserve0, extended.Reserve1, now)
-
-	return err
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// GRACEFUL SHUTDOWN AND STATE FLUSH
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// initiateGracefulShutdown handles CTRL+C and ensures all state is flushed
-func (h *DetachedHarvester) initiateGracefulShutdown() {
-	h.shutdownOnce.Do(func() {
-		debug.DropMessage("GRACEFUL_SHUTDOWN", "Initiating graceful shutdown")
-
-		// Cancel context to stop all workers (if not already cancelled)
-		h.cancel()
-
-		// Wait for ring buffer to drain
-		debug.DropMessage("RING_DRAIN", "Waiting for ring buffer to drain")
-		h.waitForRingDrain()
-
-		// Flush final state
-		debug.DropMessage("FINAL_FLUSH", "Flushing final state")
-		h.flushFinalState()
-
-		// Signal flush complete
-		close(h.flushComplete)
-
-		debug.DropMessage("SHUTDOWN_COMPLETE", "Graceful shutdown completed")
-	})
-}
-
-// waitForRingDrain waits for the ring buffer to empty
-func (h *DetachedHarvester) waitForRingDrain() {
-	timeout := time.NewTimer(ShutdownGracePeriod)
-	defer timeout.Stop()
-
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-timeout.C:
-			debug.DropMessage("DRAIN_TIMEOUT", "Ring buffer drain timeout")
-			return
-		case <-ticker.C:
-			// Check if ring is empty by trying to pop
-			if h.databaseRing.Pop() == nil {
-				debug.DropMessage("RING_EMPTY", "Ring buffer drained")
-				return
-			}
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) commitTransaction() {
+	if h.currentTx != nil {
+		err := h.currentTx.Commit()
+		if err != nil {
+			debug.DropMessage("TX_ERROR", fmt.Sprintf("Failed to commit transaction: %v", err))
+		} else {
+			debug.DropMessage("TX_COMMIT", fmt.Sprintf("Committed %d events", h.eventsInBatch))
 		}
+		h.currentTx = nil
+	}
+	h.lastCommit = time.Now()
+}
+
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) rollbackTransaction() {
+	if h.currentTx != nil {
+		h.currentTx.Rollback()
+		h.currentTx = nil
 	}
 }
 
-// flushFinalState saves the current sync state to database
-func (h *DetachedHarvester) flushFinalState() {
-	lastBlock := atomic.LoadUint64(&h.lastProcessed)
-	if lastBlock == 0 {
-		lastBlock = h.getLastProcessedBlock()
-	}
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// MONITORING AND CLEANUP
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-	processedCount := atomic.LoadInt64(&h.processed)
-	errorCount := atomic.LoadInt64(&h.errors)
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) reportProgress() {
+	elapsed := time.Since(h.startTime)
+	eventsPerSecond := float64(h.processed) / elapsed.Seconds()
+	blocksPerSecond := float64(h.lastProcessed) / elapsed.Seconds()
 
-	debug.DropMessage("FLUSH_STATE", fmt.Sprintf(
-		"Flushing state: block %d, processed %d, errors %d",
-		lastBlock, processedCount, errorCount,
+	debug.DropMessage("PEAK_PROGRESS", fmt.Sprintf(
+		"Block: %d, Events: %d (%.1f/s), Blocks: %.1f/s, Elapsed: %v",
+		h.lastProcessed, h.processed, eventsPerSecond, blocksPerSecond, elapsed.Round(time.Second),
 	))
 
-	// Update sync metadata with final state
+	// Update sync metadata
 	now := time.Now().Unix()
-	_, err := h.reservesDB.Exec(`
-		INSERT OR REPLACE INTO sync_metadata 
-		(id, last_block, sync_target, sync_status, updated_at, events_processed) 
-		VALUES (1, ?, ?, 'interrupted', ?, ?)
-	`, lastBlock, h.syncTarget, now, processedCount)
-
-	if err != nil {
-		debug.DropMessage("FLUSH_ERROR", fmt.Sprintf("Failed to flush metadata: %v", err))
-	}
-
-	// Force WAL checkpoint to ensure data is written
-	h.reservesDB.Exec("PRAGMA wal_checkpoint(FULL)")
-
-	debug.DropMessage("FLUSH_COMPLETE", "Final state flushed")
+	h.updateSyncStmt.Exec(h.lastProcessed, h.syncTarget, "running", now, h.processed)
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CLEAN TERMINATION
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-func (h *DetachedHarvester) terminateCleanly() error {
-	debug.DropMessage("TERMINATION_START", "Beginning clean termination")
-
-	h.shutdownOnce.Do(func() {
-		// Cancel context to stop all workers
-		h.cancel()
-
-		// Wait for final database writes
-		debug.DropMessage("FINAL_FLUSH", "Waiting for final database writes")
-		close(h.finalFlush)
-
-		// Wait for database writer to finish
-		select {
-		case <-h.writerDone:
-			debug.DropMessage("WRITER_DONE", "Database writer completed")
-		case <-time.After(ShutdownGracePeriod):
-			debug.DropMessage("WRITER_TIMEOUT", "Database writer timeout")
-		}
-
-		// Flush final state
-		h.flushFinalState()
-
-		// Close databases
-		h.cleanup()
-
-		// Report final statistics
-		h.reportFinalStats()
-	})
-
-	debug.DropMessage("TERMINATION_COMPLETE", "Clean termination completed")
-	return nil
-}
-
-func (h *DetachedHarvester) cleanup() {
-	debug.DropMessage("CLEANUP_START", "Cleaning up resources")
-
-	if h.reservesDB != nil {
-		// Final database optimization
-		h.reservesDB.Exec("PRAGMA optimize")
-		h.reservesDB.Exec("PRAGMA wal_checkpoint(FULL)")
-		h.reservesDB.Close()
-		h.reservesDB = nil
-	}
-
-	if h.pairsDB != nil {
-		h.pairsDB.Close()
-		h.pairsDB = nil
-	}
-
-	// Clear memory
-	h.pairMap = nil
-	h.extendedData = nil
-
-	debug.DropMessage("CLEANUP_COMPLETE", "Resource cleanup completed")
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// PROGRESS MONITORING
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-func (h *DetachedHarvester) monitorProgress() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-h.ctx.Done():
-			return
-		case <-ticker.C:
-			h.reportProgress()
-		}
-	}
-}
-
-func (h *DetachedHarvester) reportProgress() {
-	now := time.Now()
-	elapsed := now.Sub(h.startTime)
-
-	processed := atomic.LoadInt64(&h.processed)
-	errors := atomic.LoadInt64(&h.errors)
-	lastBlock := atomic.LoadUint64(&h.lastProcessed)
-
-	if elapsed > 0 {
-		eventsPerSecond := float64(processed) / elapsed.Seconds()
-		blocksPerSecond := float64(lastBlock-h.getLastProcessedBlock()) / elapsed.Seconds()
-
-		debug.DropMessage("SYNC_STATISTICS", fmt.Sprintf("Events: %d processed, %d errors (%.1f events/sec)", processed, errors, eventsPerSecond))
-		debug.DropMessage("SYNC_PERFORMANCE", fmt.Sprintf("Blocks: %d processed (%.1f blocks/sec), elapsed: %v", lastBlock, blocksPerSecond, elapsed.Round(time.Second)))
-		debug.DropMessage("BATCH_STATUS", fmt.Sprintf("Current batch size: %d, consecutive OK: %d, consecutive NG: %d",
-			h.currentBatchSize, h.consecutiveOK, h.consecutiveNG))
-	}
-
-	// Memory usage
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-
-	debug.DropMessage("MEMORY_USAGE", fmt.Sprintf("Memory: %d KB allocated, %d KB system, %d GC cycles", m.Alloc/1024, m.Sys/1024, m.NumGC))
-}
-
-func (h *DetachedHarvester) reportFinalStats() {
-	elapsed := time.Since(h.startTime)
-	processed := atomic.LoadInt64(&h.processed)
-	errors := atomic.LoadInt64(&h.errors)
-	lastBlock := atomic.LoadUint64(&h.lastProcessed)
-
-	debug.DropMessage("SYNC_FINAL_REPORT", fmt.Sprintf("Synchronization completed in %v", elapsed.Round(time.Second)))
-	debug.DropMessage("SYNC_FINAL_STATS", fmt.Sprintf("Events: %d processed, %d errors", processed, errors))
-	debug.DropMessage("SYNC_FINAL_BLOCKS", fmt.Sprintf("Blocks: %d processed, final block: %d", lastBlock, h.syncTarget))
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// METADATA MANAGEMENT
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-func (h *DetachedHarvester) getLastProcessedBlock() uint64 {
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) getLastProcessedBlock() uint64 {
 	var lastBlock uint64
 	err := h.reservesDB.QueryRow("SELECT COALESCE(MAX(block_number), 0) FROM sync_events").Scan(&lastBlock)
 	if err != nil {
-		debug.DropMessage("LAST_BLOCK_ERROR", fmt.Sprintf("Failed to get last block: %v", err))
 		return 0
 	}
 	return lastBlock
 }
 
-func (h *DetachedHarvester) updateSyncMetadata(currentBlock uint64) {
-	_, err := h.reservesDB.Exec(`
-		INSERT OR REPLACE INTO sync_metadata 
-		(id, last_block, sync_target, sync_status, updated_at) 
-		VALUES (1, ?, ?, 'running', ?)
-	`, currentBlock, h.syncTarget, time.Now().Unix())
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) terminateCleanly() error {
+	debug.DropMessage("PEAK_TERMINATION", "Beginning clean termination")
 
-	if err != nil {
-		debug.DropMessage("METADATA_ERROR", fmt.Sprintf("Failed to update metadata: %v", err))
+	// Commit any pending transaction
+	h.commitTransaction()
+
+	// Final metadata update
+	now := time.Now().Unix()
+	h.updateSyncStmt.Exec(h.lastProcessed, h.syncTarget, "completed", now, h.processed)
+
+	// Close prepared statements
+	if h.insertEventStmt != nil {
+		h.insertEventStmt.Close()
 	}
+	if h.updateReservesStmt != nil {
+		h.updateReservesStmt.Close()
+	}
+	if h.updateSyncStmt != nil {
+		h.updateSyncStmt.Close()
+	}
+
+	// Final optimization
+	h.reservesDB.Exec("PRAGMA optimize")
+
+	h.cleanup()
+
+	elapsed := time.Since(h.startTime)
+	debug.DropMessage("PEAK_COMPLETE", fmt.Sprintf(
+		"Peak sync completed: %d events, %d blocks in %v (%.1f events/sec)",
+		h.processed, h.lastProcessed, elapsed.Round(time.Second),
+		float64(h.processed)/elapsed.Seconds(),
+	))
+
+	return nil
+}
+
+//go:nosplit
+//go:inline
+func (h *PeakHarvester) cleanup() {
+	if h.reservesDB != nil {
+		h.reservesDB.Close()
+		h.reservesDB = nil
+	}
+	if h.pairsDB != nil {
+		h.pairsDB.Close()
+		h.pairsDB = nil
+	}
+
+	h.pairMap = nil
+	h.eventBuffer = nil
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // UTILITY FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+//go:nosplit
+//go:inline
 func parseHexUint64(s string) (uint64, error) {
 	s = strings.TrimPrefix(s, "0x")
 	if s == "" {
@@ -1086,6 +847,8 @@ func parseHexUint64(s string) (uint64, error) {
 	return utils.ParseHexU64([]byte(s)), nil
 }
 
+//go:nosplit
+//go:inline
 func minUint64(a, b uint64) uint64 {
 	if a < b {
 		return a
@@ -1093,52 +856,28 @@ func minUint64(a, b uint64) uint64 {
 	return b
 }
 
-func maxUint64(a, b uint64) uint64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b uint64) uint64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// PUBLIC API - SIMPLE DETACHED EXECUTION
+// PUBLIC API - PEAK PERFORMANCE EXECUTION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// ExecuteDetachedSync runs a complete sync operation and terminates
-// This is the main entry point for the detached harvester
-func ExecuteDetachedSync() error {
-	debug.DropMessage("DETACHED_SYNC", "Starting detached sync execution")
+// ExecutePeakSync runs peak performance single-core sync
+func ExecutePeakSync() error {
+	debug.DropMessage("PEAK_EXECUTION", "Starting peak performance sync")
 
-	// Create and run harvester
-	harvester, err := NewDetachedHarvester()
+	harvester, err := NewPeakHarvester()
 	if err != nil {
-		return fmt.Errorf("failed to create harvester: %w", err)
+		return fmt.Errorf("failed to create peak harvester: %w", err)
 	}
 
-	// Execute sync and terminate
 	return harvester.SyncToLatestAndTerminate()
 }
 
-// CheckIfSyncNeeded determines if sync is required
-func CheckIfSyncNeeded() (bool, uint64, uint64, error) {
-	// Quick check without full initialization
+// CheckIfPeakSyncNeeded determines if sync is required (peak version)
+func CheckIfPeakSyncNeeded() (bool, uint64, uint64, error) {
 	db, err := sql.Open("sqlite3", ReservesDBPath)
 	if err != nil {
-		return true, 0, 0, nil // Assume sync needed if can't check
+		debug.DropMessage("PEAK_CHECK_DB_ERROR", fmt.Sprintf("Cannot open DB: %v", err))
+		return true, 0, 0, nil
 	}
 	defer db.Close()
 
@@ -1148,22 +887,34 @@ func CheckIfSyncNeeded() (bool, uint64, uint64, error) {
 		return true, 0, 0, nil
 	}
 
-	// Get current head using HTTP RPC endpoint
+	if lastBlock == 0 {
+		return true, 0, 0, nil
+	}
+
+	// Get current head with infinite retry - NO TIMEOUTS
 	rpcURL := fmt.Sprintf("https://%s/v3/a2a3139d2ab24d59bed2dc3643664126", constants.WsHost)
 	client := NewRPCClient(rpcURL)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	var currentHead uint64
+	retryCount := 0
 
-	currentHead, err := client.BlockNumber(ctx)
-	if err != nil {
-		return true, 0, 0, fmt.Errorf("failed to get current head: %w", err)
+	for {
+		// NO TIMEOUT CONTEXT - will wait forever
+		currentHead, err = client.BlockNumber(context.Background())
+
+		if err == nil {
+			break
+		}
+
+		retryCount++
+		debug.DropMessage("PEAK_CHECK_RETRY", fmt.Sprintf("Check attempt %d failed: %v", retryCount, err))
+		time.Sleep(5 * time.Second)
 	}
 
 	syncTarget := currentHead - SyncTargetOffset
 	syncNeeded := lastBlock < syncTarget
 
-	debug.DropMessage("SYNC_CHECK", fmt.Sprintf(
+	debug.DropMessage("PEAK_CHECK_RESULT", fmt.Sprintf(
 		"Last: %d, Target: %d, Current: %d, Sync needed: %v",
 		lastBlock, syncTarget, currentHead, syncNeeded,
 	))

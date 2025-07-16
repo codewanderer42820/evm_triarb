@@ -895,10 +895,8 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 		}
 	}
 
-	// Clean up temporary structures and force garbage collection for memory efficiency
+	// Clean up temporary structures immediately after use
 	temporaryEdges = nil
-	runtime.GC()
-	runtime.GC()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -987,8 +985,6 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 	// Clean up temporary maps immediately after use
 	allPairs = nil
 	pairsWithQueues = nil
-	runtime.GC()
-	runtime.GC()
 
 	// Process workload shards and create cycles
 	for _, shard := range workloadShards {
@@ -1119,10 +1115,8 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	// Perform zero-fragmentation initialization of all queue structures
 	initializeArbitrageQueues(engine, allShards)
 
-	// Release the workload shards now that initialization is complete
+	// Release the workload shards immediately after initialization
 	allShards = nil
-	runtime.GC()
-	runtime.GC()
 
 	// Integrate with the control system for monitoring and shutdown coordination
 	stopFlag, hotFlag := control.Flags()
@@ -1211,11 +1205,8 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 	// This ensures the system is fully ready before returning
 	initWaitGroup.Wait()
 
-	// Clean up global workload data structures and force garbage collection
-	// These are no longer needed after distribution is complete
+	// Clean up global workload data structures immediately after distribution
 	pairWorkloadShards = nil
-	runtime.GC()
-	runtime.GC()
 
 	// Log successful system initialization
 	debug.DropMessage("SYSTEM_READY", "All "+utils.Itoa(coreCount)+" cores initialized and ready for processing")
