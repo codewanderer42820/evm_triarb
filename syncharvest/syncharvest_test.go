@@ -964,6 +964,10 @@ func TestMetaFileCorruption(t *testing.T) {
 	}
 	defer h.Close()
 
+	// Override the clients to use our mock server
+	h.dataClient = NewRPCClient(server.URL)
+	h.headClient = h.dataClient
+
 	// Start should use default block since meta is corrupted
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
