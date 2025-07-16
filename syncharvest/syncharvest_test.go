@@ -2,7 +2,6 @@
 package syncharvest
 
 import (
-	"context"
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
@@ -258,6 +257,12 @@ func TestProcessLogs(t *testing.T) {
 		logs = append(logs, createTestLog(event))
 	}
 
+	// Debug: print logs to see what we're processing
+	t.Logf("Processing %d logs", len(logs))
+	for i, log := range logs {
+		t.Logf("Log %d: address=%s, data length=%d", i, log.Address, len(log.Data))
+	}
+
 	// Process logs
 	if err := h.processLogs(logs); err != nil {
 		t.Fatalf("processLogs failed: %v", err)
@@ -406,6 +411,8 @@ func TestParseHexUint64(t *testing.T) {
 		{"e4e1c0", 15000000, false}, // without 0x prefix
 		{"0x0", 0, false},
 		{"invalid", 0, true},
+		{"", 0, true},
+		{"0x", 0, true},
 	}
 
 	for _, tt := range tests {
@@ -629,12 +636,13 @@ func ExampleHarvester_Start() {
 	defer harvester.Close()
 
 	// Start harvesting from a specific block
-	ctx := context.Background()
-	startBlock := uint64(15000000)
+	// ctx := context.Background()
+	// startBlock := uint64(15000000)
 
-	if err := harvester.Start(ctx, startBlock); err != nil {
-		panic(err)
-	}
+	// This would run forever in production
+	// if err := harvester.Start(ctx, startBlock); err != nil {
+	// 	panic(err)
+	// }
 
 	// Get latest reserves for bootstrapping
 	reserves, err := harvester.GetLatestReserves()
@@ -643,4 +651,5 @@ func ExampleHarvester_Start() {
 	}
 
 	fmt.Printf("Loaded %d pair reserves\n", len(reserves))
+	// Output: Loaded 0 pair reserves
 }

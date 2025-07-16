@@ -574,8 +574,12 @@ func (h *Harvester) writeMeta(f *os.File, block uint64) error {
 
 // Close cleanly shuts down the harvester
 func (h *Harvester) Close() error {
-	h.pairsDB.Close()
-	h.reservesDB.Close()
+	if h.pairsDB != nil {
+		h.pairsDB.Close()
+	}
+	if h.reservesDB != nil {
+		h.reservesDB.Close()
+	}
 	return nil
 }
 
