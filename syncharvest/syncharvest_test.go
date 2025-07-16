@@ -954,38 +954,14 @@ func TestMetaFileCorruption(t *testing.T) {
 	// Mock server
 	server := mockRPCServer(t, map[string]interface{}{
 		"eth_blockNumber": "0xe4e1c0",
-		"eth_getLogs":     []Log{},
 	})
 	defer server.Close()
 
-	// Create harvester manually to avoid real RPC connections
-	h := &Harvester{
-		dataClient: NewRPCClient(server.URL),
-		headClient: NewRPCClient(server.URL),
-		pairMap:    make(map[string]int64),
-	}
-
-	// Open databases
-	pairsDB, err := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")
+	// Create harvester - should handle corrupted meta file
+	h, err := NewHarvester(server.URL)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Failed to create harvester: %v", err)
 	}
-	h.pairsDB = pairsDB
-
-	reservesDB, err := sql.Open("sqlite3", ReservesDBPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.reservesDB = reservesDB
-
-	// Initialize
-	if err := h.initReservesDB(); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.loadPairMappings(); err != nil {
-		t.Fatal(err)
-	}
-
 	defer h.Close()
 
 	// Start should use default block since meta is corrupted
@@ -1148,16 +1124,35 @@ func TestHarvester_Start_RPCErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Create harvester with the mock server (not a real RPC endpoint)
-	h, err := NewHarvester(server.URL)
-	if err != nil {
-		t.Fatalf("Failed to create harvester: %v", err)
+	// Create harvester manually to avoid real RPC connections
+	h := &Harvester{
+		dataClient: NewRPCClient(server.URL),
+		headClient: NewRPCClient(server.URL),
+		pairMap:    make(map[string]int64),
 	}
-	defer h.Close()
 
-	// Override the clients to use our mock server
-	h.dataClient = NewRPCClient(server.URL)
-	h.headClient = h.dataClient
+	// Open databases
+	pairsDB, err := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.pairsDB = pairsDB
+
+	reservesDB, err := sql.Open("sqlite3", ReservesDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.reservesDB = reservesDB
+
+	// Initialize
+	if err := h.initReservesDB(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.loadPairMappings(); err != nil {
+		t.Fatal(err)
+	}
+
+	defer h.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
