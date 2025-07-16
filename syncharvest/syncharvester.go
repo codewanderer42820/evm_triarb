@@ -52,7 +52,7 @@ import (
 const (
 	// AGGRESSIVE BOOTSTRAP SETTINGS
 	MaxBatchSize     = uint64(15_000) // Larger batches for fewer RPC calls
-	MinBatchSize     = uint64(2_000)  // Minimum when network issues occur
+	MinBatchSize     = uint64(100)    // Minimum when network issues occur
 	OptimalBatchSize = uint64(8_000)  // Target batch size for optimal performance
 
 	// TERMINATION SETTINGS
@@ -102,7 +102,6 @@ type PeakHarvester struct {
 	lastCommit time.Time
 
 	// Pre-allocated buffers for zero allocation
-	eventBuffer   []SyncEvent
 	reserveBuffer [2]*big.Int
 
 	// Database transaction for batching
@@ -113,17 +112,6 @@ type PeakHarvester struct {
 	insertEventStmt    *sql.Stmt
 	updateReservesStmt *sql.Stmt
 	updateSyncStmt     *sql.Stmt
-}
-
-// SyncEvent represents a parsed sync event
-type SyncEvent struct {
-	PairID      int64
-	PairAddr    string
-	BlockNumber uint64
-	TxHash      string
-	LogIndex    uint64
-	Reserve0    string
-	Reserve1    string
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -245,6 +233,49 @@ func (c *RPCClient) GetLogs(ctx context.Context, fromBlock, toBlock uint64, addr
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
+// DATABASE LOCK MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+//go:inline
+func openDatabaseWithRetry(dbPath string) (*sql.DB, error) {
+	for retries := 0; retries < 5; retries++ {
+		db, err := sql.Open("sqlite3", dbPath)
+		if err != nil {
+			return nil, err
+		}
+
+		// Test the connection
+		if err := db.Ping(); err != nil {
+			db.Close()
+			if retries < 4 {
+				debug.DropMessage("DB_RETRY", fmt.Sprintf("Database busy, immediate retry... (attempt %d/5)", retries+1))
+				// NO SLEEP - immediate retry
+				continue
+			}
+			return nil, fmt.Errorf("database connection failed after retries: %w", err)
+		}
+
+		return db, nil
+	}
+
+	return nil, fmt.Errorf("failed to open database after 5 attempts")
+}
+
+//go:inline
+func isDatabaseLocked(dbPath string) bool {
+	// Try to open database with immediate timeout to check if locked
+	testDB, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=100")
+	if err != nil {
+		return true
+	}
+	defer testDB.Close()
+
+	// Try a simple query - if it fails, database is likely locked
+	_, err = testDB.Exec("PRAGMA schema_version")
+	return err != nil
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
 // CONSTRUCTOR - PEAK INITIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -262,14 +293,21 @@ func NewPeakHarvester() (*PeakHarvester, error) {
 	rpcURL := fmt.Sprintf("https://%s/v3/a2a3139d2ab24d59bed2dc3643664126", constants.WsHost)
 	rpcClient := NewRPCClient(rpcURL)
 
-	// Open databases
-	pairsDB, err := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")
+	// Open databases with retry and lock handling
+	pairsDB, err := openDatabaseWithRetry("uniswap_pairs.db?mode=ro")
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to open pairs database: %w", err)
 	}
 
-	reservesDB, err := sql.Open("sqlite3", ReservesDBPath)
+	// Check if reserves database is locked by another process
+	if isDatabaseLocked(ReservesDBPath) {
+		cancel()
+		pairsDB.Close()
+		return nil, fmt.Errorf("reserves database is locked by another process - please stop other instances")
+	}
+
+	reservesDB, err := openDatabaseWithRetry(ReservesDBPath)
 	if err != nil {
 		cancel()
 		pairsDB.Close()
@@ -297,7 +335,6 @@ func NewPeakHarvester() (*PeakHarvester, error) {
 		lastCommit: time.Now(),
 
 		// Pre-allocate buffers to avoid allocations during processing
-		eventBuffer:   make([]SyncEvent, 0, CommitBatchSize),
 		reserveBuffer: [2]*big.Int{big.NewInt(0), big.NewInt(0)},
 	}
 
@@ -316,8 +353,8 @@ func NewPeakHarvester() (*PeakHarvester, error) {
 		return nil, fmt.Errorf("failed to load pair mappings: %w", err)
 	}
 
-	// Prepare statements for maximum performance
-	if err := h.prepareStatements(); err != nil {
+	// Prepare global statements
+	if err := h.prepareGlobalStatements(); err != nil {
 		h.cleanup()
 		return nil, fmt.Errorf("failed to prepare statements: %w", err)
 	}
@@ -350,6 +387,8 @@ func configureDatabase(db *sql.DB) error {
 		"PRAGMA page_size = 65536",        // Large pages
 		"PRAGMA auto_vacuum = NONE",       // No auto vacuum overhead
 		"PRAGMA locking_mode = EXCLUSIVE", // Exclusive access
+		"PRAGMA busy_timeout = 30000",     // 30 second timeout for locks
+		"PRAGMA wal_autocheckpoint = 0",   // Disable WAL checkpoints
 	}
 
 	for _, pragma := range optimizations {
@@ -434,27 +473,10 @@ func (h *PeakHarvester) loadPairMappings() error {
 }
 
 //go:inline
-func (h *PeakHarvester) prepareStatements() error {
+func (h *PeakHarvester) prepareGlobalStatements() error {
 	var err error
 
-	h.insertEventStmt, err = h.reservesDB.Prepare(`
-		INSERT OR IGNORE INTO sync_events 
-		(pair_id, block_number, tx_hash, log_index, reserve0, reserve1, created_at) 
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to prepare insert event statement: %w", err)
-	}
-
-	h.updateReservesStmt, err = h.reservesDB.Prepare(`
-		INSERT OR REPLACE INTO pair_reserves 
-		(pair_id, pair_address, reserve0, reserve1, block_height, last_updated) 
-		VALUES (?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to prepare update reserves statement: %w", err)
-	}
-
+	// Only prepare the sync metadata statement outside transactions
 	h.updateSyncStmt, err = h.reservesDB.Prepare(`
 		INSERT OR REPLACE INTO sync_metadata 
 		(id, last_block, sync_target, sync_status, updated_at, events_processed) 
@@ -492,7 +514,8 @@ func (h *PeakHarvester) SyncToLatestAndTerminate() error {
 		select {
 		case <-h.ctx.Done():
 			return h.ctx.Err()
-		case <-time.After(5 * time.Second):
+		default:
+			// NO SLEEP - immediate retry
 		}
 	}
 
@@ -511,11 +534,13 @@ func (h *PeakHarvester) SyncToLatestAndTerminate() error {
 		return h.terminateCleanly()
 	}
 
-	// Begin database transaction for the entire sync
-	h.beginTransaction()
-
 	blocksToSync := h.syncTarget - startBlock
 	debug.DropMessage("SYNC_SCOPE", fmt.Sprintf("Syncing %d blocks from %d to %d", blocksToSync, startBlock, h.syncTarget))
+
+	// Begin initial transaction
+	if err := h.beginTransaction(); err != nil {
+		return fmt.Errorf("failed to begin initial transaction: %w", err)
+	}
 
 	// Execute sync loop
 	err = h.executePeakSyncLoop(startBlock)
@@ -535,6 +560,7 @@ func (h *PeakHarvester) SyncToLatestAndTerminate() error {
 func (h *PeakHarvester) executePeakSyncLoop(startBlock uint64) error {
 	current := startBlock
 	batchSize := OptimalBatchSize
+	consecutiveOK := 0
 
 	for current < h.syncTarget {
 		select {
@@ -549,22 +575,51 @@ func (h *PeakHarvester) executePeakSyncLoop(startBlock uint64) error {
 			batchEnd = h.syncTarget
 		}
 
-		// Process batch with infinite retry
-		h.processPeakBatch(current, batchEnd)
+		// Process batch - returns success/failure
+		success := h.processPeakBatch(current, batchEnd)
 
-		// Update progress
-		h.lastProcessed = batchEnd
-		current = batchEnd + 1
+		if success {
+			// Success: increment success counter
+			consecutiveOK++
+
+			// After just 2 consecutive successes, try to increase batch size
+			// This provides faster recovery from batch size reductions
+			if consecutiveOK >= 2 && batchSize < MaxBatchSize {
+				oldBatchSize := batchSize
+				batchSize = minUint64(MaxBatchSize, batchSize*3/2) // 1.5x increase (more conservative than 2x)
+
+				if batchSize != oldBatchSize {
+					debug.DropMessage("BATCH_INCREASE", fmt.Sprintf("Increased batch size from %d to %d blocks", oldBatchSize, batchSize))
+					consecutiveOK = 0 // Reset counter after increase
+				}
+			}
+
+			// Update progress and advance
+			h.lastProcessed = batchEnd
+			current = batchEnd + 1
+
+		} else {
+			// Failure: IMMEDIATELY reduce batch size and reset success counter
+			consecutiveOK = 0
+
+			if batchSize > MinBatchSize {
+				oldBatchSize := batchSize
+				batchSize /= 2
+				if batchSize < MinBatchSize {
+					batchSize = MinBatchSize
+				}
+				debug.DropMessage("BATCH_DECREASE", fmt.Sprintf("Reduced batch size from %d to %d blocks", oldBatchSize, batchSize))
+			}
+
+			// Don't advance the current position on failure - retry the same range with smaller batch
+		}
 
 		// Commit periodically for memory management
 		if h.eventsInBatch >= CommitBatchSize {
 			h.commitTransaction()
-			h.beginTransaction()
-		}
-
-		// Increase batch size for better throughput
-		if batchSize < MaxBatchSize {
-			batchSize = minUint64(MaxBatchSize, batchSize+500)
+			if err := h.beginTransaction(); err != nil {
+				return fmt.Errorf("failed to begin new transaction: %w", err)
+			}
 		}
 
 		// Progress reporting
@@ -578,15 +633,15 @@ func (h *PeakHarvester) executePeakSyncLoop(startBlock uint64) error {
 }
 
 //go:inline
-func (h *PeakHarvester) processPeakBatch(fromBlock, toBlock uint64) {
+func (h *PeakHarvester) processPeakBatch(fromBlock, toBlock uint64) bool {
 	debug.DropMessage("BATCH_START", fmt.Sprintf("Processing blocks %d-%d", fromBlock, toBlock))
 
 	var logs []Log
 	var err error
 	retryCount := 0
 
-	// Keep retrying until successful
-	for {
+	// Keep retrying until successful or we decide to give up
+	for retryCount < 3 {
 		logs, err = h.rpcClient.GetLogs(h.ctx, fromBlock, toBlock, []string{}, []string{SyncEventSignature})
 		if err == nil {
 			break
@@ -597,14 +652,21 @@ func (h *PeakHarvester) processPeakBatch(fromBlock, toBlock uint64) {
 
 		select {
 		case <-h.ctx.Done():
-			return
-		case <-time.After(2 * time.Second):
+			return false
+		default:
+			// NO SLEEP - immediate retry
 		}
 	}
 
-	debug.DropMessage("RPC_SUCCESS", fmt.Sprintf("Fetched %d events", len(logs)))
+	// If we failed after retries, return false to trigger batch size reduction
+	if err != nil {
+		debug.DropMessage("BATCH_FAILED", fmt.Sprintf("Batch %d-%d failed after %d retries: %v", fromBlock, toBlock, retryCount, err))
+		return false
+	}
 
-	// Process logs directly - no goroutines or channels
+	debug.DropMessage("RPC_SUCCESS", fmt.Sprintf("Fetched %d events for blocks %d-%d", len(logs), fromBlock, toBlock))
+
+	// Process logs directly
 	processedCount := 0
 	for i := range logs {
 		if h.processLogDirect(&logs[i]) {
@@ -613,7 +675,9 @@ func (h *PeakHarvester) processPeakBatch(fromBlock, toBlock uint64) {
 	}
 
 	h.processed += int64(processedCount)
-	debug.DropMessage("BATCH_COMPLETE", fmt.Sprintf("Processed %d events", processedCount))
+	debug.DropMessage("BATCH_COMPLETE", fmt.Sprintf("Processed %d events for blocks %d-%d", processedCount, fromBlock, toBlock))
+
+	return true // Success
 }
 
 //go:inline
@@ -646,26 +710,50 @@ func (h *PeakHarvester) processLogDirect(log *Log) bool {
 		return false
 	}
 
-	// Write directly to database - no buffering
+	// Ensure we have valid prepared statements
+	if h.insertEventStmt == nil || h.updateReservesStmt == nil {
+		debug.DropMessage("STMT_ERROR", "Prepared statements are nil")
+		return false
+	}
+
+	// Write directly to database with immediate retry on lock
 	now := time.Now().Unix()
 
-	// Insert sync event
-	_, err = h.insertEventStmt.Exec(
-		pairID, blockNum, log.TxHash, logIndex,
-		h.reserveBuffer[0].String(), h.reserveBuffer[1].String(), now,
-	)
-	if err != nil {
+	// Insert sync event with immediate retry
+	for retries := 0; retries < 3; retries++ {
+		_, err = h.insertEventStmt.Exec(
+			pairID, blockNum, log.TxHash, logIndex,
+			h.reserveBuffer[0].String(), h.reserveBuffer[1].String(), now,
+		)
+		if err == nil {
+			break
+		}
+
+		if retries < 2 && strings.Contains(err.Error(), "database is locked") {
+			// NO SLEEP - immediate retry
+			continue
+		}
+
 		debug.DropMessage("DB_ERROR", fmt.Sprintf("Insert failed: %v", err))
 		return false
 	}
 
-	// Update pair reserves
-	_, err = h.updateReservesStmt.Exec(
-		pairID, pairAddr,
-		h.reserveBuffer[0].String(), h.reserveBuffer[1].String(),
-		blockNum, now,
-	)
-	if err != nil {
+	// Update pair reserves with immediate retry
+	for retries := 0; retries < 3; retries++ {
+		_, err = h.updateReservesStmt.Exec(
+			pairID, pairAddr,
+			h.reserveBuffer[0].String(), h.reserveBuffer[1].String(),
+			blockNum, now,
+		)
+		if err == nil {
+			break
+		}
+
+		if retries < 2 && strings.Contains(err.Error(), "database is locked") {
+			// NO SLEEP - immediate retry
+			continue
+		}
+
 		debug.DropMessage("DB_ERROR", fmt.Sprintf("Update failed: %v", err))
 		return false
 	}
@@ -698,19 +786,55 @@ func (h *PeakHarvester) parseReservesDirect(dataStr string) bool {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 //go:inline
-func (h *PeakHarvester) beginTransaction() {
+func (h *PeakHarvester) beginTransaction() error {
 	var err error
 	h.currentTx, err = h.reservesDB.Begin()
 	if err != nil {
-		debug.DropMessage("TX_ERROR", fmt.Sprintf("Failed to begin transaction: %v", err))
-		return
+		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+
+	// Prepare statements within the transaction context
+	h.insertEventStmt, err = h.currentTx.Prepare(`
+		INSERT OR IGNORE INTO sync_events 
+		(pair_id, block_number, tx_hash, log_index, reserve0, reserve1, created_at) 
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		h.currentTx.Rollback()
+		h.currentTx = nil
+		return fmt.Errorf("failed to prepare insert statement in transaction: %w", err)
+	}
+
+	h.updateReservesStmt, err = h.currentTx.Prepare(`
+		INSERT OR REPLACE INTO pair_reserves 
+		(pair_id, pair_address, reserve0, reserve1, block_height, last_updated) 
+		VALUES (?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		h.insertEventStmt.Close()
+		h.insertEventStmt = nil
+		h.currentTx.Rollback()
+		h.currentTx = nil
+		return fmt.Errorf("failed to prepare update statement in transaction: %w", err)
+	}
+
 	h.eventsInBatch = 0
+	return nil
 }
 
 //go:inline
 func (h *PeakHarvester) commitTransaction() {
 	if h.currentTx != nil {
+		// Close transaction-specific statements first
+		if h.insertEventStmt != nil {
+			h.insertEventStmt.Close()
+			h.insertEventStmt = nil
+		}
+		if h.updateReservesStmt != nil {
+			h.updateReservesStmt.Close()
+			h.updateReservesStmt = nil
+		}
+
 		err := h.currentTx.Commit()
 		if err != nil {
 			debug.DropMessage("TX_ERROR", fmt.Sprintf("Failed to commit transaction: %v", err))
@@ -725,6 +849,16 @@ func (h *PeakHarvester) commitTransaction() {
 //go:inline
 func (h *PeakHarvester) rollbackTransaction() {
 	if h.currentTx != nil {
+		// Close transaction-specific statements first
+		if h.insertEventStmt != nil {
+			h.insertEventStmt.Close()
+			h.insertEventStmt = nil
+		}
+		if h.updateReservesStmt != nil {
+			h.updateReservesStmt.Close()
+			h.updateReservesStmt = nil
+		}
+
 		h.currentTx.Rollback()
 		h.currentTx = nil
 	}
@@ -746,8 +880,10 @@ func (h *PeakHarvester) reportProgress() {
 	))
 
 	// Update sync metadata
-	now := time.Now().Unix()
-	h.updateSyncStmt.Exec(h.lastProcessed, h.syncTarget, "running", now, h.processed)
+	if h.updateSyncStmt != nil {
+		now := time.Now().Unix()
+		h.updateSyncStmt.Exec(h.lastProcessed, h.syncTarget, "running", now, h.processed)
+	}
 }
 
 //go:inline
@@ -755,6 +891,7 @@ func (h *PeakHarvester) getLastProcessedBlock() uint64 {
 	var lastBlock uint64
 	err := h.reservesDB.QueryRow("SELECT COALESCE(MAX(block_number), 0) FROM sync_events").Scan(&lastBlock)
 	if err != nil {
+		debug.DropMessage("LAST_BLOCK_ERROR", fmt.Sprintf("Failed to get last block: %v", err))
 		return 0
 	}
 	return lastBlock
@@ -768,22 +905,21 @@ func (h *PeakHarvester) terminateCleanly() error {
 	h.commitTransaction()
 
 	// Final metadata update
-	now := time.Now().Unix()
-	h.updateSyncStmt.Exec(h.lastProcessed, h.syncTarget, "completed", now, h.processed)
+	if h.updateSyncStmt != nil {
+		now := time.Now().Unix()
+		h.updateSyncStmt.Exec(h.lastProcessed, h.syncTarget, "completed", now, h.processed)
+	}
 
-	// Close prepared statements
-	if h.insertEventStmt != nil {
-		h.insertEventStmt.Close()
-	}
-	if h.updateReservesStmt != nil {
-		h.updateReservesStmt.Close()
-	}
+	// Close remaining prepared statements
 	if h.updateSyncStmt != nil {
 		h.updateSyncStmt.Close()
+		h.updateSyncStmt = nil
 	}
 
 	// Final optimization
-	h.reservesDB.Exec("PRAGMA optimize")
+	if h.reservesDB != nil {
+		h.reservesDB.Exec("PRAGMA optimize")
+	}
 
 	h.cleanup()
 
@@ -809,7 +945,6 @@ func (h *PeakHarvester) cleanup() {
 	}
 
 	h.pairMap = nil
-	h.eventBuffer = nil
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -868,7 +1003,7 @@ func CheckIfPeakSyncNeeded() (bool, uint64, uint64, error) {
 		return true, 0, 0, nil
 	}
 
-	// Get current head with infinite retry - NO TIMEOUTS
+	// Get current head with infinite retry - NO TIMEOUTS, NO DELAYS
 	rpcURL := fmt.Sprintf("https://%s/v3/a2a3139d2ab24d59bed2dc3643664126", constants.WsHost)
 	client := NewRPCClient(rpcURL)
 
@@ -885,7 +1020,7 @@ func CheckIfPeakSyncNeeded() (bool, uint64, uint64, error) {
 
 		retryCount++
 		debug.DropMessage("PEAK_CHECK_RETRY", fmt.Sprintf("Check attempt %d failed: %v", retryCount, err))
-		time.Sleep(5 * time.Second)
+		// NO SLEEP - immediate retry
 	}
 
 	syncTarget := currentHead - SyncTargetOffset
