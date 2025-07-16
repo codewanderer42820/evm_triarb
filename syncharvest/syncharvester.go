@@ -170,11 +170,14 @@ func (c *RPCClient) GetLogs(ctx context.Context, fromBlock, toBlock uint64, addr
 	params := map[string]interface{}{
 		"fromBlock": fmt.Sprintf("0x%x", fromBlock),
 		"toBlock":   fmt.Sprintf("0x%x", toBlock),
-		"topics":    []string{topics[0]}, // Only first topic for sync events
 	}
 
 	if len(addresses) > 0 {
 		params["address"] = addresses
+	}
+
+	if len(topics) > 0 {
+		params["topics"] = []string{topics[0]} // Only first topic for sync events
 	}
 
 	var logs []Log
