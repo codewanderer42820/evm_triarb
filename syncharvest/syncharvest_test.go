@@ -540,6 +540,8 @@ func TestHarvester_Start_BasicFlow(t *testing.T) {
 		dataClient: NewRPCClient(server.URL),
 		headClient: NewRPCClient(server.URL),
 		pairMap:    make(map[string]int64),
+		hexBuffer:  make([]byte, 64), // Initialize the hex buffer!
+		addresses:  []string{},       // Initialize addresses slice
 	}
 
 	pairsDB, _ := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")

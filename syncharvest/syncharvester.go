@@ -201,9 +201,15 @@ type Harvester struct {
 	// Pair address to ID mapping cache
 	pairMap map[string]int64
 
+	// Pre-allocated address slice
+	addresses []string
+
 	// Head caching
 	cachedHead uint64
 	headTime   time.Time
+
+	// Reusable buffer for hex decoding
+	hexBuffer []byte
 }
 
 // NewHarvester creates a new sync event harvester
@@ -252,6 +258,7 @@ func NewHarvester(rpcURL string) (*Harvester, error) {
 		pairsDB:    pairsDB,
 		reservesDB: reservesDB,
 		pairMap:    make(map[string]int64),
+		hexBuffer:  make([]byte, 64), // Always initialize the buffer
 	}
 
 	if err := h.initReservesDB(); err != nil {
@@ -316,6 +323,9 @@ func (h *Harvester) loadPairMappings() error {
 	}
 	defer rows.Close()
 
+	// Pre-allocate addresses slice
+	h.addresses = make([]string, 0, 3000) // Pre-size for typical Uniswap V2 count
+
 	count := 0
 	for rows.Next() {
 		var id int64
@@ -323,7 +333,9 @@ func (h *Harvester) loadPairMappings() error {
 		if err := rows.Scan(&id, &addr); err != nil {
 			return err
 		}
-		h.pairMap[strings.ToLower(addr)] = id
+		addr = strings.ToLower(addr)
+		h.pairMap[addr] = id
+		h.addresses = append(h.addresses, addr)
 		count++
 	}
 
@@ -353,12 +365,6 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 
 	log.Printf("Starting sync event harvest from block %d", startBlock)
 
-	// Get all V2 pair addresses for filtering
-	addresses := make([]string, 0, len(h.pairMap))
-	for addr := range h.pairMap {
-		addresses = append(addresses, addr)
-	}
-
 	// Harvest loop
 	batch := uint64(1000)
 	consecutiveOK, consecutiveNG := 0, 0
@@ -385,6 +391,7 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 					latest, err = h.dataClient.BlockNumber(ctx)
 					if err != nil {
 						log.Printf("head retrieval err: %v", err)
+						time.Sleep(3 * time.Second)
 						continue
 					}
 				}
@@ -394,6 +401,7 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 
 		latest := h.cachedHead
 		if from > latest {
+			time.Sleep(10 * time.Second)
 			continue
 		}
 
@@ -402,19 +410,19 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 			to = latest
 		}
 
-		log.Printf("Sync events %d → %d (batch %d, %d pairs)", from, to, batch, len(addresses))
+		log.Printf("Sync events %d → %d (batch %d, %d pairs)", from, to, batch, len(h.addresses))
 
 		// Query logs in chunks to avoid query size limits
 		const chunkSize = 1000
 		var allLogs []Log
 
-		for i := 0; i < len(addresses); i += chunkSize {
+		for i := 0; i < len(h.addresses); i += chunkSize {
 			end := i + chunkSize
-			if end > len(addresses) {
-				end = len(addresses)
+			if end > len(h.addresses) {
+				end = len(h.addresses)
 			}
 
-			logs, err := h.dataClient.GetLogs(ctx, from, to, addresses[i:end], []string{SyncEventSignature})
+			logs, err := h.dataClient.GetLogs(ctx, from, to, h.addresses[i:end], []string{SyncEventSignature})
 			if err != nil {
 				consecutiveNG++
 				consecutiveOK = 0
@@ -426,6 +434,7 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 					log.Printf("↓ batch %d due to errors", batch)
 				}
 				log.Printf("Error fetching logs: %v", err)
+				time.Sleep(2 * time.Second)
 				break // Break inner loop to retry
 			}
 
@@ -467,7 +476,7 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 	}
 }
 
-// processLogs processes a batch of sync event logs
+// processLogs processes a batch of sync event logs with bulk inserts
 func (h *Harvester) processLogs(logs []Log) error {
 	if len(logs) == 0 {
 		return nil
@@ -479,57 +488,30 @@ func (h *Harvester) processLogs(logs []Log) error {
 	}
 	defer tx.Rollback()
 
-	// Prepare statements
-	insertEvent, err := tx.Prepare(`
-		INSERT OR IGNORE INTO sync_events (pair_id, block_number, tx_hash, log_index, reserve0, reserve1)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return err
-	}
-	defer insertEvent.Close()
+	// Build bulk insert for sync_events
+	const baseQuery = `INSERT OR IGNORE INTO sync_events (pair_id, block_number, tx_hash, log_index, reserve0, reserve1) VALUES `
+	values := make([]string, 0, len(logs))
+	args := make([]interface{}, 0, len(logs)*6)
 
-	updateReserves, err := tx.Prepare(`
-		INSERT OR REPLACE INTO pair_reserves (pair_id, pair_address, reserve0, reserve1, block_height, last_updated)
-		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-	`)
-	if err != nil {
-		return err
-	}
-	defer updateReserves.Close()
+	// Track latest reserves for bulk update
+	reserveUpdates := make(map[int64]*PairReserve)
 
 	processed := 0
 	for _, lg := range logs {
-		// Parse hex data
-		dataStr := strings.TrimPrefix(lg.Data, "0x")
-		if len(dataStr)%2 != 0 {
-			log.Printf("Invalid hex data length: %s", lg.Data)
-			continue
-		}
-
-		data, err := hex.DecodeString(dataStr)
+		// Parse hex data using optimized function
+		reserve0, reserve1, err := h.parseReservesOptimized(lg.Data)
 		if err != nil {
-			log.Printf("Failed to decode hex data: %v", err)
+			log.Printf("Failed to parse reserves from %s: %v", lg.Data, err)
 			continue
 		}
-
-		// Parse reserves from log data
-		if len(data) != 64 {
-			log.Printf("Invalid sync event data length: %d", len(data))
-			continue // Invalid sync event
-		}
-
-		reserve0 := new(big.Int).SetBytes(data[:32])
-		reserve1 := new(big.Int).SetBytes(data[32:])
 
 		pairAddr := strings.ToLower(lg.Address)
 		pairID, ok := h.pairMap[pairAddr]
 		if !ok {
 			log.Printf("Unknown pair address: %s", pairAddr)
-			continue // Unknown pair
+			continue
 		}
 
-		// Parse block number and log index
 		blockNum, err := parseHexUint64(lg.BlockNumber)
 		if err != nil {
 			log.Printf("Failed to parse block number %s: %v", lg.BlockNumber, err)
@@ -542,29 +524,19 @@ func (h *Harvester) processLogs(logs []Log) error {
 			continue
 		}
 
-		// Insert sync event
-		_, err = insertEvent.Exec(
-			pairID,
-			blockNum,
-			lg.TxHash,
-			logIndex,
-			reserve0.String(),
-			reserve1.String(),
-		)
-		if err != nil {
-			return fmt.Errorf("failed to insert sync event: %w", err)
-		}
+		// Add to bulk insert
+		values = append(values, "(?, ?, ?, ?, ?, ?)")
+		args = append(args, pairID, blockNum, lg.TxHash, logIndex, reserve0.String(), reserve1.String())
 
-		// Update current reserves
-		_, err = updateReserves.Exec(
-			pairID,
-			pairAddr,
-			reserve0.String(),
-			reserve1.String(),
-			blockNum,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to update reserves: %w", err)
+		// Track latest reserve for each pair
+		if existing, ok := reserveUpdates[pairID]; !ok || blockNum > existing.BlockHeight {
+			reserveUpdates[pairID] = &PairReserve{
+				PairID:      pairID,
+				PairAddress: pairAddr,
+				Reserve0:    reserve0.String(),
+				Reserve1:    reserve1.String(),
+				BlockHeight: blockNum,
+			}
 		}
 
 		processed++
@@ -574,7 +546,63 @@ func (h *Harvester) processLogs(logs []Log) error {
 		return fmt.Errorf("no logs were processed successfully")
 	}
 
+	// Execute bulk insert for events
+	query := baseQuery + strings.Join(values, ",")
+	if _, err := tx.Exec(query, args...); err != nil {
+		return fmt.Errorf("failed to bulk insert sync events: %w", err)
+	}
+
+	// Bulk update reserves
+	if len(reserveUpdates) > 0 {
+		updateQuery := `
+			INSERT OR REPLACE INTO pair_reserves (pair_id, pair_address, reserve0, reserve1, block_height, last_updated)
+			VALUES `
+
+		updateValues := make([]string, 0, len(reserveUpdates))
+		updateArgs := make([]interface{}, 0, len(reserveUpdates)*5)
+
+		for _, reserve := range reserveUpdates {
+			updateValues = append(updateValues, "(?, ?, ?, ?, ?, CURRENT_TIMESTAMP)")
+			updateArgs = append(updateArgs, reserve.PairID, reserve.PairAddress,
+				reserve.Reserve0, reserve.Reserve1, reserve.BlockHeight)
+		}
+
+		updateQuery += strings.Join(updateValues, ",")
+		if _, err := tx.Exec(updateQuery, updateArgs...); err != nil {
+			return fmt.Errorf("failed to bulk update reserves: %w", err)
+		}
+	}
+
 	return tx.Commit()
+}
+
+// parseReservesOptimized efficiently parses reserves from hex data
+func (h *Harvester) parseReservesOptimized(dataStr string) (*big.Int, *big.Int, error) {
+	// Remove 0x prefix
+	dataStr = strings.TrimPrefix(dataStr, "0x")
+	if len(dataStr) != 128 { // 64 bytes * 2 hex chars
+		return nil, nil, fmt.Errorf("invalid data length: %d", len(dataStr))
+	}
+
+	// Ensure buffer is initialized (for tests that create Harvester manually)
+	if h.hexBuffer == nil {
+		h.hexBuffer = make([]byte, 64)
+	}
+
+	// Decode into reusable buffer
+	n, err := hex.Decode(h.hexBuffer, []byte(dataStr))
+	if err != nil {
+		return nil, nil, err
+	}
+	if n != 64 {
+		return nil, nil, fmt.Errorf("decoded length mismatch: %d", n)
+	}
+
+	// Create big.Ints from buffer slices
+	reserve0 := new(big.Int).SetBytes(h.hexBuffer[:32])
+	reserve1 := new(big.Int).SetBytes(h.hexBuffer[32:64])
+
+	return reserve0, reserve1, nil
 }
 
 // writeMeta updates the meta file with the last processed block
@@ -631,7 +659,6 @@ func (h *Harvester) GetLatestReserves() (map[string]*PairReserve, error) {
 // -----------------------------------------------------------------------------
 
 // parseHexUint64 parses a hex string to uint64
-// Updated to handle odd-length hex strings
 func parseHexUint64(s string) (uint64, error) {
 	s = strings.TrimPrefix(s, "0x")
 	if s == "" {
