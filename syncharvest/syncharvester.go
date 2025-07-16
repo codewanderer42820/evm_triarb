@@ -385,7 +385,6 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 					latest, err = h.dataClient.BlockNumber(ctx)
 					if err != nil {
 						log.Printf("head retrieval err: %v", err)
-						time.Sleep(3 * time.Second)
 						continue
 					}
 				}
@@ -395,7 +394,6 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 
 		latest := h.cachedHead
 		if from > latest {
-			time.Sleep(10 * time.Second)
 			continue
 		}
 
@@ -428,7 +426,6 @@ func (h *Harvester) Start(ctx context.Context, startBlock uint64) error {
 					log.Printf("↓ batch %d due to errors", batch)
 				}
 				log.Printf("Error fetching logs: %v", err)
-				time.Sleep(2 * time.Second)
 				break // Break inner loop to retry
 			}
 
