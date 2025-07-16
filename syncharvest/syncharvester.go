@@ -575,8 +575,6 @@ func (h *PeakHarvester) SyncToLatestAndTerminate() error {
 func (h *PeakHarvester) executePeakSyncLoop(startBlock uint64) error {
 	current := startBlock
 	batchSize := OptimalBatchSize // Start at 10,000 blocks
-	consecutiveOK := 0
-	consecutiveNG := 0
 
 	for current < h.syncTarget {
 		select {
@@ -595,39 +593,25 @@ func (h *PeakHarvester) executePeakSyncLoop(startBlock uint64) error {
 		success := h.processPeakBatch(current, batchEnd)
 
 		if success {
-			// Success: reset failure counter, increment success counter
-			consecutiveNG = 0
-			consecutiveOK++
-
-			// Every 3 consecutive successes, double the batch size
-			if consecutiveOK >= 3 {
-				oldBatchSize := batchSize
-				batchSize *= 2
-				debug.DropMessage("BATCH_INCREASE", fmt.Sprintf("Doubled batch size from %d to %d blocks after 3 successes", oldBatchSize, batchSize))
-				consecutiveOK = 0 // Reset counter after increase
-			}
+			// SUCCESS: Immediately double the batch size (be aggressive)
+			oldBatchSize := batchSize
+			batchSize *= 2
+			debug.DropMessage("BATCH_INCREASE", fmt.Sprintf("Doubled batch size from %d to %d blocks after success", oldBatchSize, batchSize))
 
 			// Update progress and advance
 			h.lastProcessed = batchEnd
 			current = batchEnd + 1
 
 		} else {
-			// Failure: reset success counter, increment failure counter
-			consecutiveOK = 0
-			consecutiveNG++
-
-			// Every 3 consecutive failures, halve the batch size
-			if consecutiveNG >= 3 {
-				oldBatchSize := batchSize
-				batchSize /= 2
-				if batchSize < 1 {
-					batchSize = 1 // Absolute minimum to prevent zero
-				}
-				debug.DropMessage("BATCH_DECREASE", fmt.Sprintf("Halved batch size from %d to %d blocks after 3 failures", oldBatchSize, batchSize))
-				consecutiveNG = 0 // Reset counter after decrease
+			// FAILURE: Immediately halve the batch size
+			oldBatchSize := batchSize
+			batchSize /= 2
+			if batchSize < 1 {
+				batchSize = 1 // Absolute minimum to prevent zero
 			}
+			debug.DropMessage("BATCH_DECREASE", fmt.Sprintf("Halved batch size from %d to %d blocks after failure", oldBatchSize, batchSize))
 
-			// Don't advance the current position on failure - retry the same range with current batch size
+			// Don't advance the current position on failure - retry the same range with smaller batch
 		}
 
 		// Commit periodically for memory management
