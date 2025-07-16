@@ -620,21 +620,13 @@ func (h *PeakHarvester) executePeakSyncLoop(startBlock uint64) error {
 			current = batchEnd + 1
 
 		} else {
-			// FAILURE: Reset success counter and increment failure counter
+			// FAILURE: Immediately divide by 2 on every failure
 			h.consecutiveSuccesses = 0
-			h.consecutiveFailures++
+			oldBatchSize := batchSize
+			batchSize /= 2
+			debug.DropMessage("BATCH_DECREASE", fmt.Sprintf("Halved batch size from %d to %d blocks after failure", oldBatchSize, batchSize))
 
-			// Only halve after 3 consecutive failures
-			if h.consecutiveFailures >= 3 {
-				oldBatchSize := batchSize
-				batchSize /= 2
-				h.consecutiveFailures = 0 // Reset counter after adapting
-				debug.DropMessage("BATCH_DECREASE", fmt.Sprintf("Halved batch size from %d to %d blocks after 3 consecutive failures", oldBatchSize, batchSize))
-			} else {
-				debug.DropMessage("BATCH_FAILURE", fmt.Sprintf("Failure %d/3 - keeping batch size at %d blocks", h.consecutiveFailures, batchSize))
-			}
-
-			// Don't advance the current position on failure - retry the same range with same batch size
+			// Don't advance the current position on failure - retry the same range with smaller batch size
 		}
 
 		// Commit periodically for memory management
