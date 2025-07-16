@@ -2,20 +2,20 @@
 // 🚀 HIGH-PERFORMANCE ARBITRAGE DETECTION SYSTEM
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 // Project: High-Frequency Arbitrage Detection System
-// Component: Main Entry Point & Orchestration
+// Component: Main Entry Point & Orchestration with Bootstrap Integration
 //
 // 🇯🇵 MADE IN JAPAN. INSPIRED BY JAPANESE ENGINEERING. FROM NIIKAPPU HIDAKA HOKKAIDO 🇯🇵
 //
 // Description:
-//   Orchestrates a complete arbitrage detection pipeline for Ethereum DEX trading, processing
-//   WebSocket event streams with nanosecond-scale latency. Loads arbitrage cycles and trading
-//   pair mappings at startup, then maintains persistent connections for real-time processing.
+//   Orchestrates a complete arbitrage detection pipeline with integrated bootstrap synchronization.
+//   The system first initializes all core components, then ensures historical data completeness
+//   through bootstrap synchronization, performs cleanup, and finally enters production processing.
 //
-// Performance Characteristics:
-//   - Startup: Database-backed initialization with aggressive cleanup
-//   - Runtime: Zero-allocation hot paths, disabled GC
-//   - Networking: TCP/TLS optimizations for minimal latency
-//   - Recovery: Automatic reconnection on failures
+// Architecture:
+//   1. System initialization - loads cycles, pools, and initializes router
+//   2. Bootstrap synchronization - ensures complete historical data coverage
+//   3. Resource cleanup - prepares system for production processing
+//   4. Production processing - continuous real-time event stream processing
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -31,11 +31,13 @@ import (
 	rtdebug "runtime/debug"
 	"strings"
 	"syscall"
+	"time"
 
 	"main/constants"
 	"main/debug"
 	"main/parser"
 	"main/router"
+	"main/syncharvest"
 	"main/utils"
 	"main/ws"
 
@@ -49,7 +51,7 @@ import (
 // init performs critical system initialization before main() execution.
 // This function loads all arbitrage cycles and trading pair mappings into memory,
 // then aggressively cleans up initialization data to minimize memory footprint.
-// The garbage collector is disabled after initialization for maximum runtime performance.
+// GC is NOT disabled here - that happens after bootstrap completion.
 //
 //go:norace
 //go:nocheckptr
@@ -86,22 +88,233 @@ func init() {
 	}
 	cycles = nil // Release the slice itself
 
-	// Force immediate garbage collection to reclaim initialization memory
-	// Double GC ensures both young and old generation cleanup
-	runtime.GC()
-	runtime.GC()
-	debug.DropMessage("GC_COMPLETE", "Forced garbage collection completed")
+	debug.DropMessage("INIT_COMPLETE", "System ready for bootstrap")
+}
 
-	// Disable garbage collection for production operation
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// MAIN EXECUTION ORCHESTRATION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// main implements the primary system orchestration with integrated bootstrap.
+// The system operates in distinct phases to ensure complete data coverage
+// while maintaining production processing reliability.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func main() {
+	debug.DropMessage("MAIN_START", "Starting system orchestration")
+
+	// PHASE 1: BOOTSTRAP SYNCHRONIZATION
+	// Ensures complete historical data coverage before production processing begins.
+	// The bootstrap system either catches up to latest block height and exits,
+	// or handles CTRL+C gracefully by saving current state and exiting.
+	bootstrapStart := time.Now()
+
+	if requiresBootstrapSync() {
+		debug.DropMessage("BOOTSTRAP_EXECUTE", "Running bootstrap synchronization")
+
+		// Execute detached bootstrap synchronization
+		// This process runs to completion and terminates, ensuring no interference
+		// with production processing. Handles CTRL+C gracefully with state persistence.
+		if err := executeBootstrapSync(); err != nil {
+			debug.DropMessage("BOOTSTRAP_ERROR", fmt.Sprintf("Bootstrap synchronization failed: %v", err))
+			debug.DropMessage("BOOTSTRAP_CONTINUE", "Continuing with available data")
+		} else {
+			debug.DropMessage("BOOTSTRAP_SUCCESS", "Bootstrap synchronization completed")
+		}
+	} else {
+		debug.DropMessage("BOOTSTRAP_SKIP", "Bootstrap synchronization not required")
+	}
+
+	bootstrapElapsed := time.Since(bootstrapStart)
+	debug.DropMessage("BOOTSTRAP_DURATION", fmt.Sprintf("Bootstrap phase completed in %v", bootstrapElapsed))
+
+	// PHASE 2: RESOURCE CLEANUP
+	// Performs aggressive cleanup of bootstrap artifacts to ensure clean production startup.
+	// This phase eliminates any residual memory or resources from bootstrap operations.
+	cleanupStart := time.Now()
+	performPostBootstrapCleanup()
+	cleanupElapsed := time.Since(cleanupStart)
+	debug.DropMessage("CLEANUP_DURATION", fmt.Sprintf("Resource cleanup completed in %v", cleanupElapsed))
+
+	// PHASE 3: FINAL PRODUCTION PREPARATION
+	// After bootstrap is complete and cleanup is done, NOW we disable GC for production
+	debug.DropMessage("FINAL_GC", "Final garbage collection before production")
+
+	// ONLY place in the system with explicit GC calls - final cleanup before production
+	runtime.GC()
+	runtime.GC()
+
+	// NOW disable garbage collection for production operation
 	// This eliminates GC pauses during latency-critical event processing
 	rtdebug.SetGCPercent(-1)
 	debug.DropMessage("GC_DISABLED", "Garbage collector disabled for production operation")
 
-	debug.DropMessage("INIT_COMPLETE", "System ready")
+	// PHASE 4: PRODUCTION PROCESSING
+	// Enters continuous production event processing with the primary event loop.
+	// This phase runs indefinitely, processing real-time WebSocket events with automatic recovery.
+	totalBootstrapTime := time.Since(bootstrapStart)
+	debug.DropMessage("TOTAL_BOOTSTRAP_TIME", fmt.Sprintf("Total bootstrap overhead: %v", totalBootstrapTime))
+	debug.DropMessage("PRODUCTION_START", "Starting production processing")
+
+	// Lock to OS thread for consistent CPU affinity and syscall handling
+	runtime.LockOSThread()
+
+	// Enter the main production processing loop
+	// This infinite loop maintains continuous operation despite network failures or other errors
+	runProductionEventLoop()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// DATA LOADING
+// BOOTSTRAP SYNCHRONIZATION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// requiresBootstrapSync determines whether bootstrap synchronization is necessary.
+// This function performs a quick check without creating persistent objects or connections.
+// Returns true if the system is behind the target synchronization block.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func requiresBootstrapSync() bool {
+	// Perform lightweight synchronization status check
+	// This function opens minimal database connections and queries sync metadata
+	syncNeeded, lastBlock, targetBlock, err := syncharvest.CheckIfSyncNeeded()
+	if err != nil {
+		debug.DropMessage("BOOTSTRAP_CHECK_ERROR", fmt.Sprintf("Synchronization check failed: %v", err))
+		return false // Conservative approach - don't bootstrap if check fails
+	}
+
+	// Log synchronization status for monitoring
+	if syncNeeded {
+		blocksBehind := targetBlock - lastBlock
+		debug.DropMessage("BOOTSTRAP_NEEDED", fmt.Sprintf("Synchronization required: %d blocks behind", blocksBehind))
+	} else {
+		debug.DropMessage("BOOTSTRAP_CURRENT", fmt.Sprintf("System current at block %d", lastBlock))
+	}
+
+	return syncNeeded
+}
+
+// executeBootstrapSync runs the detached bootstrap synchronization process.
+// This function creates a completely isolated bootstrap environment that:
+// 1. Syncs from last processed block to current blockchain head
+// 2. Handles CTRL+C gracefully with state persistence
+// 3. Uses ring buffer with pinned consumer for database writes
+// 4. Terminates completely when sync is complete or interrupted
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func executeBootstrapSync() error {
+	// Execute the detached synchronization process
+	// This function encapsulates the entire bootstrap lifecycle:
+	// - Creates harvester with signal handling
+	// - Processes blocks in parallel with ring buffer
+	// - Saves per-pair sync state continuously
+	// - Handles interruption gracefully
+	// - Terminates completely when done
+	return syncharvest.ExecuteDetachedSync()
+}
+
+// performPostBootstrapCleanup performs aggressive resource cleanup after bootstrap completion.
+// This function ensures that no bootstrap artifacts remain in memory, providing a clean
+// environment for production processing startup.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func performPostBootstrapCleanup() {
+	debug.DropMessage("CLEANUP_START", "Starting post-bootstrap resource cleanup")
+
+	// Force return of unused memory to the operating system
+	// This ensures minimal memory footprint for production processing
+	rtdebug.FreeOSMemory()
+
+	debug.DropMessage("CLEANUP_COMPLETE", "Post-bootstrap cleanup completed")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// PRODUCTION PROCESSING
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// runProductionEventLoop implements the main production processing loop with automatic recovery.
+// This function maintains continuous operation despite network failures or other errors.
+// The loop establishes WebSocket connections, processes events, and handles reconnection seamlessly.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func runProductionEventLoop() {
+	debug.DropMessage("EVENT_LOOP_START", "Starting production event processing loop")
+
+	// Infinite loop with automatic error recovery
+	// This ensures the system remains operational despite transient failures
+	for {
+		// Attempt to process event stream
+		// Each iteration represents a complete WebSocket connection lifecycle
+		if err := processEventStream(); err != nil {
+			debug.DropError("STREAM_ERROR", err)
+			// Loop continues, establishing new connection automatically
+		}
+	}
+}
+
+// processEventStream manages a single WebSocket connection lifecycle.
+// This function establishes the connection, performs handshake, subscribes to events,
+// and processes incoming messages until an error occurs.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func processEventStream() error {
+	// Create optimized network connection
+	// This includes TCP optimizations and TLS configuration
+	conn, err := establishConnection()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// Perform WebSocket protocol upgrade
+	// This negotiates the WebSocket protocol with the remote server
+	if err := ws.Handshake(conn); err != nil {
+		return err
+	}
+
+	// Subscribe to Ethereum log events
+	// This sends the subscription request for contract event notifications
+	if err := ws.SendSubscription(conn); err != nil {
+		return err
+	}
+
+	debug.DropMessage("STREAM_READY", "Event stream processing active")
+
+	// Main event processing loop
+	// This loop processes incoming WebSocket messages until an error occurs
+	for {
+		// Receive complete WebSocket message
+		// This function handles WebSocket framing and message assembly
+		payload, err := ws.SpinUntilCompleteMessage(conn)
+		if err != nil {
+			return err
+		}
+
+		// Parse and route the event for arbitrage detection
+		// This processes the JSON-RPC event through the existing pipeline
+		parser.HandleFrame(payload)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// DATA LOADING - ARBITRAGE CYCLES
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // loadArbitrageCyclesFromFile parses arbitrage cycle definitions from a text file.
@@ -200,22 +413,31 @@ func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriangle, e
 			pairCountStr := utils.Itoa(pairCount)
 			debug.DropMessage("INCOMPLETE_LINE", "Line "+lineStr+" only had "+pairCountStr+" pairs")
 		}
+
+		// Clear pairIDs array after each line
+		for j := range pairIDs {
+			pairIDs[j] = 0
+		}
 	}
 
 	linesStr := utils.Itoa(lineCount)
 	debug.DropMessage("LINES_PROCESSED", "Total lines: "+linesStr)
 
 	if len(cycles) == 0 {
+		// Clear data before returning error
+		data = nil
 		return nil, fmt.Errorf("no valid arbitrage cycles found in %s", filename)
 	}
 
 	// Release file data immediately to minimize memory usage
 	data = nil
-	runtime.GC()
-	runtime.GC()
 
 	return cycles, nil
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// DATA LOADING - TRADING POOLS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // loadPoolsFromDatabase reads trading pair configurations from SQLite database.
 // This maps Ethereum contract addresses to internal pair IDs for fast lookup
@@ -282,6 +504,12 @@ func loadPoolsFromDatabase(dbPath string) error {
 		router.RegisterTradingPairAddress(poolAddressBytes, router.TradingPairID(pairID))
 		count++
 
+		// Clear temporary variables immediately after use
+		poolAddress = ""
+		token0Address = ""
+		token1Address = ""
+		exchangeName = ""
+
 		// Periodic progress updates for large databases
 		if count%100000 == 0 {
 			progressStr := utils.Itoa(count)
@@ -299,8 +527,6 @@ func loadPoolsFromDatabase(dbPath string) error {
 
 	// Release temporary buffer
 	poolAddressBytes = nil
-	runtime.GC()
-	runtime.GC()
 
 	return nil
 }
@@ -337,89 +563,34 @@ func printCyclesInfo(cycles []router.ArbitrageTriangle) {
 
 		cycleInfo := "Cycle " + indexStr + ": (" + pair0Str + ") -> (" + pair1Str + ") -> (" + pair2Str + ")"
 		debug.DropMessage("CYCLE_DETAIL", cycleInfo)
+
+		// Clear temporary strings immediately after use
+		indexStr = ""
+		pair0Str = ""
+		pair1Str = ""
+		pair2Str = ""
+		cycleInfo = ""
 	}
 
 	// Indicate if additional cycles exist beyond the sample
 	if len(cycles) > 10 {
 		remainingStr := utils.Itoa(len(cycles) - 10)
 		debug.DropMessage("CYCLES_TRUNCATED", "... and "+remainingStr+" more cycles")
-	}
-}
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MAIN EXECUTION
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// main implements the primary event processing loop with automatic recovery.
-// The system maintains continuous operation despite network failures or other errors.
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func main() {
-	debug.DropMessage("STARTUP", "Arbitrage detection engine starting")
-
-	// Lock to OS thread for consistent CPU affinity and syscall handling
-	runtime.LockOSThread()
-
-	// Infinite loop with automatic error recovery
-	// This ensures the system remains operational 24/7
-	for {
-		if err := runStream(); err != nil {
-			debug.DropError("STREAM_ERROR", err)
-			// Loop continues, establishing new connection
-		}
-	}
-}
-
-// runStream manages a single WebSocket connection lifecycle.
-// This function establishes the connection, performs handshake, and processes
-// incoming events until an error occurs.
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func runStream() error {
-	// Create optimized network connection
-	conn, err := establishConnection()
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	// Perform WebSocket protocol upgrade
-	if err := ws.Handshake(conn); err != nil {
-		return err
+		// Clear temporary string
+		remainingStr = ""
 	}
 
-	// Subscribe to Ethereum log events
-	if err := ws.SendSubscription(conn); err != nil {
-		return err
-	}
-
-	debug.DropMessage("READY", "Event processing active")
-
-	// Main event processing loop
-	for {
-		// Receive complete WebSocket message
-		payload, err := ws.SpinUntilCompleteMessage(conn)
-		if err != nil {
-			return err
-		}
-
-		// Parse and route the event for arbitrage detection
-		parser.HandleFrame(payload)
-	}
+	// Clear cycle count string
+	cycleCountStr = ""
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // NETWORK OPTIMIZATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// establishConnection creates a TLS-secured TCP connection with aggressive optimizations.
-// The connection is configured for minimum latency and maximum throughput.
+// establishConnection creates a TLS-secured TCP connection with optimizations.
+// The connection is configured for reliable operation with the WebSocket endpoint.
 //
 //go:norace
 //go:nocheckptr
@@ -436,10 +607,10 @@ func establishConnection() (*tls.Conn, error) {
 	// Type assert to access TCP-specific methods
 	tcpConn := raw.(*net.TCPConn)
 
-	// Disable Nagle's algorithm for minimum latency
+	// Disable Nagle's algorithm for reduced latency
 	tcpConn.SetNoDelay(true)
 
-	// Set buffer sizes to match maximum WebSocket frame size
+	// Set buffer sizes to match WebSocket frame requirements
 	tcpConn.SetReadBuffer(constants.MaxFrameSize)
 	tcpConn.SetWriteBuffer(constants.MaxFrameSize)
 
@@ -449,7 +620,7 @@ func establishConnection() (*tls.Conn, error) {
 		rawFile.Close() // Close the file descriptor duplicate
 	}
 
-	// Upgrade to TLS with minimal configuration
+	// Upgrade to TLS with server name indication
 	tlsConn := tls.Client(raw, &tls.Config{
 		ServerName: constants.WsHost, // Required for SNI
 	})
@@ -458,7 +629,7 @@ func establishConnection() (*tls.Conn, error) {
 }
 
 // optimizeSocket applies platform-specific TCP/IP stack optimizations.
-// These settings minimize latency and maximize throughput for real-time event processing.
+// These settings are tuned for reliable WebSocket communication.
 //
 //go:norace
 //go:nocheckptr
@@ -473,11 +644,11 @@ func optimizeSocket(fd int) {
 	syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)                   // Allow address reuse
 	syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_KEEPALIVE, 1)                   // Enable keepalive
 
-	// Platform-specific optimizations for maximum performance
+	// Platform-specific optimizations for reliable operation
 	switch runtime.GOOS {
 	case "linux":
-		// Linux-specific optimizations for low-latency networking
-		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 46, 1)         // SO_BUSY_POLL - spin on socket
+		// Linux-specific optimizations for network reliability
+		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 46, 1)         // SO_BUSY_POLL
 		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, 18, 1000)     // TCP_USER_TIMEOUT - 1 second
 		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, 16, 1)        // TCP_THIN_LINEAR_TIMEOUTS
 		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, 17, 1)        // TCP_THIN_DUPACK
@@ -494,4 +665,89 @@ func optimizeSocket(fd int) {
 		// Windows-specific socket exclusivity
 		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 0x0004, 1) // SO_EXCLUSIVEADDRUSE
 	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// BOOTSTRAP UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// RunBootstrapOnly executes bootstrap synchronization in isolation.
+// This function is useful for manual synchronization without starting production processing.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func RunBootstrapOnly() error {
+	debug.DropMessage("BOOTSTRAP_STANDALONE", "Running standalone bootstrap synchronization")
+
+	// Check if bootstrap is required
+	if requiresBootstrapSync() {
+		// Execute bootstrap synchronization
+		if err := executeBootstrapSync(); err != nil {
+			return fmt.Errorf("bootstrap synchronization failed: %w", err)
+		}
+	} else {
+		debug.DropMessage("BOOTSTRAP_UNNECESSARY", "Bootstrap synchronization not required")
+	}
+
+	// Perform cleanup
+	performPostBootstrapCleanup()
+
+	debug.DropMessage("BOOTSTRAP_STANDALONE_COMPLETE", "Standalone bootstrap synchronization complete")
+	return nil
+}
+
+// CheckSystemStatus returns current synchronization status without side effects.
+// This function provides synchronization state information for monitoring purposes.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func CheckSystemStatus() (syncNeeded bool, lastBlock, targetBlock uint64, err error) {
+	return syncharvest.CheckIfSyncNeeded()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// SYSTEM DIAGNOSTICS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// analyzeSystemState provides diagnostic information about current system state.
+// This function is useful for monitoring and debugging system resource usage.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func analyzeSystemState() {
+	debug.DropMessage("SYSTEM_ANALYSIS", "Analyzing system state")
+
+	// Collect memory statistics
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	// Report memory usage
+	allocatedStr := utils.Itoa(int(m.Alloc / 1024))
+	systemStr := utils.Itoa(int(m.Sys / 1024))
+	gcStr := utils.Itoa(int(m.NumGC))
+
+	debug.DropMessage("MEMORY_USAGE", fmt.Sprintf(
+		"Allocated: %s KB, System: %s KB, GC cycles: %s",
+		allocatedStr, systemStr, gcStr,
+	))
+
+	// Report goroutine count
+	goroutineStr := utils.Itoa(runtime.NumGoroutine())
+	debug.DropMessage("GOROUTINE_COUNT", fmt.Sprintf(
+		"Active goroutines: %s", goroutineStr,
+	))
+
+	// Clear temporary strings immediately after use
+	allocatedStr = ""
+	systemStr = ""
+	gcStr = ""
+	goroutineStr = ""
+
+	debug.DropMessage("SYSTEM_ANALYSIS_COMPLETE", "System state analysis complete")
 }
