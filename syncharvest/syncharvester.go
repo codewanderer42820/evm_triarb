@@ -51,9 +51,7 @@ import (
 
 const (
 	// AGGRESSIVE BOOTSTRAP SETTINGS
-	MaxBatchSize     = uint64(15_000) // Larger batches for fewer RPC calls
-	MinBatchSize     = uint64(100)    // Minimum when network issues occur
-	OptimalBatchSize = uint64(8_000)  // Target batch size for optimal performance
+	OptimalBatchSize = uint64(10_000) // Starting batch size - let it converge naturally
 
 	// TERMINATION SETTINGS
 	SyncTargetOffset = 50            // Blocks behind head to consider "synced"
@@ -369,8 +367,11 @@ func (h *PeakHarvester) setupSignalHandling() {
 
 	// Single goroutine for signal handling - minimal overhead
 	go func() {
-		<-h.signalChan
-		debug.DropMessage("SIGNAL_RECEIVED", "Received shutdown signal")
+		sig := <-h.signalChan
+		debug.DropMessage("SIGNAL_RECEIVED", fmt.Sprintf("Received %v - initiating graceful shutdown", sig))
+		debug.DropMessage("GRACEFUL_SHUTDOWN", "Current batch will complete and data will be saved")
+
+		// Cancel context to trigger graceful shutdown
 		h.cancel()
 	}()
 }
@@ -544,14 +545,28 @@ func (h *PeakHarvester) SyncToLatestAndTerminate() error {
 
 	// Execute sync loop
 	err = h.executePeakSyncLoop(startBlock)
-	if err != nil {
-		debug.DropMessage("SYNC_ERROR", fmt.Sprintf("Sync failed: %v", err))
-		h.rollbackTransaction()
-		return err
+
+	// CRITICAL: Always commit pending data, even on interruption
+	if h.eventsInBatch > 0 {
+		debug.DropMessage("FINAL_COMMIT", fmt.Sprintf("Committing final %d events before termination", h.eventsInBatch))
+		h.commitTransaction()
+	} else {
+		// Only rollback if we have no pending data
+		if err != nil {
+			h.rollbackTransaction()
+		} else {
+			h.commitTransaction()
+		}
 	}
 
-	// Commit final transaction
-	h.commitTransaction()
+	if err != nil {
+		// Check if this was a graceful cancellation
+		if err == context.Canceled {
+			debug.DropMessage("SYNC_CANCELLED", "Sync cancelled by user - data committed")
+		} else {
+			debug.DropMessage("SYNC_ERROR", fmt.Sprintf("Sync failed: %v", err))
+		}
+	}
 
 	return h.terminateCleanly()
 }
@@ -559,8 +574,9 @@ func (h *PeakHarvester) SyncToLatestAndTerminate() error {
 //go:inline
 func (h *PeakHarvester) executePeakSyncLoop(startBlock uint64) error {
 	current := startBlock
-	batchSize := OptimalBatchSize
+	batchSize := OptimalBatchSize // Start at 10,000 blocks
 	consecutiveOK := 0
+	consecutiveNG := 0
 
 	for current < h.syncTarget {
 		select {
@@ -579,19 +595,16 @@ func (h *PeakHarvester) executePeakSyncLoop(startBlock uint64) error {
 		success := h.processPeakBatch(current, batchEnd)
 
 		if success {
-			// Success: increment success counter
+			// Success: reset failure counter, increment success counter
+			consecutiveNG = 0
 			consecutiveOK++
 
-			// After just 2 consecutive successes, try to increase batch size
-			// This provides faster recovery from batch size reductions
-			if consecutiveOK >= 2 && batchSize < MaxBatchSize {
+			// Every 3 consecutive successes, double the batch size
+			if consecutiveOK >= 3 {
 				oldBatchSize := batchSize
-				batchSize = minUint64(MaxBatchSize, batchSize*3/2) // 1.5x increase (more conservative than 2x)
-
-				if batchSize != oldBatchSize {
-					debug.DropMessage("BATCH_INCREASE", fmt.Sprintf("Increased batch size from %d to %d blocks", oldBatchSize, batchSize))
-					consecutiveOK = 0 // Reset counter after increase
-				}
+				batchSize *= 2
+				debug.DropMessage("BATCH_INCREASE", fmt.Sprintf("Doubled batch size from %d to %d blocks after 3 successes", oldBatchSize, batchSize))
+				consecutiveOK = 0 // Reset counter after increase
 			}
 
 			// Update progress and advance
@@ -599,19 +612,22 @@ func (h *PeakHarvester) executePeakSyncLoop(startBlock uint64) error {
 			current = batchEnd + 1
 
 		} else {
-			// Failure: IMMEDIATELY reduce batch size and reset success counter
+			// Failure: reset success counter, increment failure counter
 			consecutiveOK = 0
+			consecutiveNG++
 
-			if batchSize > MinBatchSize {
+			// Every 3 consecutive failures, halve the batch size
+			if consecutiveNG >= 3 {
 				oldBatchSize := batchSize
 				batchSize /= 2
-				if batchSize < MinBatchSize {
-					batchSize = MinBatchSize
+				if batchSize < 1 {
+					batchSize = 1 // Absolute minimum to prevent zero
 				}
-				debug.DropMessage("BATCH_DECREASE", fmt.Sprintf("Reduced batch size from %d to %d blocks", oldBatchSize, batchSize))
+				debug.DropMessage("BATCH_DECREASE", fmt.Sprintf("Halved batch size from %d to %d blocks after 3 failures", oldBatchSize, batchSize))
+				consecutiveNG = 0 // Reset counter after decrease
 			}
 
-			// Don't advance the current position on failure - retry the same range with smaller batch
+			// Don't advance the current position on failure - retry the same range with current batch size
 		}
 
 		// Commit periodically for memory management
