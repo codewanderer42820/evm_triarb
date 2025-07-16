@@ -86,7 +86,6 @@ type PeakHarvester struct {
 	syncTarget    uint64
 	lastProcessed uint64
 	processed     int64
-	errors        int64
 
 	// Shutdown coordination
 	ctx    context.Context
