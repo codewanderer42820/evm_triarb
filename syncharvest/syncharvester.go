@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"main/utils"
 	"math/big"
 	"net/http"
 	"os"
@@ -497,15 +498,24 @@ func (h *Harvester) processLogs(logs []Log) error {
 	}
 	defer updateReserves.Close()
 
+	processed := 0
 	for _, lg := range logs {
 		// Parse hex data
-		data, err := hex.DecodeString(strings.TrimPrefix(lg.Data, "0x"))
+		dataStr := strings.TrimPrefix(lg.Data, "0x")
+		if len(dataStr)%2 != 0 {
+			log.Printf("Invalid hex data length: %s", lg.Data)
+			continue
+		}
+
+		data, err := hex.DecodeString(dataStr)
 		if err != nil {
+			log.Printf("Failed to decode hex data: %v", err)
 			continue
 		}
 
 		// Parse reserves from log data
 		if len(data) != 64 {
+			log.Printf("Invalid sync event data length: %d", len(data))
 			continue // Invalid sync event
 		}
 
@@ -515,17 +525,20 @@ func (h *Harvester) processLogs(logs []Log) error {
 		pairAddr := strings.ToLower(lg.Address)
 		pairID, ok := h.pairMap[pairAddr]
 		if !ok {
+			log.Printf("Unknown pair address: %s", pairAddr)
 			continue // Unknown pair
 		}
 
 		// Parse block number and log index
 		blockNum, err := parseHexUint64(lg.BlockNumber)
 		if err != nil {
+			log.Printf("Failed to parse block number %s: %v", lg.BlockNumber, err)
 			continue
 		}
 
 		logIndex, err := parseHexUint64(lg.LogIndex)
 		if err != nil {
+			log.Printf("Failed to parse log index %s: %v", lg.LogIndex, err)
 			continue
 		}
 
@@ -539,7 +552,7 @@ func (h *Harvester) processLogs(logs []Log) error {
 			reserve1.String(),
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to insert sync event: %w", err)
 		}
 
 		// Update current reserves
@@ -551,8 +564,14 @@ func (h *Harvester) processLogs(logs []Log) error {
 			blockNum,
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to update reserves: %w", err)
 		}
+
+		processed++
+	}
+
+	if processed == 0 {
+		return fmt.Errorf("no logs were processed successfully")
 	}
 
 	return tx.Commit()
@@ -612,19 +631,26 @@ func (h *Harvester) GetLatestReserves() (map[string]*PairReserve, error) {
 // -----------------------------------------------------------------------------
 
 // parseHexUint64 parses a hex string to uint64
+// Updated to handle odd-length hex strings
 func parseHexUint64(s string) (uint64, error) {
 	s = strings.TrimPrefix(s, "0x")
-	n, err := hex.DecodeString(s)
-	if err != nil {
-		return 0, err
+	if s == "" {
+		return 0, fmt.Errorf("empty hex string")
 	}
 
-	// Pad to 8 bytes if necessary
-	if len(n) < 8 {
-		padded := make([]byte, 8)
-		copy(padded[8-len(n):], n)
-		n = padded
+	// Validate hex characters
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return 0, fmt.Errorf("invalid hex string: %s", s)
+		}
 	}
 
-	return binary.BigEndian.Uint64(n[len(n)-8:]), nil
+	// Use the optimized ParseHexU64 from utils
+	// It handles up to 16 hex characters which is perfect for uint64
+	b := []byte(s)
+	if len(b) > 16 {
+		b = b[:16]
+	}
+
+	return utils.ParseHexU64(b), nil
 }
