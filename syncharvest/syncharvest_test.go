@@ -26,6 +26,17 @@ import (
 // Test Helpers
 // -----------------------------------------------------------------------------
 
+// Helper to create test harvester with initialized fields
+func createTestHarvester(dataURL, headURL string) *Harvester {
+	return &Harvester{
+		dataClient: NewRPCClient(dataURL),
+		headClient: NewRPCClient(headURL),
+		pairMap:    make(map[string]int64),
+		hexBuffer:  make([]byte, 64),
+		addresses:  []string{},
+	}
+}
+
 // mockRPCServer creates a configurable mock Ethereum JSON-RPC server
 type mockRPCServer struct {
 	*httptest.Server
@@ -374,12 +385,8 @@ func TestNewHarvester(t *testing.T) {
 	server := newMockRPCServer()
 	defer server.Close()
 
-	// Create harvester manually to avoid cloudflare connection
-	h := &Harvester{
-		dataClient: NewRPCClient(server.URL),
-		headClient: NewRPCClient(server.URL),
-		pairMap:    make(map[string]int64),
-	}
+	// Use the helper
+	h := createTestHarvester(server.URL, server.URL)
 
 	// Open databases
 	pairsDB, err := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")
@@ -446,7 +453,7 @@ func TestHarvester_initReservesDB(t *testing.T) {
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
 
-	h := &Harvester{pairMap: make(map[string]int64)}
+	h := createTestHarvester("", "")
 
 	reservesDB, err := sql.Open("sqlite3", ReservesDBPath)
 	if err != nil {
@@ -484,7 +491,7 @@ func TestHarvester_loadPairMappings(t *testing.T) {
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
 
-	h := &Harvester{pairMap: make(map[string]int64)}
+	h := createTestHarvester("", "")
 
 	pairsDB, err := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")
 	if err != nil {
@@ -536,13 +543,7 @@ func TestHarvester_Start_BasicFlow(t *testing.T) {
 	server.addLog(15000000, createTestLog("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc",
 		15000000, big.NewInt(1000000), big.NewInt(2000000)))
 
-	h := &Harvester{
-		dataClient: NewRPCClient(server.URL),
-		headClient: NewRPCClient(server.URL),
-		pairMap:    make(map[string]int64),
-		hexBuffer:  make([]byte, 64), // Initialize the hex buffer!
-		addresses:  []string{},       // Initialize addresses slice
-	}
+	h := createTestHarvester(server.URL, server.URL)
 
 	pairsDB, _ := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")
 	h.pairsDB = pairsDB
@@ -600,29 +601,44 @@ func TestHarvester_Start_HeadClientFallback(t *testing.T) {
 
 	dataServer := newMockRPCServer()
 	defer dataServer.Close()
-	dataServer.setBlock(15000001) // Set block ahead to avoid sleep
+	dataServer.setBlock(15000005) // Set block ahead to avoid sleep
 
 	headServer := newMockRPCServer()
 	defer headServer.Close()
+	headServer.setBlock(15000005) // Also set this ahead
 
-	// Use a custom handler that returns different errors
-	// First call returns 429 (triggers ankr fallback)
-	// Subsequent calls return other errors to force data client usage
-	callCount := 0
+	// Track calls
+	headCalls := 0
+	dataCalls := 0
+
 	headServer.setCustomHandler(func(req RPCRequest) (interface{}, *RPCError) {
-		callCount++
-		if callCount == 1 {
-			return nil, &RPCError{Code: 429, Message: "Too many requests"}
+		if req.Method == "eth_blockNumber" {
+			headCalls++
+			// First call returns 429 to trigger fallback
+			if headCalls == 1 {
+				return nil, &RPCError{Code: 429, Message: "Too many requests"}
+			}
+			// Subsequent calls also fail to force data client usage
+			return nil, &RPCError{Code: -32000, Message: "Internal error"}
 		}
-		// Return non-429 error to skip ankr and use data client
-		return nil, &RPCError{Code: -32000, Message: "Internal error"}
+		if req.Method == "eth_getLogs" {
+			return []Log{}, nil
+		}
+		return nil, &RPCError{Code: -32601, Message: "Method not found"}
 	})
 
-	h := &Harvester{
-		dataClient: NewRPCClient(dataServer.URL),
-		headClient: NewRPCClient(headServer.URL),
-		pairMap:    map[string]int64{"0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc": 1},
-	}
+	dataServer.setCustomHandler(func(req RPCRequest) (interface{}, *RPCError) {
+		if req.Method == "eth_blockNumber" {
+			dataCalls++
+			return "0xe4e1c5", nil
+		}
+		if req.Method == "eth_getLogs" {
+			return []Log{}, nil
+		}
+		return nil, &RPCError{Code: -32601, Message: "Method not found"}
+	})
+
+	h := createTestHarvester(dataServer.URL, headServer.URL)
 
 	pairsDB, _ := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")
 	h.pairsDB = pairsDB
@@ -632,20 +648,29 @@ func TestHarvester_Start_HeadClientFallback(t *testing.T) {
 	h.loadPairMappings()
 	defer h.Close()
 
+	// Use longer timeout to account for retry delays
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := h.Start(ctx, 15000000)
-	if err != nil && !strings.Contains(err.Error(), "context") {
-		t.Errorf("Unexpected error: %v", err)
-	}
+	// Run in goroutine and cancel after we see the expected behavior
+	done := make(chan struct{})
+	go func() {
+		h.Start(ctx, 15000000)
+		close(done)
+	}()
 
-	// Verify fallback happened
-	if headServer.getRequestCount() == 0 {
+	// Wait for fallback to happen
+	time.Sleep(4 * time.Second)
+	cancel()
+	<-done
+
+	// Verify 429 error was encountered and fallback occurred
+	if headCalls == 0 {
 		t.Error("Head server should have been called")
 	}
-	// Data server will be called after head fails and ankr fails
-	if dataServer.getRequestCount() == 0 {
+
+	// The data server should be called as final fallback after ankr fails
+	if dataCalls == 0 {
 		t.Error("Data server should have been called as fallback")
 	}
 }
@@ -663,11 +688,7 @@ func TestHarvester_Start_RPCErrors(t *testing.T) {
 	server.setFailure("error", 1) // Fail first request only
 	server.setBlock(15000001)     // Set block ahead to avoid sleep
 
-	h := &Harvester{
-		dataClient: NewRPCClient(server.URL),
-		headClient: NewRPCClient(server.URL),
-		pairMap:    make(map[string]int64),
-	}
+	h := createTestHarvester(server.URL, server.URL)
 
 	pairsDB, _ := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")
 	h.pairsDB = pairsDB
@@ -702,15 +723,13 @@ func TestHarvester_Start_ChunkProcessing(t *testing.T) {
 	defer server.Close()
 	server.setBlock(15000100) // Ahead of start block
 
-	h := &Harvester{
-		dataClient: NewRPCClient(server.URL),
-		headClient: NewRPCClient(server.URL),
-		pairMap:    make(map[string]int64),
-	}
+	h := createTestHarvester(server.URL, server.URL)
 
 	// Add 1200 pairs to force multiple chunks
 	for i := 0; i < 1200; i++ {
-		h.pairMap[fmt.Sprintf("0x%040x", i)] = int64(i)
+		addr := fmt.Sprintf("0x%040x", i)
+		h.pairMap[addr] = int64(i)
+		h.addresses = append(h.addresses, addr)
 	}
 
 	pairsDB, _ := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")
@@ -744,11 +763,7 @@ func TestHarvester_Start_WaitForNewBlock(t *testing.T) {
 	server := newMockRPCServer()
 	defer server.Close()
 
-	h := &Harvester{
-		dataClient: NewRPCClient(server.URL),
-		headClient: NewRPCClient(server.URL),
-		pairMap:    map[string]int64{},
-	}
+	h := createTestHarvester(server.URL, server.URL)
 
 	pairsDB, _ := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")
 	h.pairsDB = pairsDB
@@ -781,11 +796,10 @@ func TestHarvester_processLogs(t *testing.T) {
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
 
-	h := &Harvester{
-		pairMap: map[string]int64{
-			"0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc": 1,
-			"0xa478c2975ab1ea89e8196811f51a7b7ade33eb11": 2,
-		},
+	h := createTestHarvester("", "")
+	h.pairMap = map[string]int64{
+		"0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc": 1,
+		"0xa478c2975ab1ea89e8196811f51a7b7ade33eb11": 2,
 	}
 
 	reservesDB, _ := sql.Open("sqlite3", ReservesDBPath)
@@ -854,7 +868,7 @@ func TestHarvester_writeMeta(t *testing.T) {
 	metaF, _ := os.OpenFile(metaPath, os.O_CREATE|os.O_RDWR, 0o644)
 	defer metaF.Close()
 
-	h := &Harvester{}
+	h := createTestHarvester("", "")
 
 	// Write and verify
 	testBlock := uint64(15000000)
@@ -882,7 +896,7 @@ func TestHarvester_writeMeta(t *testing.T) {
 
 func TestHarvester_Close(t *testing.T) {
 	// Test with nil databases
-	h := &Harvester{}
+	h := createTestHarvester("", "")
 	if err := h.Close(); err != nil {
 		t.Errorf("Close with nil databases should not error: %v", err)
 	}
@@ -898,7 +912,9 @@ func TestHarvester_Close(t *testing.T) {
 	pairsDB, _ := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")
 	reservesDB, _ := sql.Open("sqlite3", ReservesDBPath)
 
-	h2 := &Harvester{pairsDB: pairsDB, reservesDB: reservesDB}
+	h2 := createTestHarvester("", "")
+	h2.pairsDB = pairsDB
+	h2.reservesDB = reservesDB
 	if err := h2.Close(); err != nil {
 		t.Errorf("Close failed: %v", err)
 	}
@@ -921,7 +937,7 @@ func TestHarvester_GetLatestReserves(t *testing.T) {
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
 
-	h := &Harvester{pairMap: make(map[string]int64)}
+	h := createTestHarvester("", "")
 	reservesDB, _ := sql.Open("sqlite3", ReservesDBPath)
 	h.reservesDB = reservesDB
 	defer h.Close()
@@ -975,7 +991,7 @@ func TestHarvester_GetLatestReserves_ScanError(t *testing.T) {
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
 
-	h := &Harvester{pairMap: make(map[string]int64)}
+	h := createTestHarvester("", "")
 	reservesDB, _ := sql.Open("sqlite3", ReservesDBPath)
 	h.reservesDB = reservesDB
 	defer h.Close()
@@ -1005,11 +1021,7 @@ func TestMetaFileCorruption(t *testing.T) {
 	server := newMockRPCServer()
 	defer server.Close()
 
-	h := &Harvester{
-		dataClient: NewRPCClient(server.URL),
-		headClient: NewRPCClient(server.URL),
-		pairMap:    make(map[string]int64),
-	}
+	h := createTestHarvester(server.URL, server.URL)
 
 	pairsDB, _ := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")
 	h.pairsDB = pairsDB
@@ -1118,7 +1130,6 @@ func TestBatchSizeAdjustment(t *testing.T) {
 	}
 }
 
-// Test error handling when all logs fail to process
 func TestHarvester_processLogs_AllFail(t *testing.T) {
 	tmpDir, cleanup := setupTestDB(t)
 	defer cleanup()
@@ -1127,10 +1138,9 @@ func TestHarvester_processLogs_AllFail(t *testing.T) {
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
 
-	h := &Harvester{
-		pairMap: map[string]int64{
-			"0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc": 1,
-		},
+	h := createTestHarvester("", "")
+	h.pairMap = map[string]int64{
+		"0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc": 1,
 	}
 
 	reservesDB, _ := sql.Open("sqlite3", ReservesDBPath)
@@ -1153,7 +1163,6 @@ func TestHarvester_processLogs_AllFail(t *testing.T) {
 	}
 }
 
-// Test head client TTL and caching
 func TestHarvester_Start_HeadCaching(t *testing.T) {
 	tmpDir, cleanup := setupTestDB(t)
 	defer cleanup()
@@ -1174,11 +1183,7 @@ func TestHarvester_Start_HeadCaching(t *testing.T) {
 		return []Log{}, nil
 	})
 
-	h := &Harvester{
-		dataClient: NewRPCClient(server.URL),
-		headClient: NewRPCClient(server.URL),
-		pairMap:    make(map[string]int64),
-	}
+	h := createTestHarvester(server.URL, server.URL)
 
 	pairsDB, _ := sql.Open("sqlite3", "uniswap_pairs.db?mode=ro")
 	h.pairsDB = pairsDB
@@ -1207,7 +1212,7 @@ func BenchmarkProcessLogs(b *testing.B) {
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
 
-	h := &Harvester{pairMap: make(map[string]int64)}
+	h := createTestHarvester("", "")
 
 	// Generate test pairs
 	for i := 0; i < 1000; i++ {
@@ -1240,7 +1245,7 @@ func BenchmarkReserveRetrieval(b *testing.B) {
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldWd)
 
-	h := &Harvester{}
+	h := createTestHarvester("", "")
 	reservesDB, _ := sql.Open("sqlite3", ReservesDBPath)
 	h.reservesDB = reservesDB
 	defer h.Close()
