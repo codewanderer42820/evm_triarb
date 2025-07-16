@@ -38,11 +38,11 @@ type testSyncEvent struct {
 }
 
 // setupTestDB creates a test database with sample pairs
-func setupTestDB(t *testing.T) (*sql.DB, string, func()) {
+func setupTestDB(tb testing.TB) (*sql.DB, string, func()) {
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "sync_test_*")
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 
 	// Create test pairs database
@@ -50,7 +50,7 @@ func setupTestDB(t *testing.T) (*sql.DB, string, func()) {
 	pairsDB, err := sql.Open("sqlite3", pairsPath)
 	if err != nil {
 		os.RemoveAll(tmpDir)
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 
 	// Create schema
@@ -77,13 +77,13 @@ func setupTestDB(t *testing.T) (*sql.DB, string, func()) {
 	if _, err := pairsDB.Exec(schema); err != nil {
 		pairsDB.Close()
 		os.RemoveAll(tmpDir)
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 
 	// Insert test data
 	_, err = pairsDB.Exec(`INSERT INTO exchanges (id, name, chain_id) VALUES (1, 'uniswap_v2', 1)`)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 
 	// Insert test tokens
@@ -99,7 +99,7 @@ func setupTestDB(t *testing.T) (*sql.DB, string, func()) {
 	for _, token := range testTokens {
 		_, err = pairsDB.Exec(`INSERT INTO tokens (id, address, chain_id) VALUES (?, ?, 1)`, token.id, token.addr)
 		if err != nil {
-			t.Fatal(err)
+			tb.Fatal(err)
 		}
 	}
 
@@ -116,7 +116,7 @@ func setupTestDB(t *testing.T) (*sql.DB, string, func()) {
 			VALUES (?, 1, ?, ?, ?, 30)
 		`, pair.ID, pair.Token0, pair.Token1, pair.Address)
 		if err != nil {
-			t.Fatal(err)
+			tb.Fatal(err)
 		}
 	}
 

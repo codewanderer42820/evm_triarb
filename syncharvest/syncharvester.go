@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -197,7 +196,6 @@ type Harvester struct {
 
 	// Pair address to ID mapping cache
 	pairMap map[string]int64
-	mu      sync.RWMutex
 
 	// Head caching
 	cachedHead uint64
