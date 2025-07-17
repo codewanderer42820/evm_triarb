@@ -100,7 +100,6 @@ func main() {
 	debug.DropMessage("TOTAL_BOOTSTRAP_TIME", fmt.Sprintf("Total bootstrap overhead: %v", totalBootstrapTime))
 	debug.DropMessage("PRODUCTION_START", "Starting production processing")
 
-	runtime.LockOSThread()
 	runProductionEventLoop()
 }
 
@@ -182,6 +181,9 @@ func requiresBootstrapSync() bool {
 //go:inline
 //go:registerparams
 func runProductionEventLoop() {
+	// Lock this goroutine to current OS thread for cache locality
+	runtime.LockOSThread()
+
 	debug.DropMessage("EVENT_LOOP_START", "Starting production event processing loop")
 
 	for {

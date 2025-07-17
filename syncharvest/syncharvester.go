@@ -283,8 +283,7 @@ func isDatabaseLocked(dbPath string) bool {
 func NewPeakHarvester() (*PeakHarvester, error) {
 	debug.DropMessage("PEAK_INIT", "Initializing peak performance harvester")
 
-	// Pin to single core for maximum cache locality
-	runtime.GOMAXPROCS(1)
+	// Lock this goroutine to current OS thread for cache locality
 	runtime.LockOSThread()
 
 	// Create context for clean shutdown
