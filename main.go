@@ -177,6 +177,7 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func loadPoolsFromDatabase(dbPath string) int {
