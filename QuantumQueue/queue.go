@@ -1,18 +1,18 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// ⚡ QUANTUM PRIORITY QUEUE
+// Hierarchical Bitmap Priority Queue
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Trading System
-// Component: Hierarchical Bitmap Priority Queue
+// Project: Arbitrage Detection System
+// Component: Fixed-Capacity Priority Queue
 //
 // Description:
-//   Fixed-capacity priority queue with O(1) operations using hierarchical bitmap indexing.
-//   Supports 262,144 distinct priority levels with constant-time minimum extraction through
+//   Fixed-capacity priority queue with constant-time operations using hierarchical bitmap indexing.
+//   Supports 262,144 distinct priority levels with minimum extraction through
 //   hardware-accelerated bit manipulation instructions.
 //
-// Architecture:
+// Features:
 //   - Three-level bitmap hierarchy for efficient minimum finding
 //   - Pre-allocated arena eliminates dynamic memory allocation
-//   - Doubly-linked lists within priority buckets for O(1) updates
+//   - Doubly-linked lists within priority buckets for constant-time updates
 //   - Hardware CLZ instructions enable rapid priority scanning
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -69,10 +69,10 @@ type idx32 = Handle
 // The 64-byte size ensures each node occupies exactly one cache line,
 // minimizing false sharing and maximizing memory bandwidth utilization.
 //
-// FIELD LAYOUT:
+// Field Layout:
 //   - tick: Priority value or -1 when free
 //   - data: User payload consuming most of the cache line
-//   - next/prev: Doubly-linked list pointers for O(1) operations
+//   - next/prev: Doubly-linked list pointers for constant-time operations
 //
 //go:notinheap
 //go:align 64
@@ -90,7 +90,7 @@ type node struct {
 // groupBlock implements the middle level of the three-tier bitmap hierarchy.
 // Each group tracks 64 lanes, with each lane tracking 64 buckets.
 //
-// BITMAP ORGANIZATION:
+// Bitmap Organization:
 //   - l1Summary: Single 64-bit mask indicating which lanes contain entries
 //   - l2: Array of 64 lane masks, each indicating occupied buckets
 //   - Padding ensures exclusive cache line ownership
@@ -110,7 +110,7 @@ type groupBlock struct {
 // QuantumQueue implements a static-capacity priority queue with hierarchical bitmap indexing.
 // The structure is carefully organized to minimize cache misses during operations.
 //
-// MEMORY LAYOUT:
+// Memory Layout:
 //   - Hot metadata (summary, size, freeHead) fits in first cache line
 //   - Large arrays (arena, buckets, groups) are cache-aligned
 //   - Padding prevents false sharing between sections
@@ -139,7 +139,7 @@ type QuantumQueue struct {
 // New creates an initialized queue with full capacity available.
 // All entries start in the freelist, ready for allocation.
 //
-// INITIALIZATION PROCESS:
+// Initialization Process:
 //  1. Create freelist chain linking all nodes
 //  2. Mark all nodes as unallocated (tick = -1)
 //  3. Initialize all buckets as empty
@@ -182,12 +182,12 @@ func New() *QuantumQueue {
 // Borrow allocates a handle from the freelist without capacity checking.
 // This variant assumes the caller has verified capacity availability.
 //
-// OPERATION:
+// Operation:
 //  1. Remove head node from freelist
 //  2. Reset node to clean state
 //  3. Return handle for caller use
 //
-// SAFETY REQUIREMENTS:
+// Safety Requirements:
 //   - Caller must ensure queue has available capacity
 //   - No validation performed for maximum speed
 //
@@ -211,7 +211,7 @@ func (q *QuantumQueue) Borrow() (Handle, error) {
 // BorrowSafe allocates a handle with exhaustion checking.
 // This variant provides safety at the cost of an additional branch.
 //
-// ERROR HANDLING:
+// Error Handling:
 //
 //	Returns error when arena is exhausted rather than corrupting state.
 //	Caller should handle capacity exhaustion gracefully.
@@ -243,7 +243,7 @@ func (q *QuantumQueue) BorrowSafe() (Handle, error) {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // Size returns the current number of entries in the queue.
-// This is maintained incrementally for O(1) access.
+// This is maintained incrementally for constant-time access.
 //
 //go:norace
 //go:nocheckptr
@@ -273,7 +273,7 @@ func (q *QuantumQueue) Empty() bool {
 // unlink removes an entry from its bucket and maintains bitmap consistency.
 // This operation handles all the complexity of bitmap hierarchy updates.
 //
-// ALGORITHM:
+// Algorithm:
 //  1. Remove node from doubly-linked bucket chain
 //  2. If bucket becomes empty, clear its bit in lane mask
 //  3. If lane becomes empty, clear its bit in group summary
@@ -331,7 +331,7 @@ func (q *QuantumQueue) unlink(h Handle) {
 // linkAtHead inserts an entry at the head of its priority bucket.
 // Uses LIFO ordering within buckets for cache efficiency.
 //
-// ALGORITHM:
+// Algorithm:
 //  1. Insert node at head of bucket's doubly-linked list
 //  2. Set bucket bit in lane mask
 //  3. Set lane bit in group summary
@@ -375,7 +375,7 @@ func (q *QuantumQueue) linkAtHead(h Handle, tick int64) {
 // Push inserts or updates an entry at the specified priority level.
 // Efficiently handles both new insertions and priority updates.
 //
-// OPTIMIZATION:
+// Optimization:
 //
 //	Same-priority updates only modify data without touching links.
 //	This common case avoids expensive bitmap maintenance.
@@ -405,14 +405,14 @@ func (q *QuantumQueue) Push(tick int64, h Handle, val *[48]byte) {
 // PeepMin returns the minimum entry without removing it.
 // Uses CLZ (Count Leading Zeros) instructions for rapid scanning.
 //
-// ALGORITHM:
+// Algorithm:
 //  1. Find first set bit in global summary (leftmost = minimum)
 //  2. Find first set bit in selected group's lane summary
 //  3. Find first set bit in selected lane's bucket mask
 //  4. Combine indices to locate minimum bucket
 //  5. Return head entry from that bucket
 //
-// SAFETY REQUIREMENTS:
+// Safety Requirements:
 //   - Queue must not be empty
 //   - Undefined behavior if called on empty queue
 //

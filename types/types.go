@@ -1,29 +1,28 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// 📦 ZERO-COPY EVENT STRUCTURES
+// Zero-Copy Event Data Structures
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Arbitrage Detection System
+// Project: Arbitrage Detection System
 // Component: Core Data Types
 //
 // Description:
 //   Defines zero-copy data structures for Ethereum event processing. All fields reference the
 //   WebSocket buffer directly, eliminating allocation overhead in the critical event path.
 //
-// Performance Characteristics:
-//   - Allocations: Zero per event
-//   - Cache alignment: 64-byte boundaries
-//   - Memory safety: Clear lifetime rules
-//   - Access pattern: Hot/cold field separation
+// Features:
+//   - Zero allocations per event
+//   - Cache-aligned structures for optimal memory access
+//   - Clear lifetime management rules
+//   - Hot/cold field separation for cache efficiency
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package types
 
 // LogView provides zero-copy access to decoded Ethereum event data from WebSocket streams.
-// This structure is designed for ultra-low-latency processing where every nanosecond matters.
-// All byte slice fields are views into the underlying WebSocket buffer, avoiding any
-// memory allocation or copying during event parsing.
+// This structure is designed for event processing where memory allocation must be avoided.
+// All byte slice fields are views into the underlying WebSocket buffer.
 //
-// Memory layout is carefully optimized:
+// Memory layout is optimized for cache efficiency:
 //   - First cache line (64 bytes): Hot fields accessed on every event
 //   - Second cache line: Metadata fields accessed occasionally
 //   - Third cache line: Fingerprint fields that persist after buffer reuse
@@ -40,8 +39,8 @@ package types
 //  2. Extract needed data immediately (e.g., parse addresses, amounts)
 //  3. Discard LogView before returning control to decoder
 //
-//go:notinheap     // Prevent heap allocation - must stay on stack
-//go:align 64      // Align to cache line boundary for optimal performance
+//go:notinheap
+//go:align 64
 type LogView struct {
 	// ╔═══════════════════════════════════════════════════════════════════╗
 	// ║ CACHE LINE 1: HOT FIELDS (64 bytes)                              ║

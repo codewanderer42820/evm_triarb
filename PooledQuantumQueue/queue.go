@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// ⚡ POOLED QUANTUM QUEUE - SHARED MEMORY ARCHITECTURE
+// Shared Memory Priority Queue
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Trading System
+// Project: Arbitrage Detection System
 // Component: Zero-Allocation Priority Queue with External Memory Management
 //
 // Description:
@@ -9,7 +9,7 @@
 //   queue instances can share a single large allocation, enabling optimal cache locality and
 //   eliminating per-queue memory overhead in multi-queue systems.
 //
-// Architectural Benefits:
+// Features:
 //   - Shared memory pools reduce total allocation overhead
 //   - Improved cache locality when related queues share memory
 //   - Zero internal allocations - all memory provided externally
@@ -62,12 +62,12 @@ const nilIdx Handle = ^Handle(0)
 // Entry represents a queue element within the shared memory pool.
 // This structure defines the fundamental unit of the external allocation.
 //
-// MEMORY REQUIREMENTS:
+// Memory Requirements:
 //   - 32-byte alignment ensures optimal cache line usage
 //   - All pool entries must be pre-initialized before use
 //   - Initialization prevents segmentation faults from garbage memory
 //
-// FIELD ORGANIZATION:
+// Field Organization:
 //   - Tick: Primary key for priority ordering (-1 indicates unlinked)
 //   - Data: User payload for compact value storage
 //   - Prev/Next: Doubly-linked list maintenance
@@ -103,7 +103,7 @@ type groupBlock struct {
 // PooledQuantumQueue provides priority queue operations on shared memory.
 // Designed for systems where multiple queues share a common memory pool.
 //
-// CRITICAL DESIGN POINT:
+// Critical Design Point:
 //
 //	Unlike self-contained queues, this implementation requires proper
 //	pool initialization. Failure to initialize pool entries results
@@ -132,7 +132,7 @@ type PooledQuantumQueue struct {
 // New creates a queue using the provided memory pool.
 // The pool must be properly initialized before calling this function.
 //
-// POOL INITIALIZATION PATTERN:
+// Pool Initialization Pattern:
 //
 //	```
 //	pool := make([]Entry, poolSize)
@@ -145,7 +145,7 @@ type PooledQuantumQueue struct {
 //	q := New(unsafe.Pointer(&pool[0]))
 //	```
 //
-// SAFETY REQUIREMENTS:
+// Safety Requirements:
 //   - Pool must be aligned for Entry structure
 //   - All entries must be initialized to unlinked state
 //   - Pool must remain valid for queue lifetime
@@ -174,12 +174,12 @@ func New(arena unsafe.Pointer) *PooledQuantumQueue {
 // entry converts a handle to its corresponding entry pointer.
 // Implements efficient address calculation for pool access.
 //
-// ADDRESS CALCULATION:
+// Address Calculation:
 //
 //	address = arena_base + (handle × sizeof(Entry))
 //	Optimized using shift for 32-byte Entry size
 //
-// SAFETY NOTES:
+// Safety Notes:
 //   - No bounds checking for maximum speed
 //   - Caller must ensure handle validity
 //   - Invalid handles cause memory corruption
@@ -229,7 +229,7 @@ func (q *PooledQuantumQueue) Empty() bool {
 // unlink removes an entry and maintains bitmap consistency.
 // Updates the hierarchical bitmap structure when buckets become empty.
 //
-// PRECONDITIONS:
+// Preconditions:
 //   - Entry must be currently linked (Tick >= 0)
 //   - Handle must be valid for the pool
 //
@@ -281,7 +281,7 @@ func (q *PooledQuantumQueue) unlink(h Handle) {
 // linkAtHead inserts an entry at the head of its priority bucket.
 // Updates bitmap hierarchy to reflect the new entry.
 //
-// PRECONDITIONS:
+// Preconditions:
 //   - Entry must be unlinked (Tick = -1)
 //   - Handle must be valid for the pool
 //
@@ -323,7 +323,7 @@ func (q *PooledQuantumQueue) linkAtHead(h Handle, tick int64) {
 // Push inserts or updates an entry in the queue.
 // Handles must be allocated and managed externally by the caller.
 //
-// HANDLE MANAGEMENT:
+// Handle Management:
 //
 //	The caller is responsible for:
 //	- Allocating handles from the shared pool
@@ -355,7 +355,7 @@ func (q *PooledQuantumQueue) Push(tick int64, h Handle, val uint64) {
 // PeepMin returns the minimum entry without removal.
 // Uses hierarchical bitmap traversal with CLZ operations.
 //
-// SAFETY REQUIREMENTS:
+// Safety Requirements:
 //   - Queue must not be empty
 //   - Undefined behavior on empty queue
 //

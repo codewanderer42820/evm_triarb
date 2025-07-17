@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// ⚡ LOCK-FREE SPSC RING BUFFER
+// Lock-Free SPSC Ring Buffer
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Trading System
+// Project: Arbitrage Detection System
 // Component: Single-Producer Single-Consumer Communication Channel
 //
 // Description:
@@ -9,7 +9,7 @@
 //   algorithm for single producer and single consumer threads with strict memory ordering
 //   guarantees and false sharing prevention through cache line isolation.
 //
-// Design Principles:
+// Features:
 //   - Wait-free progress guarantees for both producer and consumer
 //   - Cache line isolation prevents false sharing between cores
 //   - Sequence number validation ensures data consistency
@@ -30,7 +30,7 @@ import (
 // slot represents a single entry in the ring buffer.
 // Each slot contains a fixed-size payload and sequence number for synchronization.
 //
-// MEMORY LAYOUT:
+// Memory Layout:
 //
 //	32-byte alignment ensures efficient cache utilization with two slots
 //	per 64-byte cache line, maximizing memory bandwidth usage.
@@ -49,7 +49,7 @@ type slot struct {
 // Ring implements a cache-optimized SPSC ring buffer with false sharing prevention.
 // The structure uses cache line padding to isolate producer and consumer state.
 //
-// CACHE LINE ORGANIZATION:
+// Cache Line Organization:
 //   - Line 1: Padding for isolation
 //   - Line 2: Consumer position (head)
 //   - Line 3: Padding for isolation
@@ -83,12 +83,12 @@ type Ring struct {
 // New creates a ring buffer with the specified power-of-2 capacity.
 // The size must be a power of 2 for efficient masking operations.
 //
-// INITIALIZATION:
+// Initialization:
 //   - Allocates backing buffer with specified capacity
 //   - Initializes sequence numbers for each slot
 //   - Sets up masking values for efficient indexing
 //
-// CONSTRAINTS:
+// Constraints:
 //   - Size must be greater than 0
 //   - Size must be a power of 2
 //
@@ -125,18 +125,18 @@ func New(size int) *Ring {
 // Push attempts to enqueue a value into the ring buffer.
 // This operation is wait-free and safe for single producer use.
 //
-// ALGORITHM:
+// Algorithm:
 //  1. Load current tail position
 //  2. Check if target slot is available (sequence matches tail)
 //  3. Copy payload data if available
 //  4. Update sequence to signal data availability
 //  5. Advance tail pointer
 //
-// MEMORY ORDERING:
+// Memory Ordering:
 //   - Atomic load ensures visibility of consumer progress
 //   - Atomic store ensures consumer sees complete data
 //
-// RETURN VALUES:
+// Return Values:
 //   - true: Value successfully enqueued
 //   - false: Ring buffer is full
 //
@@ -175,18 +175,18 @@ func (r *Ring) Push(val *[24]byte) bool {
 // Pop attempts to dequeue a value from the ring buffer.
 // This operation is wait-free and safe for single consumer use.
 //
-// ALGORITHM:
+// Algorithm:
 //  1. Load current head position
 //  2. Check if data is available (sequence == head + 1)
 //  3. Extract payload pointer if available
 //  4. Update sequence to mark slot as free
 //  5. Advance head pointer
 //
-// MEMORY ORDERING:
+// Memory Ordering:
 //   - Atomic load ensures visibility of producer writes
 //   - Atomic store ensures producer sees freed slot
 //
-// RETURN VALUES:
+// Return Values:
 //   - Non-nil: Pointer to dequeued payload
 //   - nil: Ring buffer is empty
 //
@@ -221,14 +221,14 @@ func (r *Ring) Pop() *[24]byte {
 // PopWait blocks until data becomes available.
 // This variant spins waiting for data, consuming CPU cycles.
 //
-// USE CASES:
+// Use Cases:
 //   - Dedicated consumer threads with no other work
-//   - Ultra-low latency requirements where spinning is acceptable
 //   - Systems with sufficient CPU resources for busy waiting
+//   - Applications requiring minimal latency where spinning is acceptable
 //
-// WARNING:
+// Warning:
 //
-//	This function performs busy-waiting and will consume 100% CPU
+//	This function performs busy-waiting and will consume CPU cycles
 //	while waiting for data. Use only in appropriate scenarios.
 //
 //go:norace

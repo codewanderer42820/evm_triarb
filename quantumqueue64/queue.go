@@ -1,12 +1,12 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// ⚡ COMPACT QUANTUM PRIORITY QUEUE
+// Compact Quantum Priority Queue
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Trading System
+// Project: Arbitrage Detection System
 // Component: Memory-Optimized Priority Queue
 //
 // Description:
 //   Compact variant of the quantum priority queue using 64-bit payloads instead of 48-byte
-//   arrays. Reduces memory footprint by 50% while maintaining O(1) operation guarantees through
+//   arrays. Reduces memory footprint while maintaining constant-time operation guarantees through
 //   the same hierarchical bitmap indexing system.
 //
 // Design Trade-offs:
@@ -68,7 +68,7 @@ type idx32 = Handle
 // node represents a memory-efficient queue entry at 32 bytes.
 // Half the size of standard QuantumQueue nodes, allowing two nodes per cache line.
 //
-// MEMORY LAYOUT:
+// Memory Layout:
 //   - tick: Priority value or -1 when free
 //   - data: Compact 64-bit payload (vs 48 bytes in standard variant)
 //   - next/prev: Doubly-linked list pointers with padding for alignment
@@ -85,10 +85,10 @@ type node struct {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// BITMAP HIERARCHY (SHARED DESIGN)
+// BITMAP HIERARCHY
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// groupBlock implements the hierarchical bitmap structure for O(1) minimum finding.
+// groupBlock implements the hierarchical bitmap structure for efficient minimum finding.
 // Identical to the standard QuantumQueue implementation for consistency.
 //
 //go:notinheap
@@ -104,9 +104,9 @@ type groupBlock struct {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // QuantumQueue64 implements a memory-efficient priority queue with compact payloads.
-// Uses 50% less memory than standard QuantumQueue while maintaining same performance.
+// Uses smaller memory footprint than standard QuantumQueue while maintaining same performance.
 //
-// MEMORY SAVINGS:
+// Memory Benefits:
 //   - Node size: 32 bytes vs 64 bytes (50% reduction)
 //   - Arena size: 2MB vs 4MB for 64K entries
 //   - Better cache utilization with 2 nodes per cache line
@@ -123,7 +123,7 @@ type QuantumQueue64 struct {
 	_ [48]byte // 48B - Cache isolation
 
 	// Large data structures
-	arena   [CapItems]node         // Compact allocation pool (2MB)
+	arena   [CapItems]node         // Compact allocation pool
 	buckets [BucketCount]Handle    // Per-tick chain heads
 	groups  [GroupCount]groupBlock // Hierarchical bitmaps
 }
@@ -214,7 +214,7 @@ func (q *QuantumQueue64) BorrowSafe() (Handle, error) {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // Size returns the current number of entries.
-// Maintained incrementally for O(1) access.
+// Maintained incrementally for constant-time access.
 //
 //go:norace
 //go:nocheckptr
@@ -330,7 +330,7 @@ func (q *QuantumQueue64) linkAtHead(h Handle, tick int64) {
 // Push inserts or updates an entry with a 64-bit payload.
 // The compact payload enables efficient value storage or pointer indirection.
 //
-// PAYLOAD OPTIONS:
+// Payload Options:
 //   - Direct value storage (prices, indices, flags)
 //   - Pointer to larger structures (with appropriate lifetime management)
 //   - Packed data structures (two 32-bit values, etc.)

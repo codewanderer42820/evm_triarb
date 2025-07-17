@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// ⚡ CORE-PINNED CONSUMER SYSTEM
+// Core-Pinned Consumer System
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Trading System
+// Project: Arbitrage Detection System
 // Component: Dedicated Core Message Processing
 //
 // Description:
@@ -9,7 +9,7 @@
 //   polling strategies with hot/cold detection and automatic CPU relaxation to balance
 //   latency and power consumption in multi-core processing systems.
 //
-// Adaptive Behavior:
+// Features:
 //   - Hot mode: Continuous polling during active message flow
 //   - Cool mode: CPU relaxation after idle threshold
 //   - Automatic transition based on message arrival patterns
@@ -46,7 +46,7 @@ const (
 // PinnedConsumer launches a goroutine bound to a specific CPU core for ring consumption.
 // The consumer adaptively adjusts its polling strategy based on message traffic patterns.
 //
-// PARAMETERS:
+// Parameters:
 //   - core: Target CPU core index (0-based)
 //   - ring: SPSC ring buffer to consume from
 //   - stop: Pointer to shutdown flag (non-zero triggers shutdown)
@@ -54,12 +54,12 @@ const (
 //   - handler: Callback function for processing each message
 //   - done: Channel closed when consumer terminates
 //
-// THREADING MODEL:
+// Threading Model:
 //
 //	The goroutine locks to an OS thread and sets CPU affinity to ensure
 //	consistent NUMA locality and predictable cache behavior.
 //
-// ADAPTIVE POLLING:
+// Adaptive Polling:
 //   - Continuous polling when messages arrive or producer is active
 //   - Graduated relaxation after idle periods to save power
 //   - Immediate response to shutdown signals
@@ -129,7 +129,7 @@ func PinnedConsumer(
 // PinnedConsumerWithCooldown provides a special variant for core 1 with global cooldown polling.
 // This variant includes additional responsibility for managing system-wide cooldown state.
 //
-// SPECIAL BEHAVIOR:
+// Special Behavior:
 //
 //	In addition to standard message consumption, this variant calls
 //	control.PollCooldown() to manage global system state transitions.
