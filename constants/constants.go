@@ -1,11 +1,11 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// ⚙️ SYSTEM CONFIGURATION & CONSTANTS
+// System Configuration & Constants
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Arbitrage Detection System
+// Project: Arbitrage Detection System
 // Component: Global Configuration Parameters
 //
 // Description:
-//   Defines system-wide constants and runtime parameters optimized for high-frequency trading.
+//   Defines system-wide constants and runtime parameters optimized for arbitrage detection.
 //   Includes cache-aligned lookup tables and deployment profiles for different hardware.
 //
 // Configuration Categories:
@@ -56,11 +56,11 @@ const (
 const (
 	// RingBits determines the size of the deduplication cache as 2^RingBits entries.
 	// 18 bits = 262,144 slots provides high capacity for event deduplication
-	// while maintaining sub-microsecond lookup times via direct mapping.
+	// while maintaining fast lookup times via direct mapping.
 	RingBits = 18
 
 	// MaxReorg defines the maximum blockchain reorganization depth to handle.
-	// 256 blocks provides an ultra-conservative safety buffer that exceeds
+	// 256 blocks provides a conservative safety buffer that exceeds
 	// any historically observed reorganization by a significant margin.
 	MaxReorg = 256
 )
@@ -74,7 +74,7 @@ const (
 // during event processing.
 const (
 	// AddressTableCapacity sets the hash table size for address resolution.
-	// 2 million entries supports massive scale deployments tracking hundreds
+	// 2 million entries supports large scale deployments tracking hundreds
 	// of thousands of trading pairs with room for growth.
 	AddressTableCapacity = 1 << 21
 
@@ -144,7 +144,7 @@ const (
 	MaxFrameSize = 1 << 20
 
 	// BufferSize allocates 128MB for WebSocket buffering.
-	// Extreme capacity handles burst traffic during high-activity periods
+	// Large capacity handles burst traffic during high-activity periods
 	// without dropping events or causing backpressure.
 	BufferSize = 1 << 27
 
@@ -186,7 +186,7 @@ const (
 	ConfigARMServer    = "arm_server"   // ARM server 2.8GHz, 500ms cooldown
 
 	// Special purpose configurations
-	ConfigLowLatency       = "low_latency" // Ultra-responsive 50ms cooldown
+	ConfigLowLatency       = "low_latency" // Responsive 50ms cooldown
 	ConfigBatteryOptimized = "battery_opt" // Power-saving 2s cooldown
 	ConfigServerOptimized  = "server_opt"  // Balanced server deployment
 )
@@ -209,7 +209,7 @@ const (
 
 	// Cooldown timing options control responsiveness vs CPU usage trade-offs.
 	// Shorter cooldowns increase responsiveness but consume more CPU cycles.
-	CooldownMs50   = uint64(50)   // Ultra-responsive for latency-critical deployments
+	CooldownMs50   = uint64(50)   // Responsive for latency-critical deployments
 	CooldownMs100  = uint64(100)  // Very responsive for active trading
 	CooldownMs250  = uint64(250)  // Responsive for normal operations
 	CooldownMs500  = uint64(500)  // Balanced for sustained operation
@@ -251,7 +251,7 @@ var (
 // JSON PARSING LOOKUP TABLES
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Pre-computed byte patterns for high-speed JSON field detection.
+// Pre-computed byte patterns for efficient JSON field detection.
 // These 8-byte aligned patterns enable SIMD-optimized parsing of Ethereum events.
 //
 //go:notinheap
