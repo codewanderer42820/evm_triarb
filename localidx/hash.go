@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// ⚡ ROBIN HOOD HASH TABLE
+// Robin Hood Hash Table
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Trading System
+// Project: Arbitrage Detection System
 // Component: Fixed-Capacity Hash Map Implementation
 //
 // Description:
@@ -9,7 +9,7 @@
 //   Provides constant-time lookups with deterministic displacement patterns and efficient
 //   memory layout for single-threaded processing contexts.
 //
-// Design Principles:
+// Features:
 //   - Fixed capacity with power-of-2 sizing for fast modulo operations
 //   - Robin Hood displacement minimizes probe distances
 //   - Parallel arrays for keys and values optimize cache usage
@@ -27,7 +27,7 @@ package localidx
 // The structure uses parallel arrays for keys and values to maximize cache efficiency
 // during lookups and insertions.
 //
-// MEMORY LAYOUT:
+// Memory Layout:
 //
 //	The structure is aligned to 64-byte cache lines with explicit padding to prevent
 //	false sharing in multi-core systems. Keys and values are stored in separate arrays
@@ -49,7 +49,7 @@ type Hash struct {
 // nextPow2 calculates the smallest power of 2 greater than or equal to n.
 // This ensures the hash table size is always a power of 2 for efficient masking.
 //
-// ALGORITHM:
+// Algorithm:
 //
 //	Repeatedly doubles the size until it exceeds the input value.
 //	This simple approach is sufficient for initialization-time calculations.
@@ -75,7 +75,7 @@ func nextPow2(n int) uint32 {
 // The 2× sizing ensures the table maintains good performance characteristics
 // even at 50% load factor, reducing collision chains.
 //
-// CAPACITY PLANNING:
+// Capacity Planning:
 //
 //	Input capacity is doubled to maintain performance headroom.
 //	Final size is rounded up to the nearest power of 2.
@@ -104,17 +104,17 @@ func New(capacity int) Hash {
 // This algorithm minimizes the maximum probe distance by displacing entries
 // that are closer to their ideal positions.
 //
-// ROBIN HOOD ALGORITHM:
+// Robin Hood Algorithm:
 //
 //	When inserting, if we encounter an entry that is closer to its ideal position
 //	than we are to ours, we take its place and continue inserting the displaced entry.
 //	This "rich give to the poor" approach minimizes worst-case probe distances.
 //
-// RETURN VALUE:
+// Return Value:
 //   - For new insertions: returns the newly inserted value
 //   - For existing keys: returns the current value without modification
 //
-// SAFETY REQUIREMENTS:
+// Safety Requirements:
 //   - Key must not be 0 (reserved as empty sentinel)
 //   - Table must have sufficient capacity to avoid infinite loops
 //
@@ -164,13 +164,13 @@ func (h Hash) Put(key, val uint32) uint32 {
 // The Robin Hood invariant allows early termination when we encounter
 // an entry closer to its ideal position than our search distance.
 //
-// EARLY TERMINATION:
+// Early Termination:
 //
 //	If we find an entry that is closer to its ideal position than our
 //	current probe distance, our target key cannot exist in the table.
 //	This optimization reduces average probe lengths for missing keys.
 //
-// RETURN VALUES:
+// Return Values:
 //   - value: The associated value if key exists
 //   - found: True if key exists, false otherwise
 //

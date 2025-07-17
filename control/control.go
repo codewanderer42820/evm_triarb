@@ -1,18 +1,18 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// 🎮 LOCK-FREE COORDINATION & VIRTUAL TIMING
+// Lock-Free Coordination & Virtual Timing
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Arbitrage Detection System
+// Project: Arbitrage Detection System
 // Component: Syscall-Free Control System
 //
 // Description:
 //   Implements coordination mechanisms without system calls using lock-free flags and poll-based
-//   virtual timing. Enables sub-nanosecond multi-core synchronization.
+//   virtual timing. Enables multi-core synchronization for event processing systems.
 //
-// Performance Characteristics:
-//   - Flag operations: 0.3ns (2-3 cycles)
-//   - Virtual timing: Zero syscall overhead
-//   - Coordination: Wait-free algorithms
-//   - Precision: ±20-50% timing accuracy
+// Features:
+//   - Flag operations with minimal CPU overhead
+//   - Virtual timing without syscall overhead
+//   - Wait-free coordination algorithms
+//   - Approximate timing with configurable precision
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -33,14 +33,14 @@ import (
 //go:notinheap
 //go:align 64
 var (
-	// VIRTUAL TIMING STATE (SYSCALL-FREE PERFORMANCE MONITORING)
+	// VIRTUAL TIMING STATE (SYSCALL-FREE MONITORING)
 	// Approximates elapsed time using CPU poll counts instead of time.Now() calls.
 	// Trades timing precision for performance - acceptable for cooldown logic.
 	//
-	// PRECISION LIMITATIONS:
+	// Precision Limitations:
 	// - Timing varies with CPU frequency (boost, throttling)
 	// - Affected by system load and scheduling
-	// - ±20-50% accuracy depending on conditions
+	// - Accuracy depends on actual vs configured CPU frequency
 	// - Suitable for rough intervals, not precise timing
 	pollCounter       uint64 // Monotonic counter incremented per cooldown check
 	lastActivityCount uint64 // Poll counter value at last market activity
@@ -67,8 +67,6 @@ var (
 // - Virtual timing via poll counter avoids time.Now() syscall
 // - Inlined for direct inclusion at call sites
 //
-// Performance: ~0.3ns (2-3 CPU cycles) vs ~50-100ns for time.Now()
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -87,21 +85,21 @@ func SignalActivity() {
 // This function is called continuously by consumer cores to detect idle periods
 // without the overhead of system time queries.
 //
-// ALGORITHM:
+// Algorithm:
 // Uses bit manipulation to eliminate branches from the critical path:
 // 1. Increment poll counter (virtual time advancement)
 // 2. Calculate elapsed polls since last activity
 // 3. Compare with cooldown threshold using bit arithmetic
 // 4. Update hot flag without conditional jumps
 //
-// TIMING ACCURACY:
+// Timing Accuracy:
 // Virtual timing provides rough approximation only:
 // - Configured for specific CPU frequency (e.g., 3.2GHz)
 // - Actual timing varies with boost clocks, thermal throttling
 // - System load affects poll rate consistency
 // - Acceptable for activity timeout, not for precise scheduling
 //
-// BRANCHLESS IMPLEMENTATION:
+// Branchless Implementation:
 // Mathematical formula: hot = hot & (elapsed <= cooldownPolls)
 // Bit manipulation converts comparison to 0/1 without branches
 //
@@ -195,7 +193,7 @@ func GetPollCount() uint64 {
 // GetActivityAge returns virtual time elapsed since last activity.
 // Provides rough idle time estimation for monitoring without syscalls.
 //
-// LIMITATIONS:
+// Limitations:
 // - Result in poll counts, not real time units
 // - Accuracy depends on actual vs configured CPU frequency
 // - Handles counter wraparound via bit masking
@@ -243,13 +241,13 @@ func IsStopping() bool {
 // GetCooldownProgress returns cooldown completion as percentage (0-100).
 // Provides intuitive progress indication for monitoring interfaces.
 //
-// IMPLEMENTATION:
+// Implementation:
 // Branchless calculation using bit manipulation:
 // - Returns 100 immediately if already cold
 // - Calculates percentage for active systems
 // - Clamps to maximum 100 without conditionals
 //
-// ACCURACY: Percentage is approximate due to virtual timing limitations
+// Accuracy: Percentage is approximate due to virtual timing limitations
 //
 //go:norace
 //go:nocheckptr
@@ -278,7 +276,7 @@ func GetCooldownProgress() uint8 {
 // GetCooldownRemaining returns poll counts until cooldown completion.
 // Zero if cold or cooldown elapsed, otherwise remaining count.
 //
-// ACCURACY: Count is approximate - multiply by poll period for rough time
+// Accuracy: Count is approximate - multiply by poll period for rough time
 //
 //go:norace
 //go:nocheckptr
@@ -337,7 +335,7 @@ func GetSystemState() uint32 {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // ResetPollCounter resets virtual timing state for testing.
-// WARNING: Affects all timing calculations - use only during initialization.
+// Warning: Affects all timing calculations - use only during initialization.
 //
 //go:norace
 //go:nocheckptr

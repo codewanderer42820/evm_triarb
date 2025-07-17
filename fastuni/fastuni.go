@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// ⚡ LOGARITHMIC COMPUTATION LIBRARY
+// Logarithmic Computation Library
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Trading System
+// Project: Arbitrage Detection System
 // Component: Uniswap V3 Q64.96 Mathematics Library
 //
 // Description:
@@ -9,11 +9,11 @@
 //   Implements bit-manipulation based logarithm computation for reserve ratios and price
 //   conversions with polynomial approximation for fractional components.
 //
-// Mathematical Foundation:
+// Features:
 //   - Q64.96 format: 64 integer bits, 96 fractional bits for square root prices
 //   - Logarithmic price ratios enable efficient arbitrage calculations
 //   - Base-2 logarithms converted to natural logarithms as needed
-//   - Polynomial approximation for high-precision fractional calculations
+//   - Polynomial approximation for fractional calculations
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -99,12 +99,12 @@ type Uint128 struct {
 // ln1pf computes ln(1+f) using 5th-order Horner polynomial evaluation.
 // This function provides accurate approximation for small values of f.
 //
-// MATHEMATICAL BASIS:
+// Mathematical Basis:
 //
 //	ln(1+f) ≈ f*(c1 + f*(c2 + f*(c3 + f*(c4 + f*c5))))
 //	Horner's method reduces the number of multiplications required.
 //
-// CONSTRAINTS:
+// Constraints:
 //   - Input f must satisfy |f| < 0.5 for accurate results
 //   - Larger values of f lead to increased approximation error
 //
@@ -126,7 +126,7 @@ func ln1pf(f float64) float64 {
 // log2u64 computes log₂(x) using bit manipulation and polynomial approximation.
 // This function decomposes the logarithm into integer and fractional parts.
 //
-// ALGORITHM:
+// Algorithm:
 //  1. Extract the position of the most significant bit (integer part)
 //  2. Extract mantissa bits for fractional calculation
 //  3. Normalize mantissa to [1, 2) range
@@ -169,7 +169,7 @@ func log2u64(x uint64) float64 {
 // log2u128 handles 128-bit logarithm calculation for large values.
 // Extended precision is required for Uniswap V3's Q64.96 format.
 //
-// ALGORITHM:
+// Algorithm:
 //   - For values ≤ 2⁶⁴: delegate to 64-bit implementation
 //   - For larger values: use floating-point approximation
 //
@@ -204,12 +204,12 @@ func log2u128(u Uint128) float64 {
 // Log2ReserveRatio computes log₂(a/b) for token reserve ratios.
 // This is the fundamental operation for calculating price relationships.
 //
-// MATHEMATICAL BASIS:
+// Mathematical Basis:
 //
 //	log₂(a/b) = log₂(a) - log₂(b)
 //	This transformation avoids division and potential precision loss.
 //
-// USE CASES:
+// Use Cases:
 //   - AMM price calculations
 //   - Arbitrage opportunity detection
 //   - Liquidity pool analysis
@@ -231,7 +231,7 @@ func Log2ReserveRatio(a, b uint64) (float64, error) {
 // LnReserveRatio computes ln(a/b) with precision optimization.
 // Natural logarithm is often preferred for financial calculations.
 //
-// OPTIMIZATION:
+// Optimization:
 //
 //	For ratios near 1.0, uses log1p for improved precision.
 //	This handles the common case of small price movements accurately.
@@ -262,7 +262,7 @@ func LnReserveRatio(a, b uint64) (float64, error) {
 // LogReserveRatioConst computes logarithm with custom base conversion factor.
 // Allows efficient computation of logarithms in any base.
 //
-// PARAMETERS:
+// Parameters:
 //   - a, b: Reserve amounts to calculate ratio
 //   - conv: Conversion factor from base-2 (e.g., ln2 for natural log)
 //
@@ -287,7 +287,7 @@ func LogReserveRatioConst(a, b uint64, conv float64) (float64, error) {
 // Log2PriceX96 extracts log₂(price) from Uniswap V3 sqrtPrice format.
 // Uniswap V3 stores prices as square roots in Q64.96 fixed-point format.
 //
-// MATHEMATICAL BASIS:
+// Mathematical Basis:
 //
 //	If sqrtPrice = sqrt(price) * 2^96, then:
 //	log₂(price) = 2 * (log₂(sqrtPrice) - 96)
@@ -329,7 +329,7 @@ func LnPriceX96(s Uint128) (float64, error) {
 // LogPriceX96Const computes custom base logarithm of price.
 // Flexible variant supporting arbitrary logarithm bases.
 //
-// USE CASES:
+// Use Cases:
 //   - Custom analysis requirements
 //   - Alternative base calculations
 //   - Specialized financial metrics

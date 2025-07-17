@@ -1,18 +1,18 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// 🔍 JSON-RPC EVENT PARSER
+// JSON-RPC Event Parser
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Arbitrage Detection System
+// Project: Arbitrage Detection System
 // Component: Zero-Allocation JSON Parser
 //
 // Description:
 //   Extracts Uniswap V2 Sync events from JSON-RPC streams using direct memory access and 8-byte
 //   tag detection. Implements deduplication to prevent duplicate event processing.
 //
-// Performance Characteristics:
-//   - Parsing: Zero allocations per event
-//   - Field detection: 8-byte SIMD tags
-//   - Deduplication: Sub-5ns lookup
-//   - Memory: Stack-only operation
+// Features:
+//   - Zero allocations per event parsing operation
+//   - 8-byte SIMD field detection for efficient parsing
+//   - Event deduplication with rolling window cache
+//   - Stack-only operation for consistent memory usage
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 

@@ -1,18 +1,18 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// 🛡️ HIGH-PERFORMANCE DEDUPLICATION CACHE
+// Event Deduplication Cache
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Arbitrage Detection System
+// Project: Arbitrage Detection System
 // Component: Event Deduplication Engine
 //
 // Description:
 //   Direct-mapped cache for blockchain event deduplication with reorganization awareness.
-//   Provides O(1) duplicate detection while handling chain reorgs gracefully.
+//   Provides constant-time duplicate detection while handling chain reorgs gracefully.
 //
-// Performance Characteristics:
-//   - Lookup time: Sub-5ns operation
-//   - Memory: 2MB fixed-size cache
-//   - Allocations: Zero per check
-//   - Cache design: Direct-mapped with LRU eviction
+// Features:
+//   - Constant-time lookup operation
+//   - Fixed-size memory footprint
+//   - Zero allocations per check
+//   - Direct-mapped cache design with LRU eviction
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -63,9 +63,9 @@ type dedupeEntry struct {
 // DEDUPLICATION CACHE STRUCTURE
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Deduper implements a high-performance cache for detecting duplicate blockchain events.
+// Deduper implements a cache for detecting duplicate blockchain events.
 // Uses direct-mapped cache architecture where each event maps to exactly one cache slot,
-// providing guaranteed O(1) lookup time with minimal memory overhead.
+// providing guaranteed constant-time lookup with minimal memory overhead.
 //
 // Cache characteristics:
 // - Fixed size: 2^RingBits entries (typically 65536)
@@ -85,7 +85,7 @@ type Deduper struct {
 // DUPLICATE DETECTION ALGORITHM
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Check performs high-speed duplicate detection with blockchain reorganization handling.
+// Check performs duplicate detection with blockchain reorganization handling.
 // This is the core operation called for every incoming Ethereum event to determine
 // if it has been processed before.
 //

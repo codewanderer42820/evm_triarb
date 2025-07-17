@@ -1,18 +1,18 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// 📊 ZERO-ALLOCATION DIAGNOSTICS
+// Zero-Allocation Diagnostics
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Arbitrage Detection System
+// Project: Arbitrage Detection System
 // Component: Performance-Safe Logging
 //
 // Description:
 //   Diagnostic logging designed for hot paths where heap allocations are forbidden. Direct
 //   syscall writing with guaranteed zero allocations for production debugging.
 //
-// Performance Characteristics:
-//   - Allocations: Zero per log call
-//   - Overhead: Direct syscall only
-//   - Memory: Stack-only operation
-//   - Safety: Hot-path compatible
+// Features:
+//   - Zero allocations per log call
+//   - Direct syscall overhead only
+//   - Stack-only memory operation
+//   - Hot-path compatible design
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -33,7 +33,7 @@ import (
 // The implementation avoids string concatenation and heap allocations by
 // making multiple write calls. While this increases syscall count, it
 // eliminates memory pressure and GC overhead, which is critical for
-// maintaining consistent latency in high-frequency trading systems.
+// maintaining consistent latency in trading systems.
 //
 // Parameters:
 //   - prefix: Context identifier for the error (e.g., "ARBITRAGE_ENGINE")
