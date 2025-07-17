@@ -20,6 +20,7 @@ package ws
 import (
 	"errors"
 	"main/constants"
+	"main/utils"
 	"net"
 	"unsafe"
 )
@@ -238,9 +239,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 			}
 
 			// Convert from network byte order to host byte order
-			v := *(*uint64)(unsafe.Pointer(&headerBuf[2]))
-			payloadLen = ((v & 0xFF) << 56) | ((v & 0xFF00) << 40) | ((v & 0xFF0000) << 24) | ((v & 0xFF000000) << 8) |
-				((v & 0xFF00000000) >> 8) | ((v & 0xFF0000000000) >> 24) | ((v & 0xFF000000000000) >> 40) | ((v & 0xFF00000000000000) >> 56)
+			payloadLen = utils.LoadBE64(headerBuf[2:10])
 		}
 
 		// Validate frame size against buffer capacity
