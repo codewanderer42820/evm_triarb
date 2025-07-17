@@ -51,10 +51,6 @@ const (
 	testSize10MB  = 10 * 1024 * 1024
 	testSize50MB  = 50 * 1024 * 1024
 	testSize100MB = 100 * 1024 * 1024
-
-	// Protocol test constants
-	testHandshakeTimeout = 100 * time.Millisecond
-	testFrameTimeout     = 50 * time.Millisecond
 )
 
 var (
