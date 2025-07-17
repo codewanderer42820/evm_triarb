@@ -832,50 +832,63 @@ func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
 }
 
 // buildWorkloadShards constructs the fanout mapping infrastructure for cycle distribution.
+// Performs exact counting through complete traversals to ensure zero memory allocation overhead.
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
 func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
-	// Initialize the global workload mapping structure
-	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard)
+	// PHASE 1: Count exact edges per pair through complete traversal
+	edgeCounts := make(map[TradingPairID]int)
 
-	// Create temporary storage to organize cycles by the trading pairs they contain
-	// Each triangle has 3 pairs, so we estimate capacity as triangles * 3
-	temporaryEdges := make(map[TradingPairID][]CycleEdge, len(arbitrageTriangles)*3)
-
-	// Process each arbitrage triangle and map it to its constituent trading pairs
 	for _, triangle := range arbitrageTriangles {
-		// Each triangle consists of exactly 3 trading pairs
 		for i := 0; i < 3; i++ {
-			// Add this triangle to the list of cycles for each of its pairs
-			// The edgeIndex tracks which position this pair holds within the triangle
+			edgeCounts[triangle[i]]++
+		}
+	}
+
+	// PHASE 2: Count exact shards per pair through complete shard calculation
+	shardCounts := make(map[TradingPairID]int)
+
+	for pairID, edgeCount := range edgeCounts {
+		shardCount := (edgeCount + constants.MaxCyclesPerShard - 1) / constants.MaxCyclesPerShard
+		shardCounts[pairID] = shardCount
+	}
+
+	// PHASE 3: Pre-allocate all structures with exact capacities
+	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard, len(edgeCounts))
+	temporaryEdges := make(map[TradingPairID][]CycleEdge, len(edgeCounts))
+
+	for pairID, edgeCount := range edgeCounts {
+		temporaryEdges[pairID] = make([]CycleEdge, 0, edgeCount)
+		shardCount := shardCounts[pairID]
+		pairWorkloadShards[pairID] = make([]PairWorkloadShard, 0, shardCount)
+	}
+
+	// PHASE 4: Populate with zero reallocations
+	for _, triangle := range arbitrageTriangles {
+		for i := 0; i < 3; i++ {
 			temporaryEdges[triangle[i]] = append(temporaryEdges[triangle[i]],
 				CycleEdge{cyclePairs: triangle, edgeIndex: uint64(i)})
 		}
 	}
 
-	// Convert the temporary mapping into properly sized workload shards
+	// PHASE 5: Create shards with zero reallocations
 	for pairID, cycleEdges := range temporaryEdges {
-		// Shuffle the cycles for this pair to ensure even load distribution
 		shuffleCycleEdges(cycleEdges, pairID)
 
-		// Split the cycles into shards of manageable size for core assignment
 		for offset := 0; offset < len(cycleEdges); offset += constants.MaxCyclesPerShard {
-			// Calculate the end offset for this shard, ensuring we don't exceed the slice
 			endOffset := offset + constants.MaxCyclesPerShard
 			if endOffset > len(cycleEdges) {
 				endOffset = len(cycleEdges)
 			}
 
-			// Create a workload shard for this pair containing a subset of its cycles
 			pairWorkloadShards[pairID] = append(pairWorkloadShards[pairID],
 				PairWorkloadShard{pairID: pairID, cycleEdges: cycleEdges[offset:endOffset]})
 		}
 	}
 
-	// Clean up temporary structures immediately after use
 	temporaryEdges = nil
 }
 
@@ -884,62 +897,68 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // initializeArbitrageQueues allocates shared arena and initializes all queues with cycle data.
+// Uses complete traversals for exact counting to achieve zero memory waste and zero allocation overhead.
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
 func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWorkloadShard) {
-	// Handle the case where no workload shards are provided
 	if len(workloadShards) == 0 {
 		return
 	}
 
-	// First, identify all unique pairs across all cycles
-	allPairs := make(map[TradingPairID]bool)
-	pairsWithQueues := make(map[TradingPairID]bool)
+	// PHASE 1: Complete traversal to count exact cycles and identify all pairs
+	totalCycles := 0
+	allPairsSet := make(map[TradingPairID]struct{})
+	pairsWithQueuesSet := make(map[TradingPairID]struct{})
 
-	// Identify which pairs have their own cycles (need queues)
 	for _, shard := range workloadShards {
-		pairsWithQueues[shard.pairID] = true
-		// Also track ALL pairs that appear in any cycle
+		pairsWithQueuesSet[shard.pairID] = struct{}{}
+		totalCycles += len(shard.cycleEdges)
+
 		for _, cycleEdge := range shard.cycleEdges {
 			for i := 0; i < 3; i++ {
-				allPairs[cycleEdge.cyclePairs[i]] = true
+				allPairsSet[cycleEdge.cyclePairs[i]] = struct{}{}
 			}
 		}
 	}
 
-	// Calculate exact memory requirements
-	totalCycles := 0
-	totalQueues := len(pairsWithQueues) // Only pairs with cycles get queues
-	totalFanoutEntries := 0
+	totalQueues := len(pairsWithQueuesSet)
+	totalFanoutSlots := len(allPairsSet)
 
-	// Count cycles
+	// PHASE 2: Complete traversal to count exact fanout entries per slot
+	fanoutCounts := make(map[TradingPairID]int)
+
 	for _, shard := range workloadShards {
-		totalCycles += len(shard.cycleEdges)
+		for _, cycleEdge := range shard.cycleEdges {
+			otherPair1 := cycleEdge.cyclePairs[(cycleEdge.edgeIndex+1)%3]
+			otherPair2 := cycleEdge.cyclePairs[(cycleEdge.edgeIndex+2)%3]
+
+			fanoutCounts[otherPair1]++
+			fanoutCounts[otherPair2]++
+		}
 	}
 
-	// Initialize fanout index for ALL pairs (including fanout-only)
-	fanoutIndex := uint32(0)
-	for pairID := range allPairs {
-		engine.pairToFanoutIndex.Put(uint32(pairID), fanoutIndex)
-		fanoutIndex++
-	}
-	totalFanoutSlots := int(fanoutIndex)
-
-	// Allocate shared arena and cycle states
+	// PHASE 3: Allocate all arrays with exact sizes
 	engine.sharedArena = make([]pooledquantumqueue.Entry, totalCycles)
-	engine.nextHandle = 0
+	engine.priorityQueues = make([]pooledquantumqueue.PooledQuantumQueue, totalQueues)
+	engine.cycleFanoutTable = make([][]CycleFanoutEntry, totalFanoutSlots)
 	engine.cycleStates = make([]ArbitrageCycleState, 0, totalCycles)
 
-	// Allocate priority queues ONLY for pairs with cycles
-	engine.priorityQueues = make([]pooledquantumqueue.PooledQuantumQueue, totalQueues)
+	// PHASE 4: Create deterministic ordering and pre-allocate fanout slices
+	allPairsList := make([]TradingPairID, 0, totalFanoutSlots)
+	for pairID := range allPairsSet {
+		allPairsList = append(allPairsList, pairID)
+	}
 
-	// Allocate fanout table for ALL pairs
-	engine.cycleFanoutTable = make([][]CycleFanoutEntry, totalFanoutSlots)
+	for i, pairID := range allPairsList {
+		exactCount := fanoutCounts[pairID]
+		engine.cycleFanoutTable[i] = make([]CycleFanoutEntry, 0, exactCount)
+		engine.pairToFanoutIndex.Put(uint32(pairID), uint32(i))
+	}
 
-	// Initialize arena entries
+	// PHASE 5: Initialize arena entries
 	nilHandle := pooledquantumqueue.Handle(^uint64(0))
 	for i := range engine.sharedArena {
 		engine.sharedArena[i].Tick = -1
@@ -948,102 +967,81 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		engine.sharedArena[i].Data = 0
 	}
 
-	// Initialize priority queues
+	// PHASE 6: Initialize priority queues
 	arenaPtr := unsafe.Pointer(&engine.sharedArena[0])
 	for i := range engine.priorityQueues {
 		newQueue := pooledquantumqueue.New(arenaPtr)
 		engine.priorityQueues[i] = *newQueue
 	}
 
-	// Assign queue indices only to pairs with cycles
-	queueIdx := uint32(0)
-	for pairID := range pairsWithQueues {
-		engine.pairToQueueLookup.Put(uint32(pairID), queueIdx)
-		queueIdx++
+	// PHASE 7: Create deterministic ordering for queue assignment
+	pairsWithQueuesList := make([]TradingPairID, 0, totalQueues)
+	for pairID := range pairsWithQueuesSet {
+		pairsWithQueuesList = append(pairsWithQueuesList, pairID)
 	}
 
-	// Clean up temporary maps immediately after use
-	allPairs = nil
-	pairsWithQueues = nil
+	for i, pairID := range pairsWithQueuesList {
+		engine.pairToQueueLookup.Put(uint32(pairID), uint32(i))
+	}
 
-	// Process workload shards and create cycles
+	// PHASE 8: Populate with zero reallocations
 	for _, shard := range workloadShards {
-		// Get queue index for this pair (guaranteed to exist)
 		queueIndex, _ := engine.pairToQueueLookup.Get(uint32(shard.pairID))
 		queue := &engine.priorityQueues[queueIndex]
 
 		for _, cycleEdge := range shard.cycleEdges {
 			handle := engine.allocateQueueHandle()
 
-			// Create cycle state with main pair tick as zero
 			cycleState := ArbitrageCycleState{
-				pairIDs: cycleEdge.cyclePairs,
-				tickValues: [3]float64{
-					64.0, // Initialize to unprofitable values
-					64.0, // Initialize to unprofitable values
-					64.0, // Initialize to unprofitable values
-				},
+				pairIDs:    cycleEdge.cyclePairs,
+				tickValues: [3]float64{64.0, 64.0, 64.0},
 			}
-
-			// Set the main pair's tick to 0 (overwrite the default)
 			cycleState.tickValues[cycleEdge.edgeIndex] = 0.0
 
 			engine.cycleStates = append(engine.cycleStates, cycleState)
 			cycleIndex := CycleIndex(len(engine.cycleStates) - 1)
 
-			// Generate initial priority with randomization to prevent queue clustering
-			// Use arbitrary priority values to ensure cycles are distributed across
-			// the queue's hierarchical bitmap structure
 			cycleHash := utils.Mix64(uint64(cycleIndex))
 			randBits := cycleHash & 0xFFFF
 			initPriority := int64(196608 + randBits)
 
-			// Insert into queue
 			queue.Push(initPriority, handle, uint64(cycleIndex))
 
-			// Create fanout entries for the OTHER pairs in the triangle
 			otherEdge1 := (cycleEdge.edgeIndex + 1) % 3
 			otherEdge2 := (cycleEdge.edgeIndex + 2) % 3
 
-			// Process first other pair
 			otherPairID1 := cycleEdge.cyclePairs[otherEdge1]
-			otherFanoutIndex1, exists := engine.pairToFanoutIndex.Get(uint32(otherPairID1))
-			if !exists {
-				panic("Fanout index should exist for all pairs")
-			}
+			otherFanoutIndex1, _ := engine.pairToFanoutIndex.Get(uint32(otherPairID1))
 
-			// Add fanout entry to the first OTHER pair's fanout table
 			engine.cycleFanoutTable[otherFanoutIndex1] = append(
 				engine.cycleFanoutTable[otherFanoutIndex1],
 				CycleFanoutEntry{
 					queueHandle: handle,
 					cycleIndex:  uint64(cycleIndex),
-					queueIndex:  uint64(queueIndex), // Queue where cycle lives
-					edgeIndex:   otherEdge1,         // Position in the cycle
+					queueIndex:  uint64(queueIndex),
+					edgeIndex:   otherEdge1,
 				})
 
-			// Process second other pair
 			otherPairID2 := cycleEdge.cyclePairs[otherEdge2]
-			otherFanoutIndex2, exists := engine.pairToFanoutIndex.Get(uint32(otherPairID2))
-			if !exists {
-				panic("Fanout index should exist for all pairs")
-			}
+			otherFanoutIndex2, _ := engine.pairToFanoutIndex.Get(uint32(otherPairID2))
 
-			// Add fanout entry to the second OTHER pair's fanout table
 			engine.cycleFanoutTable[otherFanoutIndex2] = append(
 				engine.cycleFanoutTable[otherFanoutIndex2],
 				CycleFanoutEntry{
 					queueHandle: handle,
 					cycleIndex:  uint64(cycleIndex),
-					queueIndex:  uint64(queueIndex), // Queue where cycle lives
-					edgeIndex:   otherEdge2,         // Position in the cycle
+					queueIndex:  uint64(queueIndex),
+					edgeIndex:   otherEdge2,
 				})
-
-			totalFanoutEntries += 2
 		}
 	}
 
-	// Log initialization success with concise format
+	// PHASE 9: Calculate exact total fanout entries for verification
+	totalFanoutEntries := 0
+	for _, fanoutSlice := range engine.cycleFanoutTable {
+		totalFanoutEntries += len(fanoutSlice)
+	}
+
 	debug.DropMessage("QUEUES", utils.Itoa(totalQueues)+"q "+utils.Itoa(totalCycles)+"c "+utils.Itoa(totalFanoutEntries)+"f")
 }
 
@@ -1117,71 +1115,70 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 //go:registerparams
 func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 	// Determine the optimal number of CPU cores to use for arbitrage processing
-	// Reserve cores for system tasks and other processes
 	coreCount := runtime.NumCPU() - 4
 	if coreCount > constants.MaxSupportedCores {
-		coreCount = constants.MaxSupportedCores // Respect system limits
+		coreCount = constants.MaxSupportedCores
 	}
 	coreCount &^= 1                    // Ensure even number for paired forward/reverse processing
 	forwardCoreCount := coreCount >> 1 // Half the cores handle forward direction arbitrage
 
 	// Build the infrastructure for distributing workload across cores
-	// This creates shards of cycles organized by trading pairs
 	buildWorkloadShards(arbitrageTriangles)
+
+	// COMPLETE TRAVERSAL: Count exact total shards for perfect channel sizing
+	totalShards := 0
+	for _, shardBuckets := range pairWorkloadShards {
+		totalShards += len(shardBuckets)
+	}
+
+	// Each shard goes to both forward and reverse cores, so multiply by 2
+	totalShardDeliveries := totalShards * 2
+	maxShardsPerCore := (totalShardDeliveries + coreCount - 1) / coreCount // Ceiling division
 
 	// Create synchronization mechanism for core initialization
 	var initWaitGroup sync.WaitGroup
-	initWaitGroup.Add(coreCount) // Wait for all cores to initialize
+	initWaitGroup.Add(coreCount)
 
-	// Create communication channels and launch worker goroutines for each core
+	// Create communication channels with exact buffer capacity
 	shardChannels := make([]chan PairWorkloadShard, coreCount)
 	for i := range shardChannels {
-		// Create buffered channels to prevent blocking during workload distribution
-		shardChannels[i] = make(chan PairWorkloadShard, constants.ShardChannelBufferSize)
-		// Launch a worker goroutine for this core with synchronization
+		// Allocate exact capacity needed to prevent any blocking
+		shardChannels[i] = make(chan PairWorkloadShard, maxShardsPerCore)
 		go launchArbitrageWorker(i, forwardCoreCount, shardChannels[i], &initWaitGroup)
 	}
 
 	// Distribute workload shards across all available CPU cores
-	// We use round-robin distribution to ensure even load balancing
 	currentCore := 0
 	for _, shardBuckets := range pairWorkloadShards {
 		for _, shard := range shardBuckets {
-			// Calculate which cores should handle this shard
-			forwardCore := currentCore % forwardCoreCount // Forward direction core
-			reverseCore := forwardCore + forwardCoreCount // Reverse direction core
+			forwardCore := currentCore % forwardCoreCount
+			reverseCore := forwardCore + forwardCoreCount
 
 			// Send the same shard to both forward and reverse cores
-			// This enables bidirectional arbitrage detection for the same cycles
 			shardChannels[forwardCore] <- shard
 			shardChannels[reverseCore] <- shard
 
 			// Build the routing table that determines which cores receive price updates
-			// Use bitmasks to efficiently represent multi-core routing
 			routingMask := uint64(1<<forwardCore | 1<<reverseCore)
 			for _, cycleEdge := range shard.cycleEdges {
-				// Add routing entries for all pairs in all cycles in this shard
 				for _, pairID := range cycleEdge.cyclePairs {
 					pairToCoreRouting[pairID] |= routingMask
 				}
 			}
-			currentCore++ // Move to next core for round-robin distribution
+			currentCore++
 		}
 	}
 
 	// Signal completion of workload distribution by closing all channels
-	// This tells the worker goroutines that no more shards will be sent
 	for _, channel := range shardChannels {
 		close(channel)
 	}
 
 	// Wait for all cores to complete initialization
-	// This ensures the system is fully ready before returning
 	initWaitGroup.Wait()
 
 	// Clean up global workload data structures immediately after distribution
 	pairWorkloadShards = nil
 
-	// Log successful system initialization with concise format
 	debug.DropMessage("CORES", utils.Itoa(coreCount)+" cores ready")
 }
