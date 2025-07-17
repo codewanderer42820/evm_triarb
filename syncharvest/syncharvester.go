@@ -152,7 +152,6 @@ type Log struct {
 	LogIndex    string   `json:"logIndex"`
 }
 
-//go:inline
 func NewRPCClient(url string) *RPCClient {
 	return &RPCClient{
 		url:    url,
@@ -162,7 +161,6 @@ func NewRPCClient(url string) *RPCClient {
 	}
 }
 
-//go:inline
 func (c *RPCClient) Call(ctx context.Context, result interface{}, method string, params ...interface{}) error {
 	req := RPCRequest{
 		JSONRPC: "2.0",
@@ -201,7 +199,6 @@ func (c *RPCClient) Call(ctx context.Context, result interface{}, method string,
 	return json.Unmarshal(rpcResp.Result, result)
 }
 
-//go:inline
 func (c *RPCClient) BlockNumber(ctx context.Context) (uint64, error) {
 	var result string
 	if err := c.Call(ctx, &result, "eth_blockNumber"); err != nil {
@@ -210,7 +207,6 @@ func (c *RPCClient) BlockNumber(ctx context.Context) (uint64, error) {
 	return parseHexUint64(result)
 }
 
-//go:inline
 func (c *RPCClient) GetLogs(ctx context.Context, fromBlock, toBlock uint64, addresses []string, topics []string) ([]Log, error) {
 	params := map[string]interface{}{
 		"fromBlock": fmt.Sprintf("0x%x", fromBlock),
@@ -237,7 +233,6 @@ func (c *RPCClient) GetLogs(ctx context.Context, fromBlock, toBlock uint64, addr
 // DATABASE LOCK MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-//go:inline
 func openDatabaseWithRetry(dbPath string) (*sql.DB, error) {
 	for retries := 0; retries < 5; retries++ {
 		db, err := sql.Open("sqlite3", dbPath)
@@ -262,7 +257,6 @@ func openDatabaseWithRetry(dbPath string) (*sql.DB, error) {
 	return nil, fmt.Errorf("failed to open database after 5 attempts")
 }
 
-//go:inline
 func isDatabaseLocked(dbPath string) bool {
 	// Try to open database with immediate timeout to check if locked
 	testDB, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=100")
@@ -367,7 +361,6 @@ func NewPeakHarvester() (*PeakHarvester, error) {
 	return h, nil
 }
 
-//go:inline
 func (h *PeakHarvester) setupSignalHandling() {
 	signal.Notify(h.signalChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -382,7 +375,6 @@ func (h *PeakHarvester) setupSignalHandling() {
 	}()
 }
 
-//go:inline
 func configureDatabase(db *sql.DB) error {
 	// Ultra-aggressive database settings for peak write performance
 	optimizations := []string{
@@ -407,7 +399,6 @@ func configureDatabase(db *sql.DB) error {
 	return nil
 }
 
-//go:inline
 func (h *PeakHarvester) initializeSchema() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS pair_reserves (
@@ -445,7 +436,6 @@ func (h *PeakHarvester) initializeSchema() error {
 	return err
 }
 
-//go:inline
 func (h *PeakHarvester) loadPairMappings() error {
 	debug.DropMessage("PAIR_LOADING", "Loading Uniswap V2 pairs")
 
@@ -479,7 +469,6 @@ func (h *PeakHarvester) loadPairMappings() error {
 	return rows.Err()
 }
 
-//go:inline
 func (h *PeakHarvester) prepareGlobalStatements() error {
 	var err error
 
@@ -500,7 +489,6 @@ func (h *PeakHarvester) prepareGlobalStatements() error {
 // PEAK SYNC EXECUTION - SINGLE THREADED
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-//go:inline
 func (h *PeakHarvester) SyncToLatestAndTerminate() error {
 	debug.DropMessage("PEAK_SYNC_START", "Starting peak performance synchronization")
 
@@ -577,7 +565,6 @@ func (h *PeakHarvester) SyncToLatestAndTerminate() error {
 	return h.terminateCleanly()
 }
 
-//go:inline
 func (h *PeakHarvester) executePeakSyncLoop(startBlock uint64) error {
 	current := startBlock
 	batchSize := OptimalBatchSize // Start at 10,000 blocks
@@ -645,7 +632,6 @@ func (h *PeakHarvester) executePeakSyncLoop(startBlock uint64) error {
 	return nil
 }
 
-//go:inline
 func (h *PeakHarvester) processPeakBatch(fromBlock, toBlock uint64) bool {
 	debug.DropMessage("BATCH_START", fmt.Sprintf("Processing blocks %d-%d", fromBlock, toBlock))
 
@@ -693,7 +679,6 @@ func (h *PeakHarvester) processPeakBatch(fromBlock, toBlock uint64) bool {
 	return true // Success
 }
 
-//go:inline
 func (h *PeakHarvester) processLogDirect(log *Log) bool {
 	// Validate sync event
 	if len(log.Topics) == 0 || log.Topics[0] != SyncEventSignature {
@@ -775,7 +760,6 @@ func (h *PeakHarvester) processLogDirect(log *Log) bool {
 	return true
 }
 
-//go:inline
 func (h *PeakHarvester) parseReservesDirect(dataStr string) bool {
 	dataStr = strings.TrimPrefix(dataStr, "0x")
 	if len(dataStr) != 128 {
@@ -798,7 +782,6 @@ func (h *PeakHarvester) parseReservesDirect(dataStr string) bool {
 // TRANSACTION MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-//go:inline
 func (h *PeakHarvester) beginTransaction() error {
 	var err error
 	h.currentTx, err = h.reservesDB.Begin()
@@ -835,7 +818,6 @@ func (h *PeakHarvester) beginTransaction() error {
 	return nil
 }
 
-//go:inline
 func (h *PeakHarvester) commitTransaction() {
 	if h.currentTx != nil {
 		// Close transaction-specific statements first
@@ -859,7 +841,6 @@ func (h *PeakHarvester) commitTransaction() {
 	h.lastCommit = time.Now()
 }
 
-//go:inline
 func (h *PeakHarvester) rollbackTransaction() {
 	if h.currentTx != nil {
 		// Close transaction-specific statements first
@@ -881,7 +862,6 @@ func (h *PeakHarvester) rollbackTransaction() {
 // MONITORING AND CLEANUP
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-//go:inline
 func (h *PeakHarvester) reportProgress() {
 	elapsed := time.Since(h.startTime)
 	eventsPerSecond := float64(h.processed) / elapsed.Seconds()
@@ -899,7 +879,6 @@ func (h *PeakHarvester) reportProgress() {
 	}
 }
 
-//go:inline
 func (h *PeakHarvester) getLastProcessedBlock() uint64 {
 	var lastBlock uint64
 	err := h.reservesDB.QueryRow("SELECT COALESCE(MAX(block_number), 0) FROM sync_events").Scan(&lastBlock)
@@ -910,7 +889,6 @@ func (h *PeakHarvester) getLastProcessedBlock() uint64 {
 	return lastBlock
 }
 
-//go:inline
 func (h *PeakHarvester) terminateCleanly() error {
 	debug.DropMessage("PEAK_TERMINATION", "Beginning clean termination")
 
@@ -946,7 +924,6 @@ func (h *PeakHarvester) terminateCleanly() error {
 	return nil
 }
 
-//go:inline
 func (h *PeakHarvester) cleanup() {
 	if h.reservesDB != nil {
 		h.reservesDB.Close()
@@ -964,7 +941,6 @@ func (h *PeakHarvester) cleanup() {
 // UTILITY FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-//go:inline
 func parseHexUint64(s string) (uint64, error) {
 	s = strings.TrimPrefix(s, "0x")
 	if s == "" {
@@ -973,7 +949,6 @@ func parseHexUint64(s string) (uint64, error) {
 	return utils.ParseHexU64([]byte(s)), nil
 }
 
-//go:inline
 func minUint64(a, b uint64) uint64 {
 	if a < b {
 		return a
