@@ -1,18 +1,18 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// ⚡ TRIANGULAR ARBITRAGE DETECTION ENGINE
+// Multi-Core Arbitrage Detection Engine
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Arbitrage Detection System
-// Component: Multi-Core Event Router & Arbitrage Detector
+// Project: Arbitrage Detection System
+// Component: Event Router & Arbitrage Detector
 //
 // Description:
-//   Lock-free multi-core arbitrage detection system using SIMD-optimized parsing and zero-allocation
+//   Lock-free multi-core arbitrage detection system using optimized parsing and zero-allocation
 //   priority queues. Detects profitable opportunities across Uniswap V2 pairs in real-time.
 //
-// Performance Characteristics:
-//   - Event dispatch: 39.50ns end-to-end latency
-//   - Address resolution: 14ns Robin Hood lookup
-//   - SIMD hex parsing: 1.56ns per operation
-//   - Core scaling: Linear up to 64 cores
+// Features:
+//   - Multi-core event dispatch with lock-free coordination
+//   - Address resolution using Robin Hood hashing
+//   - SIMD-optimized hex parsing operations
+//   - Linear core scaling architecture
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -260,7 +260,7 @@ func (engine *ArbitrageEngine) allocateQueueHandle() pooledquantumqueue.Handle {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ULTRA-HOT PATH: EVENT DISPATCH PIPELINE
+// EVENT DISPATCH PIPELINE
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // DispatchPriceUpdate processes Uniswap V2 Sync events and distributes price updates to cores.
@@ -273,7 +273,6 @@ func (engine *ArbitrageEngine) allocateQueueHandle() pooledquantumqueue.Handle {
 //go:registerparams
 func DispatchPriceUpdate(logView *types.LogView) {
 	// Convert the Ethereum contract address from the log event to our internal trading pair ID
-	// The address slice extracts the 40-character hex address from the log view
 	pairID := lookupPairByAddress(logView.Addr[constants.AddressHexStart:constants.AddressHexEnd])
 	if pairID == 0 {
 		// This address is not registered in our system, so ignore this event
@@ -285,7 +284,6 @@ func DispatchPriceUpdate(logView *types.LogView) {
 	hexData := logView.Data[2:130]
 
 	// Count leading zeros in each reserve value to determine precision requirements
-	// This analysis helps us extract the most significant digits accurately
 	leadingZerosA := countHexLeadingZeros(hexData[32:64])  // Analyze reserve A (first token)
 	leadingZerosB := countHexLeadingZeros(hexData[96:128]) // Analyze reserve B (second token)
 
@@ -296,24 +294,20 @@ func DispatchPriceUpdate(logView *types.LogView) {
 	minZeros := leadingZerosB ^ ((leadingZerosA ^ leadingZerosB) & mask) // Branchless min()
 
 	// Calculate where to start extracting meaningful digits from the hex data
-	// We skip the data prefix, the first reserve field, and any leading zeros
 	offsetA := 2 + 32 + minZeros // Position for reserve A extraction
 	offsetB := offsetA + 64      // Reserve B is 64 hex characters after reserve A
 
 	// Calculate how many hex characters we can meaningfully extract from each reserve
-	// We're limited by both available digits and our processing capacity
 	available := 32 - minZeros                         // Available significant digits after leading zeros
 	cond = 16 - available                              // Check if we have at least 16 digits available
 	mask = cond >> 31                                  // Create mask for branchless selection
 	remaining := available ^ ((16 ^ available) & mask) // Branchless min(16, available)
 
 	// Convert the hex strings to 64-bit unsigned integers representing token reserves
-	// These values represent the actual token balances in the Uniswap V2 pair contract
 	reserve0 := utils.ParseHexU64(logView.Data[offsetA : offsetA+remaining])
 	reserve1 := utils.ParseHexU64(logView.Data[offsetB : offsetB+remaining])
 
 	// Calculate the logarithmic price ratio between the two token reserves
-	// This ratio is fundamental for determining arbitrage profitability
 	tickValue, err := fastuni.Log2ReserveRatio(reserve0, reserve1)
 
 	// Construct the price update message to send to processing cores
@@ -394,7 +388,6 @@ func countHexLeadingZeros(segment []byte) int {
 		((c2|(^c2+1))>>63)<<2 | ((c3|(^c3+1))>>63)<<3
 
 	// Find the first chunk that contains a non-zero character
-	// This gives us the chunk index (0-3) where leading zeros end
 	firstChunk := bits.TrailingZeros64(mask)
 
 	// Handle the special case where all 32 hex characters are zeros
@@ -410,11 +403,10 @@ func countHexLeadingZeros(segment []byte) int {
 	firstByte := bits.TrailingZeros64(chunks[firstChunk]) >> 3
 
 	// Calculate the total number of leading zero characters
-	// Multiply chunk index by 8 (bytes per chunk) and add the byte offset within the chunk
 	return (firstChunk << 3) + firstByte
 }
 
-// lookupPairByAddress performs high-speed address resolution using Robin Hood hashing.
+// lookupPairByAddress performs address resolution using Robin Hood hashing.
 //
 //go:norace
 //go:nocheckptr
@@ -468,7 +460,7 @@ func lookupPairByAddress(address42HexBytes []byte) TradingPairID {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// HOT PATH: CORE PROCESSING PIPELINE
+// CORE PROCESSING PIPELINE
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // processArbitrageUpdate orchestrates arbitrage detection for incoming price updates.
@@ -479,7 +471,7 @@ func lookupPairByAddress(address42HexBytes []byte) TradingPairID {
 //go:inline
 //go:registerparams
 func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage) {
-	// Select tick based on core direction - 100% predictable per core
+	// Select tick based on core direction - predictable per core
 	var currentTick float64
 	if engine.isReverseDirection {
 		currentTick = update.reverseTick
@@ -487,7 +479,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 		currentTick = update.forwardTick
 	}
 
-	// Two lookups, but both are predictable Robin Hood accesses
+	// Two lookups, both are predictable Robin Hood accesses
 	queueIndex, hasQueue := engine.pairToQueueLookup.Get(uint32(update.pairID))
 	fanoutIndex, hasFanout := engine.pairToFanoutIndex.Get(uint32(update.pairID))
 
@@ -582,7 +574,7 @@ func quantizeTickValue(tickValue float64) int64 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// WARM PATH: ADDRESS PROCESSING INFRASTRUCTURE
+// ADDRESS PROCESSING INFRASTRUCTURE
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // packEthereumAddress converts hex address strings to optimized internal representation.
@@ -650,10 +642,11 @@ func (a PackedAddress) isEqual(b PackedAddress) bool {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// COOL PATH: MONITORING AND OBSERVABILITY
+// MONITORING AND OBSERVABILITY
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// emitArbitrageOpportunity provides detailed logging for profitable arbitrage cycles.
+// emitArbitrageOpportunity provides concise logging for profitable arbitrage cycles.
+// Reports cycle details and total profitability in single-line format.
 //
 //go:norace
 //go:nocheckptr
@@ -661,33 +654,20 @@ func (a PackedAddress) isEqual(b PackedAddress) bool {
 //go:inline
 //go:registerparams
 func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
-	// Log the detection of a profitable arbitrage opportunity
-	debug.DropMessage("[ARBITRAGE_OPPORTUNITY]", "")
+	// Calculate total profitability for the opportunity
+	totalProfit := newTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
 
-	// Log the three trading pairs that form this arbitrage cycle
-	debug.DropMessage("  pair0", utils.Itoa(int(cycle.pairIDs[0])))
-	debug.DropMessage("  pair1", utils.Itoa(int(cycle.pairIDs[1])))
-	debug.DropMessage("  pair2", utils.Itoa(int(cycle.pairIDs[2])))
+	// Single-line arbitrage opportunity report matching main.go style
+	opportunity := "(" + utils.Itoa(int(cycle.pairIDs[0])) + ")→(" +
+		utils.Itoa(int(cycle.pairIDs[1])) + ")→(" +
+		utils.Itoa(int(cycle.pairIDs[2])) + ") profit=" +
+		utils.Ftoa(totalProfit)
 
-	// Convert all tick values to strings for detailed logging
-	tick0Str := utils.Ftoa(cycle.tickValues[0])
-	tick1Str := utils.Ftoa(cycle.tickValues[1])
-	tick2Str := utils.Ftoa(cycle.tickValues[2])
-	newTickStr := utils.Ftoa(newTick)
-
-	// Calculate and log the total profitability of this opportunity
-	totalProfitStr := utils.Ftoa(newTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2])
-
-	// Log all individual tick values and the total profit for analysis
-	debug.DropMessage("  tick0", tick0Str)
-	debug.DropMessage("  tick1", tick1Str)
-	debug.DropMessage("  tick2", tick2Str)
-	debug.DropMessage("  newTick", newTickStr)
-	debug.DropMessage("  totalProfit", totalProfitStr)
+	debug.DropMessage("ARB", opportunity)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// COLD PATH: SYSTEM INITIALIZATION AND CONFIGURATION
+// SYSTEM INITIALIZATION AND CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // RegisterTradingPairAddress populates the Robin Hood hash table with address-to-pair mappings.
@@ -756,7 +736,7 @@ func RegisterPairToCoreRouting(pairID TradingPairID, coreID uint8) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// COLD PATH: CRYPTOGRAPHIC RANDOM GENERATION
+// CRYPTOGRAPHIC RANDOM GENERATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // newCryptoRandomGenerator creates deterministic random number generators for load balancing.
@@ -900,7 +880,7 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// COLD PATH: CLEAN QUEUE INITIALIZATION SYSTEM
+// QUEUE INITIALIZATION SYSTEM
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // initializeArbitrageQueues allocates shared arena and initializes all queues with cycle data.
@@ -999,9 +979,9 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			cycleState := ArbitrageCycleState{
 				pairIDs: cycleEdge.cyclePairs,
 				tickValues: [3]float64{
-					64.0, // Initialize to max unprofitable
-					64.0, // Initialize to max unprofitable
-					64.0, // Initialize to max unprofitable
+					64.0, // Initialize to unprofitable values
+					64.0, // Initialize to unprofitable values
+					64.0, // Initialize to unprofitable values
 				},
 			}
 
@@ -1012,10 +992,8 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			cycleIndex := CycleIndex(len(engine.cycleStates) - 1)
 
 			// Generate initial priority with randomization to prevent queue clustering
-			// Although tick values are initialized to max unprofitable (128 total),
-			// we use arbitrary priority values to ensure cycles are distributed across
-			// the queue's hierarchical bitmap structure. This prevents initialization
-			// hotspots and ensures the O(1) operations work efficiently from the start.
+			// Use arbitrary priority values to ensure cycles are distributed across
+			// the queue's hierarchical bitmap structure
 			cycleHash := utils.Mix64(uint64(cycleIndex))
 			randBits := cycleHash & 0xFFFF
 			initPriority := int64(196608 + randBits)
@@ -1065,12 +1043,8 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		}
 	}
 
-	// Log initialization success
-	debug.DropMessage("ZERO_FRAG_INIT",
-		"Initialized "+utils.Itoa(totalQueues)+" queues, "+
-			utils.Itoa(totalCycles)+" cycles, "+
-			utils.Itoa(totalFanoutEntries)+" fanout entries, "+
-			utils.Itoa(totalFanoutSlots)+" fanout slots - zero fragmentation")
+	// Log initialization success with concise format
+	debug.DropMessage("QUEUES", utils.Itoa(totalQueues)+"q "+utils.Itoa(totalCycles)+"c "+utils.Itoa(totalFanoutEntries)+"f")
 }
 
 // launchArbitrageWorker initializes and operates a processing core for arbitrage detection.
@@ -1084,7 +1058,7 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	// Ensure we signal completion regardless of initialization outcome
 	defer initWaitGroup.Done()
 
-	// Lock this goroutine to the current OS thread for consistent NUMA locality and performance
+	// Lock this goroutine to the current OS thread for consistent NUMA locality
 	runtime.LockOSThread()
 
 	// Create a channel for coordinating graceful shutdown of this worker
@@ -1122,8 +1096,8 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	stopFlag, hotFlag := control.Flags()
 	control.SignalActivity() // Signal that this core is active and ready
 
-	// Log successful core initialization
-	debug.DropMessage("CORE_READY", "Core "+utils.Itoa(coreID)+" initialized")
+	// Log successful core initialization with concise format
+	debug.DropMessage("CORE", "Core "+utils.Itoa(coreID)+" ready")
 
 	// Start the main processing loop - this is the core's primary work function
 	// PinnedConsumer runs a tight loop consuming messages from the ring buffer
@@ -1208,6 +1182,6 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 	// Clean up global workload data structures immediately after distribution
 	pairWorkloadShards = nil
 
-	// Log successful system initialization
-	debug.DropMessage("SYSTEM_READY", "All "+utils.Itoa(coreCount)+" cores initialized and ready for processing")
+	// Log successful system initialization with concise format
+	debug.DropMessage("CORES", utils.Itoa(coreCount)+" cores ready")
 }
