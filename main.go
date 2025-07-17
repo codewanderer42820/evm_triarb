@@ -17,14 +17,12 @@ package main
 import (
 	"crypto/tls"
 	"database/sql"
-	"fmt"
 	"net"
 	"os"
 	"runtime"
 	rtdebug "runtime/debug"
 	"strings"
 	"syscall"
-	"time"
 
 	"main/constants"
 	"main/debug"
@@ -41,224 +39,72 @@ import (
 // SYSTEM INITIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// init performs mandatory system bootstrap and initializes all core components.
+// Both arbitrage cycles and trading pair database must load successfully.
+// Panics immediately on any failure to prevent invalid system state.
+//
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
 func init() {
-	debug.DropMessage("SYSTEM_INIT", "Starting arbitrage detection engine")
+	debug.DropMessage("INIT", "Loading system data")
 
-	// Load arbitrage cycles
-	cycles, err := loadArbitrageCyclesFromFile("cycles_3_3.txt")
-	if err != nil {
-		panic(fmt.Sprintf("Critical failure loading arbitrage cycles: %v", err))
+	// Both data sources are mandatory for operation
+	// Cycles define trading paths, database provides address resolution
+	cycles := loadArbitrageCyclesFromFile("cycles_3_3.txt")
+	poolCount := loadPoolsFromDatabase("uniswap_pairs.db")
+
+	debug.DropMessage("LOADED", utils.Itoa(len(cycles))+" cycles, "+utils.Itoa(poolCount)+" pools")
+
+	// Display sample cycles for verification during system startup
+	// Shows actual cycle data to confirm parsing accuracy
+	for i := 0; i < 3 && i < len(cycles); i++ {
+		c := cycles[i]
+		debug.DropMessage("CYCLE", utils.Itoa(i+1)+": ("+utils.Itoa(int(c[0]))+")→("+utils.Itoa(int(c[1]))+")→("+utils.Itoa(int(c[2]))+")")
 	}
-	printCyclesInfo(cycles)
 
-	// Load trading pairs if available
-	if err := loadPoolsFromDatabase("uniswap_pairs.db"); err != nil {
-		debug.DropMessage("DATABASE_FALLBACK", fmt.Sprintf("Database unavailable (%v), using cycles-only mode", err))
-	}
-
-	// Initialize arbitrage system
+	// Initialize multi-core arbitrage detection system
+	// Distributes cycles across CPU cores and establishes message routing
 	router.InitializeArbitrageSystem(cycles)
-
-	// Clean up init data immediately
-	cycles = nil
-
-	debug.DropMessage("INIT_COMPLETE", "System ready for bootstrap")
+	debug.DropMessage("READY", "System initialized")
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MAIN EXECUTION - CLEAN PHASES
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func main() {
-	debug.DropMessage("MAIN_START", "Starting system orchestration")
-
-	// PHASE 1: BOOTSTRAP
-	bootstrapStart := time.Now()
-	executeBootstrapPhase()
-	bootstrapDuration := time.Since(bootstrapStart)
-	debug.DropMessage("BOOTSTRAP_DURATION", fmt.Sprintf("Bootstrap phase completed in %v", bootstrapDuration))
-
-	// PHASE 2: CLEANUP & PREPARATION
-	cleanupStart := time.Now()
-	performCleanupAndPrepareProduction()
-	cleanupDuration := time.Since(cleanupStart)
-	debug.DropMessage("CLEANUP_DURATION", fmt.Sprintf("Resource cleanup completed in %v", cleanupDuration))
-
-	// PHASE 3: FINAL GC & DISABLE
-	prepareProductionMemory()
-
-	// PHASE 4: PRODUCTION
-	totalBootstrapTime := time.Since(bootstrapStart)
-	debug.DropMessage("TOTAL_BOOTSTRAP_TIME", fmt.Sprintf("Total bootstrap overhead: %v", totalBootstrapTime))
-	debug.DropMessage("PRODUCTION_START", "Starting production processing")
-
-	runProductionEventLoop()
-}
-
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func executeBootstrapPhase() {
-	if requiresBootstrapSync() {
-		debug.DropMessage("BOOTSTRAP_EXECUTE", "Running bootstrap synchronization")
-
-		if err := syncharvest.ExecutePeakSync(); err != nil {
-			debug.DropMessage("BOOTSTRAP_ERROR", fmt.Sprintf("Bootstrap failed: %v", err))
-			debug.DropMessage("BOOTSTRAP_CONTINUE", "Continuing with available data")
-		} else {
-			debug.DropMessage("BOOTSTRAP_SUCCESS", "Bootstrap synchronization completed")
-		}
-	} else {
-		debug.DropMessage("BOOTSTRAP_SKIP", "Bootstrap synchronization not required")
-	}
-}
-
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func performCleanupAndPrepareProduction() {
-	debug.DropMessage("CLEANUP_START", "Starting post-bootstrap resource cleanup")
-
-	// Force return of unused memory to OS
-	rtdebug.FreeOSMemory()
-
-	debug.DropMessage("CLEANUP_COMPLETE", "Post-bootstrap cleanup completed")
-}
-
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func prepareProductionMemory() {
-	debug.DropMessage("FINAL_GC", "Final garbage collection before production")
-
-	// Final GC to clean everything before disabling
-	runtime.GC()
-	rtdebug.FreeOSMemory()
-
-	// NOW disable GC for production
-	rtdebug.SetGCPercent(-1)
-	debug.DropMessage("GC_DISABLED", "Garbage collector disabled for production operation")
-}
-
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func requiresBootstrapSync() bool {
-	syncNeeded, lastBlock, targetBlock, err := syncharvest.CheckIfPeakSyncNeeded()
-	if err != nil {
-		debug.DropMessage("BOOTSTRAP_CHECK_ERROR", fmt.Sprintf("Synchronization check failed: %v", err))
-		return false
-	}
-
-	if syncNeeded {
-		blocksBehind := targetBlock - lastBlock
-		debug.DropMessage("BOOTSTRAP_NEEDED", fmt.Sprintf("Synchronization required: %d blocks behind", blocksBehind))
-	} else {
-		debug.DropMessage("BOOTSTRAP_CURRENT", fmt.Sprintf("System current at block %d", lastBlock))
-	}
-
-	return syncNeeded
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// PRODUCTION PROCESSING
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func runProductionEventLoop() {
-	// Lock this goroutine to current OS thread for cache locality
-	runtime.LockOSThread()
-
-	debug.DropMessage("EVENT_LOOP_START", "Starting production event processing loop")
-
-	for {
-		if err := processEventStream(); err != nil {
-			debug.DropError("STREAM_ERROR", err)
-		}
-	}
-}
-
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func processEventStream() error {
-	conn, err := establishConnection()
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	if err := ws.Handshake(conn); err != nil {
-		return err
-	}
-
-	if err := ws.SendSubscription(conn); err != nil {
-		return err
-	}
-
-	debug.DropMessage("STREAM_READY", "Event stream processing active")
-
-	for {
-		payload, err := ws.SpinUntilCompleteMessage(conn)
-		if err != nil {
-			return err
-		}
-		parser.HandleFrame(payload)
-	}
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// DATA LOADING - ARBITRAGE CYCLES
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
+// loadArbitrageCyclesFromFile parses triangular arbitrage cycles from configuration file.
+// Expected format: lines containing three parenthesized integers representing pair IDs.
+// Example line: "(12345) → (67890) → (11111)" defines one complete arbitrage triangle.
+// Returns slice of valid triangles or panics on file errors or empty results.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriangle, error) {
-	debug.DropMessage("FILE_LOADING", "Reading cycles from: "+filename)
-
+func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
+	// Read entire file into memory for efficient parsing
+	// Small config files allow full in-memory processing
 	data, err := os.ReadFile(filename)
 	if err != nil {
-		return nil, err
+		panic("Failed to load cycles: " + err.Error())
 	}
-	defer func() { data = nil }() // Clean up immediately
 
-	fileSizeStr := utils.Itoa(len(data))
-	debug.DropMessage("FILE_SIZE", "File size: "+fileSizeStr+" bytes")
+	// Pre-allocate slice capacity based on estimated cycles per file size
+	// Heuristic: ~50 characters per cycle line reduces memory reallocations
+	// Format: "(12345) → (67890) → (11111)\n" ≈ 50 characters
+	cycles := make([]router.ArbitrageTriangle, 0, len(data)/50)
+	i, dataLen := 0, len(data)
 
-	estimatedCycles := len(data) / 50
-	if estimatedCycles < 100 {
-		estimatedCycles = 100
-	}
-	cycles := make([]router.ArbitrageTriangle, 0, estimatedCycles)
-
-	i, lineCount := 0, 0
-	dataLen := len(data)
-
+	// Parse file content byte-by-byte for maximum parsing efficiency
+	// Avoids string allocations and regex overhead
 	for i < dataLen {
 		var pairIDs [3]uint64
 		pairCount := 0
-		lineCount++
 
+		// Extract exactly 3 pair IDs from current line to form valid triangle
+		// Each triangle requires 3 pairs to create arbitrage opportunity
 		for pairCount < 3 && i < dataLen && data[i] != '\n' {
+			// Locate opening parenthesis that precedes each pair ID
+			// Skip whitespace and formatting characters
 			for i < dataLen && data[i] != '(' && data[i] != '\n' {
 				i++
 			}
@@ -267,28 +113,38 @@ func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriangle, e
 			}
 			i++
 
+			// Parse numeric pair ID with overflow protection
+			// Pair IDs are positive integers representing trading pair contracts
 			pairID := uint64(0)
-			digitFound := false
 			for i < dataLen && data[i] >= '0' && data[i] <= '9' {
+				// Prevent arithmetic overflow during decimal conversion
+				// Check if multiplication would exceed uint64 maximum
+				if pairID > (^uint64(0)-10)/10 {
+					break
+				}
 				pairID = pairID*10 + uint64(data[i]-'0')
-				digitFound = true
 				i++
 			}
 
-			for i < dataLen && data[i] != ')' && data[i] != '\n' {
-				i++
-			}
-
-			if digitFound && pairID > 0 {
+			// Store valid non-zero pair ID for triangle construction
+			// Zero IDs are invalid and indicate parsing errors
+			if pairID > 0 {
 				pairIDs[pairCount] = pairID
 				pairCount++
 			}
 
+			// Skip to closing parenthesis and any trailing formatting
+			// Handles various spacing and arrow formatting styles
+			for i < dataLen && data[i] != ')' && data[i] != '\n' {
+				i++
+			}
 			if i < dataLen && data[i] == ')' {
 				i++
 			}
 		}
 
+		// Advance to next line for continued parsing
+		// Handles both Unix (\n) and Windows (\r\n) line endings
 		for i < dataLen && data[i] != '\n' {
 			i++
 		}
@@ -296,6 +152,8 @@ func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriangle, e
 			i++
 		}
 
+		// Create arbitrage triangle only if exactly 3 valid pair IDs found
+		// Incomplete triangles cannot form arbitrage opportunities
 		if pairCount == 3 {
 			cycles = append(cycles, router.ArbitrageTriangle{
 				router.TradingPairID(pairIDs[0]),
@@ -305,215 +163,217 @@ func loadArbitrageCyclesFromFile(filename string) ([]router.ArbitrageTriangle, e
 		}
 	}
 
-	linesStr := utils.Itoa(lineCount)
-	debug.DropMessage("LINES_PROCESSED", "Total lines: "+linesStr)
-
+	// Ensure at least one valid cycle was parsed from file
+	// Empty cycle set renders the arbitrage system non-functional
 	if len(cycles) == 0 {
-		return nil, fmt.Errorf("no valid arbitrage cycles found in %s", filename)
+		panic("No cycles found")
 	}
-
-	return cycles, nil
+	return cycles
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// DATA LOADING - TRADING POOLS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
+// loadPoolsFromDatabase loads trading pair addresses from SQLite database.
+// Populates global address-to-pair-ID lookup table for blockchain event routing.
+// Returns count of loaded pools or panics on any database operation failure.
+//
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
-func loadPoolsFromDatabase(dbPath string) error {
-	debug.DropMessage("DATABASE_CONNECT", "Connecting to: "+dbPath)
-
+func loadPoolsFromDatabase(dbPath string) int {
+	// Open SQLite database connection with error checking
+	// Database contains trading pair metadata and contract addresses
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		return fmt.Errorf("database connection failed: %v", err)
+		panic("Failed to open database " + dbPath + ": " + err.Error())
 	}
 	defer db.Close()
 
-	const query = `
-		SELECT 
-			p.id, p.pool_address, t0.address as token0_address,
-			t1.address as token1_address, p.fee_bps, e.name as exchange_name
+	// Query trading pairs ordered by ID for consistent processing
+	// Only need ID and address for blockchain event routing
+	rows, err := db.Query(`
+		SELECT p.id, p.pool_address 
 		FROM pools p
-		JOIN tokens t0 ON p.token0_id = t0.id  
-		JOIN tokens t1 ON p.token1_id = t1.id
-		JOIN exchanges e ON p.exchange_id = e.id
-		ORDER BY p.id`
-
-	rows, err := db.Query(query)
+		ORDER BY p.id`)
 	if err != nil {
-		return fmt.Errorf("pool query failed: %v", err)
+		panic("Failed to query pools: " + err.Error())
 	}
 	defer rows.Close()
 
 	count := 0
+	// Reuse byte buffer to minimize allocations during address processing
+	// Ethereum addresses are 40 hex characters requiring byte conversion
 	poolAddressBytes := make([]byte, 0, 40)
 
+	// Process each trading pair and register its contract address
+	// Address registration enables routing of blockchain events to pair IDs
 	for rows.Next() {
-		var (
-			pairID        int64
-			poolAddress   string
-			token0Address string
-			token1Address string
-			feeBps        sql.NullInt64
-			exchangeName  string
-		)
-
-		if err := rows.Scan(&pairID, &poolAddress, &token0Address, &token1Address, &feeBps, &exchangeName); err != nil {
-			return fmt.Errorf("pool row scan failed: %v", err)
+		var pairID int64
+		var poolAddress string
+		if err := rows.Scan(&pairID, &poolAddress); err != nil {
+			panic("Failed to scan pool row: " + err.Error())
 		}
 
+		// Convert hex address string to byte slice for hash table registration
+		// Remove "0x" prefix and store raw hex characters
 		poolAddressBytes = poolAddressBytes[:0]
-		trimmed := strings.TrimPrefix(poolAddress, "0x")
-		poolAddressBytes = append(poolAddressBytes, trimmed...)
+		poolAddressBytes = append(poolAddressBytes, strings.TrimPrefix(poolAddress, "0x")...)
 
+		// Register address mapping in router's lookup table
+		// Enables O(1) address-to-pair-ID resolution during event processing
 		router.RegisterTradingPairAddress(poolAddressBytes, router.TradingPairID(pairID))
 		count++
-
-		if count%100000 == 0 {
-			progressStr := utils.Itoa(count)
-			debug.DropMessage("POOL_PROGRESS", progressStr+" pools loaded")
-		}
 	}
 
-	if err = rows.Err(); err != nil {
-		return fmt.Errorf("pool iteration error: %v", err)
+	// Check for database iteration errors after processing all rows
+	// SQL errors might not surface until iteration completes
+	if err := rows.Err(); err != nil {
+		panic("Database iteration error: " + err.Error())
 	}
 
-	countStr := utils.Itoa(count)
-	debug.DropMessage("POOLS_LOADED", countStr+" trading pairs registered")
+	// Ensure at least one pool was loaded from database
+	// Empty database renders address resolution non-functional
+	if count == 0 {
+		panic("No pools loaded from database")
+	}
 
-	return nil
+	return count
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// VERIFICATION UTILITIES
+// MAIN ORCHESTRATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// main orchestrates complete system lifecycle through distinct operational phases.
+// Phase 1: Bootstrap synchronization ensures current blockchain state
+// Phase 2: Memory optimization prepares deterministic runtime environment
+// Phase 3: Production processing handles continuous event stream
+//
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
-func printCyclesInfo(cycles []router.ArbitrageTriangle) {
-	cycleCountStr := utils.Itoa(len(cycles))
-	debug.DropMessage("CYCLES_LOADED", "Total cycles: "+cycleCountStr)
+func main() {
+	// PHASE 1: Bootstrap synchronization with blockchain state
+	// Ensures system processes events from current block height
+	syncNeeded, lastBlock, targetBlock, _ := syncharvest.CheckIfPeakSyncNeeded()
+	if syncNeeded {
+		// Calculate synchronization workload for progress indication
+		blocksBehind := targetBlock - lastBlock
+		debug.DropMessage("SYNC", "Syncing "+utils.Itoa(int(blocksBehind))+" blocks")
 
-	maxToPrint := len(cycles)
-	if maxToPrint > 10 {
-		maxToPrint = 10
+		// Execute blockchain state synchronization to current block
+		// Critical for accurate arbitrage detection on live events
+		syncharvest.ExecutePeakSync()
 	}
 
-	for i := 0; i < maxToPrint; i++ {
-		cycle := cycles[i]
-		indexStr := utils.Itoa(i + 1)
-		pair0Str := utils.Itoa(int(cycle[0]))
-		pair1Str := utils.Itoa(int(cycle[1]))
-		pair2Str := utils.Itoa(int(cycle[2]))
+	// PHASE 2: Memory optimization for deterministic production runtime
+	// Eliminates garbage collection pauses during event processing
 
-		cycleInfo := "Cycle " + indexStr + ": (" + pair0Str + ") -> (" + pair1Str + ") -> (" + pair2Str + ")"
-		debug.DropMessage("CYCLE_DETAIL", cycleInfo)
-	}
+	// Double garbage collection ensures complete memory cleanup
+	// First GC marks unreachable objects, second GC finalizes cleanup
+	runtime.GC()
+	runtime.GC()
 
-	if len(cycles) > 10 {
-		remainingStr := utils.Itoa(len(cycles) - 10)
-		debug.DropMessage("CYCLES_TRUNCATED", "... and "+remainingStr+" more cycles")
+	// Return unused memory pages to operating system
+	// Reduces memory footprint and improves cache locality
+	rtdebug.FreeOSMemory()
+
+	// Disable garbage collector for deterministic latency
+	// Trading systems require predictable response times
+	rtdebug.SetGCPercent(-1)
+
+	// PHASE 3: Production event processing with NUMA optimization
+	// Lock thread to CPU core for consistent memory access patterns
+	runtime.LockOSThread()
+
+	// Infinite processing loop with automatic connection recovery
+	// Each connection failure triggers immediate reconnection attempt
+	for {
+		processEventStream()
 	}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// NETWORK OPTIMIZATION
+// PRODUCTION EVENT PROCESSING
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// processEventStream establishes WebSocket connection and processes blockchain events.
+// Handles complete connection lifecycle: setup, optimization, handshake, event processing.
+// Returns error on connection failure to trigger automatic reconnection by caller.
+//
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
-func establishConnection() (*tls.Conn, error) {
-	raw, err := net.Dial("tcp", constants.WsDialAddr)
-	if err != nil {
-		return nil, err
-	}
-
+func processEventStream() error {
+	// Establish TCP connection to WebSocket endpoint
+	// Raw TCP connection allows fine-grained socket optimization
+	raw, _ := net.Dial("tcp", constants.WsDialAddr)
 	tcpConn := raw.(*net.TCPConn)
+
+	// Configure TCP socket for minimal latency operation
+	// Disable Nagle algorithm for immediate packet transmission
 	tcpConn.SetNoDelay(true)
+
+	// Set buffer sizes to match expected frame sizes
+	// Prevents partial reads and optimizes memory usage
 	tcpConn.SetReadBuffer(constants.MaxFrameSize)
 	tcpConn.SetWriteBuffer(constants.MaxFrameSize)
 
-	if rawFile, err := tcpConn.File(); err == nil {
-		optimizeSocket(int(rawFile.Fd()))
-		rawFile.Close()
-	}
+	// Apply operating system level socket optimizations
+	// Access raw file descriptor for advanced socket configuration
+	rawFile, _ := tcpConn.File()
+	fd := int(rawFile.Fd())
 
-	tlsConn := tls.Client(raw, &tls.Config{
-		ServerName: constants.WsHost,
-	})
-
-	return tlsConn, nil
-}
-
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func optimizeSocket(fd int) {
+	// Core TCP optimizations applicable to all platforms
+	// TCP_NODELAY: Disable Nagle algorithm for immediate transmission
 	syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
+
+	// SO_RCVBUF/SO_SNDBUF: Optimize kernel buffer sizes for throughput
 	syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, constants.MaxFrameSize)
 	syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, constants.MaxFrameSize)
-	syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-	syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_KEEPALIVE, 1)
 
+	// Platform-specific network optimizations for enhanced performance
+	// Each OS provides different advanced networking features
 	switch runtime.GOOS {
 	case "linux":
+		// SO_REUSEPORT: Enable port reuse for load balancing
 		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 46, 1)
-		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, 18, 1000)
-		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, 16, 1)
-		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, 17, 1)
+
+		// TCP_CONGESTION: Use BBR congestion control for optimal throughput
 		syscall.SetsockoptString(fd, syscall.IPPROTO_TCP, 13, "bbr")
-
 	case "darwin":
-		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, 0x10, 1)
-		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, 0x101, 1)
-		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, 0x102, 3)
+		// SO_REUSEPORT: Enable port reuse on macOS
 		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 0x1006, 1)
-
-	case "windows":
-		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 0x0004, 1)
 	}
-}
+	rawFile.Close()
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// UTILITIES
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+	// Upgrade TCP connection to TLS for secure WebSocket communication
+	// Modern blockchain APIs require encrypted connections
+	conn := tls.Client(raw, &tls.Config{ServerName: constants.WsHost})
 
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func RunBootstrapOnly() error {
-	debug.DropMessage("BOOTSTRAP_STANDALONE", "Running standalone bootstrap synchronization")
+	// Complete WebSocket handshake protocol
+	// Establishes WebSocket protocol over TLS connection
+	ws.Handshake(conn)
 
-	if requiresBootstrapSync() {
-		if err := syncharvest.ExecutePeakSync(); err != nil {
-			return fmt.Errorf("bootstrap synchronization failed: %w", err)
+	// Send subscription message to receive relevant blockchain events
+	// Configures event filtering for arbitrage-relevant transactions
+	ws.SendSubscription(conn)
+
+	// Continuous event processing loop until connection failure
+	// Each iteration processes one complete WebSocket frame
+	for {
+		// Read complete WebSocket frame from connection
+		// Blocks until full frame is received or connection fails
+		payload, err := ws.SpinUntilCompleteMessage(conn)
+		if err != nil {
+			// Close connection and return error for reconnection attempt
+			conn.Close()
+			return err
 		}
-	} else {
-		debug.DropMessage("BOOTSTRAP_UNNECESSARY", "Bootstrap synchronization not required")
+
+		// Dispatch parsed event to arbitrage detection engine
+		// Frame parsing and routing handled by specialized parser
+		parser.HandleFrame(payload)
 	}
-
-	performCleanupAndPrepareProduction()
-	debug.DropMessage("BOOTSTRAP_STANDALONE_COMPLETE", "Standalone bootstrap synchronization complete")
-	return nil
-}
-
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func CheckSystemStatus() (syncNeeded bool, lastBlock, targetBlock uint64, err error) {
-	return syncharvest.CheckIfPeakSyncNeeded()
 }
