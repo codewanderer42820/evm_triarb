@@ -176,23 +176,23 @@ func TestRegisterTradingPairAddress(t *testing.T) {
 	RegisterTradingPairAddress([]byte(TestAddressUSDC_ETH[2:]), TestPairUSDC_ETH)
 
 	// Test successful lookups
-	if pairID := lookupPairByAddress([]byte(TestAddressETH_DAI[2:])); pairID != TestPairETH_DAI {
+	if pairID := LookupPairByAddress([]byte(TestAddressETH_DAI[2:])); pairID != TestPairETH_DAI {
 		t.Errorf("Expected pair ID %d, got %d", TestPairETH_DAI, pairID)
 	}
 
-	if pairID := lookupPairByAddress([]byte(TestAddressDAI_USDC[2:])); pairID != TestPairDAI_USDC {
+	if pairID := LookupPairByAddress([]byte(TestAddressDAI_USDC[2:])); pairID != TestPairDAI_USDC {
 		t.Errorf("Expected pair ID %d, got %d", TestPairDAI_USDC, pairID)
 	}
 
 	// Test non-existent address
 	unknownAddress := "1111111111111111111111111111111111111111"
-	if pairID := lookupPairByAddress([]byte(unknownAddress)); pairID != 0 {
+	if pairID := LookupPairByAddress([]byte(unknownAddress)); pairID != 0 {
 		t.Errorf("Expected 0 for unknown address, got %d", pairID)
 	}
 
 	// Test address update
 	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairWBTC_ETH)
-	if pairID := lookupPairByAddress([]byte(TestAddressETH_DAI[2:])); pairID != TestPairWBTC_ETH {
+	if pairID := LookupPairByAddress([]byte(TestAddressETH_DAI[2:])); pairID != TestPairWBTC_ETH {
 		t.Errorf("Address update failed, expected %d, got %d", TestPairWBTC_ETH, pairID)
 	}
 }
@@ -218,7 +218,7 @@ func TestAddressHashCollisionHandling(t *testing.T) {
 		RegisterTradingPairAddress([]byte(addr[2:]), intendedPairID)
 
 		// Immediately verify it can be found correctly
-		foundPairID := lookupPairByAddress([]byte(addr[2:]))
+		foundPairID := LookupPairByAddress([]byte(addr[2:]))
 		if foundPairID != intendedPairID {
 			t.Errorf("Address %s: expected %d, got %d after registration", addr, intendedPairID, foundPairID)
 
@@ -237,7 +237,7 @@ func TestAddressHashCollisionHandling(t *testing.T) {
 	// Test that different addresses don't return the same pair ID
 	returnedPairIDs := make(map[TradingPairID]string)
 	for _, addr := range collisionAddresses {
-		pairID := lookupPairByAddress([]byte(addr[2:]))
+		pairID := LookupPairByAddress([]byte(addr[2:]))
 		if pairID != 0 {
 			if existingAddr, exists := returnedPairIDs[pairID]; exists {
 				t.Errorf("CRITICAL BUG: Multiple addresses return same pair ID %d:", pairID)
@@ -252,7 +252,7 @@ func TestAddressHashCollisionHandling(t *testing.T) {
 
 	t.Logf("Address lookup summary:")
 	for _, addr := range collisionAddresses {
-		pairID := lookupPairByAddress([]byte(addr[2:]))
+		pairID := LookupPairByAddress([]byte(addr[2:]))
 		t.Logf("  %s → %d", addr, pairID)
 	}
 }
@@ -1247,7 +1247,7 @@ func BenchmarkAddressLookupIsolated(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		lookupPairByAddress(testAddr)
+		LookupPairByAddress(testAddr)
 	}
 }
 
@@ -1271,7 +1271,7 @@ func BenchmarkAddressLookupVariations(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		addr := addresses[i%len(addresses)]
-		lookupPairByAddress(addr)
+		LookupPairByAddress(addr)
 	}
 }
 
@@ -1361,7 +1361,7 @@ func BenchmarkPureAddressLookupChain(b *testing.B) {
 		packed := packEthereumAddress(testAddr)
 		hash := hashPackedAddressToIndex(packed)
 		_ = hash // Use the hash
-		pairID := lookupPairByAddress(testAddr)
+		pairID := LookupPairByAddress(testAddr)
 		_ = pairID // Use the result
 	}
 }
@@ -1399,7 +1399,7 @@ func BenchmarkAddressLookupCollisions(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		lookupPairByAddress(collisionAddresses[i%len(collisionAddresses)])
+		LookupPairByAddress(collisionAddresses[i%len(collisionAddresses)])
 	}
 }
 

@@ -382,7 +382,7 @@ func (h *PeakHarvester) collectLogForBatch(log *Log) bool {
 	logIndex := utils.ParseHexU64([]byte(log.LogIndex[2:]))
 
 	// Fast address lookup - skip "0x" prefix directly
-	pairID := h.lookupPairByAddress([]byte(log.Address[2:]))
+	pairID := h.LookupPairByAddress([]byte(log.Address[2:]))
 	if pairID == 0 {
 		return false
 	}
@@ -1322,14 +1322,14 @@ func FlushSyncedReservesToRouter() error {
 // ADDRESS PROCESSING INFRASTRUCTURE (from router.go)
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// lookupPairByAddress performs address resolution using Robin Hood hashing
+// LookupPairByAddress performs address resolution using Robin Hood hashing
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func (h *PeakHarvester) lookupPairByAddress(address40HexBytes []byte) TradingPairID {
+func (h *PeakHarvester) LookupPairByAddress(address40HexBytes []byte) TradingPairID {
 	// Convert the hex address string to an optimized packed representation for comparison
 	key := packEthereumAddress(address40HexBytes)
 

@@ -273,7 +273,7 @@ func (engine *ArbitrageEngine) allocateQueueHandle() pooledquantumqueue.Handle {
 //go:registerparams
 func DispatchPriceUpdate(logView *types.LogView) {
 	// Convert the Ethereum contract address from the log event to our internal trading pair ID
-	pairID := lookupPairByAddress(logView.Addr[constants.AddressHexStart:constants.AddressHexEnd])
+	pairID := LookupPairByAddress(logView.Addr[constants.AddressHexStart:constants.AddressHexEnd])
 	if pairID == 0 {
 		// This address is not registered in our system, so ignore this event
 		return
@@ -406,14 +406,14 @@ func countHexLeadingZeros(segment []byte) int {
 	return (firstChunk << 3) + firstByte
 }
 
-// lookupPairByAddress performs address resolution using Robin Hood hashing.
+// LookupPairByAddress performs address resolution using Robin Hood hashing.
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func lookupPairByAddress(address42HexBytes []byte) TradingPairID {
+func LookupPairByAddress(address42HexBytes []byte) TradingPairID {
 	// Convert the hex address string to an optimized packed representation for comparison
 	key := packEthereumAddress(address42HexBytes)
 
