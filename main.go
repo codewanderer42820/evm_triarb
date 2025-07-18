@@ -13,8 +13,6 @@
 //   - Phase 2: Memory cleanup and optimization for production
 //   - Phase 3: Real-time event processing with GC disabled
 //
-// 🇯🇵 MADE IN JAPAN. INSPIRED BY JAPANESE ENGINEERING. FROM NIIKAPPU HIDAKA HOKKAIDO 🇯🇵
-//
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package main
@@ -27,7 +25,6 @@ import (
 	"os/signal"
 	"runtime"
 	rtdebug "runtime/debug"
-	"sync"
 	"syscall"
 
 	"main/constants"
@@ -56,20 +53,6 @@ type Pool struct {
 	Address string  // 16B - Ethereum contract address
 	_       [8]byte // 8B - Padding to 32-byte boundary
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// GLOBAL STATE MANAGEMENT
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-//go:notinheap
-//go:align 8
-var (
-	// Shared database connection for sync harvester integration
-	pairsDB *sql.DB
-
-	// Global shutdown coordination mechanism
-	shutdownWG sync.WaitGroup
-)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // SYSTEM INITIALIZATION
@@ -106,6 +89,10 @@ func init() {
 
 	// Initialize the multi-core arbitrage detection system
 	router.InitializeArbitrageSystem(cycles)
+
+	// Close database after loading (syncharvester doesn't need it)
+	db.Close()
+
 	debug.DropMessage("READY", "System initialized")
 }
 
@@ -129,7 +116,7 @@ func main() {
 
 		blocksBehind := targetBlock - lastBlock
 		debug.DropMessage("SYNC", "Syncing "+utils.Itoa(int(blocksBehind))+" blocks")
-		syncharvester.ExecutePeakSyncWithDB(pairsDB)
+		syncharvester.ExecutePeakSync()
 	}
 
 	// PHASE 2: Memory optimization for deterministic runtime behavior
@@ -149,7 +136,7 @@ func main() {
 
 		blocksBehind := targetBlock - lastBlock
 		debug.DropMessage("SYNC", "Post-GC sync: "+utils.Itoa(int(blocksBehind))+" blocks")
-		syncharvester.ExecutePeakSyncWithDB(pairsDB)
+		syncharvester.ExecutePeakSync()
 	}
 
 	// Load synchronized reserve data into the router for arbitrage calculations
@@ -259,15 +246,13 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 	return cycles
 }
 
-// openDatabase establishes database connection and stores reference for sync harvester.
-// Maintains global reference for use by synchronization subsystem.
+// openDatabase establishes database connection for initialization only.
+// Connection is closed after loading data since syncharvester manages its own.
 func openDatabase(dbPath string) *sql.DB {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		panic("Failed to open database " + dbPath + ": " + err.Error())
 	}
-
-	pairsDB = db // Store global reference for sync harvester
 	return db
 }
 
@@ -380,7 +365,7 @@ func processEventStream() error {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // setupSignalHandling configures graceful shutdown coordination.
-// Uses WaitGroup to ensure all components complete cleanly before exit.
+// Uses control package's ShutdownWG for proper subsystem coordination.
 func setupSignalHandling() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -390,14 +375,13 @@ func setupSignalHandling() {
 		<-sigChan
 		debug.DropMessage("SIGNAL", "Received interrupt, shutting down...")
 
+		// Signal shutdown to all subsystems
+		control.Shutdown()
+
 		// Wait for all subsystems to complete graceful shutdown
-		shutdownWG.Wait()
+		control.ShutdownWG.Wait()
 
-		// Close shared database connection
-		if pairsDB != nil {
-			pairsDB.Close()
-		}
-
+		debug.DropMessage("SIGNAL", "All subsystems shutdown complete")
 		os.Exit(0)
 	}()
 }

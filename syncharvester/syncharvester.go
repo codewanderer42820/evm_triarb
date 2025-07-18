@@ -22,6 +22,7 @@ import (
 	"unsafe"
 
 	"main/constants"
+	"main/control"
 	"main/debug"
 	"main/router"
 	"main/types"
@@ -120,12 +121,14 @@ func NewRPCClient() *RPCClient {
 	return &RPCClient{
 		url: RPCScheme + "://" + RPCHost + RPCProjectPath,
 		client: &http.Client{
+			Timeout: 30 * time.Second, // ONLY ADD THIS - prevents infinite hangs
 			Transport: &http.Transport{
-				MaxIdleConns:        1,
-				MaxIdleConnsPerHost: 1,
-				DisableCompression:  true,
-				ForceAttemptHTTP2:   true,
-				IdleConnTimeout:     0,
+				MaxIdleConns:          1,
+				MaxIdleConnsPerHost:   1,
+				DisableCompression:    true,
+				ForceAttemptHTTP2:     true,
+				IdleConnTimeout:       90 * time.Second, // CHANGE FROM 0
+				ResponseHeaderTimeout: 10 * time.Second, // ADD
 			},
 		},
 	}
@@ -268,14 +271,21 @@ type StreamlinedHarvester struct {
 	eventsInBatch int      // 8B - Current batch size counter
 	_             [32]byte // 32B - Padding to complete cache line
 
-	// CACHE LINE 3: Database connections and transaction state (64B)
+	// CACHE LINE 3: Adaptive batch sizing (64B)
+	// Critical for performance - accessed every batch
+	consecutiveSuccesses int       // 8B - Success counter for batch size adaptation
+	consecutiveFailures  int       // 8B - Failure counter for backoff
+	startTime            time.Time // 24B - Start timestamp for progress reporting
+	lastCommit           time.Time // 24B - Last commit timestamp
+
+	// CACHE LINE 4: Database connections and transaction state (64B)
 	// Accessed together during database operations
 	reservesDB *sql.DB    // 8B - Reserves database connection
 	currentTx  *sql.Tx    // 8B - Active transaction for batch operations
 	rpcClient  *RPCClient // 8B - RPC client for blockchain communication
 	_          [40]byte   // 40B - Padding to complete cache line
 
-	// CACHE LINE 4: Context and control flow (64B)
+	// CACHE LINE 5: Context and control flow (64B)
 	// Less frequently accessed, used for lifecycle management
 	ctx    context.Context    // 16B - Cancellation context for clean shutdown
 	cancel context.CancelFunc // 8B - Cancel function for context termination
@@ -294,6 +304,8 @@ func NewStreamlinedHarvester() *StreamlinedHarvester {
 		rpcClient:  NewRPCClient(),
 		ctx:        ctx,
 		cancel:     cancel,
+		startTime:  time.Now(),
+		lastCommit: time.Now(),
 	}
 
 	// Pre-allocate string builder
@@ -313,7 +325,7 @@ func NewStreamlinedHarvester() *StreamlinedHarvester {
 		PRAGMA locking_mode = EXCLUSIVE;
 	`)
 
-	// Signal handling
+	// Signal handling with global shutdown coordination
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -325,11 +337,11 @@ func NewStreamlinedHarvester() *StreamlinedHarvester {
 }
 
 // Trust RPC completely - minimal validation
-func (h *StreamlinedHarvester) processLog(log *Log) {
+func (h *StreamlinedHarvester) processLog(log *Log) bool {
 	// Only check if we care about this pair - skip "0x" prefix
 	pairID := router.LookupPairByAddress([]byte(log.Address[2:]))
 	if pairID == 0 {
-		return
+		return false
 	}
 
 	// Trust RPC format - direct parsing, skip "0x" prefixes
@@ -349,6 +361,8 @@ func (h *StreamlinedHarvester) processLog(log *Log) {
 		txHash:      log.TxHash,
 		pairAddress: log.Address,
 	})
+
+	return true
 }
 
 // Optimized batch flush with pre-allocated builder
@@ -466,9 +480,19 @@ func (h *StreamlinedHarvester) SyncToLatest() error {
 }
 
 func (h *StreamlinedHarvester) Close() {
-	h.currentTx.Commit()
-	h.reservesDB.Close()
-	h.cancel()
+	// Ensure all data is properly flushed before marking as done
+	if h.currentTx != nil {
+		h.flushBatch()       // Flush any remaining events
+		h.currentTx.Commit() // Commit final transaction
+	}
+
+	h.reservesDB.Close() // Close database connection
+	h.cancel()           // Cancel context
+
+	// Signal completion to shutdown coordinator AFTER everything is clean
+	control.ShutdownWG.Done()
+
+	debug.DropMessage("SYNC_CLEAN", "Syncharvester shutdown complete")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -562,13 +586,22 @@ func writeHex64(dst []byte, v uint64) int {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 func ExecutePeakSync() error {
+	debug.DropMessage("SYNC_START", "Starting peak sync...")
+
+	// Register with global shutdown coordination
+	control.ShutdownWG.Add(1)
+
+	debug.DropMessage("SYNC_START", "Creating harvester...")
 	h := NewStreamlinedHarvester()
-	defer h.Close()
+	defer h.Close() // Close() will call ShutdownWG.Done() after proper cleanup
+
+	debug.DropMessage("SYNC_START", "Harvester created, beginning sync...")
 	return h.SyncToLatest()
 }
 
 func ExecutePeakSyncWithDB(existingPairsDB *sql.DB) error {
-	return ExecutePeakSync() // Don't need pairs DB anymore
+	// No longer need pairs DB - using router's address lookup
+	return ExecutePeakSync()
 }
 
 func CheckIfPeakSyncNeeded() (bool, uint64, uint64, error) {

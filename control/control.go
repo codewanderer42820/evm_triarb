@@ -13,6 +13,7 @@
 //   - Virtual timing without syscall overhead
 //   - Wait-free coordination algorithms
 //   - Approximate timing with configurable precision
+//   - Global shutdown coordination
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -20,6 +21,7 @@ package control
 
 import (
 	"main/constants"
+	"sync"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -52,6 +54,10 @@ var (
 	_    [44]byte // Pad to 64B
 	stop uint32   // Shutdown coordinator: 1 = graceful termination, 0 = normal operation
 	_    [60]byte // Pad rest
+
+	// GLOBAL SHUTDOWN COORDINATION
+	// WaitGroup for coordinating graceful shutdown across all subsystems
+	ShutdownWG sync.WaitGroup
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
