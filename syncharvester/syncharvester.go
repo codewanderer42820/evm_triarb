@@ -1185,15 +1185,9 @@ func FlushSyncedReservesToRouter() error {
 			continue
 		}
 
-		// Fast decimal to uint64 conversion using utils
-		// Convert string to bytes for utils functions
-		reserve0 := uint64(0)
-		reserve1 := uint64(0)
-
-		// Manual fast decimal parsing since utils doesn't have decimal parsing
-		// TODO: Could add decimal parsing to utils
-		reserve0 = fastParseUint64(reserve0Str)
-		reserve1 = fastParseUint64(reserve1Str)
+		// Fast decimal to uint64 conversion using ParseDecimalU64
+		reserve0 := ParseDecimalU64(reserve0Str)
+		reserve1 := ParseDecimalU64(reserve1Str)
 
 		// Skip invalid values
 		if reserve0 == 0 && reserve0Str != "0" || reserve1 == 0 && reserve1Str != "0" {
@@ -1280,46 +1274,31 @@ func writeHex64(dst []byte, v uint64) {
 	dst[15] = hex[n15]
 }
 
-// fastParseUint64 converts decimal string to uint64
+// ParseDecimalU64 converts decimal string to uint64
+// Simple loop is often fastest due to CPU branch prediction and simplicity
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func fastParseUint64(s string) uint64 {
+func ParseDecimalU64(s string) uint64 {
 	if len(s) == 0 {
 		return 0
 	}
 
-	// For very short strings, simple loop is fastest
-	if len(s) <= 4 {
-		var n uint64
-		for i := 0; i < len(s); i++ {
-			c := s[i]
-			if c < '0' || c > '9' {
-				return 0
-			}
-			n = n*10 + uint64(c-'0')
-		}
-		return n
-	}
+	// Convert string to byte slice without allocation
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
 
-	// For longer strings, we could unroll and parallelize
-	// but decimal parsing has inherent dependencies (each digit depends on previous)
-	// so we stick with the simple approach
 	var n uint64
-	for i := 0; i < len(s); i++ {
-		c := s[i]
+	for i := 0; i < len(b); i++ {
+		c := b[i]
 		if c < '0' || c > '9' {
-			return 0
-		}
-		// Overflow check
-		if n > (^uint64(0))/10 {
 			return 0
 		}
 		n = n*10 + uint64(c-'0')
 	}
+
 	return n
 }
 

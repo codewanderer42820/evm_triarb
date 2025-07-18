@@ -1850,7 +1850,7 @@ func TestFastParseUint64(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := fastParseUint64(tc.input)
+			result := ParseDecimalU64(tc.input)
 			if result != tc.expected {
 				t.Errorf("Expected %d, got %d", tc.expected, result)
 			}
@@ -2003,7 +2003,7 @@ func BenchmarkFastParseUint64(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		fastParseUint64(input)
+		ParseDecimalU64(input)
 	}
 }
 
