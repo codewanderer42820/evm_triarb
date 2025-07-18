@@ -1140,16 +1140,28 @@ func FlushSyncedReservesToRouter() error {
 	var latestBlock uint64
 	err = db.QueryRow("SELECT last_block FROM sync_metadata WHERE id = 1").Scan(&latestBlock)
 	if err != nil {
-		// If no metadata, get max block from sync_events
-		err = db.QueryRow("SELECT COALESCE(MAX(block_number), 0) FROM sync_events").Scan(&latestBlock)
-		if err != nil || latestBlock == 0 {
-			return fmt.Errorf("no sync data found in database")
+		// Check if sync_events exist - if they do, database is corrupted
+		var eventCount int
+		checkErr := db.QueryRow("SELECT COUNT(*) FROM sync_events").Scan(&eventCount)
+		if checkErr == nil && eventCount > 0 {
+			// This is a critical inconsistency - sync events exist but metadata is missing
+			panic(fmt.Sprintf("database corruption: %d sync_events exist but sync_metadata is missing", eventCount))
 		}
+
+		// No sync data at all - this is a normal empty database
+		return fmt.Errorf("no sync data found in database")
 	}
 
-	// Convert block number to hex using a simpler approach
-	// Since this runs once, we can use fmt.Sprintf
-	blockHex := []byte(fmt.Sprintf("0x%x", latestBlock))
+	// Pre-allocate block hex buffer with optimal size for uint32
+	// Max uint32 (4294967295) in hex is 8 chars plus "0x" = 10 chars
+	var blockHexBuf [10]byte
+	blockHexBuf[0] = '0'
+	blockHexBuf[1] = 'x'
+
+	// Write block number as hex (assuming it fits in uint32 for router)
+	// This is more efficient than fmt.Sprintf
+	blockLen := 2 + WriteHex32(blockHexBuf[2:], uint32(latestBlock))
+	blockHex := blockHexBuf[:blockLen]
 
 	// Pre-allocate data buffer with zeros using uint64 writes
 	var dataBuffer [130]byte
@@ -1163,6 +1175,20 @@ func FlushSyncedReservesToRouter() error {
 	for i := 0; i < 16; i++ {
 		dataPtr[i] = zeros
 	}
+
+	// Static values that never change - allocate once outside the loop
+	staticLogIdx := []byte("0x0")
+	staticTxIndex := []byte("0x0")
+	staticTopics := []byte(SyncEventSignature)
+
+	// Create LogView once outside the loop and reuse it
+	var v types.LogView
+
+	// Set static fields once
+	v.LogIdx = staticLogIdx
+	v.TxIndex = staticTxIndex
+	v.Topics = staticTopics
+	v.BlkNum = blockHex
 
 	// Query all reserves
 	rows, err := db.Query(`
@@ -1200,19 +1226,9 @@ func FlushSyncedReservesToRouter() error {
 		// Reserve1: write 16 hex chars at position 66
 		WriteHex64(dataBuffer[66:82], reserve1)
 
-		// Create minimal LogView on stack
-		var v types.LogView
-
-		// Direct assignment - no allocations
-		// Using utils.B2s would add overhead here since we already have the string
+		// Update only the changing fields
 		v.Addr = unsafe.Slice(unsafe.StringData(pairAddress), len(pairAddress))
 		v.Data = dataBuffer[:]
-		v.BlkNum = blockHex
-
-		// Static values
-		v.LogIdx = []byte("0x0")
-		v.TxIndex = []byte("0x0")
-		v.Topics = []byte(SyncEventSignature)
 
 		// Dispatch to router
 		router.DispatchPriceUpdate(&v)
@@ -1272,6 +1288,39 @@ func WriteHex64(dst []byte, v uint64) {
 	dst[14] = hex[n14]
 	dst[7] = hex[n7]
 	dst[15] = hex[n15]
+}
+
+// WriteHex32 writes uint32 as hex characters without leading zeros
+// Returns the number of hex characters written (1-8)
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func WriteHex32(dst []byte, v uint32) int {
+	const hex = "0123456789abcdef"
+
+	if v == 0 {
+		dst[0] = '0'
+		return 1
+	}
+
+	// Count nibbles
+	nibbles := 0
+	temp := v
+	for temp > 0 {
+		nibbles++
+		temp >>= 4
+	}
+
+	// Write hex chars from most significant to least
+	for i := nibbles - 1; i >= 0; i-- {
+		dst[i] = hex[v&0xF]
+		v >>= 4
+	}
+
+	return nibbles
 }
 
 // ParseDecimalU64 converts decimal string to uint64

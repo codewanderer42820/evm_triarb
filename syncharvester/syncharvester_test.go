@@ -759,10 +759,6 @@ func TestFlushBatch(t *testing.T) {
 	}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// FLUSH TO ROUTER TESTS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
 // testableFlushSyncedReservesToRouter is a version that accepts a dispatch function for testing
 func testableFlushSyncedReservesToRouter(dispatcher func(*types.LogView)) (int, error) {
 	// Open the reserves database
