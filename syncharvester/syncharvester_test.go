@@ -192,22 +192,68 @@ func createTestPairsDB(t testingInterface) *sql.DB {
 	return db
 }
 
-// Mock utils package functions
-var utilsParseHexU64 = func(b []byte) uint64 {
-	// Simple hex parser for testing
-	s := string(b)
-	var result uint64
-	for _, c := range s {
-		result *= 16
-		if c >= '0' && c <= '9' {
-			result += uint64(c - '0')
-		} else if c >= 'a' && c <= 'f' {
-			result += uint64(c - 'a' + 10)
-		} else if c >= 'A' && c <= 'F' {
-			result += uint64(c - 'A' + 10)
+// Common interface for both *testing.T and *testing.B
+type testingInterface interface {
+	Fatalf(format string, args ...interface{})
+	TempDir() string
+}
+
+func setupTestHarvester(t testingInterface, mockServer *MockRPCServer) (*PeakHarvester, func()) {
+	// Create test pairs database
+	pairsDB := createTestPairsDB(t)
+
+	// Create test reserves database with unique name to avoid conflicts
+	tempDir := t.TempDir()
+	reservesDBPath := filepath.Join(tempDir, fmt.Sprintf("test_reserves_%d.db", time.Now().UnixNano()))
+	reservesDB, err := sql.Open("sqlite3", reservesDBPath)
+	if err != nil {
+		t.Fatalf("Failed to create reserves database: %v", err)
+	}
+
+	// Configure harvester manually for testing
+	h := &PeakHarvester{
+		// Core fields
+		reserveBuffer:   [2]*big.Int{big.NewInt(0), big.NewInt(0)},
+		hexDecodeBuffer: make([]byte, HexDecodeBufferSize),
+		logSlice:        make([]Log, 0, PreAllocLogSliceSize),
+		eventBatch:      make([]batchEvent, 0, EventBatchSize),
+		reserveBatch:    make([]batchReserve, 0, EventBatchSize),
+
+		// Database connections
+		reservesDB: reservesDB,
+		pairsDB:    pairsDB,
+		rpcClient:  NewRPCClient(mockServer.URL),
+
+		// Lookup structures
+		pairMap:           make(map[string]int64),
+		pairAddressLookup: make(map[int64]string),
+
+		// Context and control
+		signalChan: make(chan os.Signal, 1),
+		startTime:  time.Now(),
+		lastCommit: time.Now(),
+	}
+
+	h.ctx, h.cancel = context.WithCancel(context.Background())
+
+	// Initialize schema
+	h.initializeSchema()
+	h.loadPairMappings()
+	h.prepareGlobalStatements()
+
+	cleanup := func() {
+		if h.reservesDB != nil {
+			h.reservesDB.Close()
+		}
+		if h.pairsDB != nil {
+			h.pairsDB.Close()
+		}
+		if h.cancel != nil {
+			h.cancel()
 		}
 	}
-	return result
+
+	return h, cleanup
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -466,70 +512,6 @@ func TestConfigureDatabase_Error(t *testing.T) {
 // UNIT TESTS - CORE PROCESSING
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Common interface for both *testing.T and *testing.B
-type testingInterface interface {
-	Fatalf(format string, args ...interface{})
-	TempDir() string
-}
-
-func setupTestHarvester(t testingInterface, mockServer *MockRPCServer) (*PeakHarvester, func()) {
-	// Create test pairs database
-	pairsDB := createTestPairsDB(t)
-
-	// Create test reserves database with unique name to avoid conflicts
-	tempDir := t.TempDir()
-	reservesDBPath := filepath.Join(tempDir, fmt.Sprintf("test_reserves_%d.db", time.Now().UnixNano()))
-	reservesDB, err := sql.Open("sqlite3", reservesDBPath)
-	if err != nil {
-		t.Fatalf("Failed to create reserves database: %v", err)
-	}
-
-	// Configure harvester manually for testing
-	h := &PeakHarvester{
-		// Core fields
-		reserveBuffer:   [2]*big.Int{big.NewInt(0), big.NewInt(0)},
-		hexDecodeBuffer: make([]byte, HexDecodeBufferSize),
-		logSlice:        make([]Log, 0, PreAllocLogSliceSize),
-		eventBatch:      make([]batchEvent, 0, EventBatchSize),
-		reserveBatch:    make([]batchReserve, 0, EventBatchSize),
-
-		// Database connections
-		reservesDB: reservesDB,
-		pairsDB:    pairsDB,
-		rpcClient:  NewRPCClient(mockServer.URL),
-
-		// Lookup structures
-		pairMap:           make(map[string]int64),
-		pairAddressLookup: make(map[int64]string),
-
-		// Context and control
-		signalChan: make(chan os.Signal, 1),
-		startTime:  time.Now(),
-		lastCommit: time.Now(),
-	}
-
-	h.ctx, h.cancel = context.WithCancel(context.Background())
-
-	// Initialize schema
-	h.initializeSchema()
-	h.loadPairMappings()
-	h.prepareGlobalStatements()
-
-	cleanup := func() {
-		if h.reservesDB != nil {
-			h.reservesDB.Close()
-		}
-		if h.pairsDB != nil {
-			h.pairsDB.Close()
-		}
-		if h.cancel != nil {
-			h.cancel()
-		}
-	}
-
-	return h, cleanup
-}
-
 func TestCollectLogForBatch(t *testing.T) {
 	mockServer := NewMockRPCServer()
 	defer mockServer.Close()
@@ -754,7 +736,6 @@ func TestNewPeakHarvester(t *testing.T) {
 	ReservesDBPath = filepath.Join(tempDir, "test_reserves.db")
 	defer func() { ReservesDBPath = oldPath }()
 
-	// Override RPCPathTemplate
 	oldTemplate := RPCPathTemplate
 	RPCPathTemplate = mockServer.URL + "/%s"
 	defer func() { RPCPathTemplate = oldTemplate }()
@@ -1014,7 +995,7 @@ func TestProcessBatch(t *testing.T) {
 		{
 			Address:     "0x1234567890123456789012345678901234567890",
 			Topics:      []string{SyncEventSignature},
-			Data:        "0x0000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000de0b6b3a7640000",
+			Data:        "0x0000000000000000000000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000000de0b6b3a7640000",
 			BlockNumber: "0x64",
 			TxHash:      "0xtest",
 			LogIndex:    "0x1",
@@ -1369,6 +1350,9 @@ func TestCheckIfPeakSyncNeeded(t *testing.T) {
 	if lastBlock != 0 || targetBlock != 0 {
 		t.Errorf("Expected zero values, got last=%d, target=%d", lastBlock, targetBlock)
 	}
+	if err != nil {
+		t.Errorf("Expected nil error for non-existent database, got: %v", err)
+	}
 
 	// Create database with data
 	db, _ := sql.Open("sqlite3", ReservesDBPath)
@@ -1403,6 +1387,9 @@ func TestCheckIfPeakSyncNeeded(t *testing.T) {
 	needed, _, _, err = CheckIfPeakSyncNeeded()
 	if needed {
 		t.Error("Expected sync to NOT be needed when already synced")
+	}
+	if err != nil {
+		t.Errorf("Unexpected error when already synced: %v", err)
 	}
 
 	// Test RPC error
@@ -1508,7 +1495,5 @@ func BenchmarkFlushBatch(b *testing.B) {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 func TestMain(m *testing.M) {
-	// Override utils.ParseHexU64 for testing
-	// In real code, this would be imported from utils package
 	os.Exit(m.Run())
 }

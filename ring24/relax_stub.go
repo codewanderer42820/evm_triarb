@@ -9,13 +9,13 @@
 //   Provides API compatibility while allowing platform-specific optimizations where available.
 //
 // Compilation Targets:
-//   - Non-x86 architectures (ARM, RISC-V, etc.)
+//   - Non-x86/ARM64 architectures (RISC-V, MIPS, etc.)
 //   - Builds with assembly disabled (noasm tag)
-//   - Platforms without PAUSE instruction support
+//   - Platforms without PAUSE/YIELD instruction support
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-//go:build !amd64 || noasm
+//go:build (!amd64 && !arm64) || noasm
 
 package ring24
 
@@ -29,9 +29,9 @@ package ring24
 //	complete elimination during compilation, adding zero overhead.
 //
 // PLATFORM BEHAVIOR:
-//   - ARM: Could use WFE (Wait For Event) if implemented
 //   - RISC-V: Could use PAUSE instruction if available
-//   - Others: Pure spinning without hints
+//   - MIPS: Pure spinning without hints
+//   - Others: Default scheduler behavior
 //
 //go:norace
 //go:nocheckptr
