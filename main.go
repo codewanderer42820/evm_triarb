@@ -319,6 +319,13 @@ func main() {
 		syncharvester.ExecutePeakSyncWithDB(pairsDB)
 	}
 
+	// Flush all synced reserves to router before entering production mode
+	// This loads the latest reserve data into the router for arbitrage detection
+	if err := syncharvester.FlushSyncedReservesToRouter(); err != nil {
+		debug.DropMessage("FLUSH_ERROR", err.Error())
+		// Continue anyway - router will work with whatever data it has
+	}
+
 	// Disable garbage collector for deterministic latency
 	// Trading systems require predictable response times
 	rtdebug.SetGCPercent(-1)
