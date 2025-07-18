@@ -1185,7 +1185,7 @@ func FlushSyncedReservesToRouter() error {
 			continue
 		}
 
-		// Fast decimal to uint64 conversion using ParseDecimalU64
+		// Parse reserve strings to uint64
 		reserve0 := ParseDecimalU64(reserve0Str)
 		reserve1 := ParseDecimalU64(reserve1Str)
 
@@ -1275,7 +1275,6 @@ func writeHex64(dst []byte, v uint64) {
 }
 
 // ParseDecimalU64 converts decimal string to uint64
-// Simple loop is often fastest due to CPU branch prediction and simplicity
 //
 //go:norace
 //go:nocheckptr
@@ -1287,18 +1286,14 @@ func ParseDecimalU64(s string) uint64 {
 		return 0
 	}
 
-	// Convert string to byte slice without allocation
-	b := unsafe.Slice(unsafe.StringData(s), len(s))
-
 	var n uint64
-	for i := 0; i < len(b); i++ {
-		c := b[i]
+	for i := 0; i < len(s); i++ {
+		c := s[i]
 		if c < '0' || c > '9' {
 			return 0
 		}
 		n = n*10 + uint64(c-'0')
 	}
-
 	return n
 }
 
