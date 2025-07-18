@@ -1196,9 +1196,9 @@ func FlushSyncedReservesToRouter() error {
 
 		// Write reserves as hex into pre-zeroed buffer
 		// Reserve0: write 16 hex chars at position 2
-		writeHex64(dataBuffer[2:18], reserve0)
+		WriteHex64(dataBuffer[2:18], reserve0)
 		// Reserve1: write 16 hex chars at position 66
-		writeHex64(dataBuffer[66:82], reserve1)
+		WriteHex64(dataBuffer[66:82], reserve1)
 
 		// Create minimal LogView on stack
 		var v types.LogView
@@ -1227,14 +1227,14 @@ func FlushSyncedReservesToRouter() error {
 	return nil
 }
 
-// writeHex64 writes uint64 as exactly 16 hex characters
+// WriteHex64 writes uint64 as exactly 16 hex characters
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func writeHex64(dst []byte, v uint64) {
+func WriteHex64(dst []byte, v uint64) {
 	const hex = "0123456789abcdef"
 
 	// Extract all nibbles at once for maximum parallelism
