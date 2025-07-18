@@ -200,16 +200,11 @@ func Ftoa(f float64) string {
 		// Convert as integer - faster than general float conversion
 		intVal := uint64(absF)
 
-		if intVal == 0 {
+		// intVal is guaranteed >= 1 due to absF >= 1.0 condition
+		for intVal > 0 {
 			i--
-			buf[i] = '0'
-		} else {
-			// Same digit extraction as Itoa
-			for intVal > 0 {
-				i--
-				buf[i] = byte(intVal%10 + '0')
-				intVal /= 10
-			}
+			buf[i] = byte(intVal%10 + '0')
+			intVal /= 10
 		}
 
 		if negative {
