@@ -25,15 +25,24 @@ import (
 	"syscall"
 
 	"main/constants"
+	"main/control"
 	"main/debug"
 	"main/parser"
 	"main/router"
-	"main/syncharvest"
+	"main/syncharvester"
 	"main/utils"
 	"main/ws"
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// GLOBAL DATABASE CONNECTION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// pairsDB holds the shared database connection for trading pairs
+// Reused by sync harvester to avoid duplicate connections
+var pairsDB *sql.DB
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // SYSTEM INITIALIZATION
@@ -173,6 +182,7 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 
 // loadPoolsFromDatabase loads trading pair addresses from SQLite database.
 // Populates global address-to-pair-ID lookup table for blockchain event routing.
+// Stores database connection globally for reuse by sync harvester.
 // Returns count of loaded pools or panics on any database operation failure.
 //
 //go:norace
@@ -187,7 +197,10 @@ func loadPoolsFromDatabase(dbPath string) int {
 	if err != nil {
 		panic("Failed to open database " + dbPath + ": " + err.Error())
 	}
-	defer db.Close()
+
+	// Store database connection globally for sync harvester reuse
+	// This avoids opening duplicate connections and improves efficiency
+	pairsDB = db
 
 	// Query trading pairs ordered by ID for consistent processing
 	// Only need ID and address for blockchain event routing
@@ -256,15 +269,15 @@ func loadPoolsFromDatabase(dbPath string) int {
 func main() {
 	// PHASE 1: Bootstrap synchronization with blockchain state
 	// Ensures system processes events from current block height
-	syncNeeded, lastBlock, targetBlock, _ := syncharvest.CheckIfPeakSyncNeeded()
+	syncNeeded, lastBlock, targetBlock, _ := syncharvester.CheckIfPeakSyncNeeded()
 	if syncNeeded {
 		// Calculate synchronization workload for progress indication
 		blocksBehind := targetBlock - lastBlock
 		debug.DropMessage("SYNC", "Syncing "+utils.Itoa(int(blocksBehind))+" blocks")
 
 		// Execute blockchain state synchronization to current block
-		// Critical for accurate arbitrage detection on live events
-		syncharvest.ExecutePeakSync()
+		// Pass existing database connection to avoid duplicate connections
+		syncharvester.ExecutePeakSyncWithDB(pairsDB)
 	}
 
 	// PHASE 2: Memory optimization for deterministic production runtime
@@ -286,6 +299,10 @@ func main() {
 	// PHASE 3: Production event processing with NUMA optimization
 	// Lock thread to CPU core for consistent memory access patterns
 	runtime.LockOSThread()
+
+	// Force the system into hot state for immediate processing
+	// This ensures arbitrage detection starts without waiting for first event
+	control.ForceHot()
 
 	// Infinite processing loop with automatic connection recovery
 	// Each connection failure triggers immediate reconnection attempt
