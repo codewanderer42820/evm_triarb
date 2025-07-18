@@ -1,14 +1,19 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// 🚀 HIGH-PERFORMANCE ARBITRAGE DETECTION SYSTEM
+// Arbitrage Detection System - Main Entry Point
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 // Project: High-Frequency Arbitrage Detection System
-// Component: Main Entry Point & Clean Orchestration
-//
-// 🇯🇵 MADE IN JAPAN. INSPIRED BY JAPANESE ENGINEERING. FROM NIIKAPPU HIDAKA HOKKAIDO 🇯🇵
+// Component: Main Entry Point & System Orchestration
 //
 // Description:
-//   Clean orchestration with proper phase separation and GC management.
-//   Bootstrap → Cleanup → GC Disable → Production WebSocket Processing
+//   System orchestration with phased initialization and clean separation of concerns.
+//   Bootstrap → Memory Optimization → Production Event Processing
+//
+// Architecture:
+//   - Phase 1: Bootstrap synchronization with blockchain state
+//   - Phase 2: Memory cleanup and optimization for production
+//   - Phase 3: Real-time event processing with GC disabled
+//
+// 🇯🇵 MADE IN JAPAN. INSPIRED BY JAPANESE ENGINEERING. FROM NIIKAPPU HIDAKA HOKKAIDO 🇯🇵
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -38,28 +43,31 @@ import (
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// TYPE DEFINITIONS
+// CORE DATA STRUCTURES
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// Pool represents a trading pair with its database identifier and contract address.
+// Optimized for cache efficiency with 32-byte alignment.
+//
 //go:notinheap
 //go:align 32
 type Pool struct {
-	ID      int64   // 8B
-	Address string  // 16B
-	_       [8]byte // 8B padding to 32B
+	ID      int64   // 8B - Database identifier for the trading pair
+	Address string  // 16B - Ethereum contract address
+	_       [8]byte // 8B - Padding to 32-byte boundary
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// GLOBAL VARIABLES
+// GLOBAL STATE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 //go:notinheap
 //go:align 8
 var (
-	// Shared database connection reused by sync harvester
+	// Shared database connection for sync harvester integration
 	pairsDB *sql.DB
 
-	// Global shutdown coordination
+	// Global shutdown coordination mechanism
 	shutdownWG sync.WaitGroup
 )
 
@@ -67,17 +75,19 @@ var (
 // SYSTEM INITIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// init performs system-wide initialization before main execution.
+// Loads all necessary data and configures the arbitrage detection infrastructure.
 func init() {
 	debug.DropMessage("INIT", "Loading system data")
 
-	// Load database first to establish connection for sync harvester
+	// Initialize database connection and load core data structures
 	db := openDatabase("uniswap_pairs.db")
 	pools := loadPoolsFromDatabase(db)
 	cycles := loadArbitrageCyclesFromFile("cycles_3_3.txt")
 
 	debug.DropMessage("LOADED", utils.Itoa(len(pools))+" pools, "+utils.Itoa(len(cycles))+" cycles")
 
-	// Display samples for verification
+	// Display sample data for verification during development
 	for i := 0; i < 3 && i < len(pools); i++ {
 		p := pools[i]
 		debug.DropMessage("POOL", utils.Itoa(i+1)+": ID "+utils.Itoa(int(p.ID))+" → "+p.Address)
@@ -88,11 +98,13 @@ func init() {
 		debug.DropMessage("CYCLE", utils.Itoa(i+1)+": ("+utils.Itoa(int(c[0]))+")→("+utils.Itoa(int(c[1]))+")→("+utils.Itoa(int(c[2]))+")")
 	}
 
-	// Register addresses before router init so lookup table is populated
+	// Register pool addresses in the router hash table before system initialization
+	// This ensures the lookup infrastructure is populated when the router initializes
 	for _, pool := range pools {
 		router.RegisterTradingPairAddress([]byte(pool.Address[2:]), router.TradingPairID(pool.ID))
 	}
 
+	// Initialize the multi-core arbitrage detection system
 	router.InitializeArbitrageSystem(cycles)
 	debug.DropMessage("READY", "System initialized")
 }
@@ -101,11 +113,13 @@ func init() {
 // MAIN ORCHESTRATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Three-phase orchestration: Bootstrap → Memory Cleanup → Production
+// main orchestrates the complete system lifecycle in three distinct phases.
+// Each phase has specific responsibilities and optimization characteristics.
 func main() {
 	setupSignalHandling()
 
 	// PHASE 1: Bootstrap synchronization with blockchain state
+	// Ensures local database reflects current blockchain state before real-time processing
 	for {
 		syncNeeded, lastBlock, targetBlock, _ := syncharvester.CheckIfPeakSyncNeeded()
 		if !syncNeeded {
@@ -118,12 +132,14 @@ func main() {
 		syncharvester.ExecutePeakSyncWithDB(pairsDB)
 	}
 
-	// PHASE 2: Memory optimization for deterministic runtime
+	// PHASE 2: Memory optimization for deterministic runtime behavior
+	// Performs garbage collection and memory consolidation before production mode
 	runtime.GC()
-	runtime.GC()
+	runtime.GC() // Double GC to ensure thorough cleanup
 	rtdebug.FreeOSMemory()
 
-	// Re-check sync after GC (blockchain doesn't pause)
+	// Re-verify synchronization status after memory cleanup
+	// Blockchain continues advancing during GC, so re-check is necessary
 	for {
 		syncNeeded, lastBlock, targetBlock, _ := syncharvester.CheckIfPeakSyncNeeded()
 		if !syncNeeded {
@@ -136,17 +152,19 @@ func main() {
 		syncharvester.ExecutePeakSyncWithDB(pairsDB)
 	}
 
-	// Load synced reserves into router
+	// Load synchronized reserve data into the router for arbitrage calculations
 	if err := syncharvester.FlushSyncedReservesToRouter(); err != nil {
 		debug.DropMessage("FLUSH_ERROR", err.Error())
 	}
 
-	// PHASE 3: Production mode with GC disabled and thread affinity
-	rtdebug.SetGCPercent(-1)
-	runtime.LockOSThread()
-	control.ForceHot()
+	// PHASE 3: Production mode with optimized runtime characteristics
+	// Disables garbage collection and locks to current thread for consistent performance
+	rtdebug.SetGCPercent(-1) // Disable garbage collection
+	runtime.LockOSThread()   // Lock to current OS thread
+	control.ForceHot()       // Signal control system to enter hot mode
 
-	// Infinite reconnection loop
+	// Infinite reconnection loop for continuous event processing
+	// Handles network disconnections and protocol errors gracefully
 	for {
 		processEventStream()
 	}
@@ -156,14 +174,15 @@ func main() {
 // DATA LOADING FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Parses "(12345) → (67890) → (11111)" format with precise allocation
+// loadArbitrageCyclesFromFile parses triangular arbitrage cycles from text file.
+// Processes "(12345) → (67890) → (11111)" format with exact memory allocation.
 func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		panic("Failed to load cycles: " + err.Error())
 	}
 
-	// Count lines for exact allocation
+	// Count total lines for exact slice allocation
 	lineCount := 0
 	for _, b := range data {
 		if b == '\n' {
@@ -171,17 +190,19 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 		}
 	}
 	if len(data) > 0 && data[len(data)-1] != '\n' {
-		lineCount++
+		lineCount++ // Account for final line without newline
 	}
 
+	// Pre-allocate result slice to exact capacity
 	cycles := make([]router.ArbitrageTriangle, 0, lineCount)
 	i, dataLen := 0, len(data)
 	var pairIDs [3]uint64
 
-	// Byte-by-byte parsing without string allocations
+	// Byte-by-byte parsing without string allocations or intermediate buffers
 	for i < dataLen {
 		pairCount := 0
 
+		// Parse up to 3 pair IDs from current line
 		for pairCount < 3 && i < dataLen && data[i] != '\n' {
 			// Find opening parenthesis
 			for i < dataLen && data[i] != '(' && data[i] != '\n' {
@@ -190,13 +211,13 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 			if i >= dataLen || data[i] == '\n' {
 				break
 			}
-			i++
+			i++ // Skip '('
 
-			// Parse number with overflow protection
+			// Parse numeric value with overflow protection
 			pairID := uint64(0)
 			for i < dataLen && data[i] >= '0' && data[i] <= '9' {
 				if pairID > (^uint64(0)-10)/10 {
-					break
+					break // Prevent overflow
 				}
 				pairID = pairID*10 + uint64(data[i]-'0')
 				i++
@@ -212,7 +233,7 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 				i++
 			}
 			if i < dataLen && data[i] == ')' {
-				i++
+				i++ // Skip ')'
 			}
 		}
 
@@ -221,10 +242,10 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 			i++
 		}
 		if i < dataLen {
-			i++
+			i++ // Skip '\n'
 		}
 
-		// Trust data contains valid triangles
+		// Create arbitrage triangle from parsed pair IDs
 		cycles = append(cycles, router.ArbitrageTriangle{
 			router.TradingPairID(pairIDs[0]),
 			router.TradingPairID(pairIDs[1]),
@@ -233,23 +254,27 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 	}
 
 	if len(cycles) == 0 {
-		panic("No cycles found")
+		panic("No cycles found in file")
 	}
 	return cycles
 }
 
+// openDatabase establishes database connection and stores reference for sync harvester.
+// Maintains global reference for use by synchronization subsystem.
 func openDatabase(dbPath string) *sql.DB {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		panic("Failed to open database " + dbPath + ": " + err.Error())
 	}
 
-	pairsDB = db
+	pairsDB = db // Store global reference for sync harvester
 	return db
 }
 
-// Loads with exact allocation based on COUNT query
+// loadPoolsFromDatabase retrieves all trading pairs with exact memory allocation.
+// Uses COUNT query to determine exact capacity requirements before loading data.
 func loadPoolsFromDatabase(db *sql.DB) []Pool {
+	// Determine exact number of pools for precise allocation
 	var poolCount int
 	err := db.QueryRow("SELECT COUNT(*) FROM pools").Scan(&poolCount)
 	if err != nil {
@@ -260,8 +285,10 @@ func loadPoolsFromDatabase(db *sql.DB) []Pool {
 		panic("No pools found in database")
 	}
 
+	// Pre-allocate slice to exact capacity
 	pools := make([]Pool, 0, poolCount)
 
+	// Load all pools with deterministic ordering
 	rows, err := db.Query(`
 		SELECT p.id, p.pool_address 
 		FROM pools p
@@ -271,6 +298,7 @@ func loadPoolsFromDatabase(db *sql.DB) []Pool {
 	}
 	defer rows.Close()
 
+	// Populate pools slice
 	for rows.Next() {
 		var pairID int64
 		var poolAddress string
@@ -295,24 +323,28 @@ func loadPoolsFromDatabase(db *sql.DB) []Pool {
 // PRODUCTION EVENT PROCESSING
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Establishes optimized WebSocket connection and processes events until failure
+// processEventStream establishes WebSocket connection and processes events until failure.
+// Implements connection-level optimizations and handles network-level protocol details.
 func processEventStream() error {
+	// Establish raw TCP connection with optimal parameters
 	raw, _ := net.Dial("tcp", constants.WsDialAddr)
 	tcpConn := raw.(*net.TCPConn)
 
-	tcpConn.SetNoDelay(true)
-	tcpConn.SetReadBuffer(constants.MaxFrameSize)
-	tcpConn.SetWriteBuffer(constants.MaxFrameSize)
+	// Configure TCP-level optimizations
+	tcpConn.SetNoDelay(true)                       // Disable Nagle's algorithm
+	tcpConn.SetReadBuffer(constants.MaxFrameSize)  // Optimize read buffer size
+	tcpConn.SetWriteBuffer(constants.MaxFrameSize) // Optimize write buffer size
 
-	// Low-level socket optimizations
+	// Apply low-level socket optimizations using syscalls
 	rawFile, _ := tcpConn.File()
 	fd := int(rawFile.Fd())
 
+	// Standard TCP optimizations
 	syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
 	syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, constants.MaxFrameSize)
 	syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, constants.MaxFrameSize)
 
-	// Platform-specific optimizations
+	// Platform-specific optimizations for improved performance
 	switch runtime.GOOS {
 	case "linux":
 		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 46, 1)         // SO_REUSEPORT
@@ -320,39 +352,48 @@ func processEventStream() error {
 	case "darwin":
 		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 0x1006, 1) // SO_REUSEPORT
 	}
-	rawFile.Close()
+	rawFile.Close() // Close file descriptor wrapper
 
+	// Establish TLS connection over the optimized TCP connection
 	conn := tls.Client(raw, &tls.Config{ServerName: constants.WsHost})
+
+	// Perform WebSocket handshake and establish subscription
 	ws.Handshake(conn)
 	ws.SendSubscription(conn)
 
+	// Main event processing loop
 	for {
+		// Wait for complete WebSocket message frame
 		payload, err := ws.SpinUntilCompleteMessage(conn)
 		if err != nil {
 			conn.Close()
-			return err
+			return err // Return error to trigger reconnection
 		}
 
+		// Dispatch message payload to parser for processing
 		parser.HandleFrame(payload)
 	}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SIGNAL HANDLING
+// SYSTEM LIFECYCLE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Proper shutdown coordination using WaitGroup
+// setupSignalHandling configures graceful shutdown coordination.
+// Uses WaitGroup to ensure all components complete cleanly before exit.
 func setupSignalHandling() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	// Background signal handler for coordinated shutdown
 	go func() {
 		<-sigChan
 		debug.DropMessage("SIGNAL", "Received interrupt, shutting down...")
 
-		// Wait for all components to finish cleanly
+		// Wait for all subsystems to complete graceful shutdown
 		shutdownWG.Wait()
 
+		// Close shared database connection
 		if pairsDB != nil {
 			pairsDB.Close()
 		}
