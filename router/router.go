@@ -1092,7 +1092,6 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 
 	// Integrate with the control system for monitoring and shutdown coordination
 	stopFlag, hotFlag := control.Flags()
-	control.SignalActivity() // Signal that this core is active and ready
 
 	// Log successful core initialization with concise format
 	debug.DropMessage("CORE", "Core "+utils.Itoa(coreID)+" ready")
