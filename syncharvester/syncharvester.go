@@ -273,7 +273,7 @@ func (h *PeakHarvester) collectLogForBatch(log *Log) bool {
 		return false
 	}
 
-	// Parse block number and log index
+	// Parse block number and log index using utils.ParseHexU64
 	blockNum := utils.ParseHexU64([]byte(strings.TrimPrefix(log.BlockNumber, "0x")))
 	logIndex := utils.ParseHexU64([]byte(strings.TrimPrefix(log.LogIndex, "0x")))
 
