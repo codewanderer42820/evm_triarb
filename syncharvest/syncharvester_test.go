@@ -1025,7 +1025,7 @@ func BenchmarkProcessLogDirect(b *testing.B) {
 	mockServer := NewMockRPCServer()
 	defer mockServer.Close()
 
-	h, cleanup := setupTestHarvester(b, mockServer)
+	h, cleanup := setupTestHarvesterForBenchmark(b, mockServer)
 	defer cleanup()
 
 	err := h.beginTransaction()
@@ -1050,7 +1050,7 @@ func BenchmarkProcessLogDirect(b *testing.B) {
 	}
 }
 
-func setupTestHarvester(tb testing.TB, mockServer *MockRPCServer) (*PeakHarvester, func()) {
+func setupTestHarvesterForBenchmark(tb testing.TB, mockServer *MockRPCServer) (*PeakHarvester, func()) {
 	// Create test pairs database
 	pairsDB := createTestPairsDBForBenchmark(tb)
 
