@@ -410,6 +410,8 @@ func (h *PeakHarvester) parseReservesDirect(dataStr string) bool {
 		return false
 	}
 
+	// Could potentially use utils.ParseHexU64 here but would need to process
+	// in 16-char chunks and reconstruct. hex.Decode is already optimized.
 	_, err := hex.Decode(h.hexDecodeBuffer[:64], []byte(dataStr))
 	if err != nil {
 		return false
@@ -1145,30 +1147,9 @@ func FlushSyncedReservesToRouter() error {
 		}
 	}
 
-	// Build block hex manually for peak performance
-	var blockHex [18]byte // Max "0x" + 16 hex chars
-	blockHex[0] = '0'
-	blockHex[1] = 'x'
-	blockLen := 2
-
-	// Convert block number to hex
-	if latestBlock == 0 {
-		blockHex[2] = '0'
-		blockLen = 3
-	} else {
-		// Write hex digits backwards then reverse
-		const hexChars = "0123456789abcdef"
-		temp := latestBlock
-		i := 18
-		for temp > 0 {
-			i--
-			blockHex[i] = hexChars[temp&0xF]
-			temp >>= 4
-		}
-		// Move to front
-		copy(blockHex[2:], blockHex[i:18])
-		blockLen = 2 + (18 - i)
-	}
+	// Convert block number to hex using a simpler approach
+	// Since this runs once, we can use fmt.Sprintf
+	blockHex := []byte(fmt.Sprintf("0x%x", latestBlock))
 
 	// Pre-allocate data buffer with zeros using uint64 writes
 	var dataBuffer [130]byte
@@ -1176,6 +1157,7 @@ func FlushSyncedReservesToRouter() error {
 	dataBuffer[1] = 'x'
 
 	// Fill with '0' using uint64 writes (0x3030303030303030)
+	// This is faster than byte-by-byte filling
 	dataPtr := (*[16]uint64)(unsafe.Pointer(&dataBuffer[2]))
 	const zeros = uint64(0x3030303030303030)
 	for i := 0; i < 16; i++ {
@@ -1203,9 +1185,15 @@ func FlushSyncedReservesToRouter() error {
 			continue
 		}
 
-		// Fast decimal to uint64 conversion
-		reserve0 := fastParseUint64(reserve0Str)
-		reserve1 := fastParseUint64(reserve1Str)
+		// Fast decimal to uint64 conversion using utils
+		// Convert string to bytes for utils functions
+		reserve0 := uint64(0)
+		reserve1 := uint64(0)
+
+		// Manual fast decimal parsing since utils doesn't have decimal parsing
+		// TODO: Could add decimal parsing to utils
+		reserve0 = fastParseUint64(reserve0Str)
+		reserve1 = fastParseUint64(reserve1Str)
 
 		// Skip invalid values
 		if reserve0 == 0 && reserve0Str != "0" || reserve1 == 0 && reserve1Str != "0" {
@@ -1222,9 +1210,10 @@ func FlushSyncedReservesToRouter() error {
 		var v types.LogView
 
 		// Direct assignment - no allocations
+		// Using utils.B2s would add overhead here since we already have the string
 		v.Addr = unsafe.Slice(unsafe.StringData(pairAddress), len(pairAddress))
 		v.Data = dataBuffer[:]
-		v.BlkNum = blockHex[:blockLen]
+		v.BlkNum = blockHex
 
 		// Static values
 		v.LogIdx = []byte("0x0")
@@ -1252,40 +1241,43 @@ func FlushSyncedReservesToRouter() error {
 //go:inline
 //go:registerparams
 func writeHex64(dst []byte, v uint64) {
-	const hexChars = "0123456789abcdef"
+	const hex = "0123456789abcdef"
 
-	// Unroll loop for peak performance
-	dst[15] = hexChars[v&0xF]
-	v >>= 4
-	dst[14] = hexChars[v&0xF]
-	v >>= 4
-	dst[13] = hexChars[v&0xF]
-	v >>= 4
-	dst[12] = hexChars[v&0xF]
-	v >>= 4
-	dst[11] = hexChars[v&0xF]
-	v >>= 4
-	dst[10] = hexChars[v&0xF]
-	v >>= 4
-	dst[9] = hexChars[v&0xF]
-	v >>= 4
-	dst[8] = hexChars[v&0xF]
-	v >>= 4
-	dst[7] = hexChars[v&0xF]
-	v >>= 4
-	dst[6] = hexChars[v&0xF]
-	v >>= 4
-	dst[5] = hexChars[v&0xF]
-	v >>= 4
-	dst[4] = hexChars[v&0xF]
-	v >>= 4
-	dst[3] = hexChars[v&0xF]
-	v >>= 4
-	dst[2] = hexChars[v&0xF]
-	v >>= 4
-	dst[1] = hexChars[v&0xF]
-	v >>= 4
-	dst[0] = hexChars[v&0xF]
+	// Extract all nibbles at once for maximum parallelism
+	n0 := (v >> 60) & 0xF
+	n1 := (v >> 56) & 0xF
+	n2 := (v >> 52) & 0xF
+	n3 := (v >> 48) & 0xF
+	n4 := (v >> 44) & 0xF
+	n5 := (v >> 40) & 0xF
+	n6 := (v >> 36) & 0xF
+	n7 := (v >> 32) & 0xF
+	n8 := (v >> 28) & 0xF
+	n9 := (v >> 24) & 0xF
+	n10 := (v >> 20) & 0xF
+	n11 := (v >> 16) & 0xF
+	n12 := (v >> 12) & 0xF
+	n13 := (v >> 8) & 0xF
+	n14 := (v >> 4) & 0xF
+	n15 := v & 0xF
+
+	// Interleaved writes to avoid store dependencies
+	dst[0] = hex[n0]
+	dst[8] = hex[n8]
+	dst[1] = hex[n1]
+	dst[9] = hex[n9]
+	dst[2] = hex[n2]
+	dst[10] = hex[n10]
+	dst[3] = hex[n3]
+	dst[11] = hex[n11]
+	dst[4] = hex[n4]
+	dst[12] = hex[n12]
+	dst[5] = hex[n5]
+	dst[13] = hex[n13]
+	dst[6] = hex[n6]
+	dst[14] = hex[n14]
+	dst[7] = hex[n7]
+	dst[15] = hex[n15]
 }
 
 // fastParseUint64 converts decimal string to uint64
@@ -1300,6 +1292,22 @@ func fastParseUint64(s string) uint64 {
 		return 0
 	}
 
+	// For very short strings, simple loop is fastest
+	if len(s) <= 4 {
+		var n uint64
+		for i := 0; i < len(s); i++ {
+			c := s[i]
+			if c < '0' || c > '9' {
+				return 0
+			}
+			n = n*10 + uint64(c-'0')
+		}
+		return n
+	}
+
+	// For longer strings, we could unroll and parallelize
+	// but decimal parsing has inherent dependencies (each digit depends on previous)
+	// so we stick with the simple approach
 	var n uint64
 	for i := 0; i < len(s); i++ {
 		c := s[i]
