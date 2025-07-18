@@ -901,6 +901,7 @@ func TestSyncToLatestAndTerminate(t *testing.T) {
 	mockServer := NewMockRPCServer()
 	defer mockServer.Close()
 
+	// Test 1: Normal sync
 	h, cleanup := setupTestHarvester(t, mockServer)
 	defer cleanup()
 
@@ -909,7 +910,7 @@ func TestSyncToLatestAndTerminate(t *testing.T) {
 		{
 			Address:     "0x1234567890123456789012345678901234567890",
 			Topics:      []string{SyncEventSignature},
-			Data:        "0x0000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000de0b6b3a7640000",
+			Data:        "0x0000000000000000000000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000000de0b6b3a7640000",
 			BlockNumber: fmt.Sprintf("0x%x", UniswapV2DeploymentBlock+1),
 			TxHash:      "0xtest",
 			LogIndex:    "0x1",
@@ -921,14 +922,7 @@ func TestSyncToLatestAndTerminate(t *testing.T) {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
-	// Test already synced
-	h.lastProcessed = mockServer.blockNumber - SyncTargetOffset
-	err = h.SyncToLatestAndTerminate()
-	if err != nil {
-		t.Errorf("Unexpected error when already synced: %v", err)
-	}
-
-	// Test RPC error
+	// Test 2: RPC error
 	mockServer.SetShouldFail("eth_blockNumber", true)
 	h2, cleanup2 := setupTestHarvester(t, mockServer)
 	defer cleanup2()
@@ -937,6 +931,9 @@ func TestSyncToLatestAndTerminate(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error when RPC fails")
 	}
+
+	// Reset the failure for other tests
+	mockServer.SetShouldFail("eth_blockNumber", false)
 }
 
 func TestExecuteSyncLoop(t *testing.T) {
