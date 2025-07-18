@@ -333,44 +333,67 @@ func (h *PeakHarvester) flushBatch() error {
 		return nil
 	}
 
-	// Build multi-value INSERT for events
-	eventValues := make([]string, len(h.eventBatch))
-	eventArgs := make([]interface{}, 0, len(h.eventBatch)*7)
-
-	for i, evt := range h.eventBatch {
-		eventValues[i] = "(?, ?, ?, ?, ?, ?, ?)"
-		eventArgs = append(eventArgs,
-			evt.pairID, evt.blockNum, evt.txHash, evt.logIndex,
-			evt.reserve0, evt.reserve1, evt.timestamp)
+	// Check if transaction is valid
+	if h.currentTx == nil {
+		return fmt.Errorf("no active transaction")
 	}
 
-	eventStmt := "INSERT OR IGNORE INTO sync_events VALUES " + strings.Join(eventValues, ",")
-	_, err := h.currentTx.Exec(eventStmt, eventArgs...)
-	if err != nil {
-		return fmt.Errorf("batch insert events failed: %w", err)
+	// SQLite has a limit of 999 variables per query
+	// Each event insert uses 7 variables, so max batch is 999/7 = 142
+	const maxBatchSize = 140
+
+	// Process in chunks if needed
+	for start := 0; start < len(h.eventBatch); start += maxBatchSize {
+		end := start + maxBatchSize
+		if end > len(h.eventBatch) {
+			end = len(h.eventBatch)
+		}
+
+		// Build multi-value INSERT for this chunk
+		chunkEvents := h.eventBatch[start:end]
+		chunkReserves := h.reserveBatch[start:end]
+
+		eventValues := make([]string, len(chunkEvents))
+		eventArgs := make([]interface{}, 0, len(chunkEvents)*7)
+
+		for i, evt := range chunkEvents {
+			eventValues[i] = "(?, ?, ?, ?, ?, ?, ?)"
+			eventArgs = append(eventArgs,
+				evt.pairID, evt.blockNum, evt.txHash, evt.logIndex,
+				evt.reserve0, evt.reserve1, evt.timestamp)
+		}
+
+		eventStmt := "INSERT OR IGNORE INTO sync_events VALUES " + strings.Join(eventValues, ",")
+		_, err := h.currentTx.Exec(eventStmt, eventArgs...)
+		if err != nil {
+			return fmt.Errorf("batch insert events failed: %w", err)
+		}
+
+		// Immediately nil the slices
+		eventValues = nil
+		eventArgs = nil
+
+		// Build multi-value INSERT for reserves
+		reserveValues := make([]string, len(chunkReserves))
+		reserveArgs := make([]interface{}, 0, len(chunkReserves)*6)
+
+		for i, res := range chunkReserves {
+			reserveValues[i] = "(?, ?, ?, ?, ?, ?)"
+			reserveArgs = append(reserveArgs,
+				res.pairID, res.pairAddress, res.reserve0,
+				res.reserve1, res.blockHeight, res.timestamp)
+		}
+
+		reserveStmt := "INSERT OR REPLACE INTO pair_reserves VALUES " + strings.Join(reserveValues, ",")
+		_, err = h.currentTx.Exec(reserveStmt, reserveArgs...)
+		if err != nil {
+			return fmt.Errorf("batch insert reserves failed: %w", err)
+		}
+
+		// Immediately nil everything
+		reserveValues = nil
+		reserveArgs = nil
 	}
-
-	// Immediately nil the slices
-	eventValues = nil
-	eventArgs = nil
-
-	// Build multi-value INSERT for reserves
-	reserveValues := make([]string, len(h.reserveBatch))
-	reserveArgs := make([]interface{}, 0, len(h.reserveBatch)*6)
-
-	for i, res := range h.reserveBatch {
-		reserveValues[i] = "(?, ?, ?, ?, ?, ?)"
-		reserveArgs = append(reserveArgs,
-			res.pairID, res.pairAddress, res.reserve0,
-			res.reserve1, res.blockHeight, res.timestamp)
-	}
-
-	reserveStmt := "INSERT OR REPLACE INTO pair_reserves VALUES " + strings.Join(reserveValues, ",")
-	_, err = h.currentTx.Exec(reserveStmt, reserveArgs...)
-
-	// Immediately nil everything
-	reserveValues = nil
-	reserveArgs = nil
 
 	h.eventsInBatch += len(h.eventBatch)
 
@@ -378,14 +401,13 @@ func (h *PeakHarvester) flushBatch() error {
 	h.eventBatch = h.eventBatch[:0]
 	h.reserveBatch = h.reserveBatch[:0]
 
-	return err
+	return nil
 }
 
 // parseReservesDirect parses reserve data from hex string using pre-allocated buffers.
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) parseReservesDirect(dataStr string) bool {
@@ -417,7 +439,6 @@ func (h *PeakHarvester) parseReservesDirect(dataStr string) bool {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func fastParseHexUint64(s string) uint64 {
@@ -441,7 +462,6 @@ func fastParseHexUint64(s string) uint64 {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func NewRPCClient(url string) *RPCClient {
@@ -465,7 +485,6 @@ func NewRPCClient(url string) *RPCClient {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (c *RPCClient) Call(ctx context.Context, result interface{}, method string, params ...interface{}) error {
@@ -510,7 +529,6 @@ func (c *RPCClient) Call(ctx context.Context, result interface{}, method string,
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (c *RPCClient) BlockNumber(ctx context.Context) (uint64, error) {
@@ -525,7 +543,6 @@ func (c *RPCClient) BlockNumber(ctx context.Context) (uint64, error) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (c *RPCClient) GetLogs(ctx context.Context, fromBlock, toBlock uint64, addresses []string, topics []string) ([]Log, error) {
@@ -563,7 +580,6 @@ var (
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func openDatabaseWithRetry(dbPath string) (*sql.DB, error) {
@@ -585,7 +601,6 @@ func openDatabaseWithRetry(dbPath string) (*sql.DB, error) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func isDatabaseLockedImpl(dbPath string) bool {
@@ -605,7 +620,6 @@ func isDatabaseLockedImpl(dbPath string) bool {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func configureDatabase(db *sql.DB) error {
@@ -641,7 +655,6 @@ func configureDatabase(db *sql.DB) error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func NewPeakHarvester(existingPairsDB *sql.DB) (*PeakHarvester, error) {
@@ -752,7 +765,6 @@ func NewPeakHarvester(existingPairsDB *sql.DB) (*PeakHarvester, error) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) setupSignalHandling() {
@@ -770,7 +782,6 @@ func (h *PeakHarvester) setupSignalHandling() {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) initializeSchema() error {
@@ -814,7 +825,6 @@ func (h *PeakHarvester) initializeSchema() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) loadPairMappings() error {
@@ -862,7 +872,6 @@ func (h *PeakHarvester) loadPairMappings() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) prepareGlobalStatements() error {
@@ -889,7 +898,6 @@ func (h *PeakHarvester) prepareGlobalStatements() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) SyncToLatestAndTerminate() error {
@@ -970,7 +978,6 @@ func (h *PeakHarvester) SyncToLatestAndTerminate() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) executeSyncLoop(startBlock uint64) error {
@@ -1123,7 +1130,6 @@ func (h *PeakHarvester) processBatch(fromBlock, toBlock uint64) bool {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) beginTransaction() error {
@@ -1148,7 +1154,6 @@ func (h *PeakHarvester) beginTransaction() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) commitTransaction() {
@@ -1175,7 +1180,6 @@ func (h *PeakHarvester) commitTransaction() {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) rollbackTransaction() {
@@ -1195,7 +1199,6 @@ func (h *PeakHarvester) rollbackTransaction() {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) reportProgress() {
@@ -1218,7 +1221,6 @@ func (h *PeakHarvester) reportProgress() {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) getLastProcessedBlockImpl() uint64 {
@@ -1235,7 +1237,6 @@ func (h *PeakHarvester) getLastProcessedBlockImpl() uint64 {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) terminateCleanly() error {
@@ -1285,7 +1286,6 @@ func (h *PeakHarvester) terminateCleanly() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func ExecutePeakSync() error {
@@ -1310,7 +1310,6 @@ func ExecutePeakSync() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func ExecutePeakSyncWithDB(existingPairsDB *sql.DB) error {
@@ -1328,7 +1327,6 @@ func ExecutePeakSyncWithDB(existingPairsDB *sql.DB) error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func CheckIfPeakSyncNeeded() (bool, uint64, uint64, error) {
