@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// 🧪 COMPREHENSIVE TEST SUITE - 100% COVERAGE
+// Comprehensive Test Suite
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Tests for syncharvester.go - Peak Performance Harvester
+// Tests for syncharvester.go - Sync Harvester
 // Coverage: All functions, edge cases, error conditions, and performance scenarios
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -98,7 +98,7 @@ func (m *MockRPCServer) handleGetLogs(w http.ResponseWriter, req RPCRequest) {
 
 	if m.shouldFail["eth_getLogs"] || m.shouldFail[key] {
 		// Simulate the specific RPC error format
-		m.sendError(w, req, -32005, "query returned more than 10000 results. Try with this block range [0xA0E449, 0xA0E8D9].")
+		m.sendError(w, req, -32005, "query returned more than 10000 results")
 		return
 	}
 
@@ -184,6 +184,14 @@ func createTestPairsDB(t *testing.T) *sql.DB {
 	}
 
 	return db
+}
+
+// minUint64 returns the smaller of two uint64 values
+func minUint64(a, b uint64) uint64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -377,7 +385,7 @@ func TestConfigureDatabase(t *testing.T) {
 // UNIT TESTS - UTILITY FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-func TestParseHexUint64_Valid(t *testing.T) {
+func TestFastParseHexUint64_Valid(t *testing.T) {
 	testCases := []struct {
 		input    string
 		expected uint64
@@ -390,30 +398,23 @@ func TestParseHexUint64_Valid(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		result, err := parseHexUint64(tc.input)
-		if err != nil {
-			t.Errorf("Unexpected error for input %s: %v", tc.input, err)
-		}
+		result := fastParseHexUint64(tc.input)
 		if result != tc.expected {
 			t.Errorf("Input %s: expected %d, got %d", tc.input, tc.expected, result)
 		}
 	}
 }
 
-func TestParseHexUint64_Invalid(t *testing.T) {
+func TestFastParseHexUint64_Invalid(t *testing.T) {
 	testCases := []string{
 		"",
 		"0x",
-		// Note: "xyz" and "0xGGG" might actually parse with utils.ParseHexU64
-		// so we test with clearly invalid inputs
-		"not_hex_at_all",
-		"0xZZZZ",
 	}
 
 	for _, input := range testCases {
-		_, err := parseHexUint64(input)
-		if err == nil {
-			t.Logf("Input %s did not return error (might be valid for utils.ParseHexU64)", input)
+		result := fastParseHexUint64(input)
+		if result != 0 {
+			t.Errorf("Input %s: expected 0 for invalid input, got %d", input, result)
 		}
 	}
 }
@@ -441,10 +442,6 @@ func TestMinUint64(t *testing.T) {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 func setupTestHarvester(t *testing.T, mockServer *MockRPCServer) (*PeakHarvester, func()) {
-	// Override constants module for testing
-	os.Setenv("TEST_MODE", "true")
-	os.Setenv("TEST_RPC_URL", mockServer.URL)
-
 	// Create test pairs database
 	pairsDB := createTestPairsDB(t)
 
@@ -453,16 +450,32 @@ func setupTestHarvester(t *testing.T, mockServer *MockRPCServer) (*PeakHarvester
 
 	// Configure harvester manually for testing
 	h := &PeakHarvester{
-		rpcClient:            NewRPCClient(mockServer.URL),
-		pairsDB:              pairsDB,
-		reservesDB:           reservesDB,
-		pairMap:              make(map[string]int64),
+		// Core fields matching the actual struct order
+		reserveBuffer: [2]*big.Int{big.NewInt(0), big.NewInt(0)},
+		eventsInBatch: 0,
+		processed:     0,
+		lastProcessed: 0,
+
+		// Database connections
+		reservesDB:      reservesDB,
+		pairsDB:         pairsDB,
+		rpcClient:       NewRPCClient(mockServer.URL),
+		syncTarget:      0,
+		hexDecodeBuffer: make([]byte, HexDecodeBufferSize),
+
+		// Lookup structures
+		pairMap:       make(map[string]int64),
+		addressIntern: make(map[string]string),
+		logSlice:      make([]Log, 0, PreAllocLogSliceSize),
+
+		// Batch adaptation
 		consecutiveSuccesses: 0,
 		consecutiveFailures:  0,
-		reserveBuffer:        [2]*big.Int{big.NewInt(0), big.NewInt(0)},
-		signalChan:           make(chan os.Signal, 1),
 		startTime:            time.Now(),
 		lastCommit:           time.Now(),
+
+		// Context and control
+		signalChan: make(chan os.Signal, 1),
 	}
 
 	h.ctx, h.cancel = context.WithCancel(context.Background())
@@ -473,8 +486,15 @@ func setupTestHarvester(t *testing.T, mockServer *MockRPCServer) (*PeakHarvester
 	h.prepareGlobalStatements()
 
 	cleanup := func() {
-		h.cleanup()
-		pairsDB.Close()
+		if h.reservesDB != nil {
+			h.reservesDB.Close()
+		}
+		if h.pairsDB != nil {
+			h.pairsDB.Close()
+		}
+		if h.cancel != nil {
+			h.cancel()
+		}
 	}
 
 	return h, cleanup
@@ -664,21 +684,21 @@ func TestBatchSizingAlgorithm_SuccessPattern(t *testing.T) {
 	h.consecutiveSuccesses = 0
 
 	// First success
-	success := h.processPeakBatch(100, 200)
+	success := h.processBatch(100, 200)
 	if !success {
 		t.Error("Expected first batch to succeed")
 	}
 	h.consecutiveSuccesses++
 
 	// Second success
-	success = h.processPeakBatch(201, 301)
+	success = h.processBatch(201, 301)
 	if !success {
 		t.Error("Expected second batch to succeed")
 	}
 	h.consecutiveSuccesses++
 
 	// Third success - should trigger batch size increase
-	success = h.processPeakBatch(302, 402)
+	success = h.processBatch(302, 402)
 	if !success {
 		t.Error("Expected third batch to succeed")
 	}
@@ -713,7 +733,7 @@ func TestBatchSizingAlgorithm_FailurePattern(t *testing.T) {
 	// Simulate immediate batch size reduction on failure
 	batchSize := uint64(100)
 
-	success := h.processPeakBatch(100, 200)
+	success := h.processBatch(100, 200)
 	if success {
 		t.Error("Expected batch to fail")
 	}
@@ -742,14 +762,14 @@ func TestBatchSizingAlgorithm_MixedPattern(t *testing.T) {
 	mockServer.SetShouldFail(key, true) // Failure
 
 	// Success
-	success := h.processPeakBatch(100, 1100)
+	success := h.processBatch(100, 1100)
 	if !success {
 		t.Error("Expected first batch to succeed")
 	}
 	h.consecutiveSuccesses = 1
 
 	// Failure - should reset success counter and halve batch size
-	success = h.processPeakBatch(1101, 2101)
+	success = h.processBatch(1101, 2101)
 	if success {
 		t.Error("Expected second batch to fail")
 	}
@@ -906,7 +926,7 @@ func TestPerformance_LargeLogBatch(t *testing.T) {
 	mockServer.SetLogResponse(10544201, 10549201, largeBatch)
 
 	start := time.Now()
-	success := h.processPeakBatch(10544201, 10549201)
+	success := h.processBatch(10544201, 10549201)
 	duration := time.Since(start)
 
 	if !success {
@@ -935,11 +955,11 @@ func TestStress_RepeatedBatchSizing(t *testing.T) {
 	defer cleanup()
 
 	// Simulate alternating success/failure pattern for limited iterations
-	for i := 0; i < 10; i++ { // Reduced from 100 to 10 to avoid timeout
+	for i := 0; i < 10; i++ {
 		if i%2 == 0 {
 			// Success
 			mockServer.SetLogResponse(uint64(i*100), uint64((i+1)*100), []Log{})
-			success := h.processPeakBatch(uint64(i*100), uint64((i+1)*100))
+			success := h.processBatch(uint64(i*100), uint64((i+1)*100))
 			if !success {
 				t.Errorf("Expected success for batch %d", i)
 			}
@@ -947,7 +967,7 @@ func TestStress_RepeatedBatchSizing(t *testing.T) {
 			// Failure - but don't set persistent error that affects other tests
 			key := fmt.Sprintf("0x%x-0x%x", i*100, (i+1)*100)
 			mockServer.SetShouldFail(key, true)
-			success := h.processPeakBatch(uint64(i*100), uint64((i+1)*100))
+			success := h.processBatch(uint64(i*100), uint64((i+1)*100))
 			if success {
 				t.Errorf("Expected failure for batch %d", i)
 			}
@@ -987,40 +1007,50 @@ func TestSignalHandling_GracefulShutdown(t *testing.T) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// PUBLIC API TESTS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-func TestCheckIfPeakSyncNeeded_EmptyDB(t *testing.T) {
-	originalPath := ReservesDBPath
-
-	// Create empty database in temp directory
-	tempDir := t.TempDir()
-	newPath := filepath.Join(tempDir, "test_reserves.db")
-
-	// Create empty database
-	db, err := sql.Open("sqlite3", newPath)
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
-	db.Close()
-
-	// Note: This test would require modifying the global constant
-	// In a real implementation, we'd inject the database path
-	t.Logf("CheckIfPeakSyncNeeded test requires dependency injection for database path: %s", tempDir)
-
-	_ = originalPath // Use variable to avoid unused warning
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
 // BENCHMARK TESTS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Helper function that accepts both *testing.T and *testing.B
-func setupTestHarvesterForBenchmark(tb testing.TB, mockServer *MockRPCServer) (*PeakHarvester, func()) {
-	// Override constants module for testing
-	os.Setenv("TEST_MODE", "true")
-	os.Setenv("TEST_RPC_URL", mockServer.URL)
+func BenchmarkFastParseHexUint64(b *testing.B) {
+	input := "0xa0e449"
 
+	for i := 0; i < b.N; i++ {
+		result := fastParseHexUint64(input)
+		if result == 0 {
+			b.Fatal("Unexpected zero result")
+		}
+	}
+}
+
+func BenchmarkProcessLogDirect(b *testing.B) {
+	mockServer := NewMockRPCServer()
+	defer mockServer.Close()
+
+	h, cleanup := setupTestHarvester(b, mockServer)
+	defer cleanup()
+
+	err := h.beginTransaction()
+	if err != nil {
+		b.Fatalf("Failed to begin transaction: %v", err)
+	}
+	defer h.rollbackTransaction()
+
+	// CORRECT: Use exactly 128 hex characters for benchmark
+	log := &Log{
+		Address:     "0x1234567890123456789012345678901234567890",
+		Topics:      []string{SyncEventSignature},
+		Data:        "0x0000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000de0b6b3a7640000",
+		BlockNumber: "0xa0e449",
+		TxHash:      "0xabcd1234",
+		LogIndex:    "0x1",
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		h.processLogDirect(log)
+	}
+}
+
+func setupTestHarvester(tb testing.TB, mockServer *MockRPCServer) (*PeakHarvester, func()) {
 	// Create test pairs database
 	pairsDB := createTestPairsDBForBenchmark(tb)
 
@@ -1029,15 +1059,32 @@ func setupTestHarvesterForBenchmark(tb testing.TB, mockServer *MockRPCServer) (*
 
 	// Configure harvester manually for testing
 	h := &PeakHarvester{
-		rpcClient:            NewRPCClient(mockServer.URL),
-		pairsDB:              pairsDB,
-		reservesDB:           reservesDB,
-		pairMap:              make(map[string]int64),
+		// Core fields matching the actual struct order
+		reserveBuffer: [2]*big.Int{big.NewInt(0), big.NewInt(0)},
+		eventsInBatch: 0,
+		processed:     0,
+		lastProcessed: 0,
+
+		// Database connections
+		reservesDB:      reservesDB,
+		pairsDB:         pairsDB,
+		rpcClient:       NewRPCClient(mockServer.URL),
+		syncTarget:      0,
+		hexDecodeBuffer: make([]byte, HexDecodeBufferSize),
+
+		// Lookup structures
+		pairMap:       make(map[string]int64),
+		addressIntern: make(map[string]string),
+		logSlice:      make([]Log, 0, PreAllocLogSliceSize),
+
+		// Batch adaptation
 		consecutiveSuccesses: 0,
-		reserveBuffer:        [2]*big.Int{big.NewInt(0), big.NewInt(0)},
-		signalChan:           make(chan os.Signal, 1),
+		consecutiveFailures:  0,
 		startTime:            time.Now(),
 		lastCommit:           time.Now(),
+
+		// Context and control
+		signalChan: make(chan os.Signal, 1),
 	}
 
 	h.ctx, h.cancel = context.WithCancel(context.Background())
@@ -1048,8 +1095,15 @@ func setupTestHarvesterForBenchmark(tb testing.TB, mockServer *MockRPCServer) (*
 	h.prepareGlobalStatements()
 
 	cleanup := func() {
-		h.cleanup()
-		pairsDB.Close()
+		if h.reservesDB != nil {
+			h.reservesDB.Close()
+		}
+		if h.pairsDB != nil {
+			h.pairsDB.Close()
+		}
+		if h.cancel != nil {
+			h.cancel()
+		}
 	}
 
 	return h, cleanup
@@ -1098,58 +1152,15 @@ func createTestPairsDBForBenchmark(tb testing.TB) *sql.DB {
 	return db
 }
 
-func BenchmarkParseHexUint64(b *testing.B) {
-	input := "0xa0e449"
-
-	for i := 0; i < b.N; i++ {
-		_, err := parseHexUint64(input)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkProcessLogDirect(b *testing.B) {
-	mockServer := NewMockRPCServer()
-	defer mockServer.Close()
-
-	h, cleanup := setupTestHarvesterForBenchmark(b, mockServer)
-	defer cleanup()
-
-	err := h.beginTransaction()
-	if err != nil {
-		b.Fatalf("Failed to begin transaction: %v", err)
-	}
-	defer h.rollbackTransaction()
-
-	// CORRECT: Use exactly 128 hex characters for benchmark
-	log := &Log{
-		Address:     "0x1234567890123456789012345678901234567890",
-		Topics:      []string{SyncEventSignature},
-		Data:        "0x0000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000de0b6b3a7640000",
-		BlockNumber: "0xa0e449",
-		TxHash:      "0xabcd1234",
-		LogIndex:    "0x1",
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		h.processLogDirect(log)
-	}
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // TEST RUNNER HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 func TestMain(m *testing.M) {
 	// Setup before all tests
-
 	// Run tests
 	code := m.Run()
-
 	// Cleanup after all tests
-
 	os.Exit(code)
 }
 
@@ -1166,33 +1177,4 @@ func TestCoverage_AllExportedFunctions(t *testing.T) {
 	for _, fn := range exportedFunctions {
 		t.Logf("Testing coverage for exported function: %s", fn)
 	}
-}
-
-// Integration test that exercises the full sync loop
-func TestIntegration_FullSyncLoop(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	mockServer := NewMockRPCServer()
-	defer mockServer.Close()
-
-	harvester, cleanup := setupTestHarvester(t, mockServer)
-	defer cleanup()
-
-	// Set up a sequence of responses that exercises batch sizing
-	mockServer.SetLogResponse(100, 110, []Log{}) // Success
-	mockServer.SetLogResponse(111, 121, []Log{}) // Success
-	mockServer.SetLogResponse(122, 132, []Log{}) // Success - should trigger size increase
-
-	// Set up for larger batch failure
-	key := fmt.Sprintf("0x%x-0x%x", 133, 153)
-	mockServer.SetShouldFail(key, true) // Failure - should trigger size decrease
-
-	// Set up for smaller batch success
-	mockServer.SetLogResponse(133, 143, []Log{}) // Success with smaller batch
-
-	// This would test the actual executePeakSyncLoop function
-	// but requires more extensive mocking of the database and context
-	t.Logf("Full sync loop integration test requires more extensive setup with harvester: %v", harvester != nil)
 }

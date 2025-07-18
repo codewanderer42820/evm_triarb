@@ -58,7 +58,7 @@ var (
 )
 
 // testSetup initializes clean test environment
-func testSetup(t *testing.T) func() {
+func testSetup(_ *testing.T) func() {
 	// Save original state for restoration
 	originalCoreEngines := coreEngines
 	originalCoreRings := coreRings
