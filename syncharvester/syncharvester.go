@@ -263,6 +263,11 @@ type PeakHarvester struct {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // collectLogForBatch validates and collects a log entry for batch processing
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) collectLogForBatch(log *Log) bool {
 	// Skip non-sync events
 	if len(log.Topics) == 0 || log.Topics[0] != SyncEventSignature {
@@ -311,6 +316,12 @@ func (h *PeakHarvester) collectLogForBatch(log *Log) bool {
 }
 
 // flushBatch performs batch insert of collected events and reserves
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) flushBatch() error {
 	if len(h.eventBatch) == 0 {
 		return nil
@@ -386,6 +397,12 @@ func (h *PeakHarvester) flushBatch() error {
 }
 
 // parseReservesDirect parses reserve data from hex string using pre-allocated buffers
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) parseReservesDirect(dataStr string) bool {
 	dataStr = strings.TrimPrefix(dataStr, "0x")
 
@@ -410,6 +427,12 @@ func (h *PeakHarvester) parseReservesDirect(dataStr string) bool {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // NewRPCClient creates a new RPC client for blockchain communication
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func NewRPCClient(url string) *RPCClient {
 	return &RPCClient{
 		url: url,
@@ -428,6 +451,12 @@ func NewRPCClient(url string) *RPCClient {
 }
 
 // Call executes an RPC method with given parameters and handles rate limiting
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func (c *RPCClient) Call(ctx context.Context, result interface{}, method string, params ...interface{}) error {
 	req := RPCRequest{
 		JSONRPC: "2.0",
@@ -474,6 +503,12 @@ func (c *RPCClient) Call(ctx context.Context, result interface{}, method string,
 }
 
 // BlockNumber retrieves the current block number from the blockchain
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func (c *RPCClient) BlockNumber(ctx context.Context) (uint64, error) {
 	var result string
 	if err := c.Call(ctx, &result, "eth_blockNumber"); err != nil {
@@ -483,6 +518,12 @@ func (c *RPCClient) BlockNumber(ctx context.Context) (uint64, error) {
 }
 
 // GetLogs retrieves event logs from the blockchain within a specified block range
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func (c *RPCClient) GetLogs(ctx context.Context, fromBlock, toBlock uint64, addresses []string, topics []string) ([]Log, error) {
 	params := map[string]interface{}{
 		"fromBlock": fmt.Sprintf("0x%x", fromBlock),
@@ -510,6 +551,12 @@ func (c *RPCClient) GetLogs(ctx context.Context, fromBlock, toBlock uint64, addr
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // configureDatabase applies optimization settings for write performance
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func configureDatabase(db *sql.DB) error {
 	// Database optimization settings
 	optimizations := []string{
@@ -539,6 +586,11 @@ func configureDatabase(db *sql.DB) error {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // NewPeakHarvester creates and initializes a new sync harvester instance
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func NewPeakHarvester(existingPairsDB *sql.DB) (*PeakHarvester, error) {
 	debug.DropMessage("INIT", "Initializing harvester")
 
@@ -633,6 +685,12 @@ func NewPeakHarvester(existingPairsDB *sql.DB) (*PeakHarvester, error) {
 }
 
 // initializeSchema creates database tables if they don't exist
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) initializeSchema() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS pair_reserves (
@@ -671,6 +729,12 @@ func (h *PeakHarvester) initializeSchema() error {
 }
 
 // loadPairMappings loads trading pair data from the database
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) loadPairMappings() error {
 	debug.DropMessage("LOADING", "Uniswap V2 pairs")
 
@@ -704,6 +768,12 @@ func (h *PeakHarvester) loadPairMappings() error {
 }
 
 // prepareGlobalStatements prepares SQL statements for execution
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) prepareGlobalStatements() error {
 	var err error
 
@@ -724,6 +794,11 @@ func (h *PeakHarvester) prepareGlobalStatements() error {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // SyncToLatestAndTerminate executes the main synchronization loop
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) SyncToLatestAndTerminate() error {
 	debug.DropMessage("SYNC", "Starting")
 
@@ -779,6 +854,11 @@ func (h *PeakHarvester) SyncToLatestAndTerminate() error {
 }
 
 // executeSyncLoop processes blocks in adaptive batches
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) executeSyncLoop(startBlock uint64) error {
 	current := startBlock
 	batchSize := OptimalBatchSize
@@ -847,6 +927,11 @@ func (h *PeakHarvester) executeSyncLoop(startBlock uint64) error {
 }
 
 // processBatch fetches and processes logs for a block range
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) processBatch(fromBlock, toBlock uint64) bool {
 	// Reuse pre-allocated slice
 	h.logSlice = h.logSlice[:0]
@@ -897,6 +982,12 @@ func (h *PeakHarvester) processBatch(fromBlock, toBlock uint64) bool {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // beginTransaction starts a new database transaction
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) beginTransaction() error {
 	var err error
 	h.currentTx, err = h.reservesDB.Begin()
@@ -909,6 +1000,11 @@ func (h *PeakHarvester) beginTransaction() error {
 }
 
 // commitTransaction commits the current database transaction
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) commitTransaction() {
 	// Flush any remaining batch data
 	h.flushBatch()
@@ -926,6 +1022,12 @@ func (h *PeakHarvester) commitTransaction() {
 }
 
 // rollbackTransaction rolls back the current database transaction
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) rollbackTransaction() {
 	h.currentTx.Rollback()
 	h.currentTx = nil
@@ -936,6 +1038,12 @@ func (h *PeakHarvester) rollbackTransaction() {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // reportProgress logs synchronization progress information
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) reportProgress() {
 	elapsed := time.Since(h.startTime)
 	eventsPerSecond := float64(h.processed) / elapsed.Seconds()
@@ -953,6 +1061,12 @@ func (h *PeakHarvester) reportProgress() {
 }
 
 // getLastProcessedBlock retrieves the last processed block from the database
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) getLastProcessedBlock() uint64 {
 	var lastBlock uint64
 	h.reservesDB.QueryRow("SELECT COALESCE(MAX(block_number), 0) FROM sync_events").Scan(&lastBlock)
@@ -960,6 +1074,11 @@ func (h *PeakHarvester) getLastProcessedBlock() uint64 {
 }
 
 // terminateCleanly performs final cleanup and resource deallocation
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func (h *PeakHarvester) terminateCleanly() error {
 	debug.DropMessage("CLEANUP", "Starting")
 
@@ -1001,6 +1120,11 @@ func (h *PeakHarvester) terminateCleanly() error {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // ExecutePeakSync runs the synchronization process (deprecated - use ExecutePeakSyncWithDB)
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func ExecutePeakSync() error {
 	debug.DropMessage("EXEC", "Starting sync (opening new DB connection)")
 
@@ -1020,6 +1144,11 @@ func ExecutePeakSync() error {
 }
 
 // ExecutePeakSyncWithDB runs the synchronization process with provided database connection
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func ExecutePeakSyncWithDB(existingPairsDB *sql.DB) error {
 	debug.DropMessage("EXEC", "Starting sync with existing DB")
 
@@ -1032,6 +1161,11 @@ func ExecutePeakSyncWithDB(existingPairsDB *sql.DB) error {
 }
 
 // CheckIfPeakSyncNeeded determines if synchronization is required
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func CheckIfPeakSyncNeeded() (bool, uint64, uint64, error) {
 	db, err := sql.Open("sqlite3", ReservesDBPath)
 	if err != nil {
