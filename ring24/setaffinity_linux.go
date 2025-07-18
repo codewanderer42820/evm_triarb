@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// ⚡ CPU AFFINITY - LINUX IMPLEMENTATION
+// CPU Affinity - Linux Implementation
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Trading System
+// Project: Arbitrage Detection System
 // Component: Linux Thread-to-CPU Binding
 //
 // Description:
@@ -50,19 +50,17 @@ var cpuMasks = [...][1]uintptr{
 // setAffinity pins the current OS thread to a specific CPU core.
 // This ensures consistent cache behavior and predictable NUMA performance.
 //
-// PARAMETERS:
+// Parameters:
+//   - cpu: Target CPU core index (0-based)
 //
-//	cpu: Target CPU core index (0-based)
+// Implementation:
+//   - Uses direct system call to avoid CGO overhead
+//   - Minimal latency in the critical path
+//   - Pre-computed masks for efficiency
 //
-// IMPLEMENTATION:
-//
-//	Uses direct system call to avoid CGO overhead and ensure
-//	minimal latency in the critical path.
-//
-// ERROR HANDLING:
-//
-//	Silently ignores errors to maintain performance.
-//	Invalid CPU indices are bounds-checked and ignored.
+// Error Handling:
+//   - Silently ignores errors to maintain performance
+//   - Invalid CPU indices are bounds-checked and ignored
 //
 //go:norace
 //go:nocheckptr

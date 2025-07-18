@@ -1,18 +1,20 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// ⚡ CPU AFFINITY - FALLBACK IMPLEMENTATION
+// CPU Affinity - Fallback Implementation
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Trading System
+// Project: Arbitrage Detection System
 // Component: Cross-Platform Compatibility Layer
 //
 // Description:
 //   Fallback implementation for platforms without CPU affinity support.
 //   Maintains API compatibility while gracefully degrading on unsupported systems.
 //
-// Supported Platforms:
-//   This stub is used for:
+// Compilation Targets:
 //   - Non-Linux operating systems (Windows, macOS, BSD)
 //   - TinyGo runtime (embedded systems)
 //   - Platforms without thread affinity APIs
+//
+// Supported Platforms (with dedicated implementations):
+//   - Linux: Uses sched_setaffinity syscall (setaffinity_linux.go)
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -20,22 +22,32 @@
 
 package ring24
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// AFFINITY CONTROL
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
 // setAffinity provides a no-op implementation for platform compatibility.
 // On systems without CPU affinity support, threads are scheduled by the OS
 // scheduler without specific core binding.
 //
-// BEHAVIOR:
+// Behavior:
+//   - Thread remains on whichever core the OS scheduler assigns
+//   - runtime.LockOSThread() still prevents goroutine migration
+//   - Cache locality depends on OS scheduler heuristics
 //
-//	While CPU affinity is not set, the OS scheduler may still provide
-//	reasonable cache locality through its own heuristics. Performance
-//	may be less predictable but remains functional.
+// Platform Notes:
+//   - Windows: Could use SetThreadAffinityMask via syscall
+//   - macOS: Could use thread_policy_set (requires CGO)
+//   - FreeBSD: Could use cpuset_setaffinity
+//   - NetBSD: Could use pthread_setaffinity_np
+//   - OpenBSD: Limited support, relies on scheduler
+//   - Plan9: No direct support
+//   - WASM: Single-threaded, no affinity needed
 //
-// FUTURE ENHANCEMENTS:
-//
-//	Platform-specific implementations could be added:
-//	- Windows: SetThreadAffinityMask
-//	- macOS: thread_policy_set with THREAD_AFFINITY_POLICY
-//	- FreeBSD: cpuset_setaffinity
+// Performance Impact:
+//   - Without CPU affinity, may experience more cache misses
+//   - Thread migration between cores can impact performance
+//   - Still functional but less predictable latency
 //
 //go:norace
 //go:nocheckptr
