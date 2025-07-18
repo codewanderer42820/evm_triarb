@@ -88,7 +88,7 @@ func init() {
 	}
 
 	// Initialize the multi-core arbitrage detection system
-	router.InitializeArbitrageSystem(cycles)
+	//router.InitializeArbitrageSystem(cycles)
 
 	// Close database after loading (syncharvester doesn't need it)
 	db.Close()
@@ -103,6 +103,17 @@ func init() {
 // main orchestrates the complete system lifecycle in three distinct phases.
 // Each phase has specific responsibilities and optimization characteristics.
 func main() {
+	syncNeeded, lastBlock, targetBlock, _ := syncharvester.CheckIfPeakSyncNeeded()
+	if !syncNeeded {
+		debug.DropMessage("SYNC", "Fully synchronized with blockchain")
+	}
+
+	blocksBehind := targetBlock - lastBlock
+	debug.DropMessage("SYNC", "Syncing "+utils.Itoa(int(blocksBehind))+" blocks")
+	syncharvester.ExecutePeakSync()
+
+	os.Exit(0)
+
 	setupSignalHandling()
 
 	// PHASE 1: Bootstrap synchronization with blockchain state
