@@ -268,9 +268,15 @@ func loadPoolsFromDatabase(dbPath string) int {
 //go:registerparams
 func main() {
 	// PHASE 1: Bootstrap synchronization with blockchain state
-	// Ensures system processes events from current block height
-	syncNeeded, lastBlock, targetBlock, _ := syncharvester.CheckIfPeakSyncNeeded()
-	if syncNeeded {
+	// Loop until completely caught up with blockchain
+	for {
+		syncNeeded, lastBlock, targetBlock, _ := syncharvester.CheckIfPeakSyncNeeded()
+		if !syncNeeded {
+			// Fully caught up, exit sync loop
+			debug.DropMessage("SYNC", "Fully synchronized with blockchain")
+			break
+		}
+
 		// Calculate synchronization workload for progress indication
 		blocksBehind := targetBlock - lastBlock
 		debug.DropMessage("SYNC", "Syncing "+utils.Itoa(int(blocksBehind))+" blocks")
@@ -278,6 +284,9 @@ func main() {
 		// Execute blockchain state synchronization to current block
 		// Pass existing database connection to avoid duplicate connections
 		syncharvester.ExecutePeakSyncWithDB(pairsDB)
+
+		// Loop continues to check if more sync is needed
+		// This handles cases where new blocks arrive during sync
 	}
 
 	// PHASE 2: Memory optimization for deterministic production runtime
