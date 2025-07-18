@@ -49,6 +49,8 @@ import (
 // CONFIGURATION CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+//go:notinheap
+//go:align 64
 var (
 	// File paths - Made variables for testing
 	ReservesDBPath = "uniswap_v2_reserves.db"
