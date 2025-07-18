@@ -214,7 +214,6 @@ type PeakHarvester struct {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) processLogDirect(log *Log) bool {
@@ -932,7 +931,6 @@ func (h *PeakHarvester) executeSyncLoop(startBlock uint64) error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) processBatch(fromBlock, toBlock uint64) bool {
