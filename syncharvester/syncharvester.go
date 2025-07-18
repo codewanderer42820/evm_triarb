@@ -1189,6 +1189,7 @@ func FlushSyncedReservesToRouter() error {
 	v.TxIndex = staticTxIndex
 	v.Topics = staticTopics
 	v.BlkNum = blockHex
+	v.Data = dataBuffer[:]
 
 	// Query all reserves
 	rows, err := db.Query(`
