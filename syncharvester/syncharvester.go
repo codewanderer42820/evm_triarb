@@ -71,12 +71,25 @@ var (
 	// File paths - Made variables for testing
 	ReservesDBPath = "uniswap_v2_reserves.db"
 
-	// RPC configuration - Made variable for testing
-	RPCPathTemplate = "https://%s/v3/a2a3139d2ab24d59bed2dc3643664126"
-
 	// Address lookup infrastructure (same as router.go)
 	addressToPairMap  [constants.AddressTableCapacity]TradingPairID
 	packedAddressKeys [constants.AddressTableCapacity]PackedAddress
+)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// RPC ENDPOINT CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// RPC configuration constants for Ethereum node connectivity
+const (
+	// RPCHost specifies the Infura mainnet endpoint host
+	RPCHost = "mainnet.infura.io"
+
+	// RPCProjectPath contains the Infura project API path with credentials
+	RPCProjectPath = "/v3/a2a3139d2ab24d59bed2dc3643664126"
+
+	// RPCScheme defines the protocol scheme for RPC connections
+	RPCScheme = "https"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -86,25 +99,26 @@ var (
 const (
 	// Synchronization parameters
 	OptimalBatchSize = uint64(10_000) // Initial batch size for block processing
-	SyncTargetOffset = 50             // Blocks behind head to consider synchronized
-	MaxSyncTime      = 4 * time.Hour  // Maximum synchronization duration
+	SyncTargetOffset = 0              // No offset - sync to exact head (fast enough)
+	// MaxSyncTime disabled - no time limits on synchronization
 
-	// Database batch processing
-	CommitBatchSize = 50_000 // Events per transaction commit
-	EventBatchSize  = 5_000  // Events per batch insert
+	// Database batch processing - Optimized for high throughput
+	CommitBatchSize = 100_000 // Events per transaction commit (doubled for better throughput)
+	EventBatchSize  = 10_000  // Events per batch insert (doubled for fewer round trips)
+
+	// Buffer sizes - Optimized for real-world usage
+	PreAllocLogSliceSize = 50_000 // Increased for block batches with many events
+	HexDecodeBufferSize  = 128    // Doubled for larger hex data processing
 
 	// Event signatures
 	SyncEventSignature = "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"
 
-	// Buffer sizes
-	PreAllocLogSliceSize = 10000
-	HexDecodeBufferSize  = 64
-
 	// Uniswap V2 deployment block
 	UniswapV2DeploymentBlock = 10000835
 
-	// Batch size limits
-	MaxRetries = 3
+	// Adaptive batch sizing parameters
+	ConsecutiveSuccessThreshold = 3 // Double batch size after 3 consecutive successes
+	MinBatchSize                = 1 // Minimum batch size (never go below 1 block)
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -238,9 +252,9 @@ type RPCClient struct {
 //go:notinheap
 //go:align 64
 type PeakHarvester struct {
-	// CACHE LINE 1: Batch processing (64B)
-	eventBatch    []batchEvent   // 24B - Event batch buffer
-	reserveBatch  []batchReserve // 24B - Reserve batch buffer
+	// CACHE LINE 1: Batch processing (64B) - Pre-allocated to exact sizes
+	eventBatch    []batchEvent   // 24B - Pre-allocated to EventBatchSize capacity
+	reserveBatch  []batchReserve // 24B - Pre-allocated to EventBatchSize capacity
 	eventsInBatch int            // 8B - Events in current batch
 	processed     int64          // 8B - Total events processed
 
@@ -274,6 +288,91 @@ type PeakHarvester struct {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // CORE PROCESSING FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// countHexLeadingZeros performs efficient leading zero counting for hex-encoded numeric data
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func countHexLeadingZeros(segment []byte) int {
+	// Define the 64-bit pattern representing eight consecutive ASCII '0' characters
+	const ZERO_PATTERN = 0x3030303030303030
+
+	// Process the 32-byte hex segment in four 8-byte chunks simultaneously
+	// XOR with ZERO_PATTERN converts zero bytes to 0x00 and non-zero bytes to non-zero values
+	c0 := utils.Load64(segment[0:8]) ^ ZERO_PATTERN   // Process bytes 0-7
+	c1 := utils.Load64(segment[8:16]) ^ ZERO_PATTERN  // Process bytes 8-15
+	c2 := utils.Load64(segment[16:24]) ^ ZERO_PATTERN // Process bytes 16-23
+	c3 := utils.Load64(segment[24:32]) ^ ZERO_PATTERN // Process bytes 24-31
+
+	// Create a bitmask indicating which 8-byte chunks contain only zero characters
+	// The expression (x|(^x+1))>>63 produces 1 if any byte in x is non-zero, 0 if all bytes are zero
+	mask := ((c0|(^c0+1))>>63)<<0 | ((c1|(^c1+1))>>63)<<1 |
+		((c2|(^c2+1))>>63)<<2 | ((c3|(^c3+1))>>63)<<3
+
+	// Find the first chunk that contains a non-zero character
+	firstChunk := bits.TrailingZeros64(mask)
+
+	// Handle the special case where all 32 hex characters are zeros
+	if firstChunk == 64 {
+		return 32 // All characters in the segment are zeros
+	}
+
+	// Create an array to access the processed chunks by index
+	chunks := [4]uint64{c0, c1, c2, c3}
+
+	// Within the first non-zero chunk, find the first non-zero byte
+	// Divide by 8 to convert bit position to byte position within the chunk
+	firstByte := bits.TrailingZeros64(chunks[firstChunk]) >> 3
+
+	// Calculate the total number of leading zero characters
+	return (firstChunk << 3) + firstByte
+}
+
+// parseReservesToZeroTrimmedHex extracts zero-trimmed hex strings using SIMD optimization
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func (h *PeakHarvester) parseReservesToZeroTrimmedHex(dataStr string) (string, string) {
+	// Uniswap V2 sync event: 0x + 128 hex chars
+	// Layout: [64 chars reserve0][64 chars reserve1]
+
+	// Use SIMD counting for reserve0 (chars 2-65)
+	leadingZeros0 := countHexLeadingZeros([]byte(dataStr[2:34])) // First 32 chars
+	if leadingZeros0 >= 32 {
+		leadingZeros0 += countHexLeadingZeros([]byte(dataStr[34:66])) // Next 32 chars
+	}
+
+	// Use SIMD counting for reserve1 (chars 66-129)
+	leadingZeros1 := countHexLeadingZeros([]byte(dataStr[66:98])) // First 32 chars
+	if leadingZeros1 >= 32 {
+		leadingZeros1 += countHexLeadingZeros([]byte(dataStr[98:130])) // Next 32 chars
+	}
+
+	// Extract reserves with calculated offsets
+	var reserve0, reserve1 string
+
+	reserve0Start := 2 + leadingZeros0
+	if reserve0Start >= 66 {
+		reserve0 = "0"
+	} else {
+		reserve0 = dataStr[reserve0Start:66]
+	}
+
+	reserve1Start := 66 + leadingZeros1
+	if reserve1Start >= 130 {
+		reserve1 = "0"
+	} else {
+		reserve1 = dataStr[reserve1Start:130]
+	}
+
+	return reserve0, reserve1
+}
 
 // collectLogForBatch validates and collects a log entry for batch processing
 //
@@ -323,100 +422,6 @@ func (h *PeakHarvester) collectLogForBatch(log *Log) bool {
 	})
 
 	return true
-}
-
-// countHexLeadingZeros performs efficient leading zero counting for hex-encoded numeric data
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func countHexLeadingZeros(segment []byte) int {
-	// Define the 64-bit pattern representing eight consecutive ASCII '0' characters
-	const ZERO_PATTERN = 0x3030303030303030
-
-	// Process the 32-byte hex segment in four 8-byte chunks simultaneously
-	// XOR with ZERO_PATTERN converts zero bytes to 0x00 and non-zero bytes to non-zero values
-	c0 := utils.Load64(segment[0:8]) ^ ZERO_PATTERN   // Process bytes 0-7
-	c1 := utils.Load64(segment[8:16]) ^ ZERO_PATTERN  // Process bytes 8-15
-	c2 := utils.Load64(segment[16:24]) ^ ZERO_PATTERN // Process bytes 16-23
-	c3 := utils.Load64(segment[24:32]) ^ ZERO_PATTERN // Process bytes 24-31
-
-	// Create a bitmask indicating which 8-byte chunks contain only zero characters
-	// The expression (x|(^x+1))>>63 produces 1 if any byte in x is non-zero, 0 if all bytes are zero
-	mask := ((c0|(^c0+1))>>63)<<0 | ((c1|(^c1+1))>>63)<<1 |
-		((c2|(^c2+1))>>63)<<2 | ((c3|(^c3+1))>>63)<<3
-
-	// Find the first chunk that contains a non-zero character
-	firstChunk := bits.TrailingZeros64(mask)
-
-	// Handle the special case where all 32 hex characters are zeros
-	if firstChunk == 64 {
-		return 32 // All characters in the segment are zeros
-	}
-
-	// Create an array to access the processed chunks by index
-	chunks := [4]uint64{c0, c1, c2, c3}
-
-	// Within the first non-zero chunk, find the first non-zero byte
-	// Divide by 8 to convert bit position to byte position within the chunk
-	firstByte := bits.TrailingZeros64(chunks[firstChunk]) >> 3
-
-	// Calculate the total number of leading zero characters
-	return (firstChunk << 3) + firstByte
-}
-
-// parseReservesToZeroTrimmedHex extracts zero-trimmed hex strings directly
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func (h *PeakHarvester) parseReservesToZeroTrimmedHex(dataStr string) (string, string) {
-	// Skip "0x" prefix - assume valid 130-char hex data from RPC
-	data := dataStr[2:]
-
-	// Uniswap V2 Sync event data layout:
-	// 0-63:   reserve0 (32 bytes, 64 hex chars)
-	// 64-127: reserve1 (32 bytes, 64 hex chars)
-
-	// Count leading zeros in each 64-char reserve segment
-	leadingZerosA := countHexLeadingZeros([]byte(data[0:32]))  // First 32 chars of reserve0
-	leadingZerosB := countHexLeadingZeros([]byte(data[64:96])) // First 32 chars of reserve1
-
-	// Extract reserve0 - return slice directly as string
-	reserve0Start := leadingZerosA
-	if reserve0Start >= 32 {
-		// Need to check the remaining 32 chars of reserve0
-		leadingZerosA2 := countHexLeadingZeros([]byte(data[32:64]))
-		if leadingZerosA2 >= 32 {
-			return "0", "0" // Reserve0 is all zeros
-		}
-		reserve0Start = 32 + leadingZerosA2
-	}
-	reserve0 := data[reserve0Start:64]
-	if reserve0 == "" {
-		reserve0 = "0"
-	}
-
-	// Extract reserve1 - return slice directly as string
-	reserve1Start := 64 + leadingZerosB
-	if leadingZerosB >= 32 {
-		// Need to check the remaining 32 chars of reserve1
-		leadingZerosB2 := countHexLeadingZeros([]byte(data[96:128]))
-		if leadingZerosB2 >= 32 {
-			return reserve0, "0" // Reserve1 is all zeros
-		}
-		reserve1Start = 96 + leadingZerosB2
-	}
-	reserve1 := data[reserve1Start:128]
-	if reserve1 == "" {
-		reserve1 = "0"
-	}
-
-	return reserve0, reserve1
 }
 
 // flushBatch performs batch insert of collected events and reserves
@@ -528,7 +533,7 @@ func NewRPCClient(url string) *RPCClient {
 	}
 }
 
-// Call executes an RPC method with given parameters and handles rate limiting
+// Call executes an RPC method with unlimited retries and exponential backoff
 //
 //go:norace
 //go:nocheckptr
@@ -545,7 +550,9 @@ func (c *RPCClient) Call(ctx context.Context, result interface{}, method string,
 
 	data, _ := json.Marshal(req)
 
-	for retries := 0; retries < MaxRetries; retries++ {
+	backoffMs := 100 // Start with 100ms backoff
+
+	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -557,16 +564,25 @@ func (c *RPCClient) Call(ctx context.Context, result interface{}, method string,
 
 		resp, err := c.client.Do(httpReq)
 		if err != nil {
-			return err
+			time.Sleep(time.Millisecond * time.Duration(backoffMs))
+			backoffMs *= 2
+			if backoffMs > 30000 { // Cap at 30 seconds
+				backoffMs = 30000
+			}
+			continue
 		}
 		defer resp.Body.Close()
 
 		var rpcResp RPCResponse
 		json.NewDecoder(resp.Body).Decode(&rpcResp)
 
-		// Check for rate limit error
+		// Handle rate limit with exponential backoff
 		if rpcResp.Error != nil && rpcResp.Error.Code == 429 {
-			time.Sleep(time.Millisecond * 100 * time.Duration(retries+1))
+			time.Sleep(time.Millisecond * time.Duration(backoffMs))
+			backoffMs *= 2
+			if backoffMs > 30000 { // Cap at 30 seconds
+				backoffMs = 30000
+			}
 			continue
 		}
 
@@ -576,8 +592,6 @@ func (c *RPCClient) Call(ctx context.Context, result interface{}, method string,
 
 		return json.Unmarshal(rpcResp.Result, result)
 	}
-
-	return fmt.Errorf("rate limit exceeded after %d retries", MaxRetries)
 }
 
 // BlockNumber retrieves the current block number from the blockchain
@@ -680,7 +694,7 @@ func NewPeakHarvester(existingPairsDB *sql.DB) (*PeakHarvester, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Create RPC client
-	rpcURL := fmt.Sprintf(RPCPathTemplate, constants.WsHost)
+	rpcURL := RPCScheme + "://" + constants.WsHost + RPCProjectPath
 	rpcClient := NewRPCClient(rpcURL)
 
 	// Open reserves database
@@ -706,11 +720,11 @@ func NewPeakHarvester(existingPairsDB *sql.DB) (*PeakHarvester, error) {
 
 	// Create harvester instance
 	h := &PeakHarvester{
-		// Core fields - Pre-allocate batches to exact sizes
+		// Core fields - Pre-allocate batches to exact EventBatchSize capacity
 		hexDecodeBuffer: make([]byte, HexDecodeBufferSize), // Unused now but kept for compatibility
 		logSlice:        make([]Log, 0, PreAllocLogSliceSize),
-		eventBatch:      make([]batchEvent, 0, EventBatchSize),   // Pre-allocated to exact batch size
-		reserveBatch:    make([]batchReserve, 0, EventBatchSize), // Pre-allocated to exact batch size
+		eventBatch:      make([]batchEvent, 0, EventBatchSize),   // FIXED: Pre-allocated capacity
+		reserveBatch:    make([]batchReserve, 0, EventBatchSize), // FIXED: Pre-allocated capacity
 
 		// Database connections
 		rpcClient:  rpcClient,
@@ -957,7 +971,7 @@ func (h *PeakHarvester) executeSyncLoop(startBlock uint64) error {
 			h.consecutiveFailures = 0
 			h.consecutiveSuccesses++
 
-			if h.consecutiveSuccesses >= 3 {
+			if h.consecutiveSuccesses >= ConsecutiveSuccessThreshold {
 				oldBatchSize := batchSize
 				batchSize *= 2
 				h.consecutiveSuccesses = 0
@@ -969,16 +983,16 @@ func (h *PeakHarvester) executeSyncLoop(startBlock uint64) error {
 			current = batchEnd + 1
 
 		} else {
-			// Halve batch size on failure
+			// Halve batch size on failure (unlimited retries via RPC client)
 			h.consecutiveSuccesses = 0
 			oldBatchSize := batchSize
 			batchSize /= 2
-			if batchSize < 1 {
-				batchSize = 1
+			if batchSize < MinBatchSize {
+				batchSize = MinBatchSize
 			}
 			debug.DropMessage("BATCH-", utils.Itoa(int(oldBatchSize))+"→"+utils.Itoa(int(batchSize)))
 
-			// Don't advance on failure - retry same range
+			// Don't advance on failure - retry same range with smaller batch
 		}
 
 		// Commit periodically
@@ -1193,6 +1207,9 @@ func (h *PeakHarvester) terminateCleanly() error {
 // ROUTER INTEGRATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// Fixed FlushSyncedReservesToRouter function
+// Replace the existing function in syncharvester.go starting around line 1270
+
 // FlushSyncedReservesToRouter loads all reserves from database and dispatches to router.
 // Reads zero-trimmed hex strings and formats them for router consumption.
 //
@@ -1281,23 +1298,60 @@ func FlushSyncedReservesToRouter() error {
 		var pairAddress string
 		var reserve0Hex, reserve1Hex string
 
-		if err := rows.Scan(&pairAddress, &reserve0Hex, &reserve1Hex); err != nil {
-			continue
+		rows.Scan(&pairAddress, &reserve0Hex, &reserve1Hex)
+
+		// Reset buffer to zeros using uint64 writes
+		bufPtr := (*[16]uint64)(unsafe.Pointer(&dataBuffer[2]))
+		for i := 0; i < 16; i++ {
+			bufPtr[i] = zeros
 		}
 
-		// Pad zero-trimmed hex strings to 64 chars and copy directly
-		// Reserve0: right-aligned in first 64-char field
-		padStart0 := 66 - len(reserve0Hex)
-		copy(dataBuffer[padStart0:66], reserve0Hex)
+		// Write reserve0 right-aligned in positions 2-65 (64 chars)
+		if reserve0Hex != "0" {
+			writePos := 66 - len(reserve0Hex)
+			srcPtr := unsafe.StringData(reserve0Hex)
+			dstPtr := unsafe.Pointer(&dataBuffer[writePos])
+			srcLen := len(reserve0Hex)
 
-		// Reserve1: right-aligned in second 64-char field
-		padStart1 := 130 - len(reserve1Hex)
-		copy(dataBuffer[padStart1:130], reserve1Hex)
+			// Write 8 bytes at a time
+			for i := 0; i < srcLen/8; i++ {
+				*(*uint64)(unsafe.Add(dstPtr, i*8)) = *(*uint64)(unsafe.Add(unsafe.Pointer(srcPtr), i*8))
+			}
+			// Write remaining bytes
+			remaining := srcLen % 8
+			if remaining > 0 {
+				srcTail := unsafe.Add(unsafe.Pointer(srcPtr), srcLen&^7)
+				dstTail := unsafe.Add(dstPtr, srcLen&^7)
+				for i := 0; i < remaining; i++ {
+					*(*byte)(unsafe.Add(dstTail, i)) = *(*byte)(unsafe.Add(srcTail, i))
+				}
+			}
+		}
 
-		// Update only the changing field
+		// Write reserve1 right-aligned in positions 66-129 (64 chars)
+		if reserve1Hex != "0" {
+			writePos := 130 - len(reserve1Hex)
+			srcPtr := unsafe.StringData(reserve1Hex)
+			dstPtr := unsafe.Pointer(&dataBuffer[writePos])
+			srcLen := len(reserve1Hex)
+
+			// Write 8 bytes at a time
+			for i := 0; i < srcLen/8; i++ {
+				*(*uint64)(unsafe.Add(dstPtr, i*8)) = *(*uint64)(unsafe.Add(unsafe.Pointer(srcPtr), i*8))
+			}
+			// Write remaining bytes
+			remaining := srcLen % 8
+			if remaining > 0 {
+				srcTail := unsafe.Add(unsafe.Pointer(srcPtr), srcLen&^7)
+				dstTail := unsafe.Add(dstPtr, srcLen&^7)
+				for i := 0; i < remaining; i++ {
+					*(*byte)(unsafe.Add(dstTail, i)) = *(*byte)(unsafe.Add(srcTail, i))
+				}
+			}
+		}
+
+		// Update address and dispatch
 		v.Addr = unsafe.Slice(unsafe.StringData(pairAddress), len(pairAddress))
-
-		// Dispatch to router
 		router.DispatchPriceUpdate(&v)
 		flushedCount++
 	}
@@ -1472,20 +1526,6 @@ func RegisterTradingPairAddress(address42HexBytes []byte, pairID TradingPairID) 
 	}
 }
 
-// isEqual performs efficient comparison between PackedAddress structures
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func (a PackedAddress) isEqual(b PackedAddress) bool {
-	// Compare all three 64-bit words - addresses are equal only if all words match exactly
-	return a.words[0] == b.words[0] &&
-		a.words[1] == b.words[1] &&
-		a.words[2] == b.words[2]
-}
-
 // Returns the number of hex characters written (1-8)
 //
 //go:norace
@@ -1587,7 +1627,7 @@ func CheckIfPeakSyncNeeded() (bool, uint64, uint64, error) {
 	}
 
 	// Get current head
-	rpcURL := fmt.Sprintf(RPCPathTemplate, constants.WsHost)
+	rpcURL := RPCScheme + "://" + constants.WsHost + RPCProjectPath
 	client := NewRPCClient(rpcURL)
 	currentHead, err := client.BlockNumber(context.Background())
 	if err != nil {
