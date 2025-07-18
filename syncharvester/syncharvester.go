@@ -100,15 +100,13 @@ const (
 	// Synchronization parameters
 	OptimalBatchSize = uint64(10_000) // Initial batch size for block processing
 	SyncTargetOffset = 0              // No offset - sync to exact head (fast enough)
-	// MaxSyncTime disabled - no time limits on synchronization
 
 	// Database batch processing - Optimized for high throughput
-	CommitBatchSize = 100_000 // Events per transaction commit (doubled for better throughput)
-	EventBatchSize  = 10_000  // Events per batch insert (doubled for fewer round trips)
+	CommitBatchSize = 100_000 // Events per transaction commit
+	EventBatchSize  = 10_000  // Events per batch insert
 
 	// Buffer sizes - Optimized for real-world usage
-	PreAllocLogSliceSize = 50_000 // Increased for block batches with many events
-	HexDecodeBufferSize  = 128    // Doubled for larger hex data processing
+	PreAllocLogSliceSize = 50_000 // Block batches with many events
 
 	// Event signatures
 	SyncEventSignature = "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"
@@ -118,7 +116,7 @@ const (
 
 	// Adaptive batch sizing parameters
 	ConsecutiveSuccessThreshold = 3 // Double batch size after 3 consecutive successes
-	MinBatchSize                = 1 // Minimum batch size (never go below 1 block)
+	MinBatchSize                = 1 // Minimum batch size
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -259,12 +257,11 @@ type PeakHarvester struct {
 	processed     int64          // 8B - Total events processed
 
 	// CACHE LINE 2: Core processing state (64B)
-	lastProcessed   uint64   // 8B - Last processed block
-	syncTarget      uint64   // 8B - Target block for sync
-	hexDecodeBuffer []byte   // 24B - Hex decode buffer (unused now)
-	_               [24]byte // 24B - Padding
+	lastProcessed uint64   // 8B - Last processed block
+	syncTarget    uint64   // 8B - Target block for sync
+	_             [48]byte // 48B - Padding
 
-	// CACHE LINE 4: Database connections and lookups (64B)
+	// CACHE LINE 3: Database connections and lookups (64B)
 	reservesDB     *sql.DB    // 8B - Reserves database (used for all writes)
 	pairsDB        *sql.DB    // 8B - Pairs database (provided by main)
 	currentTx      *sql.Tx    // 8B - Current transaction
@@ -272,13 +269,13 @@ type PeakHarvester struct {
 	rpcClient      *RPCClient // 8B - RPC client
 	logSlice       []Log      // 24B - Pre-allocated log slice
 
-	// CACHE LINE 5: Batch adaptation and timing (64B)
+	// CACHE LINE 4: Batch adaptation and timing (64B)
 	consecutiveSuccesses int       // 8B - Success counter
 	consecutiveFailures  int       // 8B - Failure counter
 	startTime            time.Time // 24B - Start timestamp
 	lastCommit           time.Time // 24B - Last commit timestamp
 
-	// CACHE LINE 6: Context and control (64B)
+	// CACHE LINE 5: Context and control (64B)
 	ctx        context.Context    // 16B - Cancellation context
 	cancel     context.CancelFunc // 8B - Cancel function
 	signalChan chan os.Signal     // 24B - Signal channel
@@ -355,23 +352,17 @@ func (h *PeakHarvester) parseReservesToZeroTrimmedHex(dataStr string) (string, s
 	}
 
 	// Extract reserves with calculated offsets
-	var reserve0, reserve1 string
-
 	reserve0Start := 2 + leadingZeros0
 	if reserve0Start >= 66 {
-		reserve0 = "0"
-	} else {
-		reserve0 = dataStr[reserve0Start:66]
+		return "0", dataStr[66+leadingZeros1 : 130]
 	}
 
 	reserve1Start := 66 + leadingZeros1
 	if reserve1Start >= 130 {
-		reserve1 = "0"
-	} else {
-		reserve1 = dataStr[reserve1Start:130]
+		return dataStr[reserve0Start:66], "0"
 	}
 
-	return reserve0, reserve1
+	return dataStr[reserve0Start:66], dataStr[reserve1Start:130]
 }
 
 // collectLogForBatch validates and collects a log entry for batch processing
@@ -381,12 +372,12 @@ func (h *PeakHarvester) parseReservesToZeroTrimmedHex(dataStr string) (string, s
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) collectLogForBatch(log *Log) bool {
-	// Skip non-sync events - assume valid RPC data
+	// Skip non-sync events
 	if len(log.Topics) == 0 || log.Topics[0] != SyncEventSignature {
 		return false
 	}
 
-	// Parse hex directly (skip "0x" prefix) - assume valid hex from RPC
+	// Parse hex directly (skip "0x" prefix)
 	blockNum := utils.ParseHexU64([]byte(log.BlockNumber[2:]))
 	logIndex := utils.ParseHexU64([]byte(log.LogIndex[2:]))
 
@@ -442,7 +433,7 @@ func (h *PeakHarvester) flushBatch() error {
 
 	// Pre-allocate builder to reduce allocations
 	var builder strings.Builder
-	builder.Grow(8192) // Pre-allocate reasonable size
+	builder.Grow(8192)
 
 	// Process in chunks if needed
 	for start := 0; start < len(h.eventBatch); start += maxBatchSize {
@@ -549,6 +540,7 @@ func (c *RPCClient) Call(ctx context.Context, result interface{}, method string,
 	}
 
 	data, _ := json.Marshal(req)
+	dataStr := string(data)
 
 	backoffMs := 100 // Start with 100ms backoff
 
@@ -559,7 +551,7 @@ func (c *RPCClient) Call(ctx context.Context, result interface{}, method string,
 		default:
 		}
 
-		httpReq, _ := http.NewRequestWithContext(ctx, "POST", c.url, strings.NewReader(string(data)))
+		httpReq, _ := http.NewRequestWithContext(ctx, "POST", c.url, strings.NewReader(dataStr))
 		httpReq.Header.Set("Content-Type", "application/json")
 
 		resp, err := c.client.Do(httpReq)
@@ -721,10 +713,9 @@ func NewPeakHarvester(existingPairsDB *sql.DB) (*PeakHarvester, error) {
 	// Create harvester instance
 	h := &PeakHarvester{
 		// Core fields - Pre-allocate batches to exact EventBatchSize capacity
-		hexDecodeBuffer: make([]byte, HexDecodeBufferSize), // Unused now but kept for compatibility
-		logSlice:        make([]Log, 0, PreAllocLogSliceSize),
-		eventBatch:      make([]batchEvent, 0, EventBatchSize),   // FIXED: Pre-allocated capacity
-		reserveBatch:    make([]batchReserve, 0, EventBatchSize), // FIXED: Pre-allocated capacity
+		logSlice:     make([]Log, 0, PreAllocLogSliceSize),
+		eventBatch:   make([]batchEvent, 0, EventBatchSize),
+		reserveBatch: make([]batchReserve, 0, EventBatchSize),
 
 		// Database connections
 		rpcClient:  rpcClient,
@@ -985,14 +976,10 @@ func (h *PeakHarvester) executeSyncLoop(startBlock uint64) error {
 		} else {
 			// Halve batch size on failure (unlimited retries via RPC client)
 			h.consecutiveSuccesses = 0
-			oldBatchSize := batchSize
 			batchSize /= 2
 			if batchSize < MinBatchSize {
 				batchSize = MinBatchSize
 			}
-			debug.DropMessage("BATCH-", utils.Itoa(int(oldBatchSize))+"→"+utils.Itoa(int(batchSize)))
-
-			// Don't advance on failure - retry same range with smaller batch
 		}
 
 		// Commit periodically
@@ -1135,10 +1122,9 @@ func (h *PeakHarvester) reportProgress() {
 	elapsed := time.Since(h.startTime)
 	eventsPerSecond := float64(h.processed) / elapsed.Seconds()
 
-	// Use utils.Itoa and utils.Ftoa with bounds checking
-	blockStr := utils.Itoa(int(h.lastProcessed)) // Safe for reasonable block numbers
-	eventsStr := utils.Itoa(int(h.processed))    // Safe for reasonable event counts
-	rateStr := utils.Ftoa(eventsPerSecond)       // Safe for reasonable rates
+	blockStr := utils.Itoa(int(h.lastProcessed))
+	eventsStr := utils.Itoa(int(h.processed))
+	rateStr := utils.Ftoa(eventsPerSecond)
 
 	debug.DropMessage("PROGRESS", fmt.Sprintf(
 		"Block %s, %s events (%s/s)",
@@ -1198,7 +1184,6 @@ func (h *PeakHarvester) terminateCleanly() error {
 	h.eventBatch = nil
 	h.reserveBatch = nil
 	h.logSlice = nil
-	h.hexDecodeBuffer = nil
 
 	return nil
 }
@@ -1206,9 +1191,6 @@ func (h *PeakHarvester) terminateCleanly() error {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ROUTER INTEGRATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// Fixed FlushSyncedReservesToRouter function
-// Replace the existing function in syncharvester.go starting around line 1270
 
 // FlushSyncedReservesToRouter loads all reserves from database and dispatches to router.
 // Reads zero-trimmed hex strings and formats them for router consumption.
@@ -1229,42 +1211,23 @@ func FlushSyncedReservesToRouter() error {
 	var latestBlock uint64
 	err = db.QueryRow("SELECT last_block FROM sync_metadata WHERE id = 1").Scan(&latestBlock)
 	if err != nil {
-		// Check if sync_events exist - if they do, database is corrupted
-		var eventCount int
-		checkErr := db.QueryRow("SELECT COUNT(*) FROM sync_events").Scan(&eventCount)
-		if checkErr == nil && eventCount > 0 {
-			// This is a critical inconsistency - sync events exist but metadata is missing
-			panic(fmt.Sprintf("database corruption: %d sync_events exist but sync_metadata is missing", eventCount))
-		}
-
-		// No sync data at all - this is a normal empty database
 		return fmt.Errorf("no sync data found in database")
 	}
 
-	// Pre-allocate block hex buffer with optimal size for uint32
-	// Max uint32 (4294967295) in hex is 8 chars plus "0x" = 10 chars
-	var blockHexBuf [10]byte
+	// Pre-allocate block hex buffer with optimal size for uint64
+	// Max uint64 in hex is 16 chars plus "0x" = 18 chars
+	var blockHexBuf [18]byte
 	blockHexBuf[0] = '0'
 	blockHexBuf[1] = 'x'
 
-	// Write block number as hex (assuming it fits in uint32 for router)
-	// This is more efficient than fmt.Sprintf
-	blockLen := 2 + WriteHex32(blockHexBuf[2:], uint32(latestBlock))
+	// Write block number as hex
+	blockLen := 2 + WriteHex64(blockHexBuf[2:], latestBlock)
 	blockHex := blockHexBuf[:blockLen]
 
-	// Pre-allocate data buffer with zeros
-	// Format: 0x + 64 hex chars (reserve0) + 64 hex chars (reserve1) = 130 chars total
+	// Pre-allocate data buffer: 0x + 64 hex chars (reserve0) + 64 hex chars (reserve1) = 130 chars
 	var dataBuffer [130]byte
 	dataBuffer[0] = '0'
 	dataBuffer[1] = 'x'
-
-	// Fill with '0' using uint64 writes (0x3030303030303030)
-	// This is faster than byte-by-byte filling
-	dataPtr := (*[16]uint64)(unsafe.Pointer(&dataBuffer[2]))
-	const zeros = uint64(0x3030303030303030)
-	for i := 0; i < 16; i++ {
-		dataPtr[i] = zeros
-	}
 
 	// Static values that never change - allocate once outside the loop
 	staticLogIdx := []byte("0x0")
@@ -1281,12 +1244,8 @@ func FlushSyncedReservesToRouter() error {
 	v.BlkNum = blockHex
 	v.Data = dataBuffer[:]
 
-	// Query all reserves
-	rows, err := db.Query(`
-		SELECT pair_address, reserve0, reserve1 
-		FROM pair_reserves 
-		ORDER BY pair_id
-	`)
+	// Query all reserves - no ORDER BY for better performance
+	rows, err := db.Query(`SELECT pair_address, reserve0, reserve1 FROM pair_reserves`)
 	if err != nil {
 		return fmt.Errorf("failed to query reserves: %w", err)
 	}
@@ -1294,69 +1253,55 @@ func FlushSyncedReservesToRouter() error {
 
 	flushedCount := 0
 
-	for rows.Next() {
-		var pairAddress string
-		var reserve0Hex, reserve1Hex string
+	// Pre-declare variables outside loop for reuse
+	var pairAddress, reserve0Hex, reserve1Hex string
+	var writePos, srcLen int
+	var srcPtr *byte
+	var dstPtr unsafe.Pointer
+	const zeros = uint64(0x3030303030303030)
 
+	for rows.Next() {
 		rows.Scan(&pairAddress, &reserve0Hex, &reserve1Hex)
 
-		// Zero only the exact ranges we need: reserve0 (34:66) and reserve1 (98:130)
-		// Each range is 32 bytes = 4 uint64 writes with zeros pattern
-
-		// Zero reserve0 range (positions 34-65: 32 bytes = 4 uint64s)
+		// Zero only the data ranges: 34:66 (reserve0) and 98:130 (reserve1)
+		// Each range is 32 bytes = 4 uint64 writes
 		*(*uint64)(unsafe.Pointer(&dataBuffer[34])) = zeros
 		*(*uint64)(unsafe.Pointer(&dataBuffer[42])) = zeros
 		*(*uint64)(unsafe.Pointer(&dataBuffer[50])) = zeros
 		*(*uint64)(unsafe.Pointer(&dataBuffer[58])) = zeros
-
-		// Zero reserve1 range (positions 98-129: 32 bytes = 4 uint64s)
 		*(*uint64)(unsafe.Pointer(&dataBuffer[98])) = zeros
 		*(*uint64)(unsafe.Pointer(&dataBuffer[106])) = zeros
 		*(*uint64)(unsafe.Pointer(&dataBuffer[114])) = zeros
 		*(*uint64)(unsafe.Pointer(&dataBuffer[122])) = zeros
 
 		// Write reserve0 right-aligned in positions 2-65 (64 chars)
-		if reserve0Hex != "0" {
-			writePos := 66 - len(reserve0Hex)
-			srcPtr := unsafe.StringData(reserve0Hex)
-			dstPtr := unsafe.Pointer(&dataBuffer[writePos])
-			srcLen := len(reserve0Hex)
+		srcLen = len(reserve0Hex)
+		writePos = 66 - srcLen
+		srcPtr = unsafe.StringData(reserve0Hex)
+		dstPtr = unsafe.Pointer(&dataBuffer[writePos])
 
-			// Write 8 bytes at a time
-			for i := 0; i < srcLen/8; i++ {
-				*(*uint64)(unsafe.Add(dstPtr, i*8)) = *(*uint64)(unsafe.Add(unsafe.Pointer(srcPtr), i*8))
-			}
-			// Write remaining bytes
-			remaining := srcLen % 8
-			if remaining > 0 {
-				srcTail := unsafe.Add(unsafe.Pointer(srcPtr), srcLen&^7)
-				dstTail := unsafe.Add(dstPtr, srcLen&^7)
-				for i := 0; i < remaining; i++ {
-					*(*byte)(unsafe.Add(dstTail, i)) = *(*byte)(unsafe.Add(srcTail, i))
-				}
-			}
+		// Write 8 bytes at a time
+		for i := 0; i < srcLen/8; i++ {
+			*(*uint64)(unsafe.Add(dstPtr, i*8)) = *(*uint64)(unsafe.Add(unsafe.Pointer(srcPtr), i*8))
+		}
+		// Write remaining bytes
+		for i := srcLen &^ 7; i < srcLen; i++ {
+			*(*byte)(unsafe.Add(dstPtr, i)) = *(*byte)(unsafe.Add(unsafe.Pointer(srcPtr), i))
 		}
 
 		// Write reserve1 right-aligned in positions 66-129 (64 chars)
-		if reserve1Hex != "0" {
-			writePos := 130 - len(reserve1Hex)
-			srcPtr := unsafe.StringData(reserve1Hex)
-			dstPtr := unsafe.Pointer(&dataBuffer[writePos])
-			srcLen := len(reserve1Hex)
+		srcLen = len(reserve1Hex)
+		writePos = 130 - srcLen
+		srcPtr = unsafe.StringData(reserve1Hex)
+		dstPtr = unsafe.Pointer(&dataBuffer[writePos])
 
-			// Write 8 bytes at a time
-			for i := 0; i < srcLen/8; i++ {
-				*(*uint64)(unsafe.Add(dstPtr, i*8)) = *(*uint64)(unsafe.Add(unsafe.Pointer(srcPtr), i*8))
-			}
-			// Write remaining bytes
-			remaining := srcLen % 8
-			if remaining > 0 {
-				srcTail := unsafe.Add(unsafe.Pointer(srcPtr), srcLen&^7)
-				dstTail := unsafe.Add(dstPtr, srcLen&^7)
-				for i := 0; i < remaining; i++ {
-					*(*byte)(unsafe.Add(dstTail, i)) = *(*byte)(unsafe.Add(srcTail, i))
-				}
-			}
+		// Write 8 bytes at a time
+		for i := 0; i < srcLen/8; i++ {
+			*(*uint64)(unsafe.Add(dstPtr, i*8)) = *(*uint64)(unsafe.Add(unsafe.Pointer(srcPtr), i*8))
+		}
+		// Write remaining bytes
+		for i := srcLen &^ 7; i < srcLen; i++ {
+			*(*byte)(unsafe.Add(dstPtr, i)) = *(*byte)(unsafe.Add(unsafe.Pointer(srcPtr), i))
 		}
 
 		// Update address and dispatch
@@ -1535,6 +1480,40 @@ func RegisterTradingPairAddress(address42HexBytes []byte, pairID TradingPairID) 
 	}
 }
 
+// WriteHex64 writes uint64 as hex characters without leading zeros
+// Returns the number of hex characters written (1-16)
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func WriteHex64(dst []byte, v uint64) int {
+	const hex = "0123456789abcdef"
+
+	if v == 0 {
+		dst[0] = '0'
+		return 1
+	}
+
+	// Count nibbles
+	nibbles := 0
+	temp := v
+	for temp > 0 {
+		nibbles++
+		temp >>= 4
+	}
+
+	// Write hex chars from most significant to least
+	for i := nibbles - 1; i >= 0; i-- {
+		dst[i] = hex[v&0xF]
+		v >>= 4
+	}
+
+	return nibbles
+}
+
+// WriteHex32 writes uint32 as hex characters without leading zeros
 // Returns the number of hex characters written (1-8)
 //
 //go:norace
@@ -1566,8 +1545,6 @@ func WriteHex32(dst []byte, v uint32) int {
 
 	return nibbles
 }
-
-// WriteHex32 writes uint32 as hex characters without leading zeros
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // PUBLIC API
