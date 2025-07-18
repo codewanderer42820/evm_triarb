@@ -22,8 +22,8 @@ import (
 	"os/signal"
 	"runtime"
 	rtdebug "runtime/debug"
+	"sync"
 	"syscall"
-	"time"
 
 	"main/constants"
 	"main/control"
@@ -58,6 +58,9 @@ type Pool struct {
 var (
 	// Shared database connection reused by sync harvester
 	pairsDB *sql.DB
+
+	// Global shutdown coordination
+	shutdownWG sync.WaitGroup
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -338,7 +341,7 @@ func processEventStream() error {
 // SIGNAL HANDLING
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Immediate shutdown on Ctrl+C without coordination overhead
+// Proper shutdown coordination using WaitGroup
 func setupSignalHandling() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -347,14 +350,13 @@ func setupSignalHandling() {
 		<-sigChan
 		debug.DropMessage("SIGNAL", "Received interrupt, shutting down...")
 
-		// Give harvester time to flush cleanly if it's running
-		// The harvester has its own signal handling for clean shutdown
+		// Wait for all components to finish cleanly
+		shutdownWG.Wait()
+
 		if pairsDB != nil {
 			pairsDB.Close()
 		}
 
-		// Exit after delay to allow harvester cleanup
-		time.Sleep(3 * time.Second)
 		os.Exit(0)
 	}()
 }
