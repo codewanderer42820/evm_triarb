@@ -79,8 +79,7 @@ const (
 	UniswapV2DeploymentBlock = 10000835
 
 	// Batch size limits
-	MinBatchSize = 100
-	MaxRetries   = 3
+	MaxRetries = 3
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -903,8 +902,8 @@ func (h *PeakHarvester) executeSyncLoop(startBlock uint64) error {
 			h.consecutiveSuccesses = 0
 			oldBatchSize := batchSize
 			batchSize /= 2
-			if batchSize < MinBatchSize {
-				batchSize = MinBatchSize
+			if batchSize < 1 {
+				batchSize = 1
 			}
 			debug.DropMessage("BATCH-", utils.Itoa(int(oldBatchSize))+"→"+utils.Itoa(int(batchSize)))
 
