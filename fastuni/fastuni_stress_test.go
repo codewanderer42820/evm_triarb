@@ -52,9 +52,9 @@ import (
 // ============================================================================
 
 const (
-	million  = 1_000_000         // Standard validation scale
-	billion  = 1_000_000_000     // Extended validation scale
-	trillion = 1_000_000_000_000 // Exhaustive validation scale
+	million  int64 = 1_000_000         // Standard validation scale
+	billion  int64 = 1_000_000_000     // Extended validation scale
+	trillion int64 = 1_000_000_000_000 // Exhaustive validation scale
 
 	seedBase = 0x5eed // Base seed for deterministic regime generation
 )
@@ -167,7 +167,7 @@ func drawLarge(r *rand.Rand) (a, b uint64) {
 //   - Linear scaling with CPU core count
 //   - Sub-linear memory usage (constant per worker)
 //   - Deterministic execution time for benchmarking
-func sweepN(t *testing.T, regime string, n int,
+func sweepN(t *testing.T, regime string, n int64,
 	gen func(*rand.Rand) (uint64, uint64),
 	gold func(float64) float64,
 	impl func(uint64, uint64) (float64, error),
@@ -175,31 +175,31 @@ func sweepN(t *testing.T, regime string, n int,
 	workers := runtime.GOMAXPROCS(0)
 
 	// Use single-threaded execution for small workloads or limited parallelism
-	if workers < 2 || n < workers {
+	if workers < 2 || n < int64(workers) { // Convert workers to int64 for comparison
 		singleThreadSweep(t, regime, n, gen, gold, impl)
 		return
 	}
 
 	// Parallel execution setup
-	chunk := n / workers
+	chunk := n / int64(workers) // Convert workers to int64 for division
 	var wg sync.WaitGroup
 	var once sync.Once
 	var failMsg string
 
 	// Launch worker pool
 	for w := 0; w < workers; w++ {
-		start := w * chunk
+		start := int64(w) * chunk // Convert w to int64
 		end := start + chunk
 		if w == workers-1 {
-			end = n // Ensure last worker handles remainder
+			end = n // Last worker handles remainder
 		}
 
 		// Deterministic per-worker seeding
-		seed := seedBase + int64(regime[0]) + int64(n) + int64(w)
+		seed := seedBase + int64(regime[0]) + n + int64(w)
 		r := rand.New(rand.NewSource(seed))
 
 		wg.Add(1)
-		go func(worker, from, to int, rng *rand.Rand) {
+		go func(worker int, from, to int64, rng *rand.Rand) { // Use int64 for from/to
 			defer wg.Done()
 
 			// Per-worker validation loop
@@ -236,14 +236,14 @@ func sweepN(t *testing.T, regime string, n int,
 //   - Sequential processing with minimal overhead
 //   - Identical validation logic to parallel version
 //   - Deterministic seeding matching parallel execution
-func singleThreadSweep(t *testing.T, regime string, n int,
+func singleThreadSweep(t *testing.T, regime string, n int64,
 	gen func(*rand.Rand) (uint64, uint64),
 	gold func(float64) float64,
 	impl func(uint64, uint64) (float64, error),
 ) {
-	r := rand.New(rand.NewSource(seedBase + int64(regime[0]) + int64(n)))
+	r := rand.New(rand.NewSource(seedBase + int64(regime[0]) + n)) // n is already int64, no need to convert
 
-	for i := 0; i < n; i++ {
+	for i := int64(0); i < n; i++ { // Change loop counter to int64
 		a, b := gen(r)
 		want := gold(float64(a) / float64(b))
 		got, err := impl(a, b)
