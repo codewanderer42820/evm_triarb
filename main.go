@@ -23,6 +23,7 @@ import (
 	"runtime"
 	rtdebug "runtime/debug"
 	"syscall"
+	"time"
 
 	"main/constants"
 	"main/control"
@@ -345,9 +346,15 @@ func setupSignalHandling() {
 	go func() {
 		<-sigChan
 		debug.DropMessage("SIGNAL", "Received interrupt, shutting down...")
+
+		// Give harvester time to flush cleanly if it's running
+		// The harvester has its own signal handling for clean shutdown
 		if pairsDB != nil {
 			pairsDB.Close()
 		}
+
+		// Exit after delay to allow harvester cleanup
+		time.Sleep(3 * time.Second)
 		os.Exit(0)
 	}()
 }
