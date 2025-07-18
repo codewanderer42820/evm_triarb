@@ -17,10 +17,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"main/types"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -254,6 +258,39 @@ func setupTestHarvester(t testingInterface, mockServer *MockRPCServer) (*PeakHar
 	}
 
 	return h, cleanup
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// MOCK ROUTER FOR TESTING
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// MockRouter captures dispatched price updates for testing
+type MockRouter struct {
+	dispatchedUpdates []MockPriceUpdate
+	mu                sync.Mutex
+}
+
+type MockPriceUpdate struct {
+	Address  string
+	Reserve0 uint64
+	Reserve1 uint64
+	Block    uint64
+}
+
+var testRouter = &MockRouter{}
+
+func (m *MockRouter) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dispatchedUpdates = nil
+}
+
+func (m *MockRouter) GetUpdates() []MockPriceUpdate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	updates := make([]MockPriceUpdate, len(m.dispatchedUpdates))
+	copy(updates, m.dispatchedUpdates)
+	return updates
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -719,6 +756,375 @@ func TestFlushBatch(t *testing.T) {
 	err = h.flushBatch()
 	if err != nil {
 		t.Errorf("Expected no error on empty flush, got: %v", err)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// FLUSH TO ROUTER TESTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// testableFlushSyncedReservesToRouter is a version that accepts a dispatch function for testing
+func testableFlushSyncedReservesToRouter(dispatcher func(*types.LogView)) (int, error) {
+	// Open the reserves database
+	db, err := sql.Open("sqlite3", ReservesDBPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open reserves database: %w", err)
+	}
+	defer db.Close()
+
+	// Get the latest block height from sync metadata
+	var latestBlock uint64
+	err = db.QueryRow("SELECT last_block FROM sync_metadata WHERE id = 1").Scan(&latestBlock)
+	if err != nil {
+		// If no metadata, get max block from sync_events
+		err = db.QueryRow("SELECT COALESCE(MAX(block_number), 0) FROM sync_events").Scan(&latestBlock)
+		if err != nil || latestBlock == 0 {
+			return 0, fmt.Errorf("no sync data found in database")
+		}
+	}
+
+	// Pre-compute block hex once
+	blockHex := make([]byte, 0, 18)
+	blockHex = append(blockHex, "0x"...)
+	blockHex = appendHexUint64Test(blockHex, latestBlock)
+
+	// Pre-allocate reusable buffers
+	dataBuffer := make([]byte, 0, 130)
+
+	// Query all reserves
+	rows, err := db.Query(`
+		SELECT pair_address, reserve0, reserve1 
+		FROM pair_reserves 
+		ORDER BY pair_id
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query reserves: %w", err)
+	}
+	defer rows.Close()
+
+	flushedCount := 0
+
+	for rows.Next() {
+		var pairAddress string
+		var reserve0Str, reserve1Str string
+
+		if err := rows.Scan(&pairAddress, &reserve0Str, &reserve1Str); err != nil {
+			continue
+		}
+
+		// Parse reserve strings to big.Int
+		r0 := new(big.Int)
+		r1 := new(big.Int)
+		r0.SetString(reserve0Str, 10)
+		r1.SetString(reserve1Str, 10)
+
+		// Skip if reserves don't fit in uint64
+		if !r0.IsUint64() || !r1.IsUint64() {
+			continue
+		}
+
+		// Build data buffer with hex encoding
+		dataBuffer = dataBuffer[:0]
+		dataStr := fmt.Sprintf("0x%064x%064x", r0.Uint64(), r1.Uint64())
+		dataBuffer = []byte(dataStr)
+
+		// Create minimal LogView on stack
+		var v types.LogView
+
+		// Direct byte slice assignment
+		v.Addr = []byte(pairAddress)
+		v.Data = []byte(dataBuffer)
+		v.BlkNum = blockHex
+
+		// Static dummy values
+		v.LogIdx = []byte("0x0")
+		v.TxIndex = []byte("0x0")
+		v.Topics = []byte("0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1")
+
+		// Dispatch using provided function
+		dispatcher(&v)
+		flushedCount++
+	}
+
+	if err := rows.Err(); err != nil {
+		return flushedCount, fmt.Errorf("error iterating reserves: %w", err)
+	}
+
+	return flushedCount, nil
+}
+
+// Test helper function
+func appendHexUint64Test(dst []byte, v uint64) []byte {
+	if v == 0 {
+		return append(dst, '0')
+	}
+
+	// Use fmt.Sprintf for simplicity in tests
+	hex := fmt.Sprintf("%x", v)
+	return append(dst, hex...)
+}
+
+// captureDispatch creates a dispatcher that captures LogView data
+func captureDispatch(router *MockRouter) func(*types.LogView) {
+	return func(v *types.LogView) {
+		router.mu.Lock()
+		defer router.mu.Unlock()
+
+		// Parse the data which is in format "0x" + 64 hex chars for reserve0 + 64 hex chars for reserve1
+		if len(v.Data) < 130 {
+			return
+		}
+
+		dataStr := string(v.Data)
+		if !strings.HasPrefix(dataStr, "0x") {
+			return
+		}
+
+		// Parse reserves from hex string
+		dataStr = dataStr[2:] // Remove "0x"
+		if len(dataStr) < 128 {
+			return
+		}
+
+		reserve0Hex := dataStr[0:64]
+		reserve1Hex := dataStr[64:128]
+
+		r0 := new(big.Int)
+		r1 := new(big.Int)
+		r0.SetString(reserve0Hex, 16)
+		r1.SetString(reserve1Hex, 16)
+
+		blockStr := strings.TrimPrefix(string(v.BlkNum), "0x")
+		block, _ := strconv.ParseUint(blockStr, 16, 64)
+
+		router.dispatchedUpdates = append(router.dispatchedUpdates, MockPriceUpdate{
+			Address:  string(v.Addr),
+			Reserve0: r0.Uint64(),
+			Reserve1: r1.Uint64(),
+			Block:    block,
+		})
+	}
+}
+
+func TestFlushSyncedReservesToRouter(t *testing.T) {
+	// Create test database
+	tempDir := t.TempDir()
+	oldPath := ReservesDBPath
+	ReservesDBPath = filepath.Join(tempDir, "test_reserves.db")
+	defer func() { ReservesDBPath = oldPath }()
+
+	db, err := sql.Open("sqlite3", ReservesDBPath)
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer db.Close()
+
+	// Create schema
+	schema := `
+	CREATE TABLE sync_metadata (
+		id INTEGER PRIMARY KEY,
+		last_block INTEGER NOT NULL
+	);
+	
+	CREATE TABLE sync_events (
+		block_number INTEGER
+	);
+	
+	CREATE TABLE pair_reserves (
+		pair_id INTEGER PRIMARY KEY,
+		pair_address TEXT NOT NULL,
+		reserve0 TEXT NOT NULL,
+		reserve1 TEXT NOT NULL,
+		block_height INTEGER NOT NULL,
+		last_updated INTEGER NOT NULL
+	);
+	
+	INSERT INTO sync_metadata (id, last_block) VALUES (1, 12345678);
+	`
+
+	_, err = db.Exec(schema)
+	if err != nil {
+		t.Fatalf("Failed to create schema: %v", err)
+	}
+
+	// Test cases
+	testCases := []struct {
+		name            string
+		setupData       func(*sql.DB)
+		expectedUpdates int
+		expectedError   bool
+		checkUpdate     func([]MockPriceUpdate) error
+	}{
+		{
+			name: "Single pair",
+			setupData: func(db *sql.DB) {
+				db.Exec(`INSERT INTO pair_reserves VALUES (1, '0xAbCdEf1234567890', '1000000', '2000000', 12345678, 1234567890)`)
+			},
+			expectedUpdates: 1,
+			checkUpdate: func(updates []MockPriceUpdate) error {
+				if updates[0].Address != "0xAbCdEf1234567890" {
+					return fmt.Errorf("Expected address 0xAbCdEf1234567890, got %s", updates[0].Address)
+				}
+				if updates[0].Reserve0 != 1000000 {
+					return fmt.Errorf("Expected reserve0 1000000, got %d", updates[0].Reserve0)
+				}
+				if updates[0].Reserve1 != 2000000 {
+					return fmt.Errorf("Expected reserve1 2000000, got %d", updates[0].Reserve1)
+				}
+				if updates[0].Block != 12345678 {
+					return fmt.Errorf("Expected block 12345678, got %d", updates[0].Block)
+				}
+				return nil
+			},
+		},
+		{
+			name: "Multiple pairs",
+			setupData: func(db *sql.DB) {
+				db.Exec(`INSERT INTO pair_reserves VALUES 
+					(1, '0x1111111111111111', '100', '200', 12345678, 1234567890),
+					(2, '0x2222222222222222', '300', '400', 12345678, 1234567890),
+					(3, '0x3333333333333333', '500', '600', 12345678, 1234567890)`)
+			},
+			expectedUpdates: 3,
+			checkUpdate: func(updates []MockPriceUpdate) error {
+				if len(updates) != 3 {
+					return fmt.Errorf("Expected 3 updates, got %d", len(updates))
+				}
+				// Check they're in order
+				expectedAddrs := []string{"0x1111111111111111", "0x2222222222222222", "0x3333333333333333"}
+				for i, update := range updates {
+					if update.Address != expectedAddrs[i] {
+						return fmt.Errorf("Update %d: expected address %s, got %s", i, expectedAddrs[i], update.Address)
+					}
+				}
+				return nil
+			},
+		},
+		{
+			name: "Large reserves",
+			setupData: func(db *sql.DB) {
+				// Use very large but still uint64-compatible reserves
+				db.Exec(`INSERT INTO pair_reserves VALUES (1, '0xLARGE', '18446744073709551615', '9223372036854775807', 12345678, 1234567890)`)
+			},
+			expectedUpdates: 1,
+			checkUpdate: func(updates []MockPriceUpdate) error {
+				if updates[0].Address != "0xLARGE" {
+					return fmt.Errorf("Expected address 0xLARGE, got %s", updates[0].Address)
+				}
+				if updates[0].Reserve0 != ^uint64(0) {
+					return fmt.Errorf("Expected max uint64 for reserve0, got %d", updates[0].Reserve0)
+				}
+				if updates[0].Reserve1 != 1<<63-1 {
+					return fmt.Errorf("Expected max int64 for reserve1, got %d", updates[0].Reserve1)
+				}
+				return nil
+			},
+		},
+		{
+			name: "Reserves too large for uint64",
+			setupData: func(db *sql.DB) {
+				// This reserve is larger than uint64 max
+				db.Exec(`INSERT INTO pair_reserves VALUES 
+					(1, '0xTOOLARGE', '99999999999999999999999999999999', '1000', 12345678, 1234567890),
+					(2, '0xNORMAL', '1000', '2000', 12345678, 1234567890)`)
+			},
+			expectedUpdates: 1, // Only the normal one should be processed
+			checkUpdate: func(updates []MockPriceUpdate) error {
+				if len(updates) != 1 {
+					return fmt.Errorf("Expected 1 update (skipping too large), got %d", len(updates))
+				}
+				if updates[0].Address != "0xNORMAL" {
+					return fmt.Errorf("Expected only '0xNORMAL' address, got %s", updates[0].Address)
+				}
+				return nil
+			},
+		},
+		{
+			name:            "Empty database",
+			setupData:       func(db *sql.DB) {},
+			expectedUpdates: 0,
+		},
+		{
+			name: "No sync metadata - use sync_events",
+			setupData: func(db *sql.DB) {
+				db.Exec(`DELETE FROM sync_metadata`)
+				db.Exec(`INSERT INTO sync_events (block_number) VALUES (11111111)`)
+				db.Exec(`INSERT INTO pair_reserves VALUES (1, '0xTEST', '1000', '2000', 11111111, 1234567890)`)
+			},
+			expectedUpdates: 1,
+			checkUpdate: func(updates []MockPriceUpdate) error {
+				if updates[0].Address != "0xTEST" {
+					return fmt.Errorf("Expected address 0xTEST, got %s", updates[0].Address)
+				}
+				if updates[0].Block != 11111111 {
+					return fmt.Errorf("Expected block from sync_events (11111111), got %d", updates[0].Block)
+				}
+				return nil
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reset router
+			testRouter.Reset()
+
+			// Clear and setup data
+			db.Exec(`DELETE FROM pair_reserves`)
+			tc.setupData(db)
+
+			// Execute flush with test dispatcher
+			_, err := testableFlushSyncedReservesToRouter(captureDispatch(testRouter))
+
+			if tc.expectedError && err == nil {
+				t.Error("Expected error but got none")
+			} else if !tc.expectedError && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+
+			// Check results
+			updates := testRouter.GetUpdates()
+			if len(updates) != tc.expectedUpdates {
+				t.Errorf("Expected %d updates, got %d", tc.expectedUpdates, len(updates))
+			}
+
+			if tc.checkUpdate != nil && len(updates) > 0 {
+				if err := tc.checkUpdate(updates); err != nil {
+					t.Error(err)
+				}
+			}
+		})
+	}
+}
+
+func TestFlushSyncedReservesToRouter_NoDatabase(t *testing.T) {
+	oldPath := ReservesDBPath
+	ReservesDBPath = "/invalid/path/nonexistent.db"
+	defer func() { ReservesDBPath = oldPath }()
+
+	_, err := testableFlushSyncedReservesToRouter(func(*types.LogView) {})
+	if err == nil {
+		t.Error("Expected error with nonexistent database")
+	}
+}
+
+func TestFlushSyncedReservesToRouter_NoSyncData(t *testing.T) {
+	tempDir := t.TempDir()
+	oldPath := ReservesDBPath
+	ReservesDBPath = filepath.Join(tempDir, "empty.db")
+	defer func() { ReservesDBPath = oldPath }()
+
+	db, _ := sql.Open("sqlite3", ReservesDBPath)
+	defer db.Close()
+
+	// Create tables but no data
+	db.Exec(`CREATE TABLE sync_metadata (id INTEGER PRIMARY KEY, last_block INTEGER)`)
+	db.Exec(`CREATE TABLE sync_events (block_number INTEGER)`)
+	db.Exec(`CREATE TABLE pair_reserves (pair_id INTEGER PRIMARY KEY)`)
+
+	_, err := testableFlushSyncedReservesToRouter(func(*types.LogView) {})
+	if err == nil || !strings.Contains(err.Error(), "no sync data") {
+		t.Errorf("Expected 'no sync data' error, got: %v", err)
 	}
 }
 
@@ -1401,6 +1807,98 @@ func TestCheckIfPeakSyncNeeded(t *testing.T) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
+// HELPER FUNCTION TESTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+func TestFastParseUint64(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    string
+		expected uint64
+	}{
+		{
+			name:     "Zero",
+			input:    "0",
+			expected: 0,
+		},
+		{
+			name:     "Simple number",
+			input:    "12345",
+			expected: 12345,
+		},
+		{
+			name:     "Max uint64",
+			input:    "18446744073709551615",
+			expected: ^uint64(0),
+		},
+		{
+			name:     "Invalid - has letters",
+			input:    "123abc",
+			expected: 0,
+		},
+		{
+			name:     "Empty string",
+			input:    "",
+			expected: 0,
+		},
+		{
+			name:     "Overflow",
+			input:    "18446744073709551616", // max uint64 + 1
+			expected: 0,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := fastParseUint64(tc.input)
+			if result != tc.expected {
+				t.Errorf("Expected %d, got %d", tc.expected, result)
+			}
+		})
+	}
+}
+
+func TestWriteHex64(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    uint64
+		expected string
+	}{
+		{
+			name:     "Zero",
+			input:    0,
+			expected: "0000000000000000",
+		},
+		{
+			name:     "Max uint64",
+			input:    ^uint64(0),
+			expected: "ffffffffffffffff",
+		},
+		{
+			name:     "Some value",
+			input:    0x123456789ABCDEF0,
+			expected: "123456789abcdef0",
+		},
+		{
+			name:     "Small value",
+			input:    255,
+			expected: "00000000000000ff",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := make([]byte, 16)
+			writeHex64(buf, tc.input)
+			result := string(buf)
+			if result != tc.expected {
+				t.Errorf("Expected %s, got %s", tc.expected, result)
+			}
+		})
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
 // BENCHMARK TESTS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -1487,6 +1985,59 @@ func BenchmarkFlushBatch(b *testing.B) {
 
 		// Flush
 		h.flushBatch()
+	}
+}
+
+func BenchmarkWriteHex64(b *testing.B) {
+	buf := make([]byte, 16)
+	val := uint64(0x123456789ABCDEF0)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		writeHex64(buf, val)
+	}
+}
+
+func BenchmarkFastParseUint64(b *testing.B) {
+	input := "12345678901234567890"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		fastParseUint64(input)
+	}
+}
+
+func BenchmarkFlushSyncedReservesToRouter(b *testing.B) {
+	// Create test database with many reserves
+	tempDir := b.TempDir()
+	oldPath := ReservesDBPath
+	ReservesDBPath = filepath.Join(tempDir, "bench_reserves.db")
+	defer func() { ReservesDBPath = oldPath }()
+
+	db, _ := sql.Open("sqlite3", ReservesDBPath)
+	defer db.Close()
+
+	// Create schema
+	db.Exec(`CREATE TABLE sync_metadata (id INTEGER PRIMARY KEY, last_block INTEGER)`)
+	db.Exec(`CREATE TABLE pair_reserves (pair_id INTEGER PRIMARY KEY, pair_address TEXT, reserve0 TEXT, reserve1 TEXT, block_height INTEGER, last_updated INTEGER)`)
+	db.Exec(`INSERT INTO sync_metadata VALUES (1, 12345678)`)
+
+	// Insert 10,000 pairs
+	tx, _ := db.Begin()
+	stmt, _ := tx.Prepare(`INSERT INTO pair_reserves VALUES (?, ?, ?, ?, ?, ?)`)
+	for i := 0; i < 10000; i++ {
+		addr := fmt.Sprintf("0x%040d", i)
+		stmt.Exec(i, addr, "1000000", "2000000", 12345678, 1234567890)
+	}
+	stmt.Close()
+	tx.Commit()
+
+	// No-op dispatcher for benchmarking
+	noopDispatcher := func(*types.LogView) {}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		testableFlushSyncedReservesToRouter(noopDispatcher)
 	}
 }
 

@@ -14,6 +14,7 @@
 //   - Pre-allocated memory structures for zero-allocation operation
 //   - Adaptive batch sizing based on network conditions
 //   - Reuses existing database connections from main
+//   - Router integration for flushing synced reserves
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -37,9 +38,12 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"main/constants"
 	"main/debug"
+	"main/router"
+	"main/types"
 	"main/utils"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -1108,6 +1112,207 @@ func (h *PeakHarvester) terminateCleanly() error {
 	h.reserveBuffer[1] = nil
 
 	return nil
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ROUTER INTEGRATION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// FlushSyncedReservesToRouter loads all reserves from database and dispatches to router.
+// Peak performance implementation using manual hex encoding.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func FlushSyncedReservesToRouter() error {
+	// Open the reserves database
+	db, err := sql.Open("sqlite3", ReservesDBPath)
+	if err != nil {
+		return fmt.Errorf("failed to open reserves database: %w", err)
+	}
+	defer db.Close()
+
+	// Get the latest block height from sync metadata
+	var latestBlock uint64
+	err = db.QueryRow("SELECT last_block FROM sync_metadata WHERE id = 1").Scan(&latestBlock)
+	if err != nil {
+		// If no metadata, get max block from sync_events
+		err = db.QueryRow("SELECT COALESCE(MAX(block_number), 0) FROM sync_events").Scan(&latestBlock)
+		if err != nil || latestBlock == 0 {
+			return fmt.Errorf("no sync data found in database")
+		}
+	}
+
+	// Build block hex manually for peak performance
+	var blockHex [18]byte // Max "0x" + 16 hex chars
+	blockHex[0] = '0'
+	blockHex[1] = 'x'
+	blockLen := 2
+
+	// Convert block number to hex
+	if latestBlock == 0 {
+		blockHex[2] = '0'
+		blockLen = 3
+	} else {
+		// Write hex digits backwards then reverse
+		const hexChars = "0123456789abcdef"
+		temp := latestBlock
+		i := 18
+		for temp > 0 {
+			i--
+			blockHex[i] = hexChars[temp&0xF]
+			temp >>= 4
+		}
+		// Move to front
+		copy(blockHex[2:], blockHex[i:18])
+		blockLen = 2 + (18 - i)
+	}
+
+	// Pre-allocate data buffer with zeros using uint64 writes
+	var dataBuffer [130]byte
+	dataBuffer[0] = '0'
+	dataBuffer[1] = 'x'
+
+	// Fill with '0' using uint64 writes (0x3030303030303030)
+	dataPtr := (*[16]uint64)(unsafe.Pointer(&dataBuffer[2]))
+	const zeros = uint64(0x3030303030303030)
+	for i := 0; i < 16; i++ {
+		dataPtr[i] = zeros
+	}
+
+	// Query all reserves
+	rows, err := db.Query(`
+		SELECT pair_address, reserve0, reserve1 
+		FROM pair_reserves 
+		ORDER BY pair_id
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to query reserves: %w", err)
+	}
+	defer rows.Close()
+
+	flushedCount := 0
+
+	for rows.Next() {
+		var pairAddress string
+		var reserve0Str, reserve1Str string
+
+		if err := rows.Scan(&pairAddress, &reserve0Str, &reserve1Str); err != nil {
+			continue
+		}
+
+		// Fast decimal to uint64 conversion
+		reserve0 := fastParseUint64(reserve0Str)
+		reserve1 := fastParseUint64(reserve1Str)
+
+		// Skip invalid values
+		if reserve0 == 0 && reserve0Str != "0" || reserve1 == 0 && reserve1Str != "0" {
+			continue
+		}
+
+		// Write reserves as hex into pre-zeroed buffer
+		// Reserve0: write 16 hex chars at position 2
+		writeHex64(dataBuffer[2:18], reserve0)
+		// Reserve1: write 16 hex chars at position 66
+		writeHex64(dataBuffer[66:82], reserve1)
+
+		// Create minimal LogView on stack
+		var v types.LogView
+
+		// Direct assignment - no allocations
+		v.Addr = unsafe.Slice(unsafe.StringData(pairAddress), len(pairAddress))
+		v.Data = dataBuffer[:]
+		v.BlkNum = blockHex[:blockLen]
+
+		// Static values
+		v.LogIdx = []byte("0x0")
+		v.TxIndex = []byte("0x0")
+		v.Topics = []byte(SyncEventSignature)
+
+		// Dispatch to router
+		router.DispatchPriceUpdate(&v)
+		flushedCount++
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating reserves: %w", err)
+	}
+
+	debug.DropMessage("FLUSH", utils.Itoa(flushedCount)+" reserves to router")
+	return nil
+}
+
+// writeHex64 writes uint64 as exactly 16 hex characters
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func writeHex64(dst []byte, v uint64) {
+	const hexChars = "0123456789abcdef"
+
+	// Unroll loop for peak performance
+	dst[15] = hexChars[v&0xF]
+	v >>= 4
+	dst[14] = hexChars[v&0xF]
+	v >>= 4
+	dst[13] = hexChars[v&0xF]
+	v >>= 4
+	dst[12] = hexChars[v&0xF]
+	v >>= 4
+	dst[11] = hexChars[v&0xF]
+	v >>= 4
+	dst[10] = hexChars[v&0xF]
+	v >>= 4
+	dst[9] = hexChars[v&0xF]
+	v >>= 4
+	dst[8] = hexChars[v&0xF]
+	v >>= 4
+	dst[7] = hexChars[v&0xF]
+	v >>= 4
+	dst[6] = hexChars[v&0xF]
+	v >>= 4
+	dst[5] = hexChars[v&0xF]
+	v >>= 4
+	dst[4] = hexChars[v&0xF]
+	v >>= 4
+	dst[3] = hexChars[v&0xF]
+	v >>= 4
+	dst[2] = hexChars[v&0xF]
+	v >>= 4
+	dst[1] = hexChars[v&0xF]
+	v >>= 4
+	dst[0] = hexChars[v&0xF]
+}
+
+// fastParseUint64 converts decimal string to uint64
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func fastParseUint64(s string) uint64 {
+	if len(s) == 0 {
+		return 0
+	}
+
+	var n uint64
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0
+		}
+		// Overflow check
+		if n > (^uint64(0))/10 {
+			return 0
+		}
+		n = n*10 + uint64(c-'0')
+	}
+	return n
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
