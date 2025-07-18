@@ -371,6 +371,11 @@ func (h *PeakHarvester) flushBatch() error {
 func (h *PeakHarvester) parseReservesDirect(dataStr string) bool {
 	dataStr = strings.TrimPrefix(dataStr, "0x")
 
+	// Check if data is the correct length (128 hex chars = 64 bytes)
+	if len(dataStr) != 128 {
+		return false
+	}
+
 	_, err := hex.Decode(h.hexDecodeBuffer[:64], []byte(dataStr))
 	if err != nil {
 		return false
