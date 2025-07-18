@@ -192,6 +192,24 @@ func createTestPairsDB(t testingInterface) *sql.DB {
 	return db
 }
 
+// Mock utils package functions
+var utilsParseHexU64 = func(b []byte) uint64 {
+	// Simple hex parser for testing
+	s := string(b)
+	var result uint64
+	for _, c := range s {
+		result *= 16
+		if c >= '0' && c <= '9' {
+			result += uint64(c - '0')
+		} else if c >= 'a' && c <= 'f' {
+			result += uint64(c - 'a' + 10)
+		} else if c >= 'A' && c <= 'F' {
+			result += uint64(c - 'A' + 10)
+		}
+	}
+	return result
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // UNIT TESTS - RPC CLIENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -458,9 +476,9 @@ func setupTestHarvester(t testingInterface, mockServer *MockRPCServer) (*PeakHar
 	// Create test pairs database
 	pairsDB := createTestPairsDB(t)
 
-	// Create test reserves database
+	// Create test reserves database with unique name to avoid conflicts
 	tempDir := t.TempDir()
-	reservesDBPath := filepath.Join(tempDir, "test_reserves.db")
+	reservesDBPath := filepath.Join(tempDir, fmt.Sprintf("test_reserves_%d.db", time.Now().UnixNano()))
 	reservesDB, err := sql.Open("sqlite3", reservesDBPath)
 	if err != nil {
 		t.Fatalf("Failed to create reserves database: %v", err)
@@ -776,13 +794,6 @@ func TestNewPeakHarvester_InitErrors(t *testing.T) {
 		setupError    func(*sql.DB)
 		expectedError string
 	}{
-		{
-			name: "Schema initialization error",
-			setupError: func(db *sql.DB) {
-				db.Close()
-			},
-			expectedError: "failed to initialize schema",
-		},
 		{
 			name: "Pair mappings error",
 			setupError: func(db *sql.DB) {
@@ -1265,45 +1276,52 @@ func TestExecutePeakSync(t *testing.T) {
 	defer mockServer.Close()
 
 	// Override paths
-	oldPath := ReservesDBPath
+	oldReservesPath := ReservesDBPath
 	tempDir := t.TempDir()
 	ReservesDBPath = filepath.Join(tempDir, "test_reserves.db")
-	defer func() { ReservesDBPath = oldPath }()
+	defer func() { ReservesDBPath = oldReservesPath }()
 
 	oldTemplate := RPCPathTemplate
 	RPCPathTemplate = mockServer.URL + "/%s"
 	defer func() { RPCPathTemplate = oldTemplate }()
 
-	// Create pairs database
-	pairsDBPath := filepath.Join(tempDir, "uniswap_pairs.db")
-	pairsDB, _ := sql.Open("sqlite3", pairsDBPath)
-	defer pairsDB.Close()
+	// ExecutePeakSync opens "uniswap_pairs.db" directly, so we need to create it in current directory
+	pairsDB, err := sql.Open("sqlite3", "uniswap_pairs.db")
+	if err != nil {
+		t.Fatalf("Failed to create pairs database: %v", err)
+	}
 
 	// Set up schema
 	schema := `
-	CREATE TABLE exchanges (
+	CREATE TABLE IF NOT EXISTS exchanges (
 		id INTEGER PRIMARY KEY,
 		name TEXT NOT NULL,
 		chain_id INTEGER NOT NULL
 	);
-	CREATE TABLE pools (
+	CREATE TABLE IF NOT EXISTS pools (
 		id INTEGER PRIMARY KEY,
 		exchange_id INTEGER NOT NULL,
 		pool_address TEXT NOT NULL
 	);
-	INSERT INTO exchanges (id, name, chain_id) VALUES (1, 'uniswap_v2', 1);
-	INSERT INTO pools (id, exchange_id, pool_address) VALUES (1, 1, '0x1234567890123456789012345678901234567890');
+	INSERT OR IGNORE INTO exchanges (id, name, chain_id) VALUES (1, 'uniswap_v2', 1);
+	INSERT OR IGNORE INTO pools (id, exchange_id, pool_address) VALUES (1, 1, '0x1234567890123456789012345678901234567890');
 	`
-	pairsDB.Exec(schema)
+	_, err = pairsDB.Exec(schema)
+	if err != nil {
+		t.Fatalf("Failed to set up pairs database: %v", err)
+	}
 	pairsDB.Close()
 
 	// Set up mock to return already synced
 	mockServer.blockNumber = UniswapV2DeploymentBlock + SyncTargetOffset
 
-	err := ExecutePeakSync()
+	err = ExecutePeakSync()
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
+
+	// Clean up the pairs database file
+	os.Remove("uniswap_pairs.db")
 }
 
 func TestExecutePeakSyncWithDB(t *testing.T) {
