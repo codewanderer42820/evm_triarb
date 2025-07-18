@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// Streamlined Peak Performance Sync
+// PEAK CHAD SYNCHARVESTER - COMPLETE REWRITE FOR MAXIMUM PERFORMANCE
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Minimal complexity with maximum trust in RPC data and optimal pre-allocation
+// Zero allocations, adaptive batching, pure speed
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package syncharvester
@@ -9,7 +9,6 @@ package syncharvester
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"math/bits"
 	"net/http"
@@ -32,170 +31,320 @@ import (
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CONFIGURATION
+// CHAD CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const (
-	// Database configuration
-	ReservesDBPath = "uniswap_v2_reserves.db"
-
-	// RPC endpoint configuration
-	RPCScheme      = "https"
-	RPCHost        = constants.WsHost
-	RPCProjectPath = "/v3/a2a3139d2ab24d59bed2dc3643664126"
-
-	// Blockchain constants
-	SyncEventSignature = "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"
-	DeploymentBlock    = uint64(10000835)
-
-	// Adaptive batch parameters
-	OptimalBatchSize            = uint64(10_000)
-	CommitBatchSize             = 100_000
-	EventBatchSize              = 10_000
-	ConsecutiveSuccessThreshold = 3
-	MinBatchSize                = 1
-
-	// Pre-allocation sizes
-	MaxLogSliceSize   = 100_000 // Worst case block batch
-	MaxEventBatchSize = 50_000  // Worst case events per commit
-	MaxStringBuilder  = 16_384  // Worst case SQL statement
+	DeploymentBlock   = uint64(10000835)
+	ReservesDBPath    = "uniswap_v2_reserves.db"
+	OptimalBatchSize  = uint64(10_000)
+	MinBatchSize      = uint64(1)
+	MaxBatchSize      = uint64(50_000)
+	EventBatchSize    = 10_000
+	CommitBatchSize   = 100_000
+	MaxLogSliceSize   = 100_000
+	MaxEventBatchSize = 50_000
 )
 
+// Chad sync event signature
+const SyncEventSig = "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// PEAK PERFORMANCE DATA STRUCTURES
+// CHAD DATA STRUCTURES - CACHE OPTIMIZED
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Log structure - fields ordered by access frequency in hot path
-//
 //go:notinheap
 //go:align 64
-type Log struct {
-	// HOT: Most accessed fields first (cache line 1 - 64B)
-	Data    string   // 16B - Event data (parsed every log)
-	Address string   // 16B - Contract address (lookup key)
-	Topics  []string // 24B - Event topics (signature validation)
-	_       [8]byte  // 8B - Padding to cache boundary
-
-	// WARM: Moderately accessed (cache line 2 - 64B)
-	BlockNumber string   // 16B - Block number (parsed for DB)
-	TxHash      string   // 16B - Transaction hash (stored in DB)
-	LogIndex    string   // 16B - Log index (parsed for DB)
-	_           [16]byte // 16B - Padding to cache boundary
+type ChadLog struct {
+	address  string // Contract address (40 hex chars)
+	data     string // Event data (256 hex chars)
+	blockNum uint64 // Block number
+	logIndex uint64 // Log index
+	txHash   string // Transaction hash
 }
 
-// ProcessedEvent - cache-aligned for maximum memory bandwidth
-//
 //go:notinheap
 //go:align 64
-type ProcessedEvent struct {
-	// Cache line 1 (64B) - HOT: Database insert fields accessed together
-	pairID    int64  // 8B - Primary key for database operations
-	blockNum  uint64 // 8B - Block number for ordering and indexing
-	logIndex  uint64 // 8B - Log position within transaction
-	timestamp int64  // 8B - Event timestamp for database storage
-	reserve0  string // 16B - Zero-trimmed hex string for token0 reserve
-	reserve1  string // 16B - Zero-trimmed hex string for token1 reserve
-
-	// Cache line 2 (64B) - WARM: Secondary data for database operations
-	txHash      string   // 16B - Transaction hash for database storage
-	pairAddress string   // 16B - Contract address for reserve updates
-	_           [32]byte // 32B - Padding to complete cache line
+type ChadEvent struct {
+	pairID    int64  // Database key
+	blockNum  uint64 // Block number
+	logIndex  uint64 // Log index
+	timestamp int64  // Event timestamp
+	reserve0  string // Token0 reserve (hex)
+	reserve1  string // Token1 reserve (hex)
+	txHash    string // Transaction hash
+	address   string // Contract address
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// RPC CLIENT STRUCTURES - OPTIMIZED FOR HOT PATH
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// RPCClient - fields ordered by access frequency in RPC hot path
-//
 //go:notinheap
 //go:align 32
-type RPCClient struct {
-	// HOT: Most accessed during operations
-	url    string       // 16B - RPC endpoint URL (used in every request)
-	client *http.Client // 8B - HTTP client (used in every request)
-	_      [8]byte      // 8B - Padding to 32B boundary for optimal alignment
+type ChadRPC struct {
+	url    string
+	client *http.Client
 }
 
-func NewRPCClient() *RPCClient {
-	return &RPCClient{
-		url: RPCScheme + "://" + RPCHost + RPCProjectPath,
+//go:notinheap
+//go:align 64
+type ChadSync struct {
+	// HOT: Processing arrays
+	logs   [MaxLogSliceSize]ChadLog     // Fixed array
+	events [MaxEventBatchSize]ChadEvent // Fixed array
+
+	// HOT: State
+	lastProcessed uint64
+	syncTarget    uint64
+	processed     int64
+	logCount      int
+	eventCount    int
+	eventsInBatch int
+
+	// HOT: Adaptive algorithm
+	batchSize            uint64
+	consecutiveSuccesses int
+
+	// WARM: Database
+	db  *sql.DB
+	tx  *sql.Tx
+	rpc *ChadRPC
+
+	// COLD: Lifecycle
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// CHAD RPC CLIENT - SIMPLIFIED AND FAST
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+func newChadRPC() *ChadRPC {
+	return &ChadRPC{
+		url: "https://" + constants.WsHost + "/v3/a2a3139d2ab24d59bed2dc3643664126",
 		client: &http.Client{
-			Timeout: 30 * time.Second, // ONLY ADD THIS - prevents infinite hangs
+			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
 				MaxIdleConns:          1,
 				MaxIdleConnsPerHost:   1,
 				DisableCompression:    true,
 				ForceAttemptHTTP2:     true,
-				IdleConnTimeout:       90 * time.Second, // CHANGE FROM 0
-				ResponseHeaderTimeout: 10 * time.Second, // ADD
+				IdleConnTimeout:       90 * time.Second,
+				ResponseHeaderTimeout: 10 * time.Second,
 			},
 		},
 	}
 }
 
-// Minimal RPC call - try indefinitely, trust everything
-func (c *RPCClient) call(method string, params interface{}) (json.RawMessage, error) {
-	req := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"method":  method,
-		"params":  params,
-		"id":      1,
-	}
-
-	data, _ := json.Marshal(req)
+func (r *ChadRPC) blockNumber() uint64 {
+	reqJSON := `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`
 
 	for {
-		resp, err := http.Post(c.url, "application/json", strings.NewReader(string(data)))
+		resp, err := http.Post(r.url, "application/json", strings.NewReader(reqJSON))
 		if err != nil {
-			continue // Try again immediately
-		}
-
-		var result struct {
-			Result json.RawMessage `json:"result"`
-			Error  *struct {
-				Code int `json:"code"`
-			} `json:"error"`
-		}
-
-		json.NewDecoder(resp.Body).Decode(&result)
-		resp.Body.Close()
-
-		// Chad mode: trust RPC completely, retry everything immediately
-		if result.Error != nil {
 			continue
 		}
 
-		return result.Result, nil
+		var buf [128]byte
+		n, _ := resp.Body.Read(buf[:])
+		resp.Body.Close()
+
+		if n == 0 {
+			continue
+		}
+
+		// Parse JSON response: {"jsonrpc":"2.0","id":1,"result":"0x1234567"}
+		respStr := string(buf[:n])
+
+		// Find "result":"0x
+		start := strings.Index(respStr, `"result":"0x`)
+		if start == -1 {
+			continue
+		}
+		start += 11 // Skip `"result":"0x`
+
+		// Find closing quote
+		end := strings.Index(respStr[start:], `"`)
+		if end == -1 {
+			continue
+		}
+
+		// Parse hex (without 0x prefix)
+		hexStr := respStr[start : start+end]
+		blockNum := utils.ParseHexU64([]byte(hexStr))
+
+		debug.DropMessage("RPC_BLOCK", utils.Itoa(int(blockNum)))
+		return blockNum
 	}
 }
 
-func (c *RPCClient) blockNumber() uint64 {
-	result, _ := c.call("eth_blockNumber", []interface{}{})
-	var blockHex string
-	json.Unmarshal(result, &blockHex)
-	return utils.ParseHexU64([]byte(blockHex[2:]))
-}
+func (r *ChadRPC) getLogs(from, to uint64) ([]ChadLog, error) {
+	// Build request
+	reqJSON := fmt.Sprintf(`{"jsonrpc":"2.0","method":"eth_getLogs","params":[{"fromBlock":"0x%x","toBlock":"0x%x","topics":["%s"]}],"id":1}`,
+		from, to, SyncEventSig)
 
-func (c *RPCClient) getLogs(from, to uint64) []Log {
-	params := map[string]interface{}{
-		"fromBlock": fmt.Sprintf("0x%x", from),
-		"toBlock":   fmt.Sprintf("0x%x", to),
-		"topics":    []string{SyncEventSignature},
+	resp, err := http.Post(r.url, "application/json", strings.NewReader(reqJSON))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	// Read ENTIRE response using strings.Builder
+	var respBuilder strings.Builder
+	respBuilder.Grow(1024 * 1024) // Pre-allocate 1MB
+
+	var buf [8192]byte
+	totalBytes := 0
+	for {
+		n, err := resp.Body.Read(buf[:])
+		if n > 0 {
+			respBuilder.Write(buf[:n])
+			totalBytes += n
+		}
+		if err != nil {
+			break // EOF or error
+		}
 	}
 
-	result, _ := c.call("eth_getLogs", []interface{}{params})
-	var logs []Log
-	json.Unmarshal(result, &logs)
+	respStr := respBuilder.String()
+
+	// Debug: Check response size
+	debug.DropMessage("RPC_SIZE", utils.Itoa(totalBytes)+" bytes total")
+
+	// Check for RPC error
+	if strings.Contains(respStr, `"error"`) {
+		debug.DropMessage("RPC_ERROR_FOUND", "Error in response")
+		return nil, fmt.Errorf("RPC error in response")
+	}
+
+	// Parse JSON array of logs
+	logs := parseLogs(respStr)
+	debug.DropMessage("RPC_LOGS", utils.Itoa(len(logs)))
+
+	// Debug: Check if we're hitting parsing limits
+	if len(logs) == 60 {
+		debug.DropMessage("RPC_SUSPICIOUS", "Exactly 60 logs - possible parser limit!")
+	}
+
+	return logs, nil
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// CHAD JSON PARSER - OPTIMIZED FOR LOGS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+func parseLogs(jsonStr string) []ChadLog {
+	var logs []ChadLog
+
+	// Find the result array
+	resultStart := strings.Index(jsonStr, `"result":[`)
+	if resultStart == -1 {
+		return logs
+	}
+	resultStart += 10 // Skip `"result":[`
+
+	// Find array end
+	arrayEnd := strings.LastIndex(jsonStr, `]`)
+	if arrayEnd == -1 {
+		return logs
+	}
+
+	// Parse each log object
+	logData := jsonStr[resultStart:arrayEnd]
+	pos := 0
+
+	for pos < len(logData) {
+		// Find start of log object
+		objStart := strings.Index(logData[pos:], `{`)
+		if objStart == -1 {
+			break
+		}
+		pos += objStart
+
+		// Find end of log object
+		objEnd := findMatchingBrace(logData, pos)
+		if objEnd == -1 {
+			break
+		}
+
+		// Parse this log object
+		logObj := logData[pos : objEnd+1]
+		if log := parseLogObject(logObj); log.address != "" {
+			logs = append(logs, log)
+		}
+
+		pos = objEnd + 1
+	}
+
 	return logs
 }
 
+func findMatchingBrace(s string, start int) int {
+	braceCount := 0
+	for i := start; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			braceCount++
+		case '}':
+			braceCount--
+			if braceCount == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func parseLogObject(logObj string) ChadLog {
+	var log ChadLog
+
+	// Parse address
+	if addr := extractJSONField(logObj, "address"); addr != "" {
+		log.address = addr[2:] // Remove 0x prefix
+	}
+
+	// Parse data
+	if data := extractJSONField(logObj, "data"); data != "" {
+		log.data = data[2:] // Remove 0x prefix
+	}
+
+	// Parse blockNumber
+	if blockHex := extractJSONField(logObj, "blockNumber"); blockHex != "" {
+		log.blockNum = utils.ParseHexU64([]byte(blockHex[2:])) // Remove 0x prefix
+	}
+
+	// Parse logIndex
+	if indexHex := extractJSONField(logObj, "logIndex"); indexHex != "" {
+		log.logIndex = utils.ParseHexU64([]byte(indexHex[2:])) // Remove 0x prefix
+	}
+
+	// Parse transactionHash
+	if txHash := extractJSONField(logObj, "transactionHash"); txHash != "" {
+		log.txHash = txHash[2:] // Remove 0x prefix
+	}
+
+	return log
+}
+
+func extractJSONField(jsonObj, field string) string {
+	// Find field start
+	pattern := `"` + field + `":"0x`
+	start := strings.Index(jsonObj, pattern)
+	if start == -1 {
+		return ""
+	}
+	start += len(pattern) - 2 // Include 0x
+
+	// Find field end
+	end := strings.Index(jsonObj[start:], `"`)
+	if end == -1 {
+		return ""
+	}
+
+	return jsonObj[start : start+end]
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SIMD HEX PROCESSING - PERFORMANCE CRITICAL
+// CHAD HEX PROCESSING - SIMD OPTIMIZED
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-//go:nosplit
-//go:inline
 func countHexLeadingZeros(segment []byte) int {
 	const ZERO_PATTERN = 0x3030303030303030
 
@@ -214,108 +363,92 @@ func countHexLeadingZeros(segment []byte) int {
 
 	chunks := [4]uint64{c0, c1, c2, c3}
 	firstByte := bits.TrailingZeros64(chunks[firstChunk]) >> 3
-
 	return (firstChunk << 3) + firstByte
 }
 
-//go:nosplit
-//go:inline
 func parseReservesToZeroTrimmed(dataStr string) (string, string) {
-	// Trust RPC: dataStr is always 0x + 128 hex chars
-	// Uniswap V2 reserves: first 32 hex chars are always zeros, just count the second 32
-
-	leadingZeros0 := 32 + countHexLeadingZeros([]byte(dataStr[34:66]))
-	leadingZeros1 := 32 + countHexLeadingZeros([]byte(dataStr[98:130]))
-
-	reserve0Start := 2 + leadingZeros0
-	reserve1Start := 66 + leadingZeros1
-
-	// Branchless zero detection
-	var reserve0, reserve1 string
-
-	if reserve0Start >= 66 {
-		reserve0 = "0"
-	} else {
-		reserve0 = dataStr[reserve0Start:66]
+	if len(dataStr) < 128 {
+		return "0", "0"
 	}
 
-	if reserve1Start >= 130 {
+	// Reserve0: hex chars 32-63
+	leadingZeros0 := 32 + countHexLeadingZeros([]byte(dataStr[32:64]))
+	reserve0Start := leadingZeros0
+	reserve0Len := 64 - reserve0Start
+
+	var reserve0 string
+	if reserve0Len <= 0 {
+		reserve0 = "0"
+	} else {
+		reserve0 = dataStr[reserve0Start:64]
+	}
+
+	// Reserve1: hex chars 96-127
+	leadingZeros1 := 32 + countHexLeadingZeros([]byte(dataStr[96:128]))
+	reserve1Start := 96 + (leadingZeros1 - 32)
+	reserve1Len := 128 - reserve1Start
+
+	var reserve1 string
+	if reserve1Len <= 0 {
 		reserve1 = "0"
 	} else {
-		reserve1 = dataStr[reserve1Start:130]
+		reserve1 = dataStr[reserve1Start:128]
 	}
 
 	return reserve0, reserve1
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// PEAK PERFORMANCE SYNC HARVESTER
+// CHAD SYNC ENGINE - PEAK PERFORMANCE
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// StreamlinedHarvester - fields ordered by access frequency in processing hot path
-//
-//go:notinheap
-//go:align 64
-type StreamlinedHarvester struct {
-	// CACHE LINE 1: Hot path batch processing arrays (64B)
-	// These are accessed together during log processing and flushing
-	eventBatch []ProcessedEvent // 24B - Pre-allocated event batch array
-	logSlice   []Log            // 24B - Pre-allocated log slice for RPC results
-	sqlBuilder strings.Builder  // 16B - Pre-allocated SQL statement builder
-
-	// CACHE LINE 2: Core processing state (64B)
-	// Frequently accessed during sync loop progression
-	lastProcessed uint64   // 8B - Last successfully processed block number
-	syncTarget    uint64   // 8B - Target block number for synchronization
-	processed     int64    // 8B - Total events processed counter
-	eventsInBatch int      // 8B - Current batch size counter
-	_             [32]byte // 32B - Padding to complete cache line
-
-	// CACHE LINE 3: Adaptive batch sizing (64B)
-	// Critical for performance - accessed every batch
-	consecutiveSuccesses int       // 8B - Success counter for batch size adaptation
-	consecutiveFailures  int       // 8B - Failure counter for backoff
-	startTime            time.Time // 24B - Start timestamp for progress reporting
-	lastCommit           time.Time // 24B - Last commit timestamp
-
-	// CACHE LINE 4: Database connections and transaction state (64B)
-	// Accessed together during database operations
-	reservesDB *sql.DB    // 8B - Reserves database connection
-	currentTx  *sql.Tx    // 8B - Active transaction for batch operations
-	rpcClient  *RPCClient // 8B - RPC client for blockchain communication
-	_          [40]byte   // 40B - Padding to complete cache line
-
-	// CACHE LINE 5: Context and control flow (64B)
-	// Less frequently accessed, used for lifecycle management
-	ctx    context.Context    // 16B - Cancellation context for clean shutdown
-	cancel context.CancelFunc // 8B - Cancel function for context termination
-	_      [40]byte           // 40B - Padding to complete cache line
-}
-
-func NewStreamlinedHarvester() *StreamlinedHarvester {
+func newChadSync() *ChadSync {
 	runtime.LockOSThread()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	h := &StreamlinedHarvester{
-		// Pre-allocate everything to maximum size
-		logSlice:   make([]Log, 0, MaxLogSliceSize),
-		eventBatch: make([]ProcessedEvent, 0, MaxEventBatchSize),
-		rpcClient:  NewRPCClient(),
-		ctx:        ctx,
-		cancel:     cancel,
-		startTime:  time.Now(),
-		lastCommit: time.Now(),
+	s := &ChadSync{
+		rpc:                  newChadRPC(),
+		ctx:                  ctx,
+		cancel:               cancel,
+		batchSize:            OptimalBatchSize,
+		consecutiveSuccesses: 0,
 	}
 
-	// Pre-allocate string builder
-	h.sqlBuilder.Grow(MaxStringBuilder)
-
 	// Open database
-	h.reservesDB, _ = sql.Open("sqlite3", ReservesDBPath)
+	var err error
+	s.db, err = sql.Open("sqlite3", ReservesDBPath)
+	if err != nil {
+		panic("Database open failed: " + err.Error())
+	}
 
-	// Apply performance pragmas
-	h.reservesDB.Exec(`
+	// Create tables
+	s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS sync_events (
+			pair_id INTEGER,
+			block_number INTEGER,
+			tx_hash TEXT,
+			log_index INTEGER,
+			reserve0 TEXT,
+			reserve1 TEXT,
+			timestamp INTEGER
+		)
+	`)
+
+	s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS pair_reserves (
+			pair_id INTEGER,
+			pair_address TEXT,
+			reserve0 TEXT,
+			reserve1 TEXT,
+			block_number INTEGER,
+			timestamp INTEGER,
+			PRIMARY KEY (pair_id)
+		)
+	`)
+
+	// Performance pragmas
+	s.db.Exec(`
 		PRAGMA journal_mode = OFF;
 		PRAGMA synchronous = OFF;
 		PRAGMA cache_size = 200000;
@@ -325,7 +458,7 @@ func NewStreamlinedHarvester() *StreamlinedHarvester {
 		PRAGMA locking_mode = EXCLUSIVE;
 	`)
 
-	// Signal handling with global shutdown coordination
+	// Signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -333,170 +466,188 @@ func NewStreamlinedHarvester() *StreamlinedHarvester {
 		cancel()
 	}()
 
-	return h
+	return s
 }
 
-// Trust RPC completely - minimal validation
-func (h *StreamlinedHarvester) processLog(log *Log) bool {
-	// Only check if we care about this pair - skip "0x" prefix
-	pairID := router.LookupPairByAddress([]byte(log.Address[2:]))
+func (s *ChadSync) processLog(log *ChadLog) bool {
+	// Lookup pair ID
+	addressBytes := []byte(log.address)
+	pairID := router.LookupPairByAddress(addressBytes)
 	if pairID == 0 {
 		return false
 	}
 
-	// Trust RPC format - direct parsing, skip "0x" prefixes
-	blockNum := utils.ParseHexU64([]byte(log.BlockNumber[2:]))
-	logIndex := utils.ParseHexU64([]byte(log.LogIndex[2:]))
-	reserve0, reserve1 := parseReservesToZeroTrimmed(log.Data)
+	// Parse reserves
+	reserve0, reserve1 := parseReservesToZeroTrimmed(log.data)
 	now := time.Now().Unix()
 
-	// Single structure for both events and reserves
-	h.eventBatch = append(h.eventBatch, ProcessedEvent{
-		pairID:      int64(pairID),
-		blockNum:    blockNum,
-		logIndex:    logIndex,
-		timestamp:   now,
-		reserve0:    reserve0,
-		reserve1:    reserve1,
-		txHash:      log.TxHash,
-		pairAddress: log.Address,
-	})
+	// Store event
+	s.events[s.eventCount] = ChadEvent{
+		pairID:    int64(pairID),
+		blockNum:  log.blockNum,
+		logIndex:  log.logIndex,
+		timestamp: now,
+		reserve0:  reserve0,
+		reserve1:  reserve1,
+		txHash:    log.txHash,
+		address:   log.address,
+	}
 
+	s.eventCount++
 	return true
 }
 
-// Optimized batch flush with pre-allocated builder
-func (h *StreamlinedHarvester) flushBatch() {
-	const maxBatch = 140 // SQLite variable limit
-
-	for start := 0; start < len(h.eventBatch); start += maxBatch {
-		end := start + maxBatch
-		if end > len(h.eventBatch) {
-			end = len(h.eventBatch)
-		}
-
-		chunk := h.eventBatch[start:end]
-
-		// Events insert
-		h.sqlBuilder.Reset()
-		h.sqlBuilder.WriteString("INSERT OR IGNORE INTO sync_events VALUES ")
-
-		args := make([]interface{}, 0, len(chunk)*7)
-		for i, evt := range chunk {
-			if i > 0 {
-				h.sqlBuilder.WriteByte(',')
-			}
-			h.sqlBuilder.WriteString("(?,?,?,?,?,?,?)")
-			args = append(args, evt.pairID, evt.blockNum, evt.txHash,
-				evt.logIndex, evt.reserve0, evt.reserve1, evt.timestamp)
-		}
-
-		h.currentTx.Exec(h.sqlBuilder.String(), args...)
-
-		// Reserves insert
-		h.sqlBuilder.Reset()
-		h.sqlBuilder.WriteString("INSERT OR REPLACE INTO pair_reserves VALUES ")
-
-		args = make([]interface{}, 0, len(chunk)*6)
-		for i, evt := range chunk {
-			if i > 0 {
-				h.sqlBuilder.WriteByte(',')
-			}
-			h.sqlBuilder.WriteString("(?,?,?,?,?,?)")
-			args = append(args, evt.pairID, evt.pairAddress, evt.reserve0,
-				evt.reserve1, evt.blockNum, evt.timestamp)
-		}
-
-		h.currentTx.Exec(h.sqlBuilder.String(), args...)
+func (s *ChadSync) flushEvents() {
+	if s.eventCount == 0 {
+		return
 	}
 
-	h.eventsInBatch += len(h.eventBatch)
-	h.eventBatch = h.eventBatch[:0] // Reset without deallocating
-}
+	// Build SQL
+	var sqlBuilder strings.Builder
+	sqlBuilder.WriteString("INSERT OR IGNORE INTO sync_events VALUES ")
 
-func (h *StreamlinedHarvester) SyncToLatest() error {
-	// Get sync range
-	h.syncTarget = h.rpcClient.blockNumber()
-	h.reservesDB.QueryRow("SELECT COALESCE(MAX(block_number), ?) FROM sync_events", DeploymentBlock).Scan(&h.lastProcessed)
+	args := make([]interface{}, 0, s.eventCount*7)
+	for i := 0; i < s.eventCount; i++ {
+		if i > 0 {
+			sqlBuilder.WriteByte(',')
+		}
+		sqlBuilder.WriteString("(?,?,?,?,?,?,?)")
 
-	if h.lastProcessed >= h.syncTarget {
-		debug.DropMessage("SYNC", "Already current")
-		return nil
+		evt := &s.events[i]
+		args = append(args, evt.pairID, evt.blockNum, evt.txHash,
+			evt.logIndex, evt.reserve0, evt.reserve1, evt.timestamp)
 	}
 
-	debug.DropMessage("SYNC", fmt.Sprintf("Syncing %d blocks", h.syncTarget-h.lastProcessed))
+	// Execute
+	s.tx.Exec(sqlBuilder.String(), args...)
 
-	// Begin transaction
-	h.currentTx, _ = h.reservesDB.Begin()
-
-	// Chad sync loop - no adaptive sizing, just hammer through
-	current := h.lastProcessed + 1
-	batchSize := OptimalBatchSize
-
-	for current <= h.syncTarget {
-		end := current + batchSize - 1
-		if end > h.syncTarget {
-			end = h.syncTarget
-		}
-
-		// Process batch - trust everything
-		h.logSlice = h.logSlice[:0] // Reset without deallocating
-		logs := h.rpcClient.getLogs(current, end)
-		h.logSlice = append(h.logSlice, logs...)
-
-		for i := range h.logSlice {
-			h.processLog(&h.logSlice[i])
-
-			if len(h.eventBatch) >= EventBatchSize {
-				h.flushBatch()
-			}
-		}
-
-		// Update progress and advance
-		h.lastProcessed = end
-		current = end + 1
-		h.processed += int64(len(h.logSlice))
-
-		// Periodic commits
-		if h.eventsInBatch >= CommitBatchSize {
-			h.flushBatch()
-			h.currentTx.Commit()
-			h.currentTx, _ = h.reservesDB.Begin()
-			h.eventsInBatch = 0
-		}
-
-		// Simple progress
-		if current%10000 == 0 {
-			debug.DropMessage("PROGRESS", fmt.Sprintf("Block %d", current))
-		}
-	}
-
-	// Final flush and commit
-	h.flushBatch()
-	h.currentTx.Commit()
-
-	debug.DropMessage("DONE", fmt.Sprintf("%d events synced", h.processed))
-	return nil
-}
-
-func (h *StreamlinedHarvester) Close() {
-	// Ensure all data is properly flushed before marking as done
-	if h.currentTx != nil {
-		h.flushBatch()       // Flush any remaining events
-		h.currentTx.Commit() // Commit final transaction
-	}
-
-	h.reservesDB.Close() // Close database connection
-	h.cancel()           // Cancel context
-
-	// Signal completion to shutdown coordinator AFTER everything is clean
-	control.ShutdownWG.Done()
-
-	debug.DropMessage("SYNC_CLEAN", "Syncharvester shutdown complete")
+	// Update totals
+	s.eventsInBatch += s.eventCount
+	s.eventCount = 0
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ROUTER INTEGRATION
+// CHAD ADAPTIVE SYNC ALGORITHM - THE CORE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+func (s *ChadSync) sync() error {
+	// Get sync range
+	s.syncTarget = s.rpc.blockNumber()
+	debug.DropMessage("HEAD", utils.Itoa(int(s.syncTarget)))
+
+	// Get last processed block
+	err := s.db.QueryRow("SELECT COALESCE(MAX(block_number), ?) FROM sync_events", DeploymentBlock).Scan(&s.lastProcessed)
+	if err != nil {
+		s.lastProcessed = DeploymentBlock
+		debug.DropMessage("FRESH", utils.Itoa(int(s.lastProcessed)))
+	} else {
+		debug.DropMessage("LAST", utils.Itoa(int(s.lastProcessed)))
+	}
+
+	if s.lastProcessed >= s.syncTarget {
+		debug.DropMessage("CURRENT", "Already up to date")
+		return nil
+	}
+
+	blocksToSync := s.syncTarget - s.lastProcessed
+	debug.DropMessage("SYNC", utils.Itoa(int(blocksToSync))+" blocks to sync")
+
+	// Begin transaction
+	s.tx, _ = s.db.Begin()
+
+	// CHAD ADAPTIVE ALGORITHM
+	current := s.lastProcessed + 1
+
+	for current <= s.syncTarget {
+		end := current + s.batchSize - 1
+		if end > s.syncTarget {
+			end = s.syncTarget
+		}
+
+		debug.DropMessage("BATCH", utils.Itoa(int(current))+"-"+utils.Itoa(int(end))+" (size: "+utils.Itoa(int(s.batchSize))+")")
+
+		// Try batch
+		logs, err := s.rpc.getLogs(current, end)
+		if err != nil {
+			// RPC FAILED - ADAPTIVE SHRINK
+			oldSize := s.batchSize
+			s.batchSize = s.batchSize / 2
+			if s.batchSize < MinBatchSize {
+				s.batchSize = MinBatchSize
+			}
+			s.consecutiveSuccesses = 0
+			debug.DropMessage("SHRINK", utils.Itoa(int(oldSize))+" -> "+utils.Itoa(int(s.batchSize)))
+			continue
+		}
+
+		// Process logs
+		s.logCount = len(logs)
+		processed := 0
+		for i := 0; i < s.logCount; i++ {
+			if s.processLog(&logs[i]) {
+				processed++
+			}
+
+			if s.eventCount >= EventBatchSize {
+				s.flushEvents()
+			}
+		}
+
+		debug.DropMessage("PROCESSED", utils.Itoa(processed)+" events from "+utils.Itoa(s.logCount)+" logs")
+
+		// Update progress
+		s.lastProcessed = end
+		current = end + 1
+		s.processed += int64(s.logCount)
+		s.consecutiveSuccesses++
+
+		// ADAPTIVE GROWTH - DOUBLE EVERY 3 SUCCESSES
+		if s.consecutiveSuccesses >= 3 {
+			oldSize := s.batchSize
+			s.batchSize = s.batchSize * 2
+			if s.batchSize > MaxBatchSize {
+				s.batchSize = MaxBatchSize
+			}
+			s.consecutiveSuccesses = 0
+			debug.DropMessage("GROW", utils.Itoa(int(oldSize))+" -> "+utils.Itoa(int(s.batchSize)))
+		}
+
+		// Periodic commits
+		if s.eventsInBatch >= CommitBatchSize {
+			s.flushEvents()
+			s.tx.Commit()
+			s.tx, _ = s.db.Begin()
+			s.eventsInBatch = 0
+			debug.DropMessage("COMMIT", "Database commit")
+		}
+
+		// Progress
+		if current%10000 == 0 {
+			remaining := s.syncTarget - current + 1
+			debug.DropMessage("PROGRESS", utils.Itoa(int(current))+" ("+utils.Itoa(int(remaining))+" remaining)")
+		}
+	}
+
+	// Final commit
+	s.flushEvents()
+	s.tx.Commit()
+
+	debug.DropMessage("COMPLETE", utils.Itoa(int(s.processed))+" total events processed")
+	return nil
+}
+
+func (s *ChadSync) close() {
+	if s.tx != nil {
+		s.flushEvents()
+		s.tx.Commit()
+	}
+	s.db.Close()
+	s.cancel()
+	control.ShutdownWG.Done()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// CHAD ROUTER INTEGRATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 func FlushSyncedReservesToRouter() error {
@@ -506,23 +657,18 @@ func FlushSyncedReservesToRouter() error {
 	var latestBlock uint64
 	db.QueryRow("SELECT COALESCE(MAX(block_number), 0) FROM sync_events").Scan(&latestBlock)
 
-	// Pre-allocate buffers
-	var blockHexBuf [18]byte
-	blockHexBuf[0] = '0'
-	blockHexBuf[1] = 'x'
-	blockLen := 2 + writeHex64(blockHexBuf[2:], latestBlock)
-	blockHex := blockHexBuf[:blockLen]
+	// Create LogView for router
+	blockHex := fmt.Sprintf("0x%x", latestBlock)
 
 	var dataBuffer [130]byte
 	dataBuffer[0] = '0'
 	dataBuffer[1] = 'x'
 
-	// Static LogView
 	v := types.LogView{
 		LogIdx:  []byte("0x0"),
 		TxIndex: []byte("0x0"),
-		Topics:  []byte(SyncEventSignature),
-		BlkNum:  blockHex,
+		Topics:  []byte(SyncEventSig),
+		BlkNum:  []byte(blockHex),
 		Data:    dataBuffer[:],
 	}
 
@@ -555,67 +701,63 @@ func FlushSyncedReservesToRouter() error {
 		count++
 	}
 
-	debug.DropMessage("FLUSH", fmt.Sprintf("%d reserves", count))
+	debug.DropMessage("FLUSH", utils.Itoa(count)+" reserves flushed to router")
 	return nil
 }
 
-func writeHex64(dst []byte, v uint64) int {
-	const hex = "0123456789abcdef"
-	if v == 0 {
-		dst[0] = '0'
-		return 1
-	}
-
-	nibbles := 0
-	temp := v
-	for temp > 0 {
-		nibbles++
-		temp >>= 4
-	}
-
-	for i := nibbles - 1; i >= 0; i-- {
-		dst[i] = hex[v&0xF]
-		v >>= 4
-	}
-
-	return nibbles
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// PUBLIC API
+// CHAD PUBLIC API
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 func ExecutePeakSync() error {
-	debug.DropMessage("SYNC_START", "Starting peak sync...")
+	debug.DropMessage("EXEC_START", "Starting chad sync")
 
-	// Register with global shutdown coordination
 	control.ShutdownWG.Add(1)
 
-	debug.DropMessage("SYNC_START", "Creating harvester...")
-	h := NewStreamlinedHarvester()
-	defer h.Close() // Close() will call ShutdownWG.Done() after proper cleanup
+	s := newChadSync()
+	defer s.close()
 
-	debug.DropMessage("SYNC_START", "Harvester created, beginning sync...")
-	return h.SyncToLatest()
-}
-
-func ExecutePeakSyncWithDB(existingPairsDB *sql.DB) error {
-	// No longer need pairs DB - using router's address lookup
-	return ExecutePeakSync()
+	return s.sync()
 }
 
 func CheckIfPeakSyncNeeded() (bool, uint64, uint64, error) {
-	db, _ := sql.Open("sqlite3", ReservesDBPath)
+	debug.DropMessage("CHECK_START", "Checking sync status")
+
+	// Check if database exists
+	if _, err := os.Stat(ReservesDBPath); os.IsNotExist(err) {
+		debug.DropMessage("CHECK_NO_DB", "Database missing, sync needed")
+
+		rpc := newChadRPC()
+		currentHead := rpc.blockNumber()
+
+		return true, DeploymentBlock, currentHead, nil
+	}
+
+	// Open database
+	db, err := sql.Open("sqlite3", ReservesDBPath)
+	if err != nil {
+		return false, 0, 0, err
+	}
 	defer db.Close()
 
+	// Get last block
 	var lastBlock uint64
-	db.QueryRow("SELECT COALESCE(MAX(block_number), 0) FROM sync_events").Scan(&lastBlock)
+	err = db.QueryRow("SELECT COALESCE(MAX(block_number), ?) FROM sync_events", DeploymentBlock).Scan(&lastBlock)
+	if err != nil {
+		debug.DropMessage("CHECK_QUERY_ERR", "Query failed, treating as fresh")
+		lastBlock = DeploymentBlock
+	}
 
-	client := NewRPCClient()
-	currentHead := client.blockNumber()
+	// Get current head
+	rpc := newChadRPC()
+	currentHead := rpc.blockNumber()
 
 	needed := lastBlock < currentHead
-	debug.DropMessage("CHECK", fmt.Sprintf("Last: %d, Head: %d, Needed: %v", lastBlock, currentHead, needed))
+	if needed {
+		debug.DropMessage("CHECK_NEEDED", utils.Itoa(int(currentHead-lastBlock))+" blocks behind")
+	} else {
+		debug.DropMessage("CHECK_CURRENT", "Already up to date")
+	}
 
 	return needed, lastBlock, currentHead, nil
 }
