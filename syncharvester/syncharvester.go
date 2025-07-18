@@ -15,6 +15,7 @@
 //   - Adaptive batch sizing based on network conditions
 //   - Reuses existing database connections from main
 //   - Router integration for flushing synced reserves
+//   - Zero-trimmed hex string storage for optimal database efficiency
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -27,10 +28,9 @@ package syncharvester
 import (
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math/big"
+	"math/bits"
 	"net/http"
 	"os"
 	"os/signal"
@@ -50,8 +50,20 @@ import (
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CONFIGURATION CONSTANTS
+// CORE TYPE DEFINITIONS (from router.go)
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// TradingPairID uniquely identifies a Uniswap V2 trading pair contract.
+type TradingPairID uint64
+
+// PackedAddress represents an Ethereum address optimized for hash table operations.
+//
+//go:notinheap
+//go:align 8
+type PackedAddress struct {
+	words [3]uint64 // 24B - 160-bit Ethereum address as three 64-bit values
+	_     [8]byte   // 8B - Padding for cache line optimization
+}
 
 //go:notinheap
 //go:align 64
@@ -61,7 +73,15 @@ var (
 
 	// RPC configuration - Made variable for testing
 	RPCPathTemplate = "https://%s/v3/a2a3139d2ab24d59bed2dc3643664126"
+
+	// Address lookup infrastructure (same as router.go)
+	addressToPairMap  [constants.AddressTableCapacity]TradingPairID
+	packedAddressKeys [constants.AddressTableCapacity]PackedAddress
 )
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// CONFIGURATION CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const (
 	// Synchronization parameters
@@ -123,11 +143,11 @@ type batchEvent struct {
 	blockNum uint64  // 8B
 	txHash   string  // 16B
 	logIndex uint64  // 8B
-	reserve0 string  // 16B
+	reserve0 string  // 16B - Zero-trimmed hex string
 	_        [8]byte // 8B - Padding
 
 	// Cache line 2 (64B)
-	reserve1  string   // 16B
+	reserve1  string   // 16B - Zero-trimmed hex string
 	timestamp int64    // 8B
 	_         [40]byte // 40B - Padding to complete cache line
 }
@@ -140,8 +160,8 @@ type batchReserve struct {
 	// Cache line 1 (64B)
 	pairID      int64   // 8B
 	pairAddress string  // 16B
-	reserve0    string  // 16B
-	reserve1    string  // 16B
+	reserve0    string  // 16B - Zero-trimmed hex string
+	reserve1    string  // 16B - Zero-trimmed hex string
 	_           [8]byte // 8B - Padding
 
 	// Cache line 2 (64B)
@@ -225,24 +245,18 @@ type PeakHarvester struct {
 	processed     int64          // 8B - Total events processed
 
 	// CACHE LINE 2: Core processing state (64B)
-	reserveBuffer   [2]*big.Int // 16B - Pre-allocated buffers (every parse)
-	lastProcessed   uint64      // 8B - Last processed block
-	syncTarget      uint64      // 8B - Target block for sync
-	hexDecodeBuffer []byte      // 24B - Hex decode buffer (reused every parse)
-	_               [8]byte     // 8B - Padding
+	lastProcessed   uint64   // 8B - Last processed block
+	syncTarget      uint64   // 8B - Target block for sync
+	hexDecodeBuffer []byte   // 24B - Hex decode buffer (unused now)
+	_               [24]byte // 24B - Padding
 
-	// CACHE LINE 3: Database connections (64B)
+	// CACHE LINE 4: Database connections and lookups (64B)
 	reservesDB     *sql.DB    // 8B - Reserves database (used for all writes)
 	pairsDB        *sql.DB    // 8B - Pairs database (provided by main)
 	currentTx      *sql.Tx    // 8B - Current transaction
 	updateSyncStmt *sql.Stmt  // 8B - Sync metadata statement
 	rpcClient      *RPCClient // 8B - RPC client
 	logSlice       []Log      // 24B - Pre-allocated log slice
-
-	// CACHE LINE 4: Lookup structures (64B)
-	pairMap           map[string]int64 // 24B - Pair mapping cache
-	pairAddressLookup map[int64]string // 16B - Reverse lookup for batch
-	_                 [24]byte         // 24B - Padding to cache boundary
 
 	// CACHE LINE 5: Batch adaptation and timing (64B)
 	consecutiveSuccesses int       // 8B - Success counter
@@ -268,50 +282,141 @@ type PeakHarvester struct {
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) collectLogForBatch(log *Log) bool {
-	// Skip non-sync events
+	// Skip non-sync events - assume valid RPC data
 	if len(log.Topics) == 0 || log.Topics[0] != SyncEventSignature {
 		return false
 	}
 
-	// Parse block number and log index using utils.ParseHexU64
-	blockNum := utils.ParseHexU64([]byte(strings.TrimPrefix(log.BlockNumber, "0x")))
-	logIndex := utils.ParseHexU64([]byte(strings.TrimPrefix(log.LogIndex, "0x")))
+	// Parse hex directly (skip "0x" prefix) - assume valid hex from RPC
+	blockNum := utils.ParseHexU64([]byte(log.BlockNumber[2:]))
+	logIndex := utils.ParseHexU64([]byte(log.LogIndex[2:]))
 
-	// Check if this is a known pair
-	pairAddr := strings.ToLower(log.Address)
-	pairID, exists := h.pairMap[pairAddr]
-	if !exists {
+	// Fast address lookup - skip "0x" prefix directly
+	pairID := h.lookupPairByAddress([]byte(log.Address[2:]))
+	if pairID == 0 {
 		return false
 	}
 
-	// Parse reserves
-	if !h.parseReservesDirect(log.Data) {
-		return false
-	}
+	// Parse reserves to zero-trimmed hex strings
+	reserve0Hex, reserve1Hex := h.parseReservesToZeroTrimmedHex(log.Data)
 
 	now := time.Now().Unix()
 
-	// Add to batch
+	// Add to batch with zero-trimmed hex strings
 	h.eventBatch = append(h.eventBatch, batchEvent{
-		pairID:    pairID,
+		pairID:    int64(pairID),
 		blockNum:  blockNum,
 		txHash:    log.TxHash,
 		logIndex:  logIndex,
-		reserve0:  h.reserveBuffer[0].String(),
-		reserve1:  h.reserveBuffer[1].String(),
+		reserve0:  reserve0Hex,
+		reserve1:  reserve1Hex,
 		timestamp: now,
 	})
 
 	h.reserveBatch = append(h.reserveBatch, batchReserve{
-		pairID:      pairID,
-		pairAddress: pairAddr,
-		reserve0:    h.reserveBuffer[0].String(),
-		reserve1:    h.reserveBuffer[1].String(),
+		pairID:      int64(pairID),
+		pairAddress: log.Address,
+		reserve0:    reserve0Hex,
+		reserve1:    reserve1Hex,
 		blockHeight: blockNum,
 		timestamp:   now,
 	})
 
 	return true
+}
+
+// countHexLeadingZeros performs efficient leading zero counting for hex-encoded numeric data
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func countHexLeadingZeros(segment []byte) int {
+	// Define the 64-bit pattern representing eight consecutive ASCII '0' characters
+	const ZERO_PATTERN = 0x3030303030303030
+
+	// Process the 32-byte hex segment in four 8-byte chunks simultaneously
+	// XOR with ZERO_PATTERN converts zero bytes to 0x00 and non-zero bytes to non-zero values
+	c0 := utils.Load64(segment[0:8]) ^ ZERO_PATTERN   // Process bytes 0-7
+	c1 := utils.Load64(segment[8:16]) ^ ZERO_PATTERN  // Process bytes 8-15
+	c2 := utils.Load64(segment[16:24]) ^ ZERO_PATTERN // Process bytes 16-23
+	c3 := utils.Load64(segment[24:32]) ^ ZERO_PATTERN // Process bytes 24-31
+
+	// Create a bitmask indicating which 8-byte chunks contain only zero characters
+	// The expression (x|(^x+1))>>63 produces 1 if any byte in x is non-zero, 0 if all bytes are zero
+	mask := ((c0|(^c0+1))>>63)<<0 | ((c1|(^c1+1))>>63)<<1 |
+		((c2|(^c2+1))>>63)<<2 | ((c3|(^c3+1))>>63)<<3
+
+	// Find the first chunk that contains a non-zero character
+	firstChunk := bits.TrailingZeros64(mask)
+
+	// Handle the special case where all 32 hex characters are zeros
+	if firstChunk == 64 {
+		return 32 // All characters in the segment are zeros
+	}
+
+	// Create an array to access the processed chunks by index
+	chunks := [4]uint64{c0, c1, c2, c3}
+
+	// Within the first non-zero chunk, find the first non-zero byte
+	// Divide by 8 to convert bit position to byte position within the chunk
+	firstByte := bits.TrailingZeros64(chunks[firstChunk]) >> 3
+
+	// Calculate the total number of leading zero characters
+	return (firstChunk << 3) + firstByte
+}
+
+// parseReservesToZeroTrimmedHex extracts zero-trimmed hex strings directly
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func (h *PeakHarvester) parseReservesToZeroTrimmedHex(dataStr string) (string, string) {
+	// Skip "0x" prefix - assume valid 130-char hex data from RPC
+	data := dataStr[2:]
+
+	// Uniswap V2 Sync event data layout:
+	// 0-63:   reserve0 (32 bytes, 64 hex chars)
+	// 64-127: reserve1 (32 bytes, 64 hex chars)
+
+	// Count leading zeros in each 64-char reserve segment
+	leadingZerosA := countHexLeadingZeros([]byte(data[0:32]))  // First 32 chars of reserve0
+	leadingZerosB := countHexLeadingZeros([]byte(data[64:96])) // First 32 chars of reserve1
+
+	// Extract reserve0 - return slice directly as string
+	reserve0Start := leadingZerosA
+	if reserve0Start >= 32 {
+		// Need to check the remaining 32 chars of reserve0
+		leadingZerosA2 := countHexLeadingZeros([]byte(data[32:64]))
+		if leadingZerosA2 >= 32 {
+			return "0", "0" // Reserve0 is all zeros
+		}
+		reserve0Start = 32 + leadingZerosA2
+	}
+	reserve0 := data[reserve0Start:64]
+	if reserve0 == "" {
+		reserve0 = "0"
+	}
+
+	// Extract reserve1 - return slice directly as string
+	reserve1Start := 64 + leadingZerosB
+	if leadingZerosB >= 32 {
+		// Need to check the remaining 32 chars of reserve1
+		leadingZerosB2 := countHexLeadingZeros([]byte(data[96:128]))
+		if leadingZerosB2 >= 32 {
+			return reserve0, "0" // Reserve1 is all zeros
+		}
+		reserve1Start = 96 + leadingZerosB2
+	}
+	reserve1 := data[reserve1Start:128]
+	if reserve1 == "" {
+		reserve1 = "0"
+	}
+
+	return reserve0, reserve1
 }
 
 // flushBatch performs batch insert of collected events and reserves
@@ -393,34 +498,6 @@ func (h *PeakHarvester) flushBatch() error {
 	h.reserveBatch = h.reserveBatch[:0]
 
 	return nil
-}
-
-// parseReservesDirect parses reserve data from hex string using pre-allocated buffers
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func (h *PeakHarvester) parseReservesDirect(dataStr string) bool {
-	dataStr = strings.TrimPrefix(dataStr, "0x")
-
-	// Check if data is the correct length (128 hex chars = 64 bytes)
-	if len(dataStr) != 128 {
-		return false
-	}
-
-	// Could potentially use utils.ParseHexU64 here but would need to process
-	// in 16-char chunks and reconstruct. hex.Decode is already optimized.
-	_, err := hex.Decode(h.hexDecodeBuffer[:64], []byte(dataStr))
-	if err != nil {
-		return false
-	}
-
-	h.reserveBuffer[0].SetBytes(h.hexDecodeBuffer[:32])
-	h.reserveBuffer[1].SetBytes(h.hexDecodeBuffer[32:64])
-
-	return true
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -515,7 +592,8 @@ func (c *RPCClient) BlockNumber(ctx context.Context) (uint64, error) {
 	if err := c.Call(ctx, &result, "eth_blockNumber"); err != nil {
 		return 0, err
 	}
-	return utils.ParseHexU64([]byte(strings.TrimPrefix(result, "0x"))), nil
+	// Skip "0x" prefix directly
+	return utils.ParseHexU64([]byte(result[2:])), nil
 }
 
 // GetLogs retrieves event logs from the blockchain within a specified block range
@@ -628,21 +706,16 @@ func NewPeakHarvester(existingPairsDB *sql.DB) (*PeakHarvester, error) {
 
 	// Create harvester instance
 	h := &PeakHarvester{
-		// Core fields
-		reserveBuffer:   [2]*big.Int{big.NewInt(0), big.NewInt(0)},
-		hexDecodeBuffer: make([]byte, HexDecodeBufferSize),
+		// Core fields - Pre-allocate batches to exact sizes
+		hexDecodeBuffer: make([]byte, HexDecodeBufferSize), // Unused now but kept for compatibility
 		logSlice:        make([]Log, 0, PreAllocLogSliceSize),
-		eventBatch:      make([]batchEvent, 0, EventBatchSize),
-		reserveBatch:    make([]batchReserve, 0, EventBatchSize),
+		eventBatch:      make([]batchEvent, 0, EventBatchSize),   // Pre-allocated to exact batch size
+		reserveBatch:    make([]batchReserve, 0, EventBatchSize), // Pre-allocated to exact batch size
 
 		// Database connections
 		rpcClient:  rpcClient,
 		pairsDB:    existingPairsDB,
 		reservesDB: reservesDB,
-
-		// Lookup structures
-		pairMap:           make(map[string]int64),
-		pairAddressLookup: make(map[int64]string),
 
 		// Context and control
 		ctx:        ctx,
@@ -667,7 +740,7 @@ func NewPeakHarvester(existingPairsDB *sql.DB) (*PeakHarvester, error) {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
-	// Load pair mappings
+	// Load pair mappings into Robin Hood hash table
 	if err := h.loadPairMappings(); err != nil {
 		h.reservesDB.Close()
 		cancel()
@@ -681,7 +754,7 @@ func NewPeakHarvester(existingPairsDB *sql.DB) (*PeakHarvester, error) {
 		return nil, fmt.Errorf("failed to prepare statements: %w", err)
 	}
 
-	debug.DropMessage("READY", utils.Itoa(len(h.pairMap))+" pairs")
+	debug.DropMessage("READY", "Pairs loaded into hash table")
 	return h, nil
 }
 
@@ -729,7 +802,7 @@ func (h *PeakHarvester) initializeSchema() error {
 	return err
 }
 
-// loadPairMappings loads trading pair data from the database
+// loadPairMappings loads trading pair data into the Robin Hood hash table
 //
 //go:norace
 //go:nocheckptr
@@ -758,9 +831,8 @@ func (h *PeakHarvester) loadPairMappings() error {
 		var addr string
 		rows.Scan(&id, &addr)
 
-		addr = strings.ToLower(addr)
-		h.pairMap[addr] = id
-		h.pairAddressLookup[id] = addr
+		// Register in Robin Hood hash table (same as router.go)
+		RegisterTradingPairAddress([]byte(addr), TradingPairID(id))
 		count++
 	}
 
@@ -1049,9 +1121,14 @@ func (h *PeakHarvester) reportProgress() {
 	elapsed := time.Since(h.startTime)
 	eventsPerSecond := float64(h.processed) / elapsed.Seconds()
 
+	// Use utils.Itoa and utils.Ftoa with bounds checking
+	blockStr := utils.Itoa(int(h.lastProcessed)) // Safe for reasonable block numbers
+	eventsStr := utils.Itoa(int(h.processed))    // Safe for reasonable event counts
+	rateStr := utils.Ftoa(eventsPerSecond)       // Safe for reasonable rates
+
 	debug.DropMessage("PROGRESS", fmt.Sprintf(
-		"Block %d, %d events (%.0f/s)",
-		h.lastProcessed, h.processed, eventsPerSecond,
+		"Block %s, %s events (%s/s)",
+		blockStr, eventsStr, rateStr,
 	))
 
 	// Update sync metadata
@@ -1099,19 +1176,15 @@ func (h *PeakHarvester) terminateCleanly() error {
 
 	elapsed := time.Since(h.startTime)
 	debug.DropMessage("DONE", fmt.Sprintf(
-		"%d events, %d blocks in %v",
-		h.processed, h.lastProcessed, elapsed.Round(time.Second),
+		"%s events, %s blocks in %v",
+		utils.Itoa(int(h.processed)), utils.Itoa(int(h.lastProcessed)), elapsed.Round(time.Second),
 	))
 
 	// Nil everything right before exit
 	h.eventBatch = nil
 	h.reserveBatch = nil
-	h.pairMap = nil
-	h.pairAddressLookup = nil
 	h.logSlice = nil
 	h.hexDecodeBuffer = nil
-	h.reserveBuffer[0] = nil
-	h.reserveBuffer[1] = nil
 
 	return nil
 }
@@ -1121,11 +1194,10 @@ func (h *PeakHarvester) terminateCleanly() error {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // FlushSyncedReservesToRouter loads all reserves from database and dispatches to router.
-// Peak performance implementation using manual hex encoding.
+// Reads zero-trimmed hex strings and formats them for router consumption.
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func FlushSyncedReservesToRouter() error {
@@ -1163,7 +1235,8 @@ func FlushSyncedReservesToRouter() error {
 	blockLen := 2 + WriteHex32(blockHexBuf[2:], uint32(latestBlock))
 	blockHex := blockHexBuf[:blockLen]
 
-	// Pre-allocate data buffer with zeros using uint64 writes
+	// Pre-allocate data buffer with zeros
+	// Format: 0x + 64 hex chars (reserve0) + 64 hex chars (reserve1) = 130 chars total
 	var dataBuffer [130]byte
 	dataBuffer[0] = '0'
 	dataBuffer[1] = 'x'
@@ -1206,30 +1279,23 @@ func FlushSyncedReservesToRouter() error {
 
 	for rows.Next() {
 		var pairAddress string
-		var reserve0Str, reserve1Str string
+		var reserve0Hex, reserve1Hex string
 
-		if err := rows.Scan(&pairAddress, &reserve0Str, &reserve1Str); err != nil {
+		if err := rows.Scan(&pairAddress, &reserve0Hex, &reserve1Hex); err != nil {
 			continue
 		}
 
-		// Parse reserve strings to uint64
-		reserve0 := ParseDecimalU64(reserve0Str)
-		reserve1 := ParseDecimalU64(reserve1Str)
+		// Pad zero-trimmed hex strings to 64 chars and copy directly
+		// Reserve0: right-aligned in first 64-char field
+		padStart0 := 66 - len(reserve0Hex)
+		copy(dataBuffer[padStart0:66], reserve0Hex)
 
-		// Skip invalid values
-		if reserve0 == 0 && reserve0Str != "0" || reserve1 == 0 && reserve1Str != "0" {
-			continue
-		}
+		// Reserve1: right-aligned in second 64-char field
+		padStart1 := 130 - len(reserve1Hex)
+		copy(dataBuffer[padStart1:130], reserve1Hex)
 
-		// Write reserves as hex into pre-zeroed buffer
-		// Reserve0: write 16 hex chars at position 2
-		WriteHex64(dataBuffer[2:18], reserve0)
-		// Reserve1: write 16 hex chars at position 66
-		WriteHex64(dataBuffer[66:82], reserve1)
-
-		// Update only the changing fields
+		// Update only the changing field
 		v.Addr = unsafe.Slice(unsafe.StringData(pairAddress), len(pairAddress))
-		v.Data = dataBuffer[:]
 
 		// Dispatch to router
 		router.DispatchPriceUpdate(&v)
@@ -1244,54 +1310,182 @@ func FlushSyncedReservesToRouter() error {
 	return nil
 }
 
-// WriteHex64 writes uint64 as exactly 16 hex characters
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ADDRESS PROCESSING INFRASTRUCTURE (from router.go)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// lookupPairByAddress performs address resolution using Robin Hood hashing
 //
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func WriteHex64(dst []byte, v uint64) {
-	const hex = "0123456789abcdef"
+func (h *PeakHarvester) lookupPairByAddress(address40HexBytes []byte) TradingPairID {
+	// Convert the hex address string to an optimized packed representation for comparison
+	key := packEthereumAddress(address40HexBytes)
 
-	// Extract all nibbles at once for maximum parallelism
-	n0 := (v >> 60) & 0xF
-	n1 := (v >> 56) & 0xF
-	n2 := (v >> 52) & 0xF
-	n3 := (v >> 48) & 0xF
-	n4 := (v >> 44) & 0xF
-	n5 := (v >> 40) & 0xF
-	n6 := (v >> 36) & 0xF
-	n7 := (v >> 32) & 0xF
-	n8 := (v >> 28) & 0xF
-	n9 := (v >> 24) & 0xF
-	n10 := (v >> 20) & 0xF
-	n11 := (v >> 16) & 0xF
-	n12 := (v >> 12) & 0xF
-	n13 := (v >> 8) & 0xF
-	n14 := (v >> 4) & 0xF
-	n15 := v & 0xF
+	// Calculate the initial position in the hash table using the address hash
+	i := hashAddressToIndex(address40HexBytes)
+	dist := uint64(0) // Track how far we've probed from the ideal position
 
-	// Interleaved writes to avoid store dependencies
-	dst[0] = hex[n0]
-	dst[8] = hex[n8]
-	dst[1] = hex[n1]
-	dst[9] = hex[n9]
-	dst[2] = hex[n2]
-	dst[10] = hex[n10]
-	dst[3] = hex[n3]
-	dst[11] = hex[n11]
-	dst[4] = hex[n4]
-	dst[12] = hex[n12]
-	dst[5] = hex[n5]
-	dst[13] = hex[n13]
-	dst[6] = hex[n6]
-	dst[14] = hex[n14]
-	dst[7] = hex[n7]
-	dst[15] = hex[n15]
+	// Robin Hood hash table lookup with early termination
+	for {
+		// Get the current entry at this table position
+		currentPairID := addressToPairMap[i]
+		currentKey := packedAddressKeys[i]
+
+		// Compare all three 64-bit words of the packed address simultaneously
+		// If keyDiff is zero, all words match and we found our target address
+		keyDiff := (key.words[0] ^ currentKey.words[0]) |
+			(key.words[1] ^ currentKey.words[1]) |
+			(key.words[2] ^ currentKey.words[2])
+
+		// Check termination conditions for the search
+		if currentPairID == 0 {
+			// Empty slot encountered - our address is not in the table
+			return 0
+		}
+		if keyDiff == 0 {
+			// Exact address match found - return the associated trading pair ID
+			return currentPairID
+		}
+
+		// Robin Hood early termination check
+		// If the current entry has traveled less distance than us, our key cannot be in the table
+		currentKeyHash := hashPackedAddressToIndex(currentKey)
+		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & uint64(constants.AddressTableMask)
+		if currentDist < dist {
+			// The current entry is closer to its ideal position than we are to ours
+			// This violates the Robin Hood invariant, so our key is not present
+			return 0
+		}
+
+		// Continue probing to the next slot in the hash table
+		i = (i + 1) & uint64(constants.AddressTableMask)
+		dist++ // Increment our probe distance
+	}
 }
 
-// WriteHex32 writes uint32 as hex characters without leading zeros
+// packEthereumAddress converts hex address strings to optimized internal representation
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func packEthereumAddress(address40HexChars []byte) PackedAddress {
+	// Parse the 40-character hex string into a 20-byte binary address
+	parsedAddress := utils.ParseEthereumAddress(address40HexChars)
+
+	// Pack the 20-byte address into three 64-bit words for efficient comparison
+	word0 := utils.Load64(parsedAddress[0:8])                       // Load first 8 bytes
+	word1 := utils.Load64(parsedAddress[8:16])                      // Load middle 8 bytes
+	word2 := uint64(*(*uint32)(unsafe.Pointer(&parsedAddress[16]))) // Load last 4 bytes as uint64
+
+	return PackedAddress{
+		words: [3]uint64{word0, word1, word2},
+	}
+}
+
+// hashAddressToIndex computes hash table indices from raw hex addresses
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func hashAddressToIndex(address40HexChars []byte) uint64 {
+	// Parse the last 16 hex characters of the address as a 64-bit hash value
+	// This provides good distribution across the hash table
+	hash64 := utils.ParseHexU64(address40HexChars[24:40])
+
+	// Mask the hash to fit within the hash table bounds
+	return hash64 & uint64(constants.AddressTableMask)
+}
+
+// hashPackedAddressToIndex computes hash values from stored PackedAddress structures
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func hashPackedAddressToIndex(key PackedAddress) uint64 {
+	// Use the third word as the hash value since it contains the address suffix
+	// Mask it to fit within the hash table bounds
+	return key.words[2] & uint64(constants.AddressTableMask)
+}
+
+// RegisterTradingPairAddress populates the Robin Hood hash table with address-to-pair mappings
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func RegisterTradingPairAddress(address42HexBytes []byte, pairID TradingPairID) {
+	// Convert the hex address to packed format for efficient storage and comparison
+	key := packEthereumAddress(address42HexBytes[2:]) // Skip "0x" prefix
+
+	// Calculate the initial position in the hash table
+	i := hashAddressToIndex(address42HexBytes[2:])
+	dist := uint64(0) // Track how far we've moved from the ideal position
+
+	// Robin Hood hash table insertion with displacement
+	for {
+		currentPairID := addressToPairMap[i]
+
+		// If we find an empty slot, insert our entry here
+		if currentPairID == 0 {
+			packedAddressKeys[i] = key
+			addressToPairMap[i] = pairID
+			return
+		}
+
+		// If we find an existing entry with the same key, update it
+		keyDiff := (key.words[0] ^ packedAddressKeys[i].words[0]) |
+			(key.words[1] ^ packedAddressKeys[i].words[1]) |
+			(key.words[2] ^ packedAddressKeys[i].words[2])
+		if keyDiff == 0 {
+			addressToPairMap[i] = pairID // Update existing entry
+			return
+		}
+
+		// Robin Hood displacement: check if we should displace the current entry
+		// If the current entry has traveled less distance than us, we displace it
+		currentKey := packedAddressKeys[i]
+		currentKeyHash := hashPackedAddressToIndex(currentKey)
+		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & uint64(constants.AddressTableMask)
+
+		if currentDist < dist {
+			// Displace the current entry (it's closer to its ideal position than we are)
+			// Swap our entry with the current entry and continue inserting the displaced entry
+			key, packedAddressKeys[i] = packedAddressKeys[i], key
+			pairID, addressToPairMap[i] = addressToPairMap[i], pairID
+			dist = currentDist
+		}
+
+		// Move to the next slot and increment our distance
+		i = (i + 1) & uint64(constants.AddressTableMask)
+		dist++
+	}
+}
+
+// isEqual performs efficient comparison between PackedAddress structures
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func (a PackedAddress) isEqual(b PackedAddress) bool {
+	// Compare all three 64-bit words - addresses are equal only if all words match exactly
+	return a.words[0] == b.words[0] &&
+		a.words[1] == b.words[1] &&
+		a.words[2] == b.words[2]
+}
+
 // Returns the number of hex characters written (1-8)
 //
 //go:norace
@@ -1324,28 +1518,7 @@ func WriteHex32(dst []byte, v uint32) int {
 	return nibbles
 }
 
-// ParseDecimalU64 converts decimal string to uint64
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func ParseDecimalU64(s string) uint64 {
-	if len(s) == 0 {
-		return 0
-	}
-
-	var n uint64
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c < '0' || c > '9' {
-			return 0
-		}
-		n = n*10 + uint64(c-'0')
-	}
-	return n
-}
+// WriteHex32 writes uint32 as hex characters without leading zeros
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // PUBLIC API
@@ -1425,8 +1598,8 @@ func CheckIfPeakSyncNeeded() (bool, uint64, uint64, error) {
 	syncNeeded := lastBlock < syncTarget
 
 	debug.DropMessage("CHECK", fmt.Sprintf(
-		"Last: %d, Target: %d, Current: %d, Needed: %v",
-		lastBlock, syncTarget, currentHead, syncNeeded,
+		"Last: %s, Target: %s, Current: %s, Needed: %v",
+		utils.Itoa(int(lastBlock)), utils.Itoa(int(syncTarget)), utils.Itoa(int(currentHead)), syncNeeded,
 	))
 
 	return syncNeeded, lastBlock, syncTarget, nil
