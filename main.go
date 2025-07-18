@@ -301,6 +301,24 @@ func main() {
 	// Reduces memory footprint and improves cache locality
 	rtdebug.FreeOSMemory()
 
+	// CRITICAL: Re-check sync after GC cleanup which could have taken time
+	// Blockchain doesn't pause during our memory optimization
+	for {
+		syncNeeded, lastBlock, targetBlock, _ := syncharvester.CheckIfPeakSyncNeeded()
+		if !syncNeeded {
+			// Still caught up after GC, proceed to production
+			debug.DropMessage("SYNC", "Confirmed synchronized post-GC")
+			break
+		}
+
+		// New blocks arrived during GC cleanup
+		blocksBehind := targetBlock - lastBlock
+		debug.DropMessage("SYNC", "Post-GC sync: "+utils.Itoa(int(blocksBehind))+" blocks")
+
+		// Catch up with blocks that arrived during memory cleanup
+		syncharvester.ExecutePeakSyncWithDB(pairsDB)
+	}
+
 	// Disable garbage collector for deterministic latency
 	// Trading systems require predictable response times
 	rtdebug.SetGCPercent(-1)
