@@ -261,7 +261,6 @@ type PeakHarvester struct {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) collectLogForBatch(log *Log) bool {
@@ -585,7 +584,6 @@ func configureDatabase(db *sql.DB) error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func NewPeakHarvester(existingPairsDB *sql.DB) (*PeakHarvester, error) {
@@ -794,7 +792,6 @@ func (h *PeakHarvester) prepareGlobalStatements() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) SyncToLatestAndTerminate() error {
@@ -855,7 +852,6 @@ func (h *PeakHarvester) SyncToLatestAndTerminate() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) executeSyncLoop(startBlock uint64) error {
@@ -929,7 +925,6 @@ func (h *PeakHarvester) executeSyncLoop(startBlock uint64) error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) processBatch(fromBlock, toBlock uint64) bool {
@@ -1003,7 +998,6 @@ func (h *PeakHarvester) beginTransaction() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) commitTransaction() {
@@ -1078,7 +1072,6 @@ func (h *PeakHarvester) getLastProcessedBlock() uint64 {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (h *PeakHarvester) terminateCleanly() error {
@@ -1125,7 +1118,6 @@ func (h *PeakHarvester) terminateCleanly() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func ExecutePeakSync() error {
@@ -1150,7 +1142,6 @@ func ExecutePeakSync() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func ExecutePeakSyncWithDB(existingPairsDB *sql.DB) error {
@@ -1168,7 +1159,6 @@ func ExecutePeakSyncWithDB(existingPairsDB *sql.DB) error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func CheckIfPeakSyncNeeded() (bool, uint64, uint64, error) {
