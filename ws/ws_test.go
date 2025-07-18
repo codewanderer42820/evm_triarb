@@ -51,6 +51,10 @@ const (
 	testSize10MB  = 10 * 1024 * 1024
 	testSize50MB  = 50 * 1024 * 1024
 	testSize100MB = 100 * 1024 * 1024
+
+	// Protocol test constants
+	testHandshakeTimeout = 100 * time.Millisecond
+	testFrameTimeout     = 50 * time.Millisecond
 )
 
 var (
@@ -1036,6 +1040,171 @@ func TestSpinUntilCompleteMessage(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "network error") {
 				t.Errorf("Expected network error, got: %v", err)
+			}
+		})
+
+		t.Run("extended_length_16bit_eof", func(t *testing.T) {
+			// Test EOF during 16-bit length read
+			conn := newMockConn()
+			readCount := 0
+			conn.readFunc = func(b []byte) (int, error) {
+				readCount++
+				if readCount == 1 && len(b) == 2 {
+					// First read: header
+					b[0] = 0x81
+					b[1] = 126
+					return 2, nil
+				} else if readCount == 2 {
+					// Second read: EOF during extended length
+					return 0, io.EOF
+				}
+				return 0, fmt.Errorf("unexpected read")
+			}
+
+			_, err := SpinUntilCompleteMessage(conn)
+			if err != io.EOF {
+				t.Errorf("Expected EOF, got: %v", err)
+			}
+		})
+
+		t.Run("extended_length_16bit_partial_read", func(t *testing.T) {
+			// Test partial read during 16-bit length (only 1 byte instead of 2)
+			conn := newMockConn()
+			readCount := 0
+			conn.readFunc = func(b []byte) (int, error) {
+				readCount++
+				if readCount == 1 && len(b) == 2 {
+					// First read: header
+					b[0] = 0x81
+					b[1] = 126
+					return 2, nil
+				} else if readCount == 2 && len(b) >= 2 {
+					// Second read: only return 1 byte instead of 2, then EOF
+					b[0] = 0x01
+					return 1, io.EOF
+				}
+				return 0, fmt.Errorf("unexpected read")
+			}
+
+			_, err := SpinUntilCompleteMessage(conn)
+			if err != io.EOF {
+				t.Errorf("Expected EOF from partial 16-bit length read, got: %v", err)
+			}
+		})
+
+		// FIXED: Add comprehensive length encoding error path testing
+		t.Run("length_encoding_error_paths", func(t *testing.T) {
+			testCases := []struct {
+				name        string
+				setupFunc   func(*mockConn)
+				expectedErr string
+				description string
+			}{
+				{
+					name: "case_126_read_failure",
+					setupFunc: func(conn *mockConn) {
+						readCount := 0
+						conn.readFunc = func(b []byte) (int, error) {
+							readCount++
+							if readCount == 1 {
+								// Header read succeeds
+								b[0] = 0x81
+								b[1] = 126 // Triggers 16-bit length read
+								return 2, nil
+							} else if readCount == 2 {
+								// 16-bit length read fails
+								return 0, fmt.Errorf("case 126 read error")
+							}
+							return 0, io.EOF
+						}
+					},
+					expectedErr: "case 126 read error",
+					description: "Tests conn.Read(headerBuf[2:4]) error path",
+				},
+				{
+					name: "case_127_read_failure",
+					setupFunc: func(conn *mockConn) {
+						readCount := 0
+						conn.readFunc = func(b []byte) (int, error) {
+							readCount++
+							if readCount == 1 {
+								// Header read succeeds
+								b[0] = 0x82
+								b[1] = 127 // Triggers 64-bit length read
+								return 2, nil
+							} else if readCount == 2 {
+								// 64-bit length read fails
+								return 0, fmt.Errorf("case 127 read error")
+							}
+							return 0, io.EOF
+						}
+					},
+					expectedErr: "case 127 read error",
+					description: "Tests conn.Read(headerBuf[2:10]) error path",
+				},
+				{
+					name: "case_126_eof_during_length",
+					setupFunc: func(conn *mockConn) {
+						readCount := 0
+						conn.readFunc = func(b []byte) (int, error) {
+							readCount++
+							if readCount == 1 {
+								b[0] = 0x81
+								b[1] = 126
+								return 2, nil
+							} else if readCount == 2 {
+								// EOF during 16-bit length read
+								return 0, io.EOF
+							}
+							return 0, io.EOF
+						}
+					},
+					expectedErr: "EOF",
+					description: "Tests EOF during 16-bit length read",
+				},
+				{
+					name: "case_127_eof_during_length",
+					setupFunc: func(conn *mockConn) {
+						readCount := 0
+						conn.readFunc = func(b []byte) (int, error) {
+							readCount++
+							if readCount == 1 {
+								b[0] = 0x82
+								b[1] = 127
+								return 2, nil
+							} else if readCount == 2 {
+								// EOF during 64-bit length read
+								return 0, io.EOF
+							}
+							return 0, io.EOF
+						}
+					},
+					expectedErr: "EOF",
+					description: "Tests EOF during 64-bit length read",
+				},
+			}
+
+			for _, tc := range testCases {
+				t.Run(tc.name, func(t *testing.T) {
+					conn := newMockConn()
+					tc.setupFunc(conn)
+
+					_, err := SpinUntilCompleteMessage(conn)
+					if err == nil {
+						t.Errorf("Expected error for %s but got none", tc.description)
+					}
+
+					if tc.expectedErr == "EOF" {
+						if err != io.EOF {
+							t.Errorf("Expected EOF for %s, got: %v", tc.description, err)
+						}
+					} else if !strings.Contains(err.Error(), tc.expectedErr) {
+						t.Errorf("Expected error containing %q for %s, got: %v",
+							tc.expectedErr, tc.description, err)
+					}
+
+					t.Logf("✓ %s: %s", tc.name, tc.description)
+				})
 			}
 		})
 
@@ -2405,22 +2574,25 @@ func BenchmarkComparison(b *testing.B) {
 	})
 
 	b.Run("FragmentationOverhead", func(b *testing.B) {
-		totalSize := 1024 * 1024 // 1MB total
-
-		fragmentSizes := []int{
-			1024 * 1024, // No fragmentation
-			102400,      // 10 fragments
-			10240,       // 100 fragments
-			1024,        // 1000 fragments
+		// FIXED: Use exact fragment counts to avoid integer division errors
+		fragmentConfigs := []struct {
+			name          string
+			fragmentSize  int
+			fragmentCount int
+		}{
+			{"1_fragments", 1024 * 1024, 1}, // No fragmentation
+			{"10_fragments", 102400, 10},    // 10 × 102400 = 1024000 bytes
+			{"100_fragments", 10240, 100},   // 100 × 10240 = 1024000 bytes
+			{"1024_fragments", 1000, 1024},  // 1024 × 1000 = 1024000 bytes
 		}
 
-		for _, fragSize := range fragmentSizes {
-			fragmentCount := totalSize / fragSize
-			b.Run(fmt.Sprintf("%d_fragments", fragmentCount), func(b *testing.B) {
+		for _, config := range fragmentConfigs {
+			totalSize := config.fragmentSize * config.fragmentCount
+			b.Run(config.name, func(b *testing.B) {
 				var frames []byte
-				for i := 0; i < fragmentCount; i++ {
-					payload := make([]byte, fragSize)
-					isLast := i == fragmentCount-1
+				for i := 0; i < config.fragmentCount; i++ {
+					payload := make([]byte, config.fragmentSize)
+					isLast := i == config.fragmentCount-1
 					opcode := byte(0x0)
 					if i == 0 {
 						opcode = 0x2
@@ -2443,7 +2615,7 @@ func BenchmarkComparison(b *testing.B) {
 						b.Fatal(err)
 					}
 					if len(msg) != totalSize {
-						b.Fatalf("Size mismatch")
+						b.Fatalf("Size mismatch: expected %d, got %d", totalSize, len(msg))
 					}
 				}
 			})
