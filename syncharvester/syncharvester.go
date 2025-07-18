@@ -1300,11 +1300,20 @@ func FlushSyncedReservesToRouter() error {
 
 		rows.Scan(&pairAddress, &reserve0Hex, &reserve1Hex)
 
-		// Reset buffer to zeros using uint64 writes
-		bufPtr := (*[16]uint64)(unsafe.Pointer(&dataBuffer[2]))
-		for i := 0; i < 16; i++ {
-			bufPtr[i] = zeros
-		}
+		// Zero only the exact ranges we need: reserve0 (34:66) and reserve1 (98:130)
+		// Each range is 32 bytes = 4 uint64 writes with zeros pattern
+
+		// Zero reserve0 range (positions 34-65: 32 bytes = 4 uint64s)
+		*(*uint64)(unsafe.Pointer(&dataBuffer[34])) = zeros
+		*(*uint64)(unsafe.Pointer(&dataBuffer[42])) = zeros
+		*(*uint64)(unsafe.Pointer(&dataBuffer[50])) = zeros
+		*(*uint64)(unsafe.Pointer(&dataBuffer[58])) = zeros
+
+		// Zero reserve1 range (positions 98-129: 32 bytes = 4 uint64s)
+		*(*uint64)(unsafe.Pointer(&dataBuffer[98])) = zeros
+		*(*uint64)(unsafe.Pointer(&dataBuffer[106])) = zeros
+		*(*uint64)(unsafe.Pointer(&dataBuffer[114])) = zeros
+		*(*uint64)(unsafe.Pointer(&dataBuffer[122])) = zeros
 
 		// Write reserve0 right-aligned in positions 2-65 (64 chars)
 		if reserve0Hex != "0" {
