@@ -200,13 +200,17 @@ func Ftoa(f float64) string {
 		// Convert as integer - faster than general float conversion
 		intVal := uint64(absF)
 
-		// intVal is guaranteed >= 1 due to absF >= 1.0 condition
-		for intVal > 0 {
+		// Extract digits (guaranteed to execute at least once since intVal >= 1)
+		for {
 			i--
 			buf[i] = byte(intVal%10 + '0')
 			intVal /= 10
+			if intVal == 0 {
+				break
+			}
 		}
 
+		// Add sign if negative
 		if negative {
 			i--
 			buf[i] = '-'
