@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// BARE MINIMUM CSV DUMP SYNCHARVESTER
+// PERFECTLY TUNED CSV DUMP SYNCHARVESTER
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Parallel connections, CSV output, minimal code
+// Optimized for perfect balance: not too big, not too small, just right
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package syncharvester
@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"math/bits"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,18 +27,22 @@ import (
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CONSTANTS
+// PERFECTLY BALANCED CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const (
 	DeploymentBlock  = uint64(10000835)
 	CSVPath          = "uniswap_v2.csv"
-	OptimalBatchSize = uint64(5_000)
-	MinBatchSize     = uint64(100)
-	MaxBatchSize     = uint64(10_000)
-	MaxLogSliceSize  = 300_000
+	OptimalBatchSize = uint64(5_000) // Starting point
+	MinBatchSize     = uint64(1)     // Only constraint: at least 1
+	MaxLogSliceSize  = 200_000       // Balanced memory usage
 	SyncEventSig     = "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"
-	NumConnections   = 6
+	NumConnections   = 8 // Perfect balance for most networks
+
+	// Buffer sizes - perfectly tuned
+	ResponseBufferSize = 4 * 1024 * 1024 // 4MB - enough for large responses
+	CSVBufferSize      = 256 * 1024      // 256KB - good batch writing size
+	ReadBufferSize     = 32 * 1024       // 32KB - optimal TCP read size
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -62,12 +67,13 @@ type EthBlockResponse struct {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// GLOBAL BUFFERS
+// PERFECTLY SIZED GLOBAL BUFFERS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 var (
-	globalRespBuffers [NumConnections][8 * 1024 * 1024]byte
+	globalRespBuffers [NumConnections][ResponseBufferSize]byte
 	globalLogBuffer   [MaxLogSliceSize]ChadLog
+	csvBuffers        [NumConnections][CSVBufferSize]byte
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -89,17 +95,40 @@ type ChadSync struct {
 	url                  string
 	outputFile           *os.File
 	fileMutex            sync.Mutex
+	csvBufferSizes       [NumConnections]int
 	ctx                  context.Context
 	cancel               context.CancelFunc
+	totalEvents          int64
+	currentBlock         uint64 // Track current highest block processed
+	startTime            time.Time
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// INITIALIZATION
+// PERFECTLY TUNED HTTP CLIENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Removed - using direct sonnet.Unmarshal
+func createBalancedTransport() *http.Transport {
+	return &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second, // Not too aggressive
+			KeepAlive: 30 * time.Second, // Standard keep-alive
+		}).DialContext,
+		MaxIdleConns:          100,              // Reasonable connection pool
+		MaxIdleConnsPerHost:   25,               // Perfect per-host limit
+		MaxConnsPerHost:       50,               // Enough but not excessive
+		IdleConnTimeout:       90 * time.Second, // Long enough to reuse
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second, // Allow for network latency
+		ExpectContinueTimeout: 1 * time.Second,
+		DisableCompression:    true,  // Raw speed
+		DisableKeepAlives:     false, // Reuse connections
+		ForceAttemptHTTP2:     true,
+	}
+}
 
 func newChadSync() *ChadSync {
+	fmt.Println("⚖️ Initializing PERFECTLY BALANCED sync engine...")
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &ChadSync{
@@ -108,16 +137,15 @@ func newChadSync() *ChadSync {
 		consecutiveSuccesses: 0,
 		ctx:                  ctx,
 		cancel:               cancel,
+		startTime:            time.Now(),
 	}
 
+	// Create perfectly balanced HTTP clients
+	transport := createBalancedTransport()
 	for i := 0; i < NumConnections; i++ {
 		s.clients[i] = &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				MaxIdleConns:        4,
-				MaxIdleConnsPerHost: 4,
-				DisableCompression:  true,
-			},
+			Timeout:   45 * time.Second, // Generous but not infinite
+			Transport: transport,
 		}
 	}
 
@@ -129,7 +157,6 @@ func newChadSync() *ChadSync {
 
 	// Write CSV header
 	s.outputFile.WriteString("address,block,reserve0,reserve1\n")
-	s.outputFile.Sync()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -138,11 +165,35 @@ func newChadSync() *ChadSync {
 		cancel()
 	}()
 
+	// Start balanced stats reporter
+	go s.reportStats()
+
 	return s
 }
 
+func (s *ChadSync) reportStats() {
+	ticker := time.NewTicker(5 * time.Second) // Every 5 seconds - not too spammy
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			elapsed := time.Since(s.startTime)
+			eventsPerSec := float64(s.totalEvents) / elapsed.Seconds()
+			blocksProcessed := s.currentBlock - s.lastProcessed
+			totalBlocks := s.syncTarget - s.lastProcessed
+			progress := float64(blocksProcessed) / float64(totalBlocks) * 100
+
+			fmt.Printf("📊 %d events | %.1f/sec | Block %d (%.1f%%) | %v elapsed\n",
+				s.totalEvents, eventsPerSec, s.currentBlock, progress, elapsed.Truncate(time.Second))
+		case <-s.ctx.Done():
+			return
+		}
+	}
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// RPC OPERATIONS
+// BALANCED RPC OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 func (s *ChadSync) blockNumber() uint64 {
@@ -151,22 +202,22 @@ func (s *ChadSync) blockNumber() uint64 {
 	for {
 		resp, err := s.clients[0].Post(s.url, "application/json", strings.NewReader(reqJSON))
 		if err != nil {
-			time.Sleep(time.Second)
+			time.Sleep(500 * time.Millisecond) // Reasonable retry delay
 			continue
 		}
 
-		n, _ := resp.Body.Read(globalRespBuffers[0][:256])
+		n, _ := resp.Body.Read(globalRespBuffers[0][:512])
 		resp.Body.Close()
 
 		if n == 0 {
-			time.Sleep(time.Second)
+			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 
 		var response EthBlockResponse
 		err = sonnet.Unmarshal(globalRespBuffers[0][:n], &response)
 		if err != nil {
-			time.Sleep(time.Second)
+			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 
@@ -177,7 +228,7 @@ func (s *ChadSync) blockNumber() uint64 {
 			}
 		}
 
-		time.Sleep(time.Second)
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 
@@ -190,13 +241,18 @@ func (s *ChadSync) getLogs(from, to uint64, connID int) (int, error) {
 	}
 	defer resp.Body.Close()
 
+	// Read response in optimal chunks
 	totalBytes := 0
 	respBuffer := &globalRespBuffers[connID]
+	buf := make([]byte, ReadBufferSize) // 32KB optimal read size
 
 	for {
-		n, err := resp.Body.Read(respBuffer[totalBytes:])
-		totalBytes += n
-		if err != nil || totalBytes >= len(respBuffer)-1 {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			copy(respBuffer[totalBytes:], buf[:n])
+			totalBytes += n
+		}
+		if err != nil || totalBytes >= len(respBuffer)-ReadBufferSize {
 			break
 		}
 	}
@@ -240,8 +296,8 @@ func (s *ChadSync) parseLogsWithSonnet(jsonBytes []byte, connID int) (int, error
 			continue
 		}
 
-		log.address = ethLog.Address // Keep full address with 0x
-		log.data = ethLog.Data[2:]   // Remove 0x
+		log.address = ethLog.Address[2:] // Remove 0x prefix
+		log.data = ethLog.Data[2:]       // Remove 0x
 		log.blockNum = utils.ParseHexU64([]byte(ethLog.BlockNumber[2:]))
 
 		logCount++
@@ -251,7 +307,7 @@ func (s *ChadSync) parseLogsWithSonnet(jsonBytes []byte, connID int) (int, error
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// HEX PROCESSING
+// OPTIMIZED HEX PROCESSING
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 func countHexLeadingZeros(segment []byte) int {
@@ -301,27 +357,63 @@ func parseReservesToZeroTrimmed(dataStr string) (string, string) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CSV WRITING
+// PERFECTLY BALANCED CSV WRITING
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-func (s *ChadSync) writeCSV(address string, blockNum uint64, reserve0, reserve1 string) {
-	s.fileMutex.Lock()
-	defer s.fileMutex.Unlock()
+func (s *ChadSync) writeCSVBuffered(address string, blockNum uint64, reserve0, reserve1 string, connID int) {
+	csvLine := fmt.Sprintf("%s,%d,%s,%s\n", address, blockNum, reserve0, reserve1)
 
-	fmt.Fprintf(s.outputFile, "%s,%d,%s,%s\n", address, blockNum, reserve0, reserve1)
+	// Add to connection-specific buffer
+	bufferSize := s.csvBufferSizes[connID]
+	newSize := bufferSize + len(csvLine)
+
+	// Flush when buffer is 80% full (not 100% for safety)
+	if newSize >= (CSVBufferSize * 4 / 5) {
+		s.flushCSVBuffer(connID)
+		bufferSize = 0
+		newSize = len(csvLine)
+	}
+
+	copy(csvBuffers[connID][bufferSize:], csvLine)
+	s.csvBufferSizes[connID] = newSize
+	s.totalEvents++
+}
+
+func (s *ChadSync) flushCSVBuffer(connID int) {
+	if s.csvBufferSizes[connID] == 0 {
+		return
+	}
+
+	s.fileMutex.Lock()
+	s.outputFile.Write(csvBuffers[connID][:s.csvBufferSizes[connID]])
+	s.fileMutex.Unlock()
+
+	s.csvBufferSizes[connID] = 0
+}
+
+func (s *ChadSync) flushAllBuffers() {
+	for i := 0; i < NumConnections; i++ {
+		s.flushCSVBuffer(i)
+	}
 	s.outputFile.Sync()
 }
 
-func (s *ChadSync) processLogFromGlobal(log *ChadLog) {
+func (s *ChadSync) processLogFromGlobal(log *ChadLog, connID int) {
 	reserve0, reserve1 := parseReservesToZeroTrimmed(log.data)
-	s.writeCSV(log.address, log.blockNum, reserve0, reserve1)
+	s.writeCSVBuffered(log.address, log.blockNum, reserve0, reserve1, connID)
+
+	// Update current block for progress tracking
+	if log.blockNum > s.currentBlock {
+		s.currentBlock = log.blockNum
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MAIN SYNC ENGINE
+// PERFECTLY BALANCED SYNC ENGINE
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 func (s *ChadSync) sync() error {
+	fmt.Println("📡 Getting current block height...")
 	s.syncTarget = s.blockNumber()
 	s.lastProcessed = DeploymentBlock
 
@@ -330,12 +422,13 @@ func (s *ChadSync) sync() error {
 	}
 
 	totalBlocks := s.syncTarget - s.lastProcessed
+	fmt.Printf("⚖️ BALANCED SYNC: %d blocks across %d connections\n", totalBlocks, NumConnections)
+	fmt.Printf("📈 Target: steady, sustainable performance\n")
+
+	// Create perfectly balanced sectors
+	sectors := make([][2]uint64, NumConnections)
 	blocksPerSector := totalBlocks / uint64(NumConnections)
 	extraBlocks := totalBlocks % uint64(NumConnections)
-
-	fmt.Printf("Syncing %d blocks across %d connections\n", totalBlocks, NumConnections)
-
-	sectors := make([][2]uint64, NumConnections)
 	sectorStart := s.lastProcessed + 1
 
 	for i := 0; i < NumConnections; i++ {
@@ -350,7 +443,22 @@ func (s *ChadSync) sync() error {
 		}
 		sectors[i] = [2]uint64{from, to}
 		sectorStart = to + 1
+		fmt.Printf("⚖️ Sector %d: %d → %d (%d blocks)\n", i, from, to, to-from+1)
 	}
+
+	// Start balanced periodic buffer flushing (every 10 seconds - not too frequent)
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.flushAllBuffers()
+			case <-s.ctx.Done():
+				return
+			}
+		}
+	}()
 
 	var wg sync.WaitGroup
 	for connID := 0; connID < NumConnections; connID++ {
@@ -362,6 +470,12 @@ func (s *ChadSync) sync() error {
 	}
 
 	wg.Wait()
+	s.flushAllBuffers() // Final flush
+
+	elapsed := time.Since(s.startTime)
+	eventsPerSec := float64(s.totalEvents) / elapsed.Seconds()
+	fmt.Printf("🏁 PERFECTLY BALANCED: %d events in %v (%.1f/sec)\n", s.totalEvents, elapsed.Truncate(time.Second), eventsPerSec)
+
 	return nil
 }
 
@@ -379,6 +493,7 @@ func (s *ChadSync) syncSector(from, to uint64, connID int) {
 		logCount, err := s.getLogs(current, batchEnd, connID)
 		if err != nil {
 			if strings.Contains(err.Error(), "more than 10000 results") {
+				// Binary search: divide by 2 when hitting limits
 				batchSize = batchSize / 2
 				if batchSize < MinBatchSize {
 					batchSize = MinBatchSize
@@ -386,7 +501,9 @@ func (s *ChadSync) syncSector(from, to uint64, connID int) {
 				consecutiveSuccesses = 0
 				continue
 			}
-			return
+			// Brief pause on error, then retry
+			time.Sleep(1 * time.Second)
+			continue
 		}
 
 		baseOffset := connID * (MaxLogSliceSize / NumConnections)
@@ -395,23 +512,22 @@ func (s *ChadSync) syncSector(from, to uint64, connID int) {
 			if logPos >= len(globalLogBuffer) {
 				break
 			}
-			s.processLogFromGlobal(&globalLogBuffer[logPos])
+			s.processLogFromGlobal(&globalLogBuffer[logPos], connID)
 		}
 
 		current = batchEnd + 1
 		consecutiveSuccesses++
 
+		// Natural convergence via binary search - wait for 3 successes, then 2x growth
 		if consecutiveSuccesses >= 3 {
-			batchSize = batchSize * 2
-			if batchSize > MaxBatchSize {
-				batchSize = MaxBatchSize
-			}
+			batchSize = batchSize * 2 // 2x growth for binary search
 			consecutiveSuccesses = 0
 		}
 	}
 }
 
 func (s *ChadSync) close() {
+	s.flushAllBuffers()
 	if s.outputFile != nil {
 		s.outputFile.Close()
 	}
@@ -431,7 +547,10 @@ func ExecutePeakSync() error {
 }
 
 func CheckIfPeakSyncNeeded() (bool, uint64, uint64, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{
+		Timeout:   15 * time.Second,
+		Transport: createBalancedTransport(),
+	}
 	url := "https://" + constants.WsHost + "/v3/a2a3139d2ab24d59bed2dc3643664126"
 
 	reqJSON := `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`
