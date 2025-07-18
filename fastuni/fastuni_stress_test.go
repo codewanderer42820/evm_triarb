@@ -175,20 +175,20 @@ func sweepN(t *testing.T, regime string, n int64,
 	workers := runtime.GOMAXPROCS(0)
 
 	// Use single-threaded execution for small workloads or limited parallelism
-	if workers < 2 || n < int64(workers) { // Convert workers to int64 for comparison
+	if workers < 2 || n < int64(workers) {
 		singleThreadSweep(t, regime, n, gen, gold, impl)
 		return
 	}
 
 	// Parallel execution setup
-	chunk := n / int64(workers) // Convert workers to int64 for division
+	chunk := n / int64(workers)
 	var wg sync.WaitGroup
 	var once sync.Once
 	var failMsg string
 
 	// Launch worker pool
 	for w := 0; w < workers; w++ {
-		start := int64(w) * chunk // Convert w to int64
+		start := int64(w) * chunk
 		end := start + chunk
 		if w == workers-1 {
 			end = n // Last worker handles remainder
@@ -199,7 +199,7 @@ func sweepN(t *testing.T, regime string, n int64,
 		r := rand.New(rand.NewSource(seed))
 
 		wg.Add(1)
-		go func(worker int, from, to int64, rng *rand.Rand) { // Use int64 for from/to
+		go func(worker int, from, to int64, rng *rand.Rand) {
 			defer wg.Done()
 
 			// Per-worker validation loop
@@ -241,9 +241,9 @@ func singleThreadSweep(t *testing.T, regime string, n int64,
 	gold func(float64) float64,
 	impl func(uint64, uint64) (float64, error),
 ) {
-	r := rand.New(rand.NewSource(seedBase + int64(regime[0]) + n)) // n is already int64, no need to convert
+	r := rand.New(rand.NewSource(seedBase + int64(regime[0]) + n))
 
-	for i := int64(0); i < n; i++ { // Change loop counter to int64
+	for i := int64(0); i < n; i++ {
 		a, b := gen(r)
 		want := gold(float64(a) / float64(b))
 		got, err := impl(a, b)
