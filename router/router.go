@@ -992,10 +992,9 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		for _, cycleEdge := range shard.cycleEdges {
 			handle := engine.allocateQueueHandle()
 
-			// FIXED: Initialize with correct field order matching struct declaration
 			engine.cycleStates[cycleStateIdx] = ArbitrageCycleState{
-				tickValues: [3]float64{64.0, 64.0, 64.0}, // FIRST in declaration
-				pairIDs:    cycleEdge.cyclePairs,         // SECOND in declaration
+				tickValues: [3]float64{64.0, 64.0, 64.0},
+				pairIDs:    cycleEdge.cyclePairs,
 			}
 			engine.cycleStates[cycleStateIdx].tickValues[cycleEdge.edgeIndex] = 0.0
 
@@ -1071,7 +1070,8 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 		allShards = append(allShards, shard)
 	}
 
-	// FIXED: Initialize the core processing engine with correct field order
+	// Initialize the core processing engine with exact memory allocations
+	// This prevents any memory fragmentation during the operational phase
 	engine := &ArbitrageEngine{
 		pairToQueueLookup:  localidx.New(constants.DefaultLocalIdxSize),
 		pairToFanoutIndex:  localidx.New(constants.DefaultLocalIdxSize * 2), // Larger for all pairs
