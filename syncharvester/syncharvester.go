@@ -182,8 +182,6 @@ func buildHTTPTransport() *http.Transport {
 // METADATA MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-const MetadataPath = constants.HarvesterMetadataPath
-
 // loadMetadata reads the last processed block height from binary metadata file.
 //
 //go:norace
@@ -193,7 +191,7 @@ const MetadataPath = constants.HarvesterMetadataPath
 //go:registerparams
 func loadMetadata() uint64 {
 	var buf [8]byte
-	file, err := os.Open(MetadataPath)
+	file, err := os.Open(constants.HarvesterMetadataPath)
 	if err != nil {
 		return constants.HarvesterDeploymentBlock
 	}
@@ -219,7 +217,7 @@ func saveMetadata(block uint64) error {
 		byte(block >> 32), byte(block >> 40), byte(block >> 48), byte(block >> 56),
 	}
 
-	file, err := os.OpenFile(MetadataPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	file, err := os.OpenFile(constants.HarvesterMetadataPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
