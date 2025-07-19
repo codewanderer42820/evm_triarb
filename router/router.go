@@ -831,61 +831,69 @@ func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
 	}
 }
 
-// buildWorkloadShards constructs the fanout mapping infrastructure for cycle distribution.
-// Performs exact counting through complete traversals to ensure zero memory allocation overhead.
+// buildWorkloadShards - EXACTLY your original logic, just pre-sized for efficiency
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
 func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
-	// PHASE 1: Count exact edges per pair through complete traversal
+	// PHASE 1: Count exact edges per pair through complete traversal (SAME as original)
 	edgeCounts := make(map[TradingPairID]int)
-
 	for _, triangle := range arbitrageTriangles {
 		for i := 0; i < 3; i++ {
 			edgeCounts[triangle[i]]++
 		}
 	}
 
-	// PHASE 2: Count exact shards per pair through complete shard calculation
+	// PHASE 2: Count exact shards per pair through complete shard calculation (SAME as original)
 	shardCounts := make(map[TradingPairID]int)
-
 	for pairID, edgeCount := range edgeCounts {
 		shardCount := (edgeCount + constants.MaxCyclesPerShard - 1) / constants.MaxCyclesPerShard
 		shardCounts[pairID] = shardCount
 	}
 
-	// PHASE 3: Pre-allocate all structures with exact capacities
+	// PHASE 3: Pre-allocate all structures with exact capacities (FIXED: was len=0,cap=X, now len=X)
 	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard, len(edgeCounts))
 	temporaryEdges := make(map[TradingPairID][]CycleEdge, len(edgeCounts))
 
 	for pairID, edgeCount := range edgeCounts {
-		temporaryEdges[pairID] = make([]CycleEdge, 0, edgeCount)
+		// FIXED: Use exact size instead of append-based growth
+		temporaryEdges[pairID] = make([]CycleEdge, edgeCount) // Was: make([]CycleEdge, 0, edgeCount)
 		shardCount := shardCounts[pairID]
-		pairWorkloadShards[pairID] = make([]PairWorkloadShard, 0, shardCount)
+		pairWorkloadShards[pairID] = make([]PairWorkloadShard, shardCount) // Was: make([]PairWorkloadShard, 0, shardCount)
 	}
 
-	// PHASE 4: Populate with zero reallocations
+	// PHASE 4: Populate with zero reallocations using direct indexing (FIXED: no append)
+	edgeIndices := make(map[TradingPairID]int, len(edgeCounts)) // Track current position per pair
+
 	for _, triangle := range arbitrageTriangles {
 		for i := 0; i < 3; i++ {
-			temporaryEdges[triangle[i]] = append(temporaryEdges[triangle[i]],
-				CycleEdge{cyclePairs: triangle, edgeIndex: uint64(i)})
+			pairID := triangle[i]
+			idx := edgeIndices[pairID]
+			// FIXED: Direct assignment instead of append
+			temporaryEdges[pairID][idx] = CycleEdge{cyclePairs: triangle, edgeIndex: uint64(i)}
+			edgeIndices[pairID]++
 		}
 	}
 
-	// PHASE 5: Create shards with zero reallocations
+	// PHASE 5: Create shards with zero reallocations (FIXED: no append)
 	for pairID, cycleEdges := range temporaryEdges {
 		shuffleCycleEdges(cycleEdges, pairID)
 
+		shardIdx := 0 // Track current shard position
 		for offset := 0; offset < len(cycleEdges); offset += constants.MaxCyclesPerShard {
 			endOffset := offset + constants.MaxCyclesPerShard
 			if endOffset > len(cycleEdges) {
 				endOffset = len(cycleEdges)
 			}
 
-			pairWorkloadShards[pairID] = append(pairWorkloadShards[pairID],
-				PairWorkloadShard{pairID: pairID, cycleEdges: cycleEdges[offset:endOffset]})
+			// FIXED: Direct assignment instead of append
+			pairWorkloadShards[pairID][shardIdx] = PairWorkloadShard{
+				pairID:     pairID,
+				cycleEdges: cycleEdges[offset:endOffset],
+			}
+			shardIdx++
 		}
 	}
 
@@ -896,8 +904,7 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 // QUEUE INITIALIZATION SYSTEM
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// initializeArbitrageQueues allocates shared arena and initializes all queues with cycle data.
-// Uses complete traversals for exact counting to achieve zero memory waste and zero allocation overhead.
+// initializeArbitrageQueues - EXACTLY your original logic, just pre-sized for efficiency
 //
 //go:norace
 //go:nocheckptr
@@ -908,7 +915,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		return
 	}
 
-	// PHASE 1: Complete traversal to count exact cycles and identify all pairs
+	// PHASE 1: Complete traversal to count exact cycles and identify all pairs (SAME as original)
 	totalCycles := 0
 	allPairsSet := make(map[TradingPairID]struct{})
 	pairsWithQueuesSet := make(map[TradingPairID]struct{})
@@ -927,9 +934,8 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 	totalQueues := len(pairsWithQueuesSet)
 	totalFanoutSlots := len(allPairsSet)
 
-	// PHASE 2: Complete traversal to count exact fanout entries per slot
+	// PHASE 2: Complete traversal to count exact fanout entries per slot (SAME as original)
 	fanoutCounts := make(map[TradingPairID]int)
-
 	for _, shard := range workloadShards {
 		for _, cycleEdge := range shard.cycleEdges {
 			otherPair1 := cycleEdge.cyclePairs[(cycleEdge.edgeIndex+1)%3]
@@ -940,25 +946,27 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		}
 	}
 
-	// PHASE 3: Allocate all arrays with exact sizes
+	// PHASE 3: Allocate all arrays with exact sizes (SAME as original)
 	engine.sharedArena = make([]pooledquantumqueue.Entry, totalCycles)
 	engine.priorityQueues = make([]pooledquantumqueue.PooledQuantumQueue, totalQueues)
 	engine.cycleFanoutTable = make([][]CycleFanoutEntry, totalFanoutSlots)
-	engine.cycleStates = make([]ArbitrageCycleState, 0, totalCycles)
+	engine.cycleStates = make([]ArbitrageCycleState, totalCycles) // FIXED: exact size instead of 0,cap
 
-	// PHASE 4: Create deterministic ordering and pre-allocate fanout slices
-	allPairsList := make([]TradingPairID, 0, totalFanoutSlots)
+	// PHASE 4: Create deterministic ordering and pre-allocate fanout slices (FIXED: no append)
+	allPairsList := make([]TradingPairID, totalFanoutSlots)
+	pairIdx := 0
 	for pairID := range allPairsSet {
-		allPairsList = append(allPairsList, pairID)
+		allPairsList[pairIdx] = pairID
+		pairIdx++
 	}
 
 	for i, pairID := range allPairsList {
 		exactCount := fanoutCounts[pairID]
-		engine.cycleFanoutTable[i] = make([]CycleFanoutEntry, 0, exactCount)
+		engine.cycleFanoutTable[i] = make([]CycleFanoutEntry, exactCount) // FIXED: exact size instead of 0,cap
 		engine.pairToFanoutIndex.Put(uint32(pairID), uint32(i))
 	}
 
-	// PHASE 5: Initialize arena entries
+	// PHASE 5: Initialize arena entries (SAME as original)
 	nilHandle := pooledquantumqueue.Handle(^uint64(0))
 	for i := range engine.sharedArena {
 		engine.sharedArena[i].Tick = -1
@@ -967,24 +975,29 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		engine.sharedArena[i].Data = 0
 	}
 
-	// PHASE 6: Initialize priority queues
+	// PHASE 6: Initialize priority queues (SAME as original)
 	arenaPtr := unsafe.Pointer(&engine.sharedArena[0])
 	for i := range engine.priorityQueues {
 		newQueue := pooledquantumqueue.New(arenaPtr)
 		engine.priorityQueues[i] = *newQueue
 	}
 
-	// PHASE 7: Create deterministic ordering for queue assignment
-	pairsWithQueuesList := make([]TradingPairID, 0, totalQueues)
+	// PHASE 7: Create deterministic ordering for queue assignment (FIXED: no append)
+	pairsWithQueuesList := make([]TradingPairID, totalQueues)
+	queueIdx := 0
 	for pairID := range pairsWithQueuesSet {
-		pairsWithQueuesList = append(pairsWithQueuesList, pairID)
+		pairsWithQueuesList[queueIdx] = pairID
+		queueIdx++
 	}
 
 	for i, pairID := range pairsWithQueuesList {
 		engine.pairToQueueLookup.Put(uint32(pairID), uint32(i))
 	}
 
-	// PHASE 8: Populate with zero reallocations
+	// PHASE 8: Populate with zero reallocations using direct indexing (FIXED: no append)
+	cycleStateIdx := 0
+	fanoutIndices := make(map[TradingPairID]int, totalFanoutSlots) // Track positions for direct assignment
+
 	for _, shard := range workloadShards {
 		queueIndex, _ := engine.pairToQueueLookup.Get(uint32(shard.pairID))
 		queue := &engine.priorityQueues[queueIndex]
@@ -992,20 +1005,18 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		for _, cycleEdge := range shard.cycleEdges {
 			handle := engine.allocateQueueHandle()
 
-			cycleState := ArbitrageCycleState{
+			// FIXED: Direct assignment instead of append
+			engine.cycleStates[cycleStateIdx] = ArbitrageCycleState{
 				pairIDs:    cycleEdge.cyclePairs,
 				tickValues: [3]float64{64.0, 64.0, 64.0},
 			}
-			cycleState.tickValues[cycleEdge.edgeIndex] = 0.0
+			engine.cycleStates[cycleStateIdx].tickValues[cycleEdge.edgeIndex] = 0.0
 
-			engine.cycleStates = append(engine.cycleStates, cycleState)
-			cycleIndex := CycleIndex(len(engine.cycleStates) - 1)
-
-			cycleHash := utils.Mix64(uint64(cycleIndex))
+			cycleHash := utils.Mix64(uint64(cycleStateIdx))
 			randBits := cycleHash & 0xFFFF
 			initPriority := int64(196608 + randBits)
 
-			queue.Push(initPriority, handle, uint64(cycleIndex))
+			queue.Push(initPriority, handle, uint64(cycleStateIdx))
 
 			otherEdge1 := (cycleEdge.edgeIndex + 1) % 3
 			otherEdge2 := (cycleEdge.edgeIndex + 2) % 3
@@ -1013,30 +1024,34 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			otherPairID1 := cycleEdge.cyclePairs[otherEdge1]
 			otherFanoutIndex1, _ := engine.pairToFanoutIndex.Get(uint32(otherPairID1))
 
-			engine.cycleFanoutTable[otherFanoutIndex1] = append(
-				engine.cycleFanoutTable[otherFanoutIndex1],
-				CycleFanoutEntry{
-					queueHandle: handle,
-					cycleIndex:  uint64(cycleIndex),
-					queueIndex:  uint64(queueIndex),
-					edgeIndex:   otherEdge1,
-				})
+			// FIXED: Direct assignment instead of append
+			idx1 := fanoutIndices[otherPairID1]
+			engine.cycleFanoutTable[otherFanoutIndex1][idx1] = CycleFanoutEntry{
+				queueHandle: handle,
+				cycleIndex:  uint64(cycleStateIdx),
+				queueIndex:  uint64(queueIndex),
+				edgeIndex:   otherEdge1,
+			}
+			fanoutIndices[otherPairID1]++
 
 			otherPairID2 := cycleEdge.cyclePairs[otherEdge2]
 			otherFanoutIndex2, _ := engine.pairToFanoutIndex.Get(uint32(otherPairID2))
 
-			engine.cycleFanoutTable[otherFanoutIndex2] = append(
-				engine.cycleFanoutTable[otherFanoutIndex2],
-				CycleFanoutEntry{
-					queueHandle: handle,
-					cycleIndex:  uint64(cycleIndex),
-					queueIndex:  uint64(queueIndex),
-					edgeIndex:   otherEdge2,
-				})
+			// FIXED: Direct assignment instead of append
+			idx2 := fanoutIndices[otherPairID2]
+			engine.cycleFanoutTable[otherFanoutIndex2][idx2] = CycleFanoutEntry{
+				queueHandle: handle,
+				cycleIndex:  uint64(cycleStateIdx),
+				queueIndex:  uint64(queueIndex),
+				edgeIndex:   otherEdge2,
+			}
+			fanoutIndices[otherPairID2]++
+
+			cycleStateIdx++
 		}
 	}
 
-	// PHASE 9: Calculate exact total fanout entries for verification
+	// PHASE 9: Calculate exact total fanout entries for verification (SAME as original)
 	totalFanoutEntries := 0
 	for _, fanoutSlice := range engine.cycleFanoutTable {
 		totalFanoutEntries += len(fanoutSlice)
