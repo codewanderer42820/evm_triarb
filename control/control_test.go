@@ -45,8 +45,8 @@ const (
 
 // resetState cleans all global state for test isolation
 func resetState() {
-	hot = 0
-	stop = 0
+	activityFlag = 0
+	shutdownFlag = 0
 	lastActivityCount = 0
 	pollCounter = 0
 }
@@ -66,11 +66,11 @@ func TestControl_InitialState(t *testing.T) {
 	resetState()
 
 	// Verify zero initialization
-	if hot != 0 {
-		t.Error("hot flag should initialize to 0")
+	if activityFlag != 0 {
+		t.Error("activityFlag should initialize to 0")
 	}
-	if stop != 0 {
-		t.Error("stop flag should initialize to 0")
+	if shutdownFlag != 0 {
+		t.Error("shutdownFlag should initialize to 0")
 	}
 	if lastActivityCount != 0 {
 		t.Error("lastActivityCount should initialize to 0")
@@ -102,16 +102,16 @@ func TestControl_FlagPointers(t *testing.T) {
 	}
 
 	// Verify pointer targets
-	if stopPtr1 != &stop {
-		t.Error("Stop pointer should reference global stop variable")
+	if stopPtr1 != &shutdownFlag {
+		t.Error("Stop pointer should reference global shutdownFlag variable")
 	}
-	if hotPtr1 != &hot {
-		t.Error("Hot pointer should reference global hot variable")
+	if hotPtr1 != &activityFlag {
+		t.Error("Hot pointer should reference global activityFlag variable")
 	}
 
 	// Test pointer usage
 	*hotPtr1 = 1
-	if hot != 1 {
+	if activityFlag != 1 {
 		t.Error("Setting via pointer should update global variable")
 	}
 }
@@ -130,8 +130,8 @@ func TestControl_SignalActivity(t *testing.T) {
 	SignalActivity()
 
 	// Verify effects
-	if hot != 1 {
-		t.Error("SignalActivity should set hot flag to 1")
+	if activityFlag != 1 {
+		t.Error("SignalActivity should set activityFlag to 1")
 	}
 	if lastActivityCount != beforeCount {
 		t.Errorf("lastActivityCount should be %d, got %d", beforeCount, lastActivityCount)
@@ -150,8 +150,8 @@ func TestControl_MultipleSignals(t *testing.T) {
 		expectedCount := pollCounter
 		SignalActivity()
 
-		if hot != 1 {
-			t.Errorf("Iteration %d: hot flag should remain 1", i)
+		if activityFlag != 1 {
+			t.Errorf("Iteration %d: activityFlag should remain 1", i)
 		}
 		if lastActivityCount != expectedCount {
 			t.Errorf("Iteration %d: activity count mismatch", i)
@@ -166,11 +166,11 @@ func TestControl_MultipleSignals(t *testing.T) {
 func TestControl_PollCooldown_Branchless(t *testing.T) {
 	t.Run("InactiveSystem", func(t *testing.T) {
 		resetState()
-		hot = 0
+		activityFlag = 0
 
 		PollCooldown()
 
-		if hot != 0 {
+		if activityFlag != 0 {
 			t.Error("PollCooldown should not activate cold system")
 		}
 		if pollCounter != 1 {
@@ -185,8 +185,8 @@ func TestControl_PollCooldown_Branchless(t *testing.T) {
 		// Poll within cooldown period
 		for i := uint64(0); i < constants.CooldownPolls/2; i++ {
 			PollCooldown()
-			if hot != 1 {
-				t.Errorf("Hot flag cleared too early at poll %d", i)
+			if activityFlag != 1 {
+				t.Errorf("Activity flag cleared too early at poll %d", i)
 				break
 			}
 		}
@@ -201,10 +201,10 @@ func TestControl_PollCooldown_Branchless(t *testing.T) {
 			PollCooldown()
 		}
 
-		// Next poll should clear hot flag
+		// Next poll should clear activity flag
 		PollCooldown()
-		if hot != 0 {
-			t.Error("Hot flag should clear after cooldown expiry")
+		if activityFlag != 0 {
+			t.Error("Activity flag should clear after cooldown expiry")
 		}
 	})
 
@@ -218,14 +218,14 @@ func TestControl_PollCooldown_Branchless(t *testing.T) {
 			PollCooldown()
 		}
 
-		if hot != 1 {
-			t.Error("Hot flag should remain set at cooldown boundary")
+		if activityFlag != 1 {
+			t.Error("Activity flag should remain set at cooldown boundary")
 		}
 
 		// One more poll should clear
 		PollCooldown()
-		if hot != 0 {
-			t.Error("Hot flag should clear after boundary")
+		if activityFlag != 0 {
+			t.Error("Activity flag should clear after boundary")
 		}
 	})
 }
@@ -266,20 +266,20 @@ func TestControl_Shutdown(t *testing.T) {
 	resetState()
 
 	// Initial state
-	if stop != 0 {
-		t.Error("Stop flag should start at 0")
+	if shutdownFlag != 0 {
+		t.Error("Shutdown flag should start at 0")
 	}
 
 	// Trigger shutdown
 	Shutdown()
-	if stop != 1 {
-		t.Error("Shutdown should set stop flag to 1")
+	if shutdownFlag != 1 {
+		t.Error("Shutdown should set shutdown flag to 1")
 	}
 
 	// Verify idempotence
 	Shutdown()
-	if stop != 1 {
-		t.Error("Multiple shutdowns should maintain stop=1")
+	if shutdownFlag != 1 {
+		t.Error("Multiple shutdowns should maintain shutdownFlag=1")
 	}
 }
 
@@ -331,36 +331,36 @@ func TestControl_GetActivityAge(t *testing.T) {
 	}
 }
 
-func TestControl_IsHot(t *testing.T) {
+func TestControl_IsActive(t *testing.T) {
 	resetState()
 
-	if IsHot() {
-		t.Error("Should not be hot initially")
+	if IsActive() {
+		t.Error("Should not be active initially")
 	}
 
-	hot = 1
-	if !IsHot() {
-		t.Error("Should be hot after setting flag")
+	activityFlag = 1
+	if !IsActive() {
+		t.Error("Should be active after setting flag")
 	}
 }
 
-func TestControl_IsStopping(t *testing.T) {
+func TestControl_IsShuttingDown(t *testing.T) {
 	resetState()
 
-	if IsStopping() {
-		t.Error("Should not be stopping initially")
+	if IsShuttingDown() {
+		t.Error("Should not be shutting down initially")
 	}
 
-	stop = 1
-	if !IsStopping() {
-		t.Error("Should be stopping after setting flag")
+	shutdownFlag = 1
+	if !IsShuttingDown() {
+		t.Error("Should be shutting down after setting flag")
 	}
 }
 
 func TestControl_GetCooldownProgress(t *testing.T) {
 	t.Run("ColdSystem", func(t *testing.T) {
 		resetState()
-		hot = 0
+		activityFlag = 0
 
 		progress := GetCooldownProgress()
 		if progress != 100 {
@@ -448,11 +448,11 @@ func TestControl_GetCooldownRemaining(t *testing.T) {
 	})
 }
 
-func TestControl_IsActive(t *testing.T) {
+func TestControl_IsWithinCooldown(t *testing.T) {
 	t.Run("ColdSystem", func(t *testing.T) {
 		resetState()
-		if IsActive() {
-			t.Error("Cold system should not be active")
+		if IsWithinCooldown() {
+			t.Error("Cold system should not be within cooldown")
 		}
 	})
 
@@ -460,14 +460,14 @@ func TestControl_IsActive(t *testing.T) {
 		resetState()
 		SignalActivity()
 
-		if !IsActive() {
-			t.Error("Hot system within cooldown should be active")
+		if !IsWithinCooldown() {
+			t.Error("Hot system within cooldown should be within cooldown")
 		}
 
 		// Still active near end
 		advanceVirtualTime(constants.CooldownPolls - 10)
-		if !IsActive() {
-			t.Error("Should remain active until cooldown expires")
+		if !IsWithinCooldown() {
+			t.Error("Should remain within cooldown until cooldown expires")
 		}
 	})
 
@@ -476,8 +476,8 @@ func TestControl_IsActive(t *testing.T) {
 		SignalActivity()
 
 		advanceVirtualTime(constants.CooldownPolls + 10)
-		if IsActive() {
-			t.Error("Should not be active after cooldown")
+		if IsWithinCooldown() {
+			t.Error("Should not be within cooldown after cooldown expires")
 		}
 	})
 }
@@ -490,35 +490,35 @@ func TestControl_GetSystemState(t *testing.T) {
 		// When system has never been active, the cooldown calculation may show as "expired"
 		// because pollCounter - lastActivityCount = 0 - 0 = 0, which is less than CooldownPolls
 		// This makes withinCooldown = 1, setting bit 2
-		// Expected: Bit 0: hot (0), Bit 1: stop (0), Bit 2: cooldown (1)
+		// Expected: Bit 0: activityFlag (0), Bit 1: shutdownFlag (0), Bit 2: cooldown (1)
 		expected := uint32(0b100)
 		if state != expected {
 			t.Errorf("Initial state should be %b, got %b", expected, state)
 		}
 	})
 
-	t.Run("HotOnly", func(t *testing.T) {
+	t.Run("ActiveOnly", func(t *testing.T) {
 		resetState()
 		SignalActivity()
 
 		state := GetSystemState()
-		// Bit 0: hot (1), Bit 1: stop (0), Bit 2: cooldown (1)
+		// Bit 0: activityFlag (1), Bit 1: shutdownFlag (0), Bit 2: cooldown (1)
 		expected := uint32(0b101)
 		if state != expected {
-			t.Errorf("Hot state should be %b, got %b", expected, state)
+			t.Errorf("Active state should be %b, got %b", expected, state)
 		}
 	})
 
-	t.Run("StoppingOnly", func(t *testing.T) {
+	t.Run("ShuttingDownOnly", func(t *testing.T) {
 		resetState()
 		Shutdown()
 
 		state := GetSystemState()
 		// When never activated, cooldown bit is still 1
-		// Bit 0: hot (0), Bit 1: stop (1), Bit 2: cooldown (1)
+		// Bit 0: activityFlag (0), Bit 1: shutdownFlag (1), Bit 2: cooldown (1)
 		expected := uint32(0b110)
 		if state != expected {
-			t.Errorf("Stopping state should be %b, got %b", expected, state)
+			t.Errorf("Shutting down state should be %b, got %b", expected, state)
 		}
 	})
 
@@ -530,7 +530,7 @@ func TestControl_GetSystemState(t *testing.T) {
 		advanceVirtualTime(constants.CooldownPolls + 100)
 
 		state := GetSystemState()
-		// Bit 0: hot (1), Bit 1: stop (0), Bit 2: cooldown (0)
+		// Bit 0: activityFlag (1), Bit 1: shutdownFlag (0), Bit 2: cooldown (0)
 		expected := uint32(0b001)
 		if state != expected {
 			t.Errorf("Expired cooldown state should be %b, got %b", expected, state)
@@ -543,7 +543,7 @@ func TestControl_GetSystemState(t *testing.T) {
 		Shutdown()
 
 		state := GetSystemState()
-		// Bit 0: hot (1), Bit 1: stop (1), Bit 2: cooldown (1)
+		// Bit 0: activityFlag (1), Bit 1: shutdownFlag (1), Bit 2: cooldown (1)
 		expected := uint32(0b111)
 		if state != expected {
 			t.Errorf("All active state should be %b, got %b", expected, state)
@@ -572,8 +572,8 @@ func TestControl_TestUtilities(t *testing.T) {
 		resetState()
 		ForceActive()
 
-		if hot != 1 {
-			t.Error("ForceActive should set hot flag")
+		if activityFlag != 1 {
+			t.Error("ForceActive should set activity flag")
 		}
 		if lastActivityCount != 0 {
 			t.Error("ForceActive should not affect activity counter")
@@ -582,11 +582,11 @@ func TestControl_TestUtilities(t *testing.T) {
 
 	t.Run("ForceInactive", func(t *testing.T) {
 		resetState()
-		hot = 1
+		activityFlag = 1
 		ForceInactive()
 
-		if hot != 0 {
-			t.Error("ForceInactive should clear hot flag")
+		if activityFlag != 0 {
+			t.Error("ForceInactive should clear activity flag")
 		}
 	})
 }
@@ -625,11 +625,11 @@ func TestControl_EdgeCases(t *testing.T) {
 
 	t.Run("MemoryAlignment", func(t *testing.T) {
 		// Verify alignment for performance
-		if unsafe.Sizeof(hot) != 4 {
-			t.Errorf("hot size: %d bytes, expected 4", unsafe.Sizeof(hot))
+		if unsafe.Sizeof(activityFlag) != 4 {
+			t.Errorf("activityFlag size: %d bytes, expected 4", unsafe.Sizeof(activityFlag))
 		}
-		if unsafe.Sizeof(stop) != 4 {
-			t.Errorf("stop size: %d bytes, expected 4", unsafe.Sizeof(stop))
+		if unsafe.Sizeof(shutdownFlag) != 4 {
+			t.Errorf("shutdownFlag size: %d bytes, expected 4", unsafe.Sizeof(shutdownFlag))
 		}
 		if unsafe.Sizeof(lastActivityCount) != 8 {
 			t.Errorf("lastActivityCount size: %d bytes, expected 8", unsafe.Sizeof(lastActivityCount))
@@ -684,7 +684,7 @@ func TestControl_ConcurrentAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < testOpsPerGoroutine; j++ {
-				_ = IsHot()
+				_ = IsActive()
 				_ = GetActivityAge()
 				_ = GetSystemState()
 				atomic.AddUint64(&queryCount, 1)
@@ -745,8 +745,8 @@ func TestControl_CompleteWorkflow(t *testing.T) {
 
 	// Phase 5: Shutdown
 	Shutdown()
-	if !IsStopping() {
-		t.Error("System should be stopping after shutdown")
+	if !IsShuttingDown() {
+		t.Error("System should be shutting down after shutdown")
 	}
 }
 
@@ -848,11 +848,11 @@ func TestControl_ZeroAllocations(t *testing.T) {
 		{"Flags", func() { Flags() }},
 		{"GetPollCount", func() { GetPollCount() }},
 		{"GetActivityAge", func() { GetActivityAge() }},
-		{"IsHot", func() { IsHot() }},
-		{"IsStopping", func() { IsStopping() }},
+		{"IsActive", func() { IsActive() }},
+		{"IsShuttingDown", func() { IsShuttingDown() }},
 		{"GetCooldownProgress", func() { GetCooldownProgress() }},
 		{"GetCooldownRemaining", func() { GetCooldownRemaining() }},
-		{"IsActive", func() { IsActive() }},
+		{"IsWithinCooldown", func() { IsWithinCooldown() }},
 		{"GetSystemState", func() { GetSystemState() }},
 	}
 
