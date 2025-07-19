@@ -250,17 +250,27 @@ func newSynchronizationHarvester(connectionCount int) *SynchronizationHarvester 
 	lastProcessed := loadMetadata()
 
 	harvester := &SynchronizationHarvester{
-		totalEvents:          0,
-		rpcEndpoint:          "https://" + constants.HarvesterHost + constants.HarvesterPath,
+		// Cache Line 1: Hottest fields accessed during every operation
+		totalEvents: 0,
+		rpcEndpoint: "https://" + constants.HarvesterHost + constants.HarvesterPath,
+		outputFile:  nil, // Will be set below
+		fileMutex:   sync.Mutex{},
+		batchSizes:  make([]uint64, connectionCount),
+
+		// Cache Line 2: Hot fields accessed frequently during processing
 		csvBufferSizes:       make([]int, connectionCount),
-		batchSizes:           make([]uint64, connectionCount),
 		consecutiveSuccesses: make([]int, connectionCount),
-		currentBlocks:        make([]uint64, connectionCount),
-		httpClients:          make([]*http.Client, connectionCount),
-		lastProcessed:        lastProcessed,
-		startTime:            time.Now(),
-		processingContext:    ctx,
-		cancelFunc:           cancel,
+
+		// Cache Line 3: Warm fields accessed during batch completion
+		currentBlocks: make([]uint64, connectionCount),
+		httpClients:   make([]*http.Client, connectionCount),
+
+		// Cache Line 4: Cold fields accessed infrequently
+		syncTarget:        0, // Will be set in executeHarvesting()
+		lastProcessed:     lastProcessed,
+		startTime:         time.Now(),
+		processingContext: ctx,
+		cancelFunc:        cancel,
 	}
 
 	// Initialize batch sizes to optimal default values
@@ -268,11 +278,11 @@ func newSynchronizationHarvester(connectionCount int) *SynchronizationHarvester 
 		harvester.batchSizes[i] = constants.OptimalBatchSize
 	}
 
-	// Allocate global buffers based on connection count
+	// Initialize global buffers in the order they are declared
 	responseBuffers = make([][]byte, connectionCount)
+	processedLogs = make([]ProcessedReserveEntry, constants.MaxLogSliceSize)
 	csvOutputBuffers = make([][]byte, connectionCount)
 	csvStringBuilders = make([]strings.Builder, connectionCount)
-	processedLogs = make([]ProcessedReserveEntry, constants.MaxLogSliceSize)
 
 	// Create shared HTTP transport for connection pooling efficiency
 	sharedTransport := buildHTTPTransport()
