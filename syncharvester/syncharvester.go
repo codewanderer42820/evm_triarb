@@ -418,7 +418,6 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock uint64, connectionID int) (int, error) {
@@ -800,7 +799,6 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint64, connectionID int) {
@@ -883,7 +881,6 @@ func ExecuteHarvesting() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func ExecuteHarvestingWithConnections(connectionCount int) error {
@@ -945,7 +942,6 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func FlushHarvestedReservesToRouter() error {
