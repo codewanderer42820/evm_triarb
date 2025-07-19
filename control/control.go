@@ -38,14 +38,16 @@ var (
 	_                 [40]byte // 40B - Padding to fill cache line
 
 	// COLD: Global shutdown synchronization (accessed only during startup/shutdown)
-	ShutdownWG sync.WaitGroup
-	_          [52]byte // 52B - Padding to fill cache line
+	ShutdownWG sync.WaitGroup // 12B - WaitGroup for coordinated shutdown
+	_          [52]byte       // 52B - Padding to complete cache line alignment
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ACTIVITY SIGNALING OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// SignalActivity marks the system as active and records the current poll time.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -60,6 +62,8 @@ func SignalActivity() {
 // VIRTUAL TIMING COORDINATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// PollCooldown advances virtual time and clears activity flag after cooldown period expires.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -76,6 +80,8 @@ func PollCooldown() {
 // SYSTEM CONTROL OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// Shutdown signals all workers to terminate gracefully.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -85,6 +91,8 @@ func Shutdown() {
 	shutdownFlag = 1
 }
 
+// Flags returns pointers to shutdown and activity flags for direct polling by workers.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -98,6 +106,8 @@ func Flags() (*uint32, *uint32) {
 // MONITORING AND DIAGNOSTICS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// GetPollCount returns the total number of polls executed since system start.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -107,6 +117,8 @@ func GetPollCount() uint64 {
 	return pollCounter
 }
 
+// GetActivityAge returns the number of polls elapsed since the last activity signal.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -116,6 +128,8 @@ func GetActivityAge() uint64 {
 	return (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
 }
 
+// IsActive returns true if the system has been active within the cooldown period.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -125,6 +139,8 @@ func IsActive() bool {
 	return activityFlag == 1
 }
 
+// IsShuttingDown returns true if shutdown has been signaled.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -138,6 +154,8 @@ func IsShuttingDown() bool {
 // ADVANCED MONITORING OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// GetCooldownProgress returns the cooldown completion percentage (0-100).
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -153,6 +171,8 @@ func GetCooldownProgress() uint8 {
 	return uint8(inactiveBonus | (uint64(activityFlag) * clampedProgress))
 }
 
+// GetCooldownRemaining returns the number of polls remaining in the cooldown period.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -164,6 +184,8 @@ func GetCooldownRemaining() uint64 {
 	return remaining &^ uint64(int64(remaining)>>63)
 }
 
+// IsWithinCooldown returns true if the system is active and within the cooldown window.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -175,6 +197,8 @@ func IsWithinCooldown() bool {
 	return (activityFlag & withinWindow) == 1
 }
 
+// GetSystemState returns a packed state word with activity, shutdown, and cooldown flags.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -190,6 +214,8 @@ func GetSystemState() uint32 {
 // TESTING AND DEBUGGING UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// ResetPollCounter resets both poll counter and activity timestamp to zero for testing.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -200,6 +226,8 @@ func ResetPollCounter() {
 	lastActivityCount = 0
 }
 
+// ForceActive sets the activity flag to active state for testing purposes.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -209,6 +237,8 @@ func ForceActive() {
 	activityFlag = 1
 }
 
+// ForceInactive clears the activity flag to inactive state for testing purposes.
+//
 //go:norace
 //go:nocheckptr
 //go:nosplit
