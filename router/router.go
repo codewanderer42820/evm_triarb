@@ -64,7 +64,7 @@ type CycleIndex uint64
 // that need to update arbitrage cycles involving that pair.
 //
 //go:notinheap
-//go:align 8
+//go:align 16
 type PriceUpdateMessage struct {
 	pairID      TradingPairID // 8B - Trading pair that experienced the price change
 	forwardTick float64       // 8B - Logarithmic price ratio in forward direction
@@ -102,7 +102,7 @@ type ArbitrageCycleState struct {
 // This structure maps each price update to the specific cycles and queues that need updating.
 //
 //go:notinheap
-//go:align 8
+//go:align 16
 type CycleFanoutEntry struct {
 	queueHandle pooledquantumqueue.Handle // 8B - Direct access to the cycle's position in the priority queue
 	cycleIndex  uint64                    // 8B - Points to the specific arbitrage cycle that needs updating
@@ -115,7 +115,7 @@ type CycleFanoutEntry struct {
 // priority queues. This structure remembers their original state for reinsertion.
 //
 //go:notinheap
-//go:align 8
+//go:align 16
 type ExtractedCycle struct {
 	cycleIndex   CycleIndex                // 8B - Which cycle was extracted from the queue
 	originalTick int64                     // 8B - The cycle's priority before extraction
@@ -168,7 +168,7 @@ type ArbitrageEngine struct {
 // for efficient comparison and hashing operations.
 //
 //go:notinheap
-//go:align 8
+//go:align 32
 type PackedAddress struct {
 	words [3]uint64 // 24B - 160-bit Ethereum address as three 64-bit values
 	_     [8]byte   // 8B - Padding for cache line optimization
@@ -183,7 +183,7 @@ type PackedAddress struct {
 // and what position it holds within each cycle.
 //
 //go:notinheap
-//go:align 8
+//go:align 16
 type CycleEdge struct {
 	cyclePairs [3]TradingPairID // 24B - Complete three-pair arbitrage cycle definition
 	edgeIndex  uint64           // 8B - This pair's position (0, 1, or 2) within the cycle
@@ -194,7 +194,7 @@ type CycleEdge struct {
 // these shards across CPU cores for parallel processing.
 //
 //go:notinheap
-//go:align 8
+//go:align 16
 type PairWorkloadShard struct {
 	pairID     TradingPairID // 8B - Trading pair that all cycles in this shard have in common
 	cycleEdges []CycleEdge   // 24B - All arbitrage cycles that include this trading pair

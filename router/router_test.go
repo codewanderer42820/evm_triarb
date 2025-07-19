@@ -77,7 +77,7 @@ func testSetup(_ *testing.T) func() {
 
 	// Reset control system
 	control.ResetPollCounter()
-	control.ForceCold()
+	control.ForceInactive()
 
 	// Return cleanup function
 	return func() {
@@ -95,7 +95,7 @@ func testSetup(_ *testing.T) func() {
 
 		// Reset control system
 		control.ResetPollCounter()
-		control.ForceCold()
+		control.ForceInactive()
 	}
 }
 

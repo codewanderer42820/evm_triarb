@@ -1,19 +1,18 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// Lock-Free Coordination & Virtual Timing
+// Lock-Free Coordination Engine
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 // Project: Arbitrage Detection System
-// Component: Syscall-Free Control System
+// Component: Syscall-Free Control Coordination
 //
 // Description:
-//   Implements coordination mechanisms without system calls using lock-free flags and poll-based
-//   virtual timing. Enables multi-core synchronization for event processing systems.
+//   Lock-free coordination system using virtual timing and atomic flags for multi-core
+//   synchronization. Eliminates syscall overhead from critical paths via poll-based timing.
 //
 // Features:
-//   - Flag operations with minimal CPU overhead
 //   - Virtual timing without syscall overhead
-//   - Wait-free coordination algorithms
-//   - Approximate timing with configurable precision
-//   - Global shutdown coordination
+//   - Lock-free activity coordination
+//   - Branchless cooldown algorithms
+//   - Wait-free shutdown signaling
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -25,168 +24,79 @@ import (
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// GLOBAL COORDINATION STATE
+// COORDINATION STATE VARIABLES
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Global coordination flags provide lock-free synchronization across all processing
-// cores without mutex overhead or cache line contention. Cache-aligned for optimal
-// multi-core access patterns.
-//
 //go:notinheap
 //go:align 64
 var (
-	// VIRTUAL TIMING STATE (SYSCALL-FREE MONITORING)
-	// Approximates elapsed time using CPU poll counts instead of time.Now() calls.
-	// Trades timing precision for performance - acceptable for cooldown logic.
-	//
-	// Precision Limitations:
-	// - Timing varies with CPU frequency (boost, throttling)
-	// - Affected by system load and scheduling
-	// - Accuracy depends on actual vs configured CPU frequency
-	// - Suitable for rough intervals, not precise timing
-	pollCounter       uint64 // Monotonic counter incremented per cooldown check
-	lastActivityCount uint64 // Poll counter value at last market activity
+	// CACHE LINE 1: Hottest fields (accessed together in every PollCooldown() call)
+	pollCounter       uint64   // 8B - Incremented every PollCooldown() call
+	lastActivityCount uint64   // 8B - Read every PollCooldown() for elapsed calculation
+	activityFlag      uint32   // 4B - Read/written every PollCooldown()
+	shutdownFlag      uint32   // 4B - Checked in worker loops but less frequently
+	_                 [40]byte // 40B - Padding to fill cache line
 
-	// ACTIVITY FLAGS (READ BY ALL CORES, WRITTEN BY WEBSOCKET)
-	// Binary flags enable wait-free coordination without atomic operations.
-	// Single-writer (WebSocket) multiple-reader (cores) access pattern.
-	hot  uint32   // Market activity indicator: 1 = active trading, 0 = idle market
-	_    [44]byte // Pad to 64B
-	stop uint32   // Shutdown coordinator: 1 = graceful termination, 0 = normal operation
-	_    [60]byte // Pad rest
-
-	// GLOBAL SHUTDOWN COORDINATION
-	// WaitGroup for coordinating graceful shutdown across all subsystems
+	// COLD: Global shutdown synchronization (accessed only during startup/shutdown)
 	ShutdownWG sync.WaitGroup
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ACTIVITY SIGNALING
+// ACTIVITY SIGNALING OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// SignalActivity marks the system as processing active market data.
-// Called by the WebSocket layer when receiving events, this function
-// updates both the activity flag and virtual timestamp with zero overhead.
-//
-// Design rationale:
-// - Simple stores instead of atomic operations (single writer pattern)
-// - Virtual timing via poll counter avoids time.Now() syscall
-// - Inlined for direct inclusion at call sites
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
 func SignalActivity() {
-	hot = 1                         // Mark system as active
-	lastActivityCount = pollCounter // Record virtual timestamp
+	activityFlag = 1
+	lastActivityCount = pollCounter
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// COOLDOWN MANAGEMENT
+// VIRTUAL TIMING COORDINATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// PollCooldown implements branchless activity timeout using virtual timing.
-// This function is called continuously by consumer cores to detect idle periods
-// without the overhead of system time queries.
-//
-// Algorithm:
-// Uses bit manipulation to eliminate branches from the critical path:
-// 1. Increment poll counter (virtual time advancement)
-// 2. Calculate elapsed polls since last activity
-// 3. Compare with cooldown threshold using bit arithmetic
-// 4. Update hot flag without conditional jumps
-//
-// Timing Accuracy:
-// Virtual timing provides rough approximation only:
-// - Configured for specific CPU frequency (e.g., 3.2GHz)
-// - Actual timing varies with boost clocks, thermal throttling
-// - System load affects poll rate consistency
-// - Acceptable for activity timeout, not for precise scheduling
-//
-// Branchless Implementation:
-// Mathematical formula: hot = hot & (elapsed <= cooldownPolls)
-// Bit manipulation converts comparison to 0/1 without branches
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
 func PollCooldown() {
-	pollCounter++ // Advance virtual time
-
-	// Calculate elapsed polls with wraparound safety
+	pollCounter++
 	elapsed := pollCounter - lastActivityCount
-
-	// Branchless comparison: stillActive = (elapsed <= cooldownPolls) ? 1 : 0
-	// When elapsed > cooldownPolls:
-	//   - (cooldownPolls - elapsed) becomes negative
-	//   - Right shift by 63 propagates sign bit (all 1s for negative)
-	//   - XOR with 1 flips to 0
-	// When elapsed <= cooldownPolls:
-	//   - (cooldownPolls - elapsed) is positive or zero
-	//   - Right shift by 63 gives 0
-	//   - XOR with 1 gives 1
 	stillActive := uint32(((constants.CooldownPolls - elapsed) >> 63) ^ 1)
-
-	// Apply activity state without branches
-	hot &= stillActive
+	activityFlag &= stillActive
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SYSTEM CONTROL
+// SYSTEM CONTROL OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Shutdown signals all cores to begin graceful termination.
-// Sets the global stop flag that is continuously checked by worker loops,
-// enabling coordinated shutdown without synchronization primitives.
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
 func Shutdown() {
-	stop = 1
+	shutdownFlag = 1
 }
 
-// Flags returns direct pointers to control flags for zero-copy access.
-// Enables consumer cores to poll flags without function call overhead
-// by caching pointers and checking values directly in tight loops.
-//
-// Returns: (*stop_flag, *hot_flag) for inline checking
-//
-// Usage pattern:
-//
-//	stopPtr, hotPtr := control.Flags()
-//	for *stopPtr == 0 { // Direct memory access in hot loop
-//	    if *hotPtr == 1 { process() }
-//	}
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
 func Flags() (*uint32, *uint32) {
-	return &stop, &hot
+	return &shutdownFlag, &activityFlag
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // MONITORING AND DIAGNOSTICS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// GetPollCount returns the current virtual time counter for diagnostics.
-// Useful for performance analysis and timing calibration without syscalls.
-//
-// To approximate real time from poll count:
-//
-//	nanoseconds ≈ (count * 1_000_000_000) / ActivePollRate
-//
-// Note: This is a rough approximation affected by CPU frequency variations
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -196,94 +106,52 @@ func GetPollCount() uint64 {
 	return pollCounter
 }
 
-// GetActivityAge returns virtual time elapsed since last activity.
-// Provides rough idle time estimation for monitoring without syscalls.
-//
-// Limitations:
-// - Result in poll counts, not real time units
-// - Accuracy depends on actual vs configured CPU frequency
-// - Handles counter wraparound via bit masking
-// - Use for rough estimates only, not precise timing
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
 func GetActivityAge() uint64 {
-	// Mask high bit to handle wraparound gracefully
-	// Prevents negative values from appearing as large positives
 	return (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
 }
 
-// IsHot returns true if system is actively processing market data.
-// Simple flag check for external monitoring without side effects.
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func IsHot() bool {
-	return hot == 1
+func IsActive() bool {
+	return activityFlag == 1
 }
 
-// IsStopping returns true if system shutdown has been initiated.
-// Enables external components to detect shutdown state.
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func IsStopping() bool {
-	return stop == 1
+func IsShuttingDown() bool {
+	return shutdownFlag == 1
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ADVANCED MONITORING
+// ADVANCED MONITORING OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// GetCooldownProgress returns cooldown completion as percentage (0-100).
-// Provides intuitive progress indication for monitoring interfaces.
-//
-// Implementation:
-// Branchless calculation using bit manipulation:
-// - Returns 100 immediately if already cold
-// - Calculates percentage for active systems
-// - Clamps to maximum 100 without conditionals
-//
-// Accuracy: Percentage is approximate due to virtual timing limitations
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
 func GetCooldownProgress() uint8 {
-	// If cold (hot=0), return 100; if hot (hot=1), calculate progress
-	notHotBonus := uint64((hot ^ 1) * 100) // 100 if cold, 0 if hot
-
-	// Calculate elapsed with wraparound protection
+	inactiveBonus := uint64((activityFlag ^ 1) * 100)
 	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
-
-	// Raw progress may exceed 100%
 	rawProgress := (elapsed * 100) / constants.CooldownPolls
-
-	// Branchless clamp to 100: min(rawProgress, 100)
 	overflow := rawProgress - 100
-	clampMask := uint64(int64(overflow) >> 63) // All 1s if overflow < 0
-	clamped := rawProgress - (overflow &^ clampMask)
-
-	// Combine cold bonus with calculated progress
-	return uint8(notHotBonus | (uint64(hot) * clamped))
+	clampMask := uint64(int64(overflow) >> 63)
+	clampedProgress := rawProgress - (overflow &^ clampMask)
+	return uint8(inactiveBonus | (uint64(activityFlag) * clampedProgress))
 }
 
-// GetCooldownRemaining returns poll counts until cooldown completion.
-// Zero if cold or cooldown elapsed, otherwise remaining count.
-//
-// Accuracy: Count is approximate - multiply by poll period for rough time
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -292,36 +160,20 @@ func GetCooldownProgress() uint8 {
 func GetCooldownRemaining() uint64 {
 	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
 	remaining := constants.CooldownPolls - elapsed
-
-	// Branchless zero clamp for negative values
-	// If remaining is negative (elapsed > cooldown), mask to zero
 	return remaining &^ uint64(int64(remaining)>>63)
 }
 
-// IsActive returns true if system is hot and within cooldown window.
-// Combines activity flag with timing check for complete status.
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func IsActive() bool {
+func IsWithinCooldown() bool {
 	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
-	withinCooldown := uint32(((constants.CooldownPolls - elapsed) >> 63) ^ 1)
-	return (hot & withinCooldown) == 1
+	withinWindow := uint32(((constants.CooldownPolls - elapsed) >> 63) ^ 1)
+	return (activityFlag & withinWindow) == 1
 }
 
-// GetSystemState returns all flags packed into single uint32.
-// Enables atomic snapshot of system state for monitoring.
-//
-// Bit layout:
-//
-//	Bit 0: hot flag (1=active, 0=idle)
-//	Bit 1: stop flag (1=stopping, 0=running)
-//	Bit 2: within cooldown (1=cooling, 0=cold)
-//	Bits 3-31: Reserved
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -330,19 +182,13 @@ func IsActive() bool {
 func GetSystemState() uint32 {
 	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
 	withinCooldown := uint32(((constants.CooldownPolls - elapsed) >> 63) ^ 1)
-
-	return hot | // Bit 0
-		(stop << 1) | // Bit 1
-		(withinCooldown << 2) // Bit 2
+	return activityFlag | (shutdownFlag << 1) | (withinCooldown << 2)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// TEST SUPPORT FUNCTIONS
+// TESTING AND DEBUGGING UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// ResetPollCounter resets virtual timing state for testing.
-// Warning: Affects all timing calculations - use only during initialization.
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -353,26 +199,20 @@ func ResetPollCounter() {
 	lastActivityCount = 0
 }
 
-// ForceHot manually activates system without updating timing.
-// Testing utility - bypasses normal activity signaling.
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func ForceHot() {
-	hot = 1
+func ForceActive() {
+	activityFlag = 1
 }
 
-// ForceCold manually deactivates system regardless of timing.
-// Testing utility - bypasses cooldown logic.
-//
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
-func ForceCold() {
-	hot = 0
+func ForceInactive() {
+	activityFlag = 0
 }

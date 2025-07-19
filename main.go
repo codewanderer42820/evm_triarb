@@ -147,7 +147,7 @@ func main() {
 
 	runtime.LockOSThread()
 	rtdebug.SetGCPercent(-1)
-	control.ForceHot()
+	control.ForceActive()
 
 	// Final synchronization verification
 	for {

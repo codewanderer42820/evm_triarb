@@ -568,25 +568,25 @@ func TestControl_TestUtilities(t *testing.T) {
 		}
 	})
 
-	t.Run("ForceHot", func(t *testing.T) {
+	t.Run("ForceActive", func(t *testing.T) {
 		resetState()
-		ForceHot()
+		ForceActive()
 
 		if hot != 1 {
-			t.Error("ForceHot should set hot flag")
+			t.Error("ForceActive should set hot flag")
 		}
 		if lastActivityCount != 0 {
-			t.Error("ForceHot should not affect activity counter")
+			t.Error("ForceActive should not affect activity counter")
 		}
 	})
 
-	t.Run("ForceCold", func(t *testing.T) {
+	t.Run("ForceInactive", func(t *testing.T) {
 		resetState()
 		hot = 1
-		ForceCold()
+		ForceInactive()
 
 		if hot != 0 {
-			t.Error("ForceCold should clear hot flag")
+			t.Error("ForceInactive should clear hot flag")
 		}
 	})
 }
