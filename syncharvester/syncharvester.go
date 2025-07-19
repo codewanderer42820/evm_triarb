@@ -940,7 +940,7 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 }
 
 // FlushHarvestedReservesToRouter loads CSV data and populates the router's reserve state.
-// Simple, clean implementation that prioritizes correctness and readability over micro-optimizations.
+// Optimized implementation with zero allocations during processing loop.
 //
 //go:norace
 //go:nocheckptr
@@ -977,7 +977,7 @@ func FlushHarvestedReservesToRouter() error {
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════════════════════
-	// SIMPLE BUFFER SETUP
+	// OPTIMIZED BUFFER SETUP - Zero Allocations During Processing
 	// ═══════════════════════════════════════════════════════════════════════════════════════════
 
 	// Single LogView structure reused for all events
@@ -1012,13 +1012,15 @@ func FlushHarvestedReservesToRouter() error {
 	processed := 0
 
 	// ═══════════════════════════════════════════════════════════════════════════════════════════
-	// SIMPLE BACKWARDS READER
+	// ZERO-ALLOCATION BACKWARDS READER
 	// ═══════════════════════════════════════════════════════════════════════════════════════════
 
 	const bufSize = 8192
 	buffer := make([]byte, bufSize)
+	workingBuffer := make([]byte, bufSize*2) // Pre-allocate big enough for combining chunks
+	lineBuffer := make([]byte, bufSize)      // Pre-allocate for partial lines
+	lineBufferUsed := 0                      // Track how much of lineBuffer is used
 	pos := stat.Size()
-	var lineBuffer []byte
 
 	for pos > 0 {
 		readSize := bufSize
@@ -1034,12 +1036,12 @@ func FlushHarvestedReservesToRouter() error {
 
 		// Combine with any leftover from previous chunk
 		var data []byte
-		if len(lineBuffer) > 0 {
-			// Need to copy here because we have two separate buffers to combine
-			data = make([]byte, readSize+len(lineBuffer))
-			copy(data, buffer[:readSize])
-			copy(data[readSize:], lineBuffer)
-			lineBuffer = nil
+		if lineBufferUsed > 0 {
+			// Copy into pre-allocated working buffer, then slice to right size
+			copy(workingBuffer, buffer[:readSize])
+			copy(workingBuffer[readSize:], lineBuffer[:lineBufferUsed])
+			data = workingBuffer[:readSize+lineBufferUsed]
+			lineBufferUsed = 0 // Reset line buffer usage
 		} else {
 			// Direct slice - no copying needed!
 			data = buffer[:readSize]
@@ -1059,16 +1061,16 @@ func FlushHarvestedReservesToRouter() error {
 			}
 		}
 
-		// Save leftover partial line
+		// Save leftover partial line to pre-allocated buffer
 		if end > 0 {
-			lineBuffer = make([]byte, end)
 			copy(lineBuffer, data[:end])
+			lineBufferUsed = end
 		}
 	}
 
 	// Process final line
-	if len(lineBuffer) > 0 {
-		processLine(lineBuffer, &v, addressBuf, dataBuf, blocks, &processed, 0)
+	if lineBufferUsed > 0 {
+		processLine(lineBuffer[:lineBufferUsed], &v, addressBuf, dataBuf, blocks, &processed, 0)
 	}
 
 	debug.DropMessage("HARVEST", utils.Itoa(processed)+" states loaded")
