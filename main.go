@@ -55,12 +55,13 @@ type Pool struct {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SYSTEM INITIALIZATION
+// MAIN ORCHESTRATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// init performs system-wide initialization before main execution.
-// Loads all necessary data and configures the arbitrage detection infrastructure.
-func init() {
+// main orchestrates the complete system lifecycle in distinct phases.
+// Each phase has specific responsibilities and optimization characteristics.
+func main() {
+	// PHASE 0: System initialization and data loading
 	debug.DropMessage("INIT", "Loading system data")
 
 	// Initialize database connection and load core data structures
@@ -94,15 +95,7 @@ func init() {
 	db.Close()
 
 	debug.DropMessage("READY", "System initialized")
-}
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MAIN ORCHESTRATION
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// main orchestrates the complete system lifecycle in three distinct phases.
-// Each phase has specific responsibilities and optimization characteristics.
-func main() {
 	setupSignalHandling()
 
 	// PHASE 1: Bootstrap synchronization with blockchain state
