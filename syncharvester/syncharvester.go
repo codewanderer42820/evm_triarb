@@ -940,7 +940,7 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 }
 
 // FlushHarvestedReservesToRouter loads CSV data and populates the router's reserve state.
-// Optimized implementation with zero allocations during processing loop.
+// Implements backwards file streaming with zero-allocation processing for optimal memory usage.
 //
 //go:norace
 //go:nocheckptr
@@ -1077,7 +1077,8 @@ func FlushHarvestedReservesToRouter() error {
 	return nil
 }
 
-// processLine handles a single CSV line
+// processLine handles a single CSV line with optimized parsing and router dispatch.
+// Performs address lookup, block validation, and reserve extraction for price updates.
 //
 //go:norace
 //go:nocheckptr
