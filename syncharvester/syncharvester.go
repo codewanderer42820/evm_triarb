@@ -551,10 +551,6 @@ func (harvester *SynchronizationHarvester) parseLogsWithSonnet(jsonData []byte, 
 // countHexLeadingZeros performs leading zero counting using SIMD-style operations.
 // Optimized for processing 32-character hex segments from Ethereum event data.
 //
-//go:noinline
-//go:norace
-//go:nocheckptr
-//go:registerparams
 //go:norace
 //go:nocheckptr
 //go:nosplit
@@ -591,10 +587,6 @@ func countHexLeadingZeros(hexSegment []byte) int {
 // parseReservesToZeroTrimmed extracts and trims reserve values from Sync event data.
 // Processes 128-character hex strings representing reserve0 and reserve1 values.
 //
-//go:noinline
-//go:norace
-//go:nocheckptr
-//go:registerparams
 //go:norace
 //go:nocheckptr
 //go:nosplit
