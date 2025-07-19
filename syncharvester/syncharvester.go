@@ -842,7 +842,6 @@ func ExecuteHarvesting() error {
 
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func ExecuteHarvestingWithConnections(connectionCount int) error {
