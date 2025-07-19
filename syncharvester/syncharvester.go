@@ -26,7 +26,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +35,7 @@ import (
 	"main/constants"
 	"main/debug"
 	"main/router"
+	"main/types"
 	"main/utils"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -940,137 +940,229 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 }
 
 // FlushHarvestedReservesToRouter loads CSV data and populates the router's reserve state.
-// Processes historical reserve data and updates the routing system for arbitrage detection.
+// Processes historical reserve data by streaming backwards through the CSV file to get the
+// latest state for each pair without loading the entire 23GB file into memory.
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func FlushHarvestedReservesToRouter() error {
-	database, err := sql.Open("sqlite3", "uniswap_pairs.db")
+	// Open database connection to get total pair count
+	db, err := sql.Open("sqlite3", "uniswap_pairs.db")
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer db.Close()
 
+	// Get total number of pairs for allocation and termination logic
 	var totalPairs int
-	err = database.QueryRow("SELECT COUNT(*) FROM pools").Scan(&totalPairs)
+	if err := db.QueryRow("SELECT COUNT(*) FROM pools").Scan(&totalPairs); err != nil {
+		return err
+	}
+	if totalPairs == 0 {
+		return fmt.Errorf("no pairs found")
+	}
+
+	// Open CSV file for backwards streaming
+	file, err := os.Open(constants.HarvesterOutputPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// Get file size for backwards reading position tracking
+	stat, err := file.Stat()
 	if err != nil {
 		return err
 	}
 
-	if totalPairs == 0 {
-		return fmt.Errorf("no trading pairs found in database")
+	// ═══════════════════════════════════════════════════════════════════════════════════════════
+	// REUSABLE BUFFER SETUP - Zero Allocation Processing
+	// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+	// Initialize single LogView structure that will be reused for all events
+	var v types.LogView
+
+	// Pre-allocated address buffer: "0x" + 40 hex characters = 42 bytes total
+	// This buffer will hold contract addresses in the format expected by the router
+	addressBuffer := make([]byte, 42)
+	addressBuffer[0], addressBuffer[1] = '0', 'x' // Set permanent "0x" prefix
+
+	// Pre-allocated Sync event data buffer: "0x" + 128 hex characters = 130 bytes total
+	// Uniswap V2 Sync event layout: 0x + 32 zeros + 32 reserve0 + 32 zeros + 32 reserve1
+	// Memory layout: [0x][00000...][reserve0][00000...][reserve1]
+	//                 0-1  2-33     34-65    66-97     98-129
+	syncDataBuffer := make([]byte, 130)
+	syncDataBuffer[0], syncDataBuffer[1] = '0', 'x' // Set permanent "0x" prefix
+
+	// Initialize the zero-filled sections of the Sync event data buffer
+	// We pre-fill sections that should always be zeros to avoid clearing them repeatedly
+	// Section 1: Bytes 2-33 (32 bytes of zeros before reserve0)
+	zeroSection1 := (*[4]uint64)(unsafe.Pointer(&syncDataBuffer[2]))
+	// Section 2: Bytes 66-97 (32 bytes of zeros before reserve1)
+	zeroSection2 := (*[4]uint64)(unsafe.Pointer(&syncDataBuffer[66]))
+
+	// Fill both zero sections with ASCII '0' characters (0x3030303030303030 = "00000000")
+	for i := 0; i < 4; i++ {
+		zeroSection1[i] = 0x3030303030303030 // 8 ASCII '0' characters
+		zeroSection2[i] = 0x3030303030303030 // 8 ASCII '0' characters
 	}
 
-	// Allocate storage for reserve states and block tracking
-	reserveStorage := make([][8]uint64, totalPairs+1)
-	blockHeights := make([]uint64, totalPairs+1)
+	// Connect the pre-allocated buffers to the LogView structure
+	// These pointers will remain constant throughout processing
+	v.Addr = addressBuffer  // Address field points to our reusable address buffer
+	v.Data = syncDataBuffer // Data field points to our reusable Sync event buffer
 
-	csvFile, err := os.Open(constants.HarvesterOutputPath)
-	if err != nil {
-		return fmt.Errorf("failed to open CSV file: %v", err)
-	}
-	defer csvFile.Close()
+	// ═══════════════════════════════════════════════════════════════════════════════════════════
+	// PROCESSING STATE TRACKING
+	// ═══════════════════════════════════════════════════════════════════════════════════════════
 
-	csvData, err := os.ReadFile(constants.HarvesterOutputPath)
-	if err != nil {
-		return fmt.Errorf("failed to read CSV file: %v", err)
-	}
+	// Track the latest block number seen for each pair to ensure we only keep the newest state
+	// Index 0 is unused since pair IDs start from 1, matching the database schema
+	latestBlockNumbers := make([]uint64, totalPairs+1)
 
-	csvLines := strings.Split(string(csvData), "\n")
+	// Count of pairs successfully processed and dispatched to router
 	eventsProcessed := 0
-	eventsSkipped := 0
 
-	// Process CSV lines in reverse order to get latest state for each pair
-	for i := len(csvLines) - 1; i >= 0; i-- {
-		line := csvLines[i]
-		if i == 0 || line == "" {
-			continue
+	// ═══════════════════════════════════════════════════════════════════════════════════════════
+	// BACKWARDS FILE STREAMING - Constant Memory Usage
+	// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+	// Use small buffer size for streaming to minimize memory usage
+	// 8KB is optimal for most filesystems while keeping memory footprint low
+	const chunkBufferSize = 8192
+	chunkBuffer := make([]byte, chunkBufferSize)
+	currentPosition := stat.Size() // Start reading from end of file
+
+	// Stream through file backwards in chunks
+	for currentPosition > 0 {
+		// Calculate how much to read in this iteration
+		readSize := chunkBufferSize
+		if currentPosition < chunkBufferSize {
+			readSize = int(currentPosition) // Handle final chunk smaller than buffer
+		}
+		currentPosition -= int64(readSize)
+
+		// Read chunk from file at calculated position
+		_, err := file.ReadAt(chunkBuffer[:readSize], currentPosition)
+		if err != nil {
+			return err
 		}
 
-		lineBytes := []byte(line)
+		// ═══════════════════════════════════════════════════════════════════════════════════════
+		// LINE PARSING - Process Lines Backwards Within Chunk
+		// ═══════════════════════════════════════════════════════════════════════════════════════
 
-		commaPositions := make([]int, 0, 4)
-		commaPositions = append(commaPositions, -1)
-		for j, b := range lineBytes {
-			if b == ',' {
-				commaPositions = append(commaPositions, j)
+		// Process lines backwards within this chunk
+		lineEnd := readSize
+		for i := readSize - 1; i >= 0; i-- {
+			if chunkBuffer[i] == '\n' {
+				// Found line boundary, process the line if it has content
+				if i+1 < lineEnd {
+					currentLine := chunkBuffer[i+1 : lineEnd]
+
+					// ═══════════════════════════════════════════════════════════════════════════════
+					// CSV FIELD EXTRACTION - Find Comma Positions
+					// ═══════════════════════════════════════════════════════════════════════════════
+
+					// Locate the three commas that separate our four CSV fields
+					// Expected format: address,block,reserve0,reserve1
+					comma1, comma2, comma3 := -1, -1, -1
+					for j, b := range currentLine {
+						if b == ',' {
+							if comma1 == -1 {
+								comma1 = j // First comma: separates address from block
+							} else if comma2 == -1 {
+								comma2 = j // Second comma: separates block from reserve0
+							} else if comma3 == -1 {
+								comma3 = j // Third comma: separates reserve0 from reserve1
+								break      // Found all required commas, stop searching
+							}
+						}
+					}
+
+					// Validate CSV format - all three commas must be present
+					// In a well-formed harvester CSV, this should never fail
+					if comma1 == -1 || comma2 == -1 || comma3 == -1 {
+						panic(fmt.Sprintf("malformed CSV line: expected 3 commas, found: comma1=%d, comma2=%d, comma3=%d, line: %q", comma1, comma2, comma3, string(currentLine)))
+					}
+
+					// ═══════════════════════════════════════════════════════════════════════════════
+					// OPTIMIZATION: Process Fields in Order of Computational Cost
+					// ═══════════════════════════════════════════════════════════════════════════════
+
+					// 1. BLOCK NUMBER PARSING - Cheapest operation, eliminates most entries early
+					// Parse hex block number to compare against latest seen for this pair
+					blockNumber := utils.ParseHexU64(currentLine[comma1+1 : comma2])
+
+					// 2. ADDRESS SETUP - Load address into buffer for pair lookup
+					// Copy 40-character hex address into our reusable buffer (after "0x" prefix)
+					// Use 64-bit word copying for maximum efficiency on 64-bit systems
+					addressWords := (*[5]uint64)(unsafe.Pointer(&addressBuffer[2]))
+					addressWords[0] = utils.Load64(currentLine[0:8])   // Characters 0-7
+					addressWords[1] = utils.Load64(currentLine[8:16])  // Characters 8-15
+					addressWords[2] = utils.Load64(currentLine[16:24]) // Characters 16-23
+					addressWords[3] = utils.Load64(currentLine[24:32]) // Characters 24-31
+					addressWords[4] = utils.Load64(currentLine[32:40]) // Characters 32-39
+
+					// 3. PAIR EXISTENCE CHECK - Early exit if pair not found in router
+					// Look up pair ID using the address we just loaded into the buffer
+					pairID := router.LookupPairByAddress(currentLine[0:comma1])
+					if pairID == 0 {
+						continue // Pair not found in router, skip this line
+					}
+
+					// 4. BLOCK RECENCY CHECK - Skip if we already have newer or equal data
+					// Since we're reading backwards, newer blocks appear first in the file
+					if blockNumber <= latestBlockNumbers[pairID] {
+						continue // Already processed newer state for this pair
+					}
+					latestBlockNumbers[pairID] = blockNumber // Update latest block for this pair
+
+					// ═══════════════════════════════════════════════════════════════════════════════
+					// SYNC EVENT DATA CONSTRUCTION - Build Router-Compatible Format
+					// ═══════════════════════════════════════════════════════════════════════════════
+
+					// 5. CLEAR RESERVE FIELDS - Reset reserve areas to zeros before writing new data
+					// Reserve0 area: bytes 34-65 (32 characters for reserve0 value)
+					reserve0Area := (*[4]uint64)(unsafe.Pointer(&syncDataBuffer[34]))
+					// Reserve1 area: bytes 98-129 (32 characters for reserve1 value)
+					reserve1Area := (*[4]uint64)(unsafe.Pointer(&syncDataBuffer[98]))
+
+					// Fill both reserve areas with ASCII '0' characters
+					for k := 0; k < 4; k++ {
+						reserve0Area[k] = 0x3030303030303030 // 8 ASCII '0' characters
+						reserve1Area[k] = 0x3030303030303030 // 8 ASCII '0' characters
+					}
+
+					// 6. PLACE RESERVE DATA - Right-align reserve values in their designated areas
+					// Extract reserve values from CSV line
+					reserve0Data := currentLine[comma2+1 : comma3] // Reserve0: between comma2 and comma3
+					reserve1Data := currentLine[comma3+1:]         // Reserve1: after comma3 to end of line
+
+					// Copy reserve data right-aligned into buffer (hex values are right-aligned)
+					// Reserve0 goes into bytes 34-65, right-aligned from position 66
+					copy(syncDataBuffer[66-len(reserve0Data):66], reserve0Data)
+					// Reserve1 goes into bytes 98-129, right-aligned from position 130
+					copy(syncDataBuffer[130-len(reserve1Data):130], reserve1Data)
+
+					// ═══════════════════════════════════════════════════════════════════════════════
+					// ROUTER DISPATCH - Send Processed Event to Arbitrage System
+					// ═══════════════════════════════════════════════════════════════════════════════
+
+					// 7. DISPATCH TO ROUTER - Send completed LogView to arbitrage detection system
+					// The LogView now contains properly formatted address and Sync event data
+					router.DispatchPriceUpdate(&v)
+					eventsProcessed++
+				}
+				lineEnd = i // Move to next line boundary
 			}
 		}
-		commaPositions = append(commaPositions, len(lineBytes))
-
-		if len(commaPositions) < 5 {
-			continue
-		}
-
-		addressBytes := lineBytes[commaPositions[0]+1 : commaPositions[1]]
-		blockBytes := lineBytes[commaPositions[1]+1 : commaPositions[2]]
-		reserve0Bytes := lineBytes[commaPositions[2]+1 : commaPositions[3]]
-		reserve1Bytes := lineBytes[commaPositions[3]+1 : commaPositions[4]]
-
-		address := string(addressBytes)
-		blockString := string(blockBytes)
-
-		if !strings.HasPrefix(address, "0x") {
-			address = "0x" + address
-		}
-
-		pairID := router.LookupPairByAddress([]byte(address[2:]))
-		if pairID == 0 {
-			eventsSkipped++
-			continue
-		}
-
-		blockNumber, _ := strconv.ParseUint(blockString, 16, 64)
-
-		if blockNumber <= blockHeights[pairID] {
-			eventsSkipped++
-			continue
-		}
-
-		var reserve0Array [4]uint64
-		var reserve1Array [4]uint64
-
-		var reserve0Padded [32]byte
-		copyLength := len(reserve0Bytes)
-		if copyLength > 32 {
-			copyLength = 32
-		}
-		copy(reserve0Padded[:copyLength], reserve0Bytes)
-
-		for j := 0; j < 4; j++ {
-			reserve0Array[j] = *(*uint64)(unsafe.Pointer(&reserve0Padded[j*8]))
-		}
-
-		var reserve1Padded [32]byte
-		copyLength = len(reserve1Bytes)
-		if copyLength > 32 {
-			copyLength = 32
-		}
-		copy(reserve1Padded[:copyLength], reserve1Bytes)
-
-		for j := 0; j < 4; j++ {
-			reserve1Array[j] = *(*uint64)(unsafe.Pointer(&reserve1Padded[j*8]))
-		}
-
-		for j := 0; j < 4; j++ {
-			reserveStorage[pairID][j] = reserve0Array[j]
-			reserveStorage[pairID][j+4] = reserve1Array[j]
-		}
-
-		blockHeights[pairID] = blockNumber
-		eventsProcessed++
 	}
 
-	// TODO: CRITICAL - Actually update the router with processed reserve data
-	// This function currently parses data but doesn't apply it to the routing system
-	// Need to call: router.UpdateReserveStates(reserveStorage, blockHeights)
-	// or similar function to make this data available for arbitrage detection
-
+	// Report processing completion statistics
 	debug.DropMessage("HARVEST", utils.Itoa(eventsProcessed)+" states loaded")
-	debug.DropMessage("HARVEST", utils.Itoa(totalPairs)+" pairs ready")
-	debug.DropMessage("HARVEST", "WARNING: Reserve data parsed but not applied to router")
-
 	return nil
 }
