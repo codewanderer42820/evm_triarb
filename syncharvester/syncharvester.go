@@ -765,14 +765,25 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 	return nil
 }
 
+// harvestSector processes a continuous range of blocks for a specific connection.
+// Respects context cancellation for graceful shutdown coordination.
+//
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint64, connectionID int) {
 	currentBlock := fromBlock
 
 	for currentBlock <= toBlock {
+		// Check for graceful shutdown signal
+		select {
+		case <-harvester.processingContext.Done():
+			return
+		default:
+		}
+
 		batchSize := harvester.batchSizes[connectionID]
 		batchEnd := currentBlock + batchSize - 1
 		if batchEnd > toBlock {
@@ -781,6 +792,13 @@ func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint
 
 		logCount, err := harvester.extractLogBatch(currentBlock, batchEnd, connectionID)
 		if err != nil {
+			// Check for cancellation on error to exit promptly
+			select {
+			case <-harvester.processingContext.Done():
+				return
+			default:
+			}
+
 			if strings.Contains(err.Error(), "more than 10000 results") {
 				harvester.batchSizes[connectionID] = harvester.batchSizes[connectionID] / 2
 				if harvester.batchSizes[connectionID] < constants.MinBatchSize {
