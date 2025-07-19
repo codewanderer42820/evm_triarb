@@ -889,7 +889,6 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func FlushHarvestedReservesToRouter() error {
