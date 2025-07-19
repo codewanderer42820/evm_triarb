@@ -366,9 +366,8 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 		req.Header.Set("Content-Type", "application/json")
 
 		response, err := harvester.httpClients[0].Do(req)
-		cancel()
-
 		if err != nil {
+			cancel()
 			time.Sleep(25 * time.Millisecond)
 			continue
 		}
@@ -376,6 +375,7 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 		// Read response with size limit
 		bytesRead, _ := response.Body.Read(responseBuffers[0][:512])
 		response.Body.Close()
+		cancel() // Now it's safe to cancel after we're done with the response
 
 		if bytesRead == 0 {
 			time.Sleep(10 * time.Millisecond)
@@ -904,8 +904,16 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 	client := &http.Client{Timeout: 10 * time.Second, Transport: buildHTTPTransport()}
 	rpcEndpoint := "https://" + constants.HarvesterHost + constants.HarvesterPath
 
-	response, err := client.Post(rpcEndpoint, "application/json",
-		strings.NewReader(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`))
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", rpcEndpoint, strings.NewReader(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`))
+	if err != nil {
+		return false, 0, 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	response, err := client.Do(req)
 	if err != nil {
 		return false, 0, 0, err
 	}
