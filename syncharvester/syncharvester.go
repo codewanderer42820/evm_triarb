@@ -188,6 +188,7 @@ const MetadataPath = constants.HarvesterMetadataPath
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func loadMetadata() uint64 {
@@ -209,6 +210,7 @@ func loadMetadata() uint64 {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func saveMetadata(block uint64) error {
@@ -233,6 +235,7 @@ func saveMetadata(block uint64) error {
 
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func newSynchronizationHarvester(connectionCount int) *SynchronizationHarvester {
@@ -300,6 +303,7 @@ func newSynchronizationHarvester(connectionCount int) *SynchronizationHarvester 
 
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) reportStatistics() {
@@ -327,6 +331,7 @@ func (harvester *SynchronizationHarvester) reportStatistics() {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
@@ -395,6 +400,7 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock uint64, connectionID int) (int, error) {
@@ -477,6 +483,7 @@ func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock ui
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) parseLogsWithSonnet(jsonData []byte, connectionID int) (int, error) {
@@ -608,6 +615,7 @@ func parseReservesToZeroTrimmed(eventData string) (string, string) {
 
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) writeCSVRecord(address string, blockHeight string,
@@ -643,6 +651,7 @@ func (harvester *SynchronizationHarvester) writeCSVRecord(address string, blockH
 
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) flushCSVBuffer(connectionID int) {
@@ -659,6 +668,7 @@ func (harvester *SynchronizationHarvester) flushCSVBuffer(connectionID int) {
 
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) flushAllBuffers() {
@@ -670,6 +680,7 @@ func (harvester *SynchronizationHarvester) flushAllBuffers() {
 
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) processLogFromGlobalBuffer(logEntry *ProcessedReserveEntry, connectionID int) {
@@ -688,6 +699,7 @@ func (harvester *SynchronizationHarvester) processLogFromGlobalBuffer(logEntry *
 
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) executeHarvesting() error {
@@ -758,6 +770,7 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint64, connectionID int) {
@@ -805,6 +818,7 @@ func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint
 
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) cleanup() {
@@ -823,6 +837,7 @@ func (harvester *SynchronizationHarvester) cleanup() {
 
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func ExecuteHarvesting() error {
@@ -831,6 +846,7 @@ func ExecuteHarvesting() error {
 
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func ExecuteHarvestingWithConnections(connectionCount int) error {
@@ -842,6 +858,7 @@ func ExecuteHarvestingWithConnections(connectionCount int) error {
 
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
@@ -874,6 +891,7 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func FlushHarvestedReservesToRouter() error {
