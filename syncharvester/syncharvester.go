@@ -1099,6 +1099,11 @@ func processLine(line []byte, v *types.LogView, addressBuf, dataBuf []byte, bloc
 		}
 	}
 
+	// HEADER CHECK: Skip CSV header line (has comma at position 7)
+	if c1 == 7 {
+		return // Skip "address,block,reserve0,reserve1"
+	}
+
 	if c1 == -1 || c2 == -1 || c3 == -1 {
 		panic(fmt.Sprintf("malformed CSV line at offset %d (after %d events): expected 3 commas, found: comma1=%d, comma2=%d, comma3=%d, line: %q", offset, *processed, c1, c2, c3, string(line)))
 	}
