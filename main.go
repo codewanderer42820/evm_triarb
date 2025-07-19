@@ -63,6 +63,12 @@ type Pool struct {
 
 // main orchestrates the complete system lifecycle in distinct phases.
 // Each phase has specific responsibilities and optimization characteristics.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func main() {
 	// PHASE 0: System initialization and data loading
 	debug.DropMessage("INIT", "System startup")
@@ -191,6 +197,12 @@ func main() {
 
 // loadArbitrageCyclesFromFile parses triangular arbitrage cycles from text file.
 // Processes "(12345) → (67890) → (11111)" format with exact memory allocation.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 	data, err := os.ReadFile(filename)
 	if err != nil {
@@ -279,6 +291,12 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 
 // openDatabase establishes database connection for initialization only.
 // Connection is closed after loading data since syncharvester manages its own.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func openDatabase(dbPath string) *sql.DB {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
@@ -289,6 +307,12 @@ func openDatabase(dbPath string) *sql.DB {
 
 // loadPoolsFromDatabase retrieves all trading pairs with exact memory allocation.
 // Uses COUNT query to determine exact capacity requirements before loading data.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func loadPoolsFromDatabase(db *sql.DB) []Pool {
 	// Determine exact number of pools for precise allocation
 	var poolCount int
@@ -343,6 +367,12 @@ func loadPoolsFromDatabase(db *sql.DB) []Pool {
 
 // processEventStream establishes WebSocket connection and processes events until failure.
 // Implements connection-level optimizations and handles network-level protocol details.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func processEventStream() error {
 	// Establish raw TCP connection with optimal parameters
 	raw, _ := net.Dial("tcp", constants.WsDialAddr)
@@ -399,6 +429,12 @@ func processEventStream() error {
 
 // setupSignalHandling configures graceful shutdown coordination.
 // Uses control package's ShutdownWG for proper subsystem coordination.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func setupSignalHandling() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
