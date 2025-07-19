@@ -39,6 +39,7 @@ var (
 
 	// COLD: Global shutdown synchronization (accessed only during startup/shutdown)
 	ShutdownWG sync.WaitGroup
+	_          [32]byte // 32B - Padding to fill cache line
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
