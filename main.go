@@ -88,7 +88,7 @@ func init() {
 	}
 
 	// Initialize the multi-core arbitrage detection system
-	//router.InitializeArbitrageSystem(cycles)
+	router.InitializeArbitrageSystem(cycles)
 
 	// Close database after loading (syncharvester doesn't need it)
 	db.Close()
@@ -103,23 +103,16 @@ func init() {
 // main orchestrates the complete system lifecycle in three distinct phases.
 // Each phase has specific responsibilities and optimization characteristics.
 func main() {
-	syncNeeded, lastBlock, targetBlock, _ := syncharvester.CheckIfPeakSyncNeeded()
-	if !syncNeeded {
-		debug.DropMessage("SYNC", "Fully synchronized with blockchain")
-	}
-
-	blocksBehind := targetBlock - lastBlock
-	debug.DropMessage("SYNC", "Syncing "+utils.Itoa(int(blocksBehind))+" blocks")
-	syncharvester.ExecutePeakSync()
-
-	os.Exit(0)
-
 	setupSignalHandling()
 
 	// PHASE 1: Bootstrap synchronization with blockchain state
 	// Ensures local database reflects current blockchain state before real-time processing
 	for {
-		syncNeeded, lastBlock, targetBlock, _ := syncharvester.CheckIfPeakSyncNeeded()
+		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
+		if err != nil {
+			debug.DropMessage("SYNC_ERROR", err.Error())
+			break
+		}
 		if !syncNeeded {
 			debug.DropMessage("SYNC", "Fully synchronized with blockchain")
 			break
@@ -127,7 +120,12 @@ func main() {
 
 		blocksBehind := targetBlock - lastBlock
 		debug.DropMessage("SYNC", "Syncing "+utils.Itoa(int(blocksBehind))+" blocks")
-		syncharvester.ExecutePeakSync()
+
+		err = syncharvester.ExecuteHarvesting()
+		if err != nil {
+			debug.DropMessage("HARVEST_ERROR", err.Error())
+			break
+		}
 	}
 
 	// PHASE 2: Memory optimization for deterministic runtime behavior
@@ -139,7 +137,11 @@ func main() {
 	// Re-verify synchronization status after memory cleanup
 	// Blockchain continues advancing during GC, so re-check is necessary
 	for {
-		syncNeeded, lastBlock, targetBlock, _ := syncharvester.CheckIfPeakSyncNeeded()
+		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
+		if err != nil {
+			debug.DropMessage("SYNC_ERROR", err.Error())
+			break
+		}
 		if !syncNeeded {
 			debug.DropMessage("SYNC", "Confirmed synchronized post-GC")
 			break
@@ -147,11 +149,16 @@ func main() {
 
 		blocksBehind := targetBlock - lastBlock
 		debug.DropMessage("SYNC", "Post-GC sync: "+utils.Itoa(int(blocksBehind))+" blocks")
-		syncharvester.ExecutePeakSync()
+
+		err = syncharvester.ExecuteHarvesting()
+		if err != nil {
+			debug.DropMessage("HARVEST_ERROR", err.Error())
+			break
+		}
 	}
 
 	// Load synchronized reserve data into the router for arbitrage calculations
-	if err := syncharvester.FlushSyncedReservesToRouter(); err != nil {
+	if err := syncharvester.FlushHarvestedReservesToRouter(); err != nil {
 		debug.DropMessage("FLUSH_ERROR", err.Error())
 	}
 
@@ -159,7 +166,7 @@ func main() {
 	// Disables garbage collection and locks to current thread for consistent performance
 	rtdebug.SetGCPercent(-1) // Disable garbage collection
 	runtime.LockOSThread()   // Lock to current OS thread
-	control.ForceHot()       // Signal control system to enter hot mode
+	control.ForceHot()       // Signal control system to enter active mode
 
 	// Infinite reconnection loop for continuous event processing
 	// Handles network disconnections and protocol errors gracefully
