@@ -904,7 +904,7 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 // QUEUE INITIALIZATION SYSTEM
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// initializeArbitrageQueues - EXACTLY your original logic, just pre-sized for efficiency
+// initializeArbitrageQueues allocates priority queues and fanout tables for core arbitrage processing.
 //
 //go:norace
 //go:nocheckptr
@@ -915,7 +915,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		return
 	}
 
-	// PHASE 1: Complete traversal to count exact cycles and identify all pairs (SAME as original)
+	// Count total cycles and identify all pairs through complete traversal
 	totalCycles := 0
 	allPairsSet := make(map[TradingPairID]struct{})
 	pairsWithQueuesSet := make(map[TradingPairID]struct{})
@@ -934,7 +934,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 	totalQueues := len(pairsWithQueuesSet)
 	totalFanoutSlots := len(allPairsSet)
 
-	// PHASE 2: Complete traversal to count exact fanout entries per slot (SAME as original)
+	// Calculate exact fanout entries per slot
 	fanoutCounts := make(map[TradingPairID]int)
 	for _, shard := range workloadShards {
 		for _, cycleEdge := range shard.cycleEdges {
@@ -946,13 +946,13 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		}
 	}
 
-	// PHASE 3: Allocate all arrays with exact sizes (SAME as original)
+	// Allocate all arrays with exact sizes
 	engine.sharedArena = make([]pooledquantumqueue.Entry, totalCycles)
 	engine.priorityQueues = make([]pooledquantumqueue.PooledQuantumQueue, totalQueues)
 	engine.cycleFanoutTable = make([][]CycleFanoutEntry, totalFanoutSlots)
-	engine.cycleStates = make([]ArbitrageCycleState, totalCycles) // FIXED: exact size instead of 0,cap
+	engine.cycleStates = make([]ArbitrageCycleState, totalCycles)
 
-	// PHASE 4: Create deterministic ordering and pre-allocate fanout slices (FIXED: no append)
+	// Create deterministic ordering and pre-allocate fanout slices
 	allPairsList := make([]TradingPairID, totalFanoutSlots)
 	pairIdx := 0
 	for pairID := range allPairsSet {
@@ -962,11 +962,11 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 
 	for i, pairID := range allPairsList {
 		exactCount := fanoutCounts[pairID]
-		engine.cycleFanoutTable[i] = make([]CycleFanoutEntry, exactCount) // FIXED: exact size instead of 0,cap
+		engine.cycleFanoutTable[i] = make([]CycleFanoutEntry, exactCount)
 		engine.pairToFanoutIndex.Put(uint32(pairID), uint32(i))
 	}
 
-	// PHASE 5: Initialize arena entries (SAME as original)
+	// Initialize arena entries with sentinel values
 	nilHandle := pooledquantumqueue.Handle(^uint64(0))
 	for i := range engine.sharedArena {
 		engine.sharedArena[i].Tick = -1
@@ -975,14 +975,14 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		engine.sharedArena[i].Data = 0
 	}
 
-	// PHASE 6: Initialize priority queues (SAME as original)
+	// Initialize priority queues with shared arena
 	arenaPtr := unsafe.Pointer(&engine.sharedArena[0])
 	for i := range engine.priorityQueues {
 		newQueue := pooledquantumqueue.New(arenaPtr)
 		engine.priorityQueues[i] = *newQueue
 	}
 
-	// PHASE 7: Create deterministic ordering for queue assignment (FIXED: no append)
+	// Create deterministic ordering for queue assignment
 	pairsWithQueuesList := make([]TradingPairID, totalQueues)
 	queueIdx := 0
 	for pairID := range pairsWithQueuesSet {
@@ -994,9 +994,9 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		engine.pairToQueueLookup.Put(uint32(pairID), uint32(i))
 	}
 
-	// PHASE 8: Populate with zero reallocations using direct indexing (FIXED: no append)
+	// Populate cycles and fanout tables using direct indexing
 	cycleStateIdx := 0
-	fanoutIndices := make(map[TradingPairID]int, totalFanoutSlots) // Track positions for direct assignment
+	fanoutIndices := make(map[TradingPairID]int, totalFanoutSlots)
 
 	for _, shard := range workloadShards {
 		queueIndex, _ := engine.pairToQueueLookup.Get(uint32(shard.pairID))
@@ -1005,7 +1005,6 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		for _, cycleEdge := range shard.cycleEdges {
 			handle := engine.allocateQueueHandle()
 
-			// FIXED: Direct assignment instead of append
 			engine.cycleStates[cycleStateIdx] = ArbitrageCycleState{
 				pairIDs:    cycleEdge.cyclePairs,
 				tickValues: [3]float64{64.0, 64.0, 64.0},
@@ -1024,7 +1023,6 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			otherPairID1 := cycleEdge.cyclePairs[otherEdge1]
 			otherFanoutIndex1, _ := engine.pairToFanoutIndex.Get(uint32(otherPairID1))
 
-			// FIXED: Direct assignment instead of append
 			idx1 := fanoutIndices[otherPairID1]
 			engine.cycleFanoutTable[otherFanoutIndex1][idx1] = CycleFanoutEntry{
 				queueHandle: handle,
@@ -1037,7 +1035,6 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			otherPairID2 := cycleEdge.cyclePairs[otherEdge2]
 			otherFanoutIndex2, _ := engine.pairToFanoutIndex.Get(uint32(otherPairID2))
 
-			// FIXED: Direct assignment instead of append
 			idx2 := fanoutIndices[otherPairID2]
 			engine.cycleFanoutTable[otherFanoutIndex2][idx2] = CycleFanoutEntry{
 				queueHandle: handle,
@@ -1051,7 +1048,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		}
 	}
 
-	// PHASE 9: Calculate exact total fanout entries for verification (SAME as original)
+	// Calculate total fanout entries for logging
 	totalFanoutEntries := 0
 	for _, fanoutSlice := range engine.cycleFanoutTable {
 		totalFanoutEntries += len(fanoutSlice)
