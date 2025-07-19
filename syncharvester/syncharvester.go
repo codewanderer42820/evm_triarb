@@ -986,9 +986,10 @@ func FlushHarvestedReservesToRouter() error {
 	dataBuf := make([]byte, 130)
 	dataBuf[0], dataBuf[1] = '0', 'x'
 
-	// Pre-zero the constant sections with 64-bit pattern fills for performance
-	zeros1 := (*[4]uint64)(unsafe.Pointer(&dataBuf[2]))  // 2:34 (32 bytes)
-	zeros2 := (*[4]uint64)(unsafe.Pointer(&dataBuf[66])) // 66:98 (32 bytes)
+	// Pre-zero the reserve data sections with 64-bit pattern fills for performance
+	// Reserve0: positions 34-65 (32 bytes), Reserve1: positions 98-129 (32 bytes)
+	zeros1 := (*[4]uint64)(unsafe.Pointer(&dataBuf[34])) // Reserve0 data area
+	zeros2 := (*[4]uint64)(unsafe.Pointer(&dataBuf[98])) // Reserve1 data area
 	for i := 0; i < 4; i++ {
 		zeros1[i] = 0x3030303030303030 // Eight ASCII '0' characters
 		zeros2[i] = 0x3030303030303030 // Eight ASCII '0' characters
@@ -998,7 +999,7 @@ func FlushHarvestedReservesToRouter() error {
 	v.Addr = addressBuf
 	v.Data = dataBuf
 
-	// Track latest block per pair
+	// Track latest block per pair for deduplication
 	blocks := make([]uint64, totalPairs+1)
 	processed := 0
 
@@ -1102,16 +1103,17 @@ func processLine(line []byte, v *types.LogView, addressBuf, dataBuf []byte, bloc
 		return
 	}
 
-	// Parse block number first (cheapest operation)
+	// Parse block number for freshness check
 	block := utils.ParseHexU64(line[c1+1 : c2])
 
-	// Check if block is newer
+	// Skip if we already have a newer or equal block for this pair
 	if block <= blocks[pairID] {
 		return
 	}
 	blocks[pairID] = block
 
 	// Setup address buffer when we actually need to dispatch
+	// Copy 40-character hex address into buffer positions 2-41
 	addrWords := (*[5]uint64)(unsafe.Pointer(&addressBuf[2]))
 	addrWords[0] = utils.Load64(line[0:8])
 	addrWords[1] = utils.Load64(line[8:16])
@@ -1119,7 +1121,8 @@ func processLine(line []byte, v *types.LogView, addressBuf, dataBuf []byte, bloc
 	addrWords[3] = utils.Load64(line[24:32])
 	addrWords[4] = utils.Load64(line[32:40])
 
-	// Clear reserve areas with 64-bit pattern fills
+	// Clear reserve data areas with 64-bit pattern fills
+	// Reserve0: positions 34-65, Reserve1: positions 98-129
 	r0 := (*[4]uint64)(unsafe.Pointer(&dataBuf[34]))
 	r1 := (*[4]uint64)(unsafe.Pointer(&dataBuf[98]))
 	for i := 0; i < 4; i++ {
@@ -1127,11 +1130,12 @@ func processLine(line []byte, v *types.LogView, addressBuf, dataBuf []byte, bloc
 		r1[i] = 0x3030303030303030 // Eight ASCII '0' characters
 	}
 
-	// Extract reserves from CSV fields
+	// Extract reserve values from CSV fields
 	res0 := line[c2+1 : c3]
 	res1 := line[c3+1:]
 
 	// Place reserve data right-aligned in hex buffer
+	// Reserve0 goes to positions 34-65, Reserve1 goes to positions 98-129
 	copy(dataBuf[66-len(res0):66], res0)
 	copy(dataBuf[130-len(res1):130], res1)
 
