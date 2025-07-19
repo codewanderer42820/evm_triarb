@@ -103,15 +103,15 @@ type ProcessedReserveEntry struct {
 //go:align 64
 type SynchronizationHarvester struct {
 	// Cache Line 1: Hottest fields accessed during every operation
-	totalEvents int64      // Atomic counter for processed events
-	rpcEndpoint string     // RPC endpoint URL for HTTP requests
-	outputFile  *os.File   // CSV output file handle
-	fileMutex   sync.Mutex // Protects concurrent file writes
-	batchSizes  []uint64   // Dynamic batch sizes per connection
+	totalEvents int64      // Atomic counter for processed events (8B)
+	rpcEndpoint string     // RPC endpoint URL for HTTP requests (16B)
+	outputFile  *os.File   // CSV output file handle (8B)
+	fileMutex   sync.Mutex // Protects concurrent file writes (8B)
+	batchSizes  []uint64   // Dynamic batch sizes per connection (24B) - moved here for hot access
 
 	// Cache Line 2: Hot fields accessed frequently during processing
-	csvBufferSizes       []int    // Current buffer sizes for CSV data
-	consecutiveSuccesses []int    // Success counters for batch size adaptation
+	csvBufferSizes       []int    // Current buffer sizes for CSV data (24B)
+	consecutiveSuccesses []int    // Success counters for batch size adaptation (24B)
 	_                    [16]byte // Padding to complete cache line alignment
 
 	// Cache Line 3: Warm fields accessed during batch completion
