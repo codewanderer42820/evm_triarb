@@ -857,7 +857,10 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 		for i := 0; i < 3; i++ {
 			pairID := triangle[i]
 			idx := edgeIndices[pairID]
-			temporaryEdges[pairID][idx] = CycleEdge{cyclePairs: triangle, edgeIndex: uint64(i)}
+			temporaryEdges[pairID][idx] = CycleEdge{
+				cyclePairs: triangle,
+				edgeIndex:  uint64(i),
+			}
 			edgeIndices[pairID]++
 		}
 	}
@@ -989,9 +992,10 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		for _, cycleEdge := range shard.cycleEdges {
 			handle := engine.allocateQueueHandle()
 
+			// FIXED: Initialize with correct field order matching struct declaration
 			engine.cycleStates[cycleStateIdx] = ArbitrageCycleState{
-				pairIDs:    cycleEdge.cyclePairs,
-				tickValues: [3]float64{64.0, 64.0, 64.0},
+				tickValues: [3]float64{64.0, 64.0, 64.0}, // FIRST in declaration
+				pairIDs:    cycleEdge.cyclePairs,         // SECOND in declaration
 			}
 			engine.cycleStates[cycleStateIdx].tickValues[cycleEdge.edgeIndex] = 0.0
 
@@ -1067,13 +1071,19 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 		allShards = append(allShards, shard)
 	}
 
-	// Initialize the core processing engine with exact memory allocations
-	// This prevents any memory fragmentation during the operational phase
+	// FIXED: Initialize the core processing engine with correct field order
 	engine := &ArbitrageEngine{
 		pairToQueueLookup:  localidx.New(constants.DefaultLocalIdxSize),
 		pairToFanoutIndex:  localidx.New(constants.DefaultLocalIdxSize * 2), // Larger for all pairs
 		isReverseDirection: coreID >= forwardCoreCount,
-		shutdownChannel:    shutdownChannel,
+		// Skip padding fields in initialization
+		// priorityQueues: will be set in initializeArbitrageQueues
+		// cycleStates: will be set in initializeArbitrageQueues
+		// cycleFanoutTable: will be set in initializeArbitrageQueues
+		// sharedArena: will be set in initializeArbitrageQueues
+		// extractedCycles: zero value is fine
+		// nextHandle: zero value is fine
+		shutdownChannel: shutdownChannel,
 	}
 
 	// Register this engine in the global core array for message routing
