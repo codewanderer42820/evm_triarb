@@ -36,7 +36,6 @@ import (
 	"unsafe"
 
 	"main/constants"
-	"main/control"
 	"main/debug"
 	"main/router"
 	"main/utils"
@@ -774,16 +773,17 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 	}()
 
 	// Launch all worker goroutines with proper synchronization
+	var workerWG sync.WaitGroup
 	for connectionID := 0; connectionID < connectionCount; connectionID++ {
-		control.ShutdownWG.Add(1)
+		workerWG.Add(1)
 		go func(id int, sectorRange [2]uint64) {
-			defer control.ShutdownWG.Done()
+			defer workerWG.Done()
 			harvester.harvestSector(sectorRange[0], sectorRange[1], id)
 		}(connectionID, workSectors[connectionID])
 	}
 
 	// Wait for all workers to complete processing
-	control.ShutdownWG.Wait()
+	workerWG.Wait()
 
 	// Ensure all buffered data is written to disk
 	harvester.flushAllBuffers()
@@ -884,9 +884,6 @@ func ExecuteHarvesting() error {
 //go:inline
 //go:registerparams
 func ExecuteHarvestingWithConnections(connectionCount int) error {
-	control.ShutdownWG.Add(1)
-	defer control.ShutdownWG.Done()
-
 	harvester := newSynchronizationHarvester(connectionCount)
 	defer harvester.cleanup()
 
