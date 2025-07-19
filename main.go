@@ -11,9 +11,10 @@
 //   Bootstrap → Memory Optimization → Production Event Processing
 //
 // Architecture:
-//   - Phase 1: Bootstrap synchronization with blockchain state
-//   - Phase 2: Memory cleanup and optimization for production
-//   - Phase 3: Real-time event processing with GC disabled
+//   - Phase 0: System initialization and data loading
+//   - Phase 1: Blockchain synchronization and arbitrage system setup
+//   - Phase 2: Memory optimization with production mode activation
+//   - Phase 3: Real-time event processing loop
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -144,6 +145,10 @@ func main() {
 	runtime.GC()
 	rtdebug.FreeOSMemory()
 
+	runtime.LockOSThread()
+	rtdebug.SetGCPercent(-1)
+	control.ForceHot()
+
 	// Final synchronization verification
 	for {
 		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
@@ -173,9 +178,6 @@ func main() {
 
 	// PHASE 3: Production mode
 	debug.DropMessage("PROD", "Entering production mode")
-	runtime.LockOSThread()
-	rtdebug.SetGCPercent(-1)
-	control.ForceHot()
 
 	// Main event processing loop
 	for {
