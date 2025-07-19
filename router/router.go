@@ -130,32 +130,35 @@ type ExtractedCycle struct {
 // Each core operates independently on its assigned subset of trading pairs.
 // This design enables parallel processing while avoiding lock contention.
 //
-// Fields are ordered by access frequency to optimize CPU cache usage:
+// Fields are ordered by access frequency and cache line optimization:
 //
 //go:notinheap
 //go:align 64
 type ArbitrageEngine struct {
-	// CACHE LINE 1-2: Primary lookups (64B)
-	pairToQueueLookup localidx.Hash // 64B - Only pairs with queues
-	pairToFanoutIndex localidx.Hash // 64B - ALL pairs (with queues + fanout-only)
+	// CACHE LINE 1: Primary lookup table (64B)
+	pairToQueueLookup localidx.Hash // 64B - Nuclear hot: used in every update
 
-	// CACHE LINE 3: Core processing data (64B)
-	priorityQueues     []pooledquantumqueue.PooledQuantumQueue // 24B
-	cycleStates        []ArbitrageCycleState                   // 24B
-	isReverseDirection bool                                    // 1B
-	_                  [15]byte                                // Padding
+	// CACHE LINE 2: Secondary lookup table (64B)
+	pairToFanoutIndex localidx.Hash // 64B - Nuclear hot: used in every update
 
-	// CACHE LINE 4: Fanout data (64B)
-	cycleFanoutTable [][]CycleFanoutEntry       // 24B
-	sharedArena      []pooledquantumqueue.Entry // 24B
-	_                [16]byte                   // Padding
+	// CACHE LINE 3: Core processing control and arrays (64B)
+	isReverseDirection bool                                    // 1B - Nuclear hot: read first in every update
+	_                  [7]byte                                 // 7B - Alignment padding
+	priorityQueues     []pooledquantumqueue.PooledQuantumQueue // 24B - Extremely hot: queue operations
+	cycleStates        []ArbitrageCycleState                   // 24B - Extremely hot: tick calculations
+	_                  [8]byte                                 // 8B - Cache line padding
 
-	// CACHE LINE 5+: Temporary extraction buffer (rarely used)
-	extractedCycles [32]ExtractedCycle // 1024B
+	// CACHE LINE 4: Fanout processing and shared memory (64B)
+	cycleFanoutTable [][]CycleFanoutEntry       // 24B - Extremely hot: fanout loops
+	sharedArena      []pooledquantumqueue.Entry // 24B - Extremely hot: all queue memory operations
+	_                [16]byte                   // 16B - Cache line padding
 
-	// COLD: Init only
-	nextHandle      pooledquantumqueue.Handle
-	shutdownChannel <-chan struct{}
+	// CACHE LINE 5+: Extraction buffer (1024B = 16 cache lines)
+	extractedCycles [32]ExtractedCycle // 1024B - Warm: only used for profitable cycles
+
+	// COLD: Initialization and shutdown only
+	nextHandle      pooledquantumqueue.Handle // 8B - Cold: only during queue setup
+	shutdownChannel <-chan struct{}           // 8B - Cold: only for shutdown coordination
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -218,20 +221,18 @@ type CryptoRandomGenerator struct {
 //go:notinheap
 //go:align 64
 var (
-	// CACHE LINE GROUP 1: Address lookup (accessed together)
+	// CACHE LINE GROUP 1: Address lookup (accessed together in hot path)
 	addressToPairMap  [constants.AddressTableCapacity]TradingPairID
 	packedAddressKeys [constants.AddressTableCapacity]PackedAddress
 
-	// CACHE LINE GROUP 2: Routing (accessed after address lookup)
+	// CACHE LINE GROUP 2: Core routing (accessed after address lookup)
 	pairToCoreRouting [constants.PairRoutingTableCapacity]uint64
 
-	// CACHE LINE GROUP 3: Ring buffers (accessed after routing)
+	// CACHE LINE GROUP 3: Ring buffers (NUCLEAR HOT - accessed after routing)
 	coreRings [constants.MaxSupportedCores]*ring24.Ring
 
-	// COLD: Only accessed during arbitrage processing
-	coreEngines [constants.MaxSupportedCores]*ArbitrageEngine
-
-	// COLD: Only during init
+	// COLD: Only accessed during initialization
+	coreEngines        [constants.MaxSupportedCores]*ArbitrageEngine
 	pairWorkloadShards map[TradingPairID][]PairWorkloadShard
 )
 
