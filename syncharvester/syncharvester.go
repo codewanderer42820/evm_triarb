@@ -1101,14 +1101,14 @@ func processLine(line []byte, v *types.LogView, addressBuf, dataBuf []byte, bloc
 		panic(fmt.Sprintf("malformed CSV line at offset %d (after %d events): expected 3 commas, found: comma1=%d, comma2=%d, comma3=%d, line: %q", offset, *processed, c1, c2, c3, string(line)))
 	}
 
-	// Parse block number first (cheapest operation)
-	block := utils.ParseHexU64(line[c1+1 : c2])
-
 	// Check if pair exists using direct slice (no copying!)
 	pairID := router.LookupPairByAddress(line[0:c1])
 	if pairID == 0 {
 		return
 	}
+
+	// Parse block number first (cheapest operation)
+	block := utils.ParseHexU64(line[c1+1 : c2])
 
 	// Check if block is newer
 	if block <= blocks[pairID] {
@@ -1124,17 +1124,6 @@ func processLine(line []byte, v *types.LogView, addressBuf, dataBuf []byte, bloc
 	addrWords[3] = utils.Load64(line[24:32])
 	addrWords[4] = utils.Load64(line[32:40])
 
-	// Extract reserves
-	res0 := line[c2+1 : c3]
-	res1 := line[c3+1:]
-
-	if len(res0) == 0 || len(res1) == 0 {
-		panic(fmt.Sprintf("empty reserve data at offset %d (after %d events): %q", offset, *processed, string(line)))
-	}
-	if len(res0) > 32 || len(res1) > 32 {
-		panic(fmt.Sprintf("reserve data too long at offset %d (after %d events): r0=%d r1=%d chars (max 32), line: %q", offset, *processed, len(res0), len(res1), string(line)))
-	}
-
 	// Clear reserve areas with 64-bit pattern fills (much faster than byte-by-byte)
 	r0 := (*[4]uint64)(unsafe.Pointer(&dataBuf[34]))
 	r1 := (*[4]uint64)(unsafe.Pointer(&dataBuf[98]))
@@ -1142,6 +1131,10 @@ func processLine(line []byte, v *types.LogView, addressBuf, dataBuf []byte, bloc
 		r0[i] = 0x3030303030303030 // Eight ASCII '0' characters
 		r1[i] = 0x3030303030303030 // Eight ASCII '0' characters
 	}
+
+	// Extract reserves
+	res0 := line[c2+1 : c3]
+	res1 := line[c3+1:]
 
 	// Place reserve data right-aligned
 	copy(dataBuf[66-len(res0):66], res0)
