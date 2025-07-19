@@ -114,12 +114,12 @@ type ChadSync struct {
 	url     string
 
 	// File I/O - separate cache line
-	_pad1      [CacheLineSize - 8]byte // Padding
+	_          [CacheLineSize - 8]byte // Padding
 	outputFile *os.File
 	fileMutex  sync.Mutex
 
 	// Per-connection state - separate cache line
-	_pad2                [CacheLineSize - 16]byte // Padding
+	_                    [CacheLineSize - 16]byte // Padding
 	batchSizes           []uint64                 // Per-connection batch sizes
 	consecutiveSuccesses []int                    // Per-connection success counts
 	csvBufferSizes       []int                    // Per-connection buffer sizes
