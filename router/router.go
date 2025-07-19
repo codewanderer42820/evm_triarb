@@ -64,7 +64,6 @@ type CycleIndex uint64
 // that need to update arbitrage cycles involving that pair.
 //
 //go:notinheap
-//go:align 16
 type PriceUpdateMessage struct {
 	pairID      TradingPairID // 8B - Trading pair that experienced the price change
 	forwardTick float64       // 8B - Logarithmic price ratio in forward direction
