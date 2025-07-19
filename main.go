@@ -66,7 +66,6 @@ type Pool struct {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func main() {
