@@ -401,7 +401,7 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 		// Parse hex block number with minimal validation
 		if len(blockResponse.Result) > 2 {
 			blockNumber := utils.ParseHexU64([]byte(blockResponse.Result[2:]))
-			return blockNumber
+			return blockNumber // Block 0 is valid (genesis block)
 		}
 
 		time.Sleep(5 * time.Millisecond)
@@ -805,6 +805,8 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint64, connectionID int) {
+	// Calculate buffer partition once for this connection
+	bufferOffset := connectionID * (len(processedLogs) / len(harvester.httpClients))
 	currentBlock := fromBlock
 
 	for currentBlock <= toBlock {
@@ -829,8 +831,7 @@ func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint
 			continue
 		}
 
-		// Process retrieved logs using partitioned buffer system
-		bufferOffset := connectionID * (len(processedLogs) / len(harvester.httpClients))
+		// Process retrieved logs using pre-calculated buffer offset
 		for i := 0; i < logCount; i++ {
 			logPosition := bufferOffset + i
 			if logPosition >= len(processedLogs) {
