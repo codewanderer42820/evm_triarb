@@ -110,7 +110,7 @@ func main() {
 	// Initialize arbitrage detection system
 	router.InitializeArbitrageSystem(cycles)
 
-	// PHASE 2: Memory optimization
+	// PHASE 2: Memory optimization (First Pass)
 	debug.DropMessage("GC", "Memory optimization")
 	runtime.GC()
 	runtime.GC()
@@ -134,6 +134,34 @@ func main() {
 		err = syncharvester.ExecuteHarvesting()
 		if err != nil {
 			debug.DropMessage("ERROR", "Post-GC harvest failed: "+err.Error())
+			break
+		}
+	}
+
+	// PHASE 2.5: Final memory optimization (Second Pass)
+	debug.DropMessage("GC", "Final memory optimization")
+	runtime.GC()
+	runtime.GC()
+	rtdebug.FreeOSMemory()
+
+	// Final synchronization verification
+	for {
+		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
+		if err != nil {
+			debug.DropMessage("ERROR", "Final sync check failed: "+err.Error())
+			break
+		}
+		if !syncNeeded {
+			debug.DropMessage("SYNC", "Final verification complete")
+			break
+		}
+
+		blocksBehind := targetBlock - lastBlock
+		debug.DropMessage("SYNC", "Final processing "+utils.Itoa(int(blocksBehind))+" blocks")
+
+		err = syncharvester.ExecuteHarvesting()
+		if err != nil {
+			debug.DropMessage("ERROR", "Final harvest failed: "+err.Error())
 			break
 		}
 	}
