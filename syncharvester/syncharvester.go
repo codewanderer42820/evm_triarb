@@ -244,7 +244,7 @@ func newSynchronizationHarvester(connectionCount int) *SynchronizationHarvester 
 
 	harvester := &SynchronizationHarvester{
 		totalEvents:          0,
-		rpcEndpoint:          "https://" + constants.HarvesterHost + constants.HarvesterPath,
+		rpcEndpoint:          "https://" + constants.WsHost + constants.HarvesterPath,
 		csvBufferSizes:       make([]int, connectionCount),
 		batchSizes:           make([]uint64, connectionCount),
 		consecutiveSuccesses: make([]int, connectionCount),
@@ -390,8 +390,8 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 			continue
 		}
 
-		// Validate and parse hex block number
-		if len(blockResponse.Result) >= 2 && blockResponse.Result[:2] == "0x" {
+		// Parse hex block number
+		if len(blockResponse.Result) > 2 {
 			blockNumber := utils.ParseHexU64([]byte(blockResponse.Result[2:]))
 			if blockNumber > 0 {
 				return blockNumber
@@ -511,7 +511,7 @@ func (harvester *SynchronizationHarvester) parseLogsWithSonnet(jsonData []byte, 
 		return 0, fmt.Errorf("RPC error: %s", logsResponse.Error.Message)
 	}
 
-	// Process each log entry with validation
+	// Process each log entry - minimal checks only
 	for _, ethereumLog := range logsResponse.Result {
 		if logCount >= maxLogsPerConnection {
 			break // Prevent buffer overflow
@@ -519,12 +519,7 @@ func (harvester *SynchronizationHarvester) parseLogsWithSonnet(jsonData []byte, 
 
 		bufferPosition := bufferOffset + logCount
 		if bufferPosition >= len(processedLogs) {
-			break // Additional safety check
-		}
-
-		// Validate Sync event data format (130 bytes: 0x + 128 hex chars)
-		if len(ethereumLog.Data) != 130 || ethereumLog.Data[:2] != "0x" {
-			continue // Skip malformed events
+			break // Prevent memory corruption
 		}
 
 		// Store parsed log data in global buffer
@@ -927,7 +922,7 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 		return false, 0, 0, err
 	}
 
-	if len(blockResponse.Result) >= 2 && blockResponse.Result[:2] == "0x" {
+	if len(blockResponse.Result) > 2 {
 		currentHeight := utils.ParseHexU64([]byte(blockResponse.Result[2:]))
 		lastProcessed := loadMetadata()
 		return lastProcessed < currentHeight, lastProcessed, currentHeight, nil
@@ -1017,10 +1012,7 @@ func FlushHarvestedReservesToRouter() error {
 			continue
 		}
 
-		blockNumber, err := strconv.ParseUint(blockString, 16, 64)
-		if err != nil {
-			continue
-		}
+		blockNumber, _ := strconv.ParseUint(blockString, 16, 64)
 
 		if blockNumber <= blockHeights[pairID] {
 			eventsSkipped++
