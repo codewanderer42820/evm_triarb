@@ -560,19 +560,6 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 	}
 }
 
-// quantizeTickValue converts floating-point tick values to integer priorities for queue operations.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func quantizeTickValue(tickValue float64) int64 {
-	// Convert floating-point profitability to integer priority for the priority queue
-	// Add clamping bound to ensure all values are positive, then scale to preserve precision
-	return int64((tickValue + constants.TickClampingBound) * constants.QuantizationScale)
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ADDRESS PROCESSING INFRASTRUCTURE
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
