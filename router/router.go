@@ -413,12 +413,12 @@ func countHexLeadingZeros(segment []byte) int {
 //go:nosplit
 //go:inline
 //go:registerparams
-func LookupPairByAddress(address42HexBytes []byte) TradingPairID {
+func LookupPairByAddress(address40HexChars []byte) TradingPairID {
 	// Convert the hex address string to an optimized packed representation for comparison
-	key := packEthereumAddress(address42HexBytes)
+	key := packEthereumAddress(address40HexChars)
 
 	// Calculate the initial position in the hash table using the address hash
-	i := hashAddressToIndex(address42HexBytes)
+	i := hashAddressToIndex(address40HexChars)
 	dist := uint64(0) // Track how far we've probed from the ideal position
 
 	// Robin Hood hash table lookup with early termination
@@ -664,12 +664,12 @@ func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
 //go:nosplit
 //go:inline
 //go:registerparams
-func RegisterTradingPairAddress(address42HexBytes []byte, pairID TradingPairID) {
+func RegisterTradingPairAddress(address40HexChars []byte, pairID TradingPairID) {
 	// Convert the hex address to packed format for efficient storage and comparison
-	key := packEthereumAddress(address42HexBytes)
+	key := packEthereumAddress(address40HexChars)
 
 	// Calculate the initial position in the hash table
-	i := hashAddressToIndex(address42HexBytes)
+	i := hashAddressToIndex(address40HexChars)
 	dist := uint64(0) // Track how far we've moved from the ideal position
 
 	// Robin Hood hash table insertion with displacement
