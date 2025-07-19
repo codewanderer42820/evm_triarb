@@ -26,12 +26,10 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 	"unsafe"
 
@@ -311,14 +309,6 @@ func newSynchronizationHarvester(connectionCount int) *SynchronizationHarvester 
 	if lastProcessed == constants.HarvesterDeploymentBlock {
 		harvester.outputFile.WriteString("address,block,reserve0,reserve1\n")
 	}
-
-	// Set up immediate termination on interrupt signals
-	signalChannel := make(chan os.Signal, 1)
-	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-signalChannel
-		os.Exit(0) // Immediate termination without graceful shutdown
-	}()
 
 	// Start background reporting goroutine
 	go harvester.reportStatistics()
