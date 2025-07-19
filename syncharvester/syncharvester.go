@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -156,15 +155,8 @@ func createPeakTransport() *http.Transport {
 	}
 }
 
-func newChadSync() *ChadSync {
-	return newChadSyncWithConnections(DefaultConnections)
-}
-
 func newChadSyncWithConnections(numConnections int) *ChadSync {
 	fmt.Printf("🚀 Initializing PEAK PERFORMANCE sync engine with %d connections...\n", numConnections)
-
-	// Set optimal runtime parameters
-	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	ctx, cancel := context.WithCancel(context.Background())
 
