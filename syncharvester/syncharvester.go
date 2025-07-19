@@ -244,7 +244,7 @@ func newSynchronizationHarvester(connectionCount int) *SynchronizationHarvester 
 
 	harvester := &SynchronizationHarvester{
 		totalEvents:          0,
-		rpcEndpoint:          "https://" + constants.HarvesterHost + constants.HarvesterPath,
+		rpcEndpoint:          "https://" + constants.WsHost + constants.HarvesterPath,
 		csvBufferSizes:       make([]int, connectionCount),
 		batchSizes:           make([]uint64, connectionCount),
 		consecutiveSuccesses: make([]int, connectionCount),
@@ -294,6 +294,7 @@ func newSynchronizationHarvester(connectionCount int) *SynchronizationHarvester 
 	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-signalChannel
+		debug.DropMessage("HARVEST", "Shutdown signal received, stopping gracefully...")
 		cancel()
 	}()
 
@@ -408,6 +409,7 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock uint64, connectionID int) (int, error) {
@@ -771,8 +773,11 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 	// Wait for all workers to complete before proceeding to final flush
 	control.ShutdownWG.Wait()
 
-	// Final flush after all workers complete
+	// Ensure all data is written to disk before returning
 	harvester.flushAllBuffers()
+
+	// Give filesystem time to sync
+	time.Sleep(50 * time.Millisecond)
 
 	events := atomic.LoadInt64(&harvester.totalEvents)
 	debug.DropMessage("HARVEST", utils.Itoa(int(events))+" events complete")
@@ -784,6 +789,7 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint64, connectionID int) {
@@ -856,8 +862,6 @@ func (harvester *SynchronizationHarvester) cleanup() {
 	if harvester.outputFile != nil {
 		harvester.outputFile.Close()
 	}
-	harvester.cancelFunc()
-	control.ShutdownWG.Done()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -884,9 +888,20 @@ func ExecuteHarvesting() error {
 //go:registerparams
 func ExecuteHarvestingWithConnections(connectionCount int) error {
 	control.ShutdownWG.Add(1)
+	defer control.ShutdownWG.Done()
+
 	harvester := newSynchronizationHarvester(connectionCount)
 	defer harvester.cleanup()
-	return harvester.executeHarvesting()
+
+	err := harvester.executeHarvesting()
+
+	// Cancel context and wait for all workers to finish
+	harvester.cancelFunc()
+
+	// Give workers time to finish and flush
+	time.Sleep(100 * time.Millisecond)
+
+	return err
 }
 
 // CheckHarvestingRequirement determines if harvesting is needed by comparing block heights.
@@ -936,6 +951,7 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func FlushHarvestedReservesToRouter() error {
