@@ -939,8 +939,7 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 	return false, 0, 0, fmt.Errorf("invalid response format")
 }
 
-// FlushHarvestedReservesToRouter loads CSV data and populates the router's reserve state.
-// Implements backwards file streaming with zero-allocation processing for optimal memory usage.
+// FlushHarvestedReservesToRouter loads CSV data into router state using backwards file streaming.
 //
 //go:norace
 //go:nocheckptr
@@ -976,10 +975,6 @@ func FlushHarvestedReservesToRouter() error {
 		return err
 	}
 
-	// ═══════════════════════════════════════════════════════════════════════════════════════════
-	// OPTIMIZED BUFFER SETUP - Zero Allocations During Processing
-	// ═══════════════════════════════════════════════════════════════════════════════════════════
-
 	// Single LogView structure reused for all events
 	var v types.LogView
 
@@ -991,7 +986,7 @@ func FlushHarvestedReservesToRouter() error {
 	dataBuf := make([]byte, 130)
 	dataBuf[0], dataBuf[1] = '0', 'x'
 
-	// Pre-zero the constant sections with 64-bit pattern fills (much faster)
+	// Pre-zero the constant sections with 64-bit pattern fills for performance
 	zeros1 := (*[4]uint64)(unsafe.Pointer(&dataBuf[2]))  // 2:34 (32 bytes)
 	zeros2 := (*[4]uint64)(unsafe.Pointer(&dataBuf[66])) // 66:98 (32 bytes)
 	for i := 0; i < 4; i++ {
@@ -1003,21 +998,14 @@ func FlushHarvestedReservesToRouter() error {
 	v.Addr = addressBuf
 	v.Data = dataBuf
 
-	// ═══════════════════════════════════════════════════════════════════════════════════════════
-	// PROCESSING STATE
-	// ═══════════════════════════════════════════════════════════════════════════════════════════
-
 	// Track latest block per pair
 	blocks := make([]uint64, totalPairs+1)
 	processed := 0
 
-	// ═══════════════════════════════════════════════════════════════════════════════════════════
-	// ZERO-ALLOCATION BACKWARDS READER
-	// ═══════════════════════════════════════════════════════════════════════════════════════════
-
+	// Backwards file reading with zero-allocation buffer management
 	const bufSize = 8192
 	buffer := make([]byte, bufSize)
-	workingBuffer := make([]byte, bufSize*2) // Pre-allocate big enough for combining chunks
+	workingBuffer := make([]byte, bufSize*2) // Pre-allocate for combining chunks
 	lineBuffer := make([]byte, bufSize)      // Pre-allocate for partial lines
 	lineBufferUsed := 0                      // Track how much of lineBuffer is used
 	pos := stat.Size()
@@ -1043,7 +1031,7 @@ func FlushHarvestedReservesToRouter() error {
 			data = workingBuffer[:readSize+lineBufferUsed]
 			lineBufferUsed = 0 // Reset line buffer usage
 		} else {
-			// Direct slice - no copying needed!
+			// Direct slice - no copying needed
 			data = buffer[:readSize]
 		}
 
@@ -1077,15 +1065,14 @@ func FlushHarvestedReservesToRouter() error {
 	return nil
 }
 
-// processLine handles a single CSV line with optimized parsing and router dispatch.
-// Performs address lookup, block validation, and reserve extraction for price updates.
+// processLine parses CSV line and dispatches price update to router with zero-copy operations.
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
 func processLine(line []byte, v *types.LogView, addressBuf, dataBuf []byte, blocks []uint64, processed *int, offset int64) {
-	// Find commas
+	// Find CSV field delimiters
 	c1, c2, c3 := -1, -1, -1
 	for i, b := range line {
 		if b == ',' {
@@ -1100,7 +1087,7 @@ func processLine(line []byte, v *types.LogView, addressBuf, dataBuf []byte, bloc
 		}
 	}
 
-	// HEADER CHECK: Skip CSV header line (has comma at position 7)
+	// Skip CSV header line (has comma at position 7)
 	if c1 == 7 {
 		return // Skip "address,block,reserve0,reserve1"
 	}
@@ -1109,7 +1096,7 @@ func processLine(line []byte, v *types.LogView, addressBuf, dataBuf []byte, bloc
 		panic(fmt.Sprintf("malformed CSV line at offset %d (after %d events): expected 3 commas, found: comma1=%d, comma2=%d, comma3=%d, line: %q", offset, *processed, c1, c2, c3, string(line)))
 	}
 
-	// Check if pair exists using direct slice (no copying!)
+	// Check if pair exists using direct slice (no copying)
 	pairID := router.LookupPairByAddress(line[0:c1])
 	if pairID == 0 {
 		return
@@ -1124,7 +1111,7 @@ func processLine(line []byte, v *types.LogView, addressBuf, dataBuf []byte, bloc
 	}
 	blocks[pairID] = block
 
-	// Only setup address buffer when we actually need to dispatch
+	// Setup address buffer when we actually need to dispatch
 	addrWords := (*[5]uint64)(unsafe.Pointer(&addressBuf[2]))
 	addrWords[0] = utils.Load64(line[0:8])
 	addrWords[1] = utils.Load64(line[8:16])
@@ -1132,7 +1119,7 @@ func processLine(line []byte, v *types.LogView, addressBuf, dataBuf []byte, bloc
 	addrWords[3] = utils.Load64(line[24:32])
 	addrWords[4] = utils.Load64(line[32:40])
 
-	// Clear reserve areas with 64-bit pattern fills (much faster than byte-by-byte)
+	// Clear reserve areas with 64-bit pattern fills
 	r0 := (*[4]uint64)(unsafe.Pointer(&dataBuf[34]))
 	r1 := (*[4]uint64)(unsafe.Pointer(&dataBuf[98]))
 	for i := 0; i < 4; i++ {
@@ -1140,11 +1127,11 @@ func processLine(line []byte, v *types.LogView, addressBuf, dataBuf []byte, bloc
 		r1[i] = 0x3030303030303030 // Eight ASCII '0' characters
 	}
 
-	// Extract reserves
+	// Extract reserves from CSV fields
 	res0 := line[c2+1 : c3]
 	res1 := line[c3+1:]
 
-	// Place reserve data right-aligned
+	// Place reserve data right-aligned in hex buffer
 	copy(dataBuf[66-len(res0):66], res0)
 	copy(dataBuf[130-len(res1):130], res1)
 
