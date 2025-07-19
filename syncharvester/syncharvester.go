@@ -785,6 +785,9 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 	// Wait for all workers to complete processing
 	workerWG.Wait()
 
+	// Stop the reporting goroutine
+	harvester.cancelFunc()
+
 	// Ensure all buffered data is written to disk
 	harvester.flushAllBuffers()
 
