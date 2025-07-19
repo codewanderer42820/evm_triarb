@@ -1,6 +1,8 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // Arbitrage Detection System - Main Entry Point
 // ────────────────────────────────────────────────────────────────────────────────────────────────
+// 🇯🇵 MADE IN JAPAN. INSPIRED BY JAPANESE ENGINEERING. FROM NIIKAPPU HIDAKA HOKKAIDO 🇯🇵
+// ────────────────────────────────────────────────────────────────────────────────────────────────
 // Project: High-Frequency Arbitrage Detection System
 // Component: Main Entry Point & System Orchestration
 //
@@ -62,107 +64,92 @@ type Pool struct {
 // Each phase has specific responsibilities and optimization characteristics.
 func main() {
 	// PHASE 0: System initialization and data loading
-	debug.DropMessage("INIT", "Loading system data")
+	debug.DropMessage("INIT", "System startup")
 
-	// Initialize database connection and load core data structures
+	// Load trading pairs from database
 	db := openDatabase("uniswap_pairs.db")
 	pools := loadPoolsFromDatabase(db)
+	db.Close()
+
+	// Load arbitrage cycles from configuration
 	cycles := loadArbitrageCyclesFromFile("cycles_3_3.txt")
 
 	debug.DropMessage("LOADED", utils.Itoa(len(pools))+" pools, "+utils.Itoa(len(cycles))+" cycles")
 
-	// Display sample data for verification during development
-	for i := 0; i < 3 && i < len(pools); i++ {
-		p := pools[i]
-		debug.DropMessage("POOL", utils.Itoa(i+1)+": ID "+utils.Itoa(int(p.ID))+" → "+p.Address)
-	}
-
-	for i := 0; i < 3 && i < len(cycles); i++ {
-		c := cycles[i]
-		debug.DropMessage("CYCLE", utils.Itoa(i+1)+": ("+utils.Itoa(int(c[0]))+")→("+utils.Itoa(int(c[1]))+")→("+utils.Itoa(int(c[2]))+")")
-	}
-
-	// Register pool addresses in the router hash table before system initialization
-	// This ensures the lookup infrastructure is populated when the router initializes
+	// Register pool addresses in router hash table
 	for _, pool := range pools {
 		router.RegisterTradingPairAddress([]byte(pool.Address[2:]), router.TradingPairID(pool.ID))
 	}
 
-	// Initialize the multi-core arbitrage detection system
+	setupSignalHandling()
+	debug.DropMessage("INIT", "Setup complete")
+
+	// PHASE 1: Blockchain synchronization
+	debug.DropMessage("SYNC", "Checking blockchain state")
+	for {
+		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
+		if err != nil {
+			debug.DropMessage("ERROR", "Sync check failed: "+err.Error())
+			break
+		}
+		if !syncNeeded {
+			debug.DropMessage("SYNC", "Blockchain synchronized")
+			break
+		}
+
+		blocksBehind := targetBlock - lastBlock
+		debug.DropMessage("SYNC", "Processing "+utils.Itoa(int(blocksBehind))+" blocks")
+
+		err = syncharvester.ExecuteHarvesting()
+		if err != nil {
+			debug.DropMessage("ERROR", "Harvest failed: "+err.Error())
+			break
+		}
+	}
+
+	// Initialize arbitrage detection system
 	router.InitializeArbitrageSystem(cycles)
 
-	// Close database after loading (syncharvester doesn't need it)
-	db.Close()
-
-	debug.DropMessage("READY", "System initialized")
-
-	setupSignalHandling()
-
-	// PHASE 1: Bootstrap synchronization with blockchain state
-	// Ensures local database reflects current blockchain state before real-time processing
-	for {
-		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
-		if err != nil {
-			debug.DropMessage("SYNC_ERROR", err.Error())
-			break
-		}
-		if !syncNeeded {
-			debug.DropMessage("SYNC", "Fully synchronized with blockchain")
-			break
-		}
-
-		blocksBehind := targetBlock - lastBlock
-		debug.DropMessage("SYNC", "Syncing "+utils.Itoa(int(blocksBehind))+" blocks")
-
-		err = syncharvester.ExecuteHarvesting()
-		if err != nil {
-			debug.DropMessage("HARVEST_ERROR", err.Error())
-			break
-		}
-	}
-
-	// PHASE 2: Memory optimization for deterministic runtime behavior
-	// Performs garbage collection and memory consolidation before production mode
+	// PHASE 2: Memory optimization
+	debug.DropMessage("GC", "Memory optimization")
 	runtime.GC()
-	runtime.GC() // Double GC to ensure thorough cleanup
+	runtime.GC()
 	rtdebug.FreeOSMemory()
 
-	// Re-verify synchronization status after memory cleanup
-	// Blockchain continues advancing during GC, so re-check is necessary
+	// Verify synchronization after GC
 	for {
 		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
 		if err != nil {
-			debug.DropMessage("SYNC_ERROR", err.Error())
+			debug.DropMessage("ERROR", "Post-GC sync check failed: "+err.Error())
 			break
 		}
 		if !syncNeeded {
-			debug.DropMessage("SYNC", "Confirmed synchronized post-GC")
+			debug.DropMessage("SYNC", "Post-GC verification complete")
 			break
 		}
 
 		blocksBehind := targetBlock - lastBlock
-		debug.DropMessage("SYNC", "Post-GC sync: "+utils.Itoa(int(blocksBehind))+" blocks")
+		debug.DropMessage("SYNC", "Post-GC processing "+utils.Itoa(int(blocksBehind))+" blocks")
 
 		err = syncharvester.ExecuteHarvesting()
 		if err != nil {
-			debug.DropMessage("HARVEST_ERROR", err.Error())
+			debug.DropMessage("ERROR", "Post-GC harvest failed: "+err.Error())
 			break
 		}
 	}
 
-	// Load synchronized reserve data into the router for arbitrage calculations
+	// Load reserve data into router
 	if err := syncharvester.FlushHarvestedReservesToRouter(); err != nil {
-		debug.DropMessage("FLUSH_ERROR", err.Error())
+		debug.DropMessage("ERROR", "Reserve flush failed: "+err.Error())
 	}
 
-	// PHASE 3: Production mode with optimized runtime characteristics
-	// Disables garbage collection and locks to current thread for consistent performance
-	rtdebug.SetGCPercent(-1) // Disable garbage collection
-	runtime.LockOSThread()   // Lock to current OS thread
-	control.ForceHot()       // Signal control system to enter active mode
+	// PHASE 3: Production mode
+	debug.DropMessage("PROD", "Entering production mode")
+	runtime.LockOSThread()
+	rtdebug.SetGCPercent(-1)
+	control.ForceHot()
 
-	// Infinite reconnection loop for continuous event processing
-	// Handles network disconnections and protocol errors gracefully
+	// Main event processing loop
 	for {
 		processEventStream()
 	}
@@ -192,12 +179,13 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 	}
 
 	// Pre-allocate result slice to exact capacity
-	cycles := make([]router.ArbitrageTriangle, 0, lineCount)
+	cycles := make([]router.ArbitrageTriangle, lineCount)
+	cycleIndex := 0
 	i, dataLen := 0, len(data)
 	var pairIDs [3]uint64
 
 	// Byte-by-byte parsing without string allocations or intermediate buffers
-	for i < dataLen {
+	for i < dataLen && cycleIndex < lineCount {
 		pairCount := 0
 
 		// Parse up to 3 pair IDs from current line
@@ -243,15 +231,17 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 			i++ // Skip '\n'
 		}
 
-		// Create arbitrage triangle from parsed pair IDs
-		cycles = append(cycles, router.ArbitrageTriangle{
+		// Set arbitrage triangle at exact index
+		cycles[cycleIndex] = router.ArbitrageTriangle{
 			router.TradingPairID(pairIDs[0]),
 			router.TradingPairID(pairIDs[1]),
 			router.TradingPairID(pairIDs[2]),
-		})
+		}
+		cycleIndex++
 	}
 
-	if len(cycles) == 0 {
+	// Return slice with exact valid entries
+	if cycleIndex == 0 {
 		panic("No cycles found in file")
 	}
 	return cycles
@@ -282,7 +272,8 @@ func loadPoolsFromDatabase(db *sql.DB) []Pool {
 	}
 
 	// Pre-allocate slice to exact capacity
-	pools := make([]Pool, 0, poolCount)
+	pools := make([]Pool, poolCount)
+	poolIndex := 0
 
 	// Load all pools with deterministic ordering
 	rows, err := db.Query(`
@@ -294,18 +285,19 @@ func loadPoolsFromDatabase(db *sql.DB) []Pool {
 	}
 	defer rows.Close()
 
-	// Populate pools slice
-	for rows.Next() {
+	// Populate pools slice at exact indices
+	for rows.Next() && poolIndex < poolCount {
 		var pairID int64
 		var poolAddress string
 		if err := rows.Scan(&pairID, &poolAddress); err != nil {
 			panic("Failed to scan pool row: " + err.Error())
 		}
 
-		pools = append(pools, Pool{
+		pools[poolIndex] = Pool{
 			ID:      pairID,
 			Address: poolAddress,
-		})
+		}
+		poolIndex++
 	}
 
 	if err := rows.Err(); err != nil {
