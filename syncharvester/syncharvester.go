@@ -417,6 +417,7 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock uint64, connectionID int) (int, error) {
@@ -555,6 +556,11 @@ func (harvester *SynchronizationHarvester) parseLogsWithSonnet(jsonData []byte, 
 //go:norace
 //go:nocheckptr
 //go:registerparams
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func countHexLeadingZeros(hexSegment []byte) int {
 	// 64-bit pattern representing eight consecutive ASCII '0' characters
 	const ZERO_PATTERN = 0x3030303030303030
@@ -589,6 +595,11 @@ func countHexLeadingZeros(hexSegment []byte) int {
 //go:noinline
 //go:norace
 //go:nocheckptr
+//go:registerparams
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
 //go:registerparams
 func parseReservesToZeroTrimmed(eventData string) (string, string) {
 	// Convert string to byte slice for SIMD processing efficiency
@@ -802,6 +813,7 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint64, connectionID int) {
@@ -884,6 +896,7 @@ func ExecuteHarvesting() error {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func ExecuteHarvestingWithConnections(connectionCount int) error {
@@ -942,6 +955,7 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 //
 //go:norace
 //go:nocheckptr
+//go:nosplit
 //go:inline
 //go:registerparams
 func FlushHarvestedReservesToRouter() error {
