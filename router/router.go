@@ -101,7 +101,7 @@ type ArbitrageCycleState struct {
 // This structure maps each price update to the specific cycles and queues that need updating.
 //
 //go:notinheap
-//go:align 16
+//go:align 32
 type CycleFanoutEntry struct {
 	queueHandle pooledquantumqueue.Handle // 8B - Direct access to the cycle's position in the priority queue
 	cycleIndex  uint64                    // 8B - Points to the specific arbitrage cycle that needs updating
@@ -114,7 +114,7 @@ type CycleFanoutEntry struct {
 // priority queues. This structure remembers their original state for reinsertion.
 //
 //go:notinheap
-//go:align 16
+//go:align 32
 type ExtractedCycle struct {
 	cycleIndex   CycleIndex                // 8B - Which cycle was extracted from the queue
 	originalTick int64                     // 8B - The cycle's priority before extraction
@@ -135,22 +135,22 @@ type ExtractedCycle struct {
 //go:notinheap
 //go:align 64
 type ArbitrageEngine struct {
-	// CACHE LINE 1: Primary lookups (64B)
-	pairToQueueLookup localidx.Hash // 32B - Only pairs with queues
-	pairToFanoutIndex localidx.Hash // 32B - ALL pairs (with queues + fanout-only)
+	// CACHE LINE 1-2: Primary lookups (64B)
+	pairToQueueLookup localidx.Hash // 64B - Only pairs with queues
+	pairToFanoutIndex localidx.Hash // 64B - ALL pairs (with queues + fanout-only)
 
-	// CACHE LINE 2: Core processing data (64B)
+	// CACHE LINE 3: Core processing data (64B)
 	priorityQueues     []pooledquantumqueue.PooledQuantumQueue // 24B
 	cycleStates        []ArbitrageCycleState                   // 24B
 	isReverseDirection bool                                    // 1B
 	_                  [15]byte                                // Padding
 
-	// CACHE LINE 3: Fanout data (64B)
+	// CACHE LINE 4: Fanout data (64B)
 	cycleFanoutTable [][]CycleFanoutEntry       // 24B
 	sharedArena      []pooledquantumqueue.Entry // 24B
 	_                [16]byte                   // Padding
 
-	// CACHE LINE 4+: Temporary extraction buffer (rarely used)
+	// CACHE LINE 5+: Temporary extraction buffer (rarely used)
 	extractedCycles [32]ExtractedCycle // 1024B
 
 	// COLD: Init only
@@ -182,7 +182,7 @@ type PackedAddress struct {
 // and what position it holds within each cycle.
 //
 //go:notinheap
-//go:align 16
+//go:align 32
 type CycleEdge struct {
 	cyclePairs [3]TradingPairID // 24B - Complete three-pair arbitrage cycle definition
 	edgeIndex  uint64           // 8B - This pair's position (0, 1, or 2) within the cycle
@@ -193,7 +193,7 @@ type CycleEdge struct {
 // these shards across CPU cores for parallel processing.
 //
 //go:notinheap
-//go:align 16
+//go:align 32
 type PairWorkloadShard struct {
 	pairID     TradingPairID // 8B - Trading pair that all cycles in this shard have in common
 	cycleEdges []CycleEdge   // 24B - All arbitrage cycles that include this trading pair
