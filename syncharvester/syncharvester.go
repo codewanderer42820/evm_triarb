@@ -401,9 +401,7 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 		// Parse hex block number with minimal validation
 		if len(blockResponse.Result) > 2 {
 			blockNumber := utils.ParseHexU64([]byte(blockResponse.Result[2:]))
-			if blockNumber > 0 {
-				return blockNumber
-			}
+			return blockNumber
 		}
 
 		time.Sleep(5 * time.Millisecond)
