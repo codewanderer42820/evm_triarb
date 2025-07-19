@@ -831,14 +831,14 @@ func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
 	}
 }
 
-// buildWorkloadShards - EXACTLY your original logic, just pre-sized for efficiency
+// buildWorkloadShards distributes arbitrage cycles across processing cores for load balancing.
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
 func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
-	// PHASE 1: Count exact edges per pair through complete traversal (SAME as original)
+	// Count edges per pair through complete traversal
 	edgeCounts := make(map[TradingPairID]int)
 	for _, triangle := range arbitrageTriangles {
 		for i := 0; i < 3; i++ {
@@ -846,49 +846,46 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 		}
 	}
 
-	// PHASE 2: Count exact shards per pair through complete shard calculation (SAME as original)
+	// Calculate shard requirements per pair
 	shardCounts := make(map[TradingPairID]int)
 	for pairID, edgeCount := range edgeCounts {
 		shardCount := (edgeCount + constants.MaxCyclesPerShard - 1) / constants.MaxCyclesPerShard
 		shardCounts[pairID] = shardCount
 	}
 
-	// PHASE 3: Pre-allocate all structures with exact capacities (FIXED: was len=0,cap=X, now len=X)
+	// Pre-allocate all structures with exact capacities
 	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard, len(edgeCounts))
 	temporaryEdges := make(map[TradingPairID][]CycleEdge, len(edgeCounts))
 
 	for pairID, edgeCount := range edgeCounts {
-		// FIXED: Use exact size instead of append-based growth
-		temporaryEdges[pairID] = make([]CycleEdge, edgeCount) // Was: make([]CycleEdge, 0, edgeCount)
+		temporaryEdges[pairID] = make([]CycleEdge, edgeCount)
 		shardCount := shardCounts[pairID]
-		pairWorkloadShards[pairID] = make([]PairWorkloadShard, shardCount) // Was: make([]PairWorkloadShard, 0, shardCount)
+		pairWorkloadShards[pairID] = make([]PairWorkloadShard, shardCount)
 	}
 
-	// PHASE 4: Populate with zero reallocations using direct indexing (FIXED: no append)
-	edgeIndices := make(map[TradingPairID]int, len(edgeCounts)) // Track current position per pair
+	// Populate edges using direct indexing to avoid reallocations
+	edgeIndices := make(map[TradingPairID]int, len(edgeCounts))
 
 	for _, triangle := range arbitrageTriangles {
 		for i := 0; i < 3; i++ {
 			pairID := triangle[i]
 			idx := edgeIndices[pairID]
-			// FIXED: Direct assignment instead of append
 			temporaryEdges[pairID][idx] = CycleEdge{cyclePairs: triangle, edgeIndex: uint64(i)}
 			edgeIndices[pairID]++
 		}
 	}
 
-	// PHASE 5: Create shards with zero reallocations (FIXED: no append)
+	// Create shards with deterministic shuffle for load balancing
 	for pairID, cycleEdges := range temporaryEdges {
 		shuffleCycleEdges(cycleEdges, pairID)
 
-		shardIdx := 0 // Track current shard position
+		shardIdx := 0
 		for offset := 0; offset < len(cycleEdges); offset += constants.MaxCyclesPerShard {
 			endOffset := offset + constants.MaxCyclesPerShard
 			if endOffset > len(cycleEdges) {
 				endOffset = len(cycleEdges)
 			}
 
-			// FIXED: Direct assignment instead of append
 			pairWorkloadShards[pairID][shardIdx] = PairWorkloadShard{
 				pairID:     pairID,
 				cycleEdges: cycleEdges[offset:endOffset],
