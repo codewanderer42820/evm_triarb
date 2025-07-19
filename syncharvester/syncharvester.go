@@ -244,7 +244,7 @@ func newSynchronizationHarvester(connectionCount int) *SynchronizationHarvester 
 
 	harvester := &SynchronizationHarvester{
 		totalEvents:          0,
-		rpcEndpoint:          "https://" + constants.WsHost + constants.HarvesterPath,
+		rpcEndpoint:          "https://" + constants.HarvesterHost + constants.HarvesterPath,
 		csvBufferSizes:       make([]int, connectionCount),
 		batchSizes:           make([]uint64, connectionCount),
 		consecutiveSuccesses: make([]int, connectionCount),
