@@ -818,7 +818,7 @@ func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint
 		if err != nil {
 			// Handle "too many results" error by reducing batch size
 			if strings.Contains(err.Error(), "more than 10000 results") {
-				harvester.batchSizes[connectionID] = harvester.batchSizes[connectionID] / 2
+				harvester.batchSizes[connectionID] = harvester.batchSizes[connectionID] >> 1
 				if harvester.batchSizes[connectionID] < constants.MinBatchSize {
 					harvester.batchSizes[connectionID] = constants.MinBatchSize
 				}
@@ -844,7 +844,7 @@ func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint
 
 		// Increase batch size after consecutive successes for adaptive optimization
 		if harvester.consecutiveSuccesses[connectionID] >= 3 {
-			harvester.batchSizes[connectionID] = harvester.batchSizes[connectionID] * 2
+			harvester.batchSizes[connectionID] = harvester.batchSizes[connectionID] << 1
 			harvester.consecutiveSuccesses[connectionID] = 0
 		}
 	}
