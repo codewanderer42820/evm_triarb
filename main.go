@@ -369,7 +369,6 @@ func loadPoolsFromDatabase(db *sql.DB) []Pool {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func processEventStream() error {
