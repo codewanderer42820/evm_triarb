@@ -241,8 +241,5 @@ func (r *Ring) PopWait() *[24]byte {
 		if p := r.Pop(); p != nil {
 			return p
 		}
-		// CPU relaxation to reduce power consumption
-		// and improve performance on hyperthreaded cores
-		cpuRelax()
 	}
 }
