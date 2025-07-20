@@ -85,14 +85,6 @@ func setupSignalHandling() {
 		// Wait for graceful completion
 		control.ShutdownWG.Wait()
 
-		// Clean up temporary files
-		if err := os.Remove(constants.HarvesterTempPath); err != nil {
-			// File may not exist - this is expected
-			if !os.IsNotExist(err) {
-				debug.DropMessage("SIG", "Failed to remove temp file: "+err.Error())
-			}
-		}
-
 		debug.DropMessage("SIG", "Shutdown complete")
 		os.Exit(0)
 	}()
@@ -286,9 +278,6 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 //go:inline
 //go:registerparams
 func init() {
-	// Clean up any leftover temporary files
-	os.Remove(constants.HarvesterTempPath) // Ignore errors - file may not exist
-
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 0: FOUNDATION INITIALIZATION
 	//═══════════════════════════════════════════════════════════════════════════════════════
@@ -480,6 +469,8 @@ func main() {
 		for {
 			err := syncharvester.FlushHarvestedReservesToRouterFromTemp()
 			if err == nil {
+				// Data successfully loaded, temp file no longer needed
+				os.Remove(constants.HarvesterTempPath)
 				break
 			}
 			debug.DropMessage("SYNC", "Temporary reserve data flush failed: "+err.Error())
