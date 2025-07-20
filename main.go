@@ -330,6 +330,7 @@ func init() {
 	}
 
 	// Initialize arbitrage detection system
+	// Workers will initialize but wait for GC before hot spinning
 	router.InitializeArbitrageSystem(cycles)
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
@@ -373,6 +374,9 @@ func init() {
 	runtime.GC()
 	runtime.GC()
 	rtdebug.FreeOSMemory()
+
+	// Signal all worker cores that GC is complete - they can now start hot spinning
+	router.SignalGCComplete()
 
 	// Activate production mode
 	debug.DropMessage("PROD", "Production mode active")
@@ -499,3 +503,5 @@ func main() {
 		// Connection lost - loop will reconnect with synchronization
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════

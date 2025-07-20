@@ -38,6 +38,15 @@ import (
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
+// GLOBAL SYNCHRONIZATION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// gcComplete is a channel used for two-stage initialization.
+// Workers block on this channel after initialization until GC is complete.
+// Closing this channel releases all workers to start hot spinning.
+var gcComplete = make(chan struct{})
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
 // CORE TYPE DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -1112,6 +1121,9 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	// Signal that this core's initialization is complete
 	initWaitGroup.Done()
 
+	// Wait for GC to complete before starting hot spin
+	<-gcComplete
+
 	// Start the hot-spinning processing loop directly
 	processArbitrageUpdateLoop(engine, coreRings[coreID])
 }
@@ -1191,4 +1203,16 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 	pairWorkloadShards = nil
 
 	debug.DropMessage("CORES", utils.Itoa(coreCount)+" cores ready")
+}
+
+// SignalGCComplete signals all worker cores that GC is complete and they can start hot spinning.
+// This function should be called from main after GC operations are finished.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func SignalGCComplete() {
+	close(gcComplete)
 }
