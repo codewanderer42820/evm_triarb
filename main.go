@@ -375,13 +375,15 @@ func init() {
 	runtime.GC()
 	rtdebug.FreeOSMemory()
 
-	// Signal all worker cores that GC is complete - they can now start hot spinning
+	// Disable automatic GC permanently - create safe environment for hot spinning
+	rtdebug.SetGCPercent(-1)
+
+	// Signal all workers: "GC is permanently disabled, hot spin mode is safe"
 	router.SignalGCComplete()
 
 	// Activate production mode
 	debug.DropMessage("PROD", "Production mode active")
 	runtime.LockOSThread()
-	rtdebug.SetGCPercent(-1) // Disable automatic GC
 	control.ForceActive()
 }
 
