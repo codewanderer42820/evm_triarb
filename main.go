@@ -3,18 +3,18 @@
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 // 🇯🇵 MADE IN JAPAN. INSPIRED BY JAPANESE ENGINEERING. FROM NIIKAPPU HIDAKA HOKKAIDO 🇯🇵
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: High-Frequency Arbitrage Detection System
+// Project: Arbitrage Detection System
 // Component: Main Entry Point & System Orchestration
 //
 // Description:
-//   System orchestration with phased initialization and clean separation of concerns.
-//   Bootstrap → Memory Optimization → Production Event Processing
+//   System orchestration with phased initialization and structured event processing.
+//   Manages initialization, synchronization, and real-time event handling.
 //
 // Architecture:
 //   - Phase 0: System initialization and data loading
-//   - Phase 1: Blockchain synchronization and arbitrage system setup
-//   - Phase 2: Memory optimization with production mode activation
-//   - Phase 3: Real-time event processing loop
+//   - Phase 1: Blockchain synchronization and system setup
+//   - Phase 2: Memory optimization and production mode activation
+//   - Phase 3: Real-time event processing
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -48,22 +48,22 @@ import (
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // Pool represents a trading pair with its database identifier and contract address.
-// Optimized for cache efficiency with 32-byte alignment for improved memory access patterns.
+// Structure is aligned for memory efficiency.
 //
 //go:notinheap
 //go:align 32
 type Pool struct {
 	ID      int64   // Database identifier for the trading pair
 	Address string  // Ethereum contract address (hex format)
-	_       [8]byte // Padding to achieve 32-byte boundary alignment for cache optimization
+	_       [8]byte // Padding for memory alignment
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // SYSTEM LIFECYCLE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// setupSignalHandling configures graceful shutdown coordination for SIGINT and SIGTERM signals.
-// Utilizes the control package's ShutdownWG for proper subsystem shutdown coordination.
+// setupSignalHandling configures graceful shutdown for SIGINT and SIGTERM signals.
+// Coordinates shutdown across all subsystems using the control package.
 //
 //go:norace
 //go:nocheckptr
@@ -74,21 +74,20 @@ func setupSignalHandling() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Background goroutine for coordinated shutdown handling
+	// Background handler for graceful shutdown
 	go func() {
 		<-sigChan
 		debug.DropMessage("SIG", "Shutdown initiated")
 
-		// Signal shutdown to all registered subsystems
+		// Signal shutdown to all subsystems
 		control.Shutdown()
 
-		// Wait for all subsystems to complete their graceful shutdown procedures
+		// Wait for graceful completion
 		control.ShutdownWG.Wait()
 
-		// Clean up temporary file if it exists
-		// This is the optimal place as all subsystems have finished their work
+		// Clean up temporary files
 		if err := os.Remove(constants.HarvesterTempPath); err != nil {
-			// File may not exist or already be deleted - this is not an error condition
+			// File may not exist - this is expected
 			if !os.IsNotExist(err) {
 				debug.DropMessage("SIG", "Failed to remove temp file: "+err.Error())
 			}
@@ -103,8 +102,8 @@ func setupSignalHandling() {
 // DATABASE OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// openDatabase establishes a SQLite database connection for pool data initialization.
-// The connection is designed to be closed immediately after loading, as syncharvester manages its own connection pool.
+// openDatabase establishes a SQLite database connection.
+// Connection should be closed after initial data loading.
 //
 //go:norace
 //go:nocheckptr
@@ -119,8 +118,8 @@ func openDatabase(dbPath string) *sql.DB {
 	return db
 }
 
-// loadPoolsFromDatabase retrieves all trading pairs from the database with precise memory allocation.
-// Uses a COUNT query to determine exact capacity requirements before data loading for optimal memory usage.
+// loadPoolsFromDatabase retrieves all trading pairs from the database.
+// Pre-allocates memory based on exact count for efficiency.
 //
 //go:norace
 //go:nocheckptr
@@ -128,7 +127,7 @@ func openDatabase(dbPath string) *sql.DB {
 //go:inline
 //go:registerparams
 func loadPoolsFromDatabase(db *sql.DB) []Pool {
-	// Determine exact number of pools for precise memory allocation
+	// Get total count for memory allocation
 	var poolCount int
 	err := db.QueryRow("SELECT COUNT(*) FROM pools").Scan(&poolCount)
 	if err != nil {
@@ -136,14 +135,14 @@ func loadPoolsFromDatabase(db *sql.DB) []Pool {
 	}
 
 	if poolCount == 0 {
-		panic("Database contains no trading pairs - system cannot operate")
+		panic("Database contains no trading pairs")
 	}
 
-	// Pre-allocate slice with exact capacity to prevent reallocations
+	// Allocate exact capacity
 	pools := make([]Pool, poolCount)
 	poolIndex := 0
 
-	// Load all pools with deterministic ordering by ID
+	// Load pools ordered by ID
 	rows, err := db.Query(`
 		SELECT p.id, p.pool_address 
 		FROM pools p
@@ -153,7 +152,7 @@ func loadPoolsFromDatabase(db *sql.DB) []Pool {
 	}
 	defer rows.Close()
 
-	// Populate pools slice with exact indexing
+	// Populate pools array
 	for rows.Next() && poolIndex < poolCount {
 		var pairID int64
 		var poolAddress string
@@ -179,8 +178,8 @@ func loadPoolsFromDatabase(db *sql.DB) []Pool {
 // FILE PARSING OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// loadArbitrageCyclesFromFile parses triangular arbitrage cycles from a structured text file.
-// Processes lines in format "(12345) → (67890) → (11111)" with exact memory allocation and zero-copy parsing.
+// loadArbitrageCyclesFromFile parses triangular arbitrage cycles from a text file.
+// Expected format: "(12345) → (67890) → (11111)" per line.
 //
 //go:norace
 //go:nocheckptr
@@ -193,7 +192,7 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 		panic("Failed to read arbitrage cycles file: " + err.Error())
 	}
 
-	// Count total lines for exact slice allocation
+	// Count lines for allocation
 	lineCount := 0
 	for _, b := range data {
 		if b == '\n' {
@@ -201,35 +200,35 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 		}
 	}
 	if len(data) > 0 && data[len(data)-1] != '\n' {
-		lineCount++ // Account for final line without trailing newline
+		lineCount++ // Account for last line without newline
 	}
 
-	// Pre-allocate result slice with exact capacity
+	// Pre-allocate result array
 	cycles := make([]router.ArbitrageTriangle, lineCount)
 	cycleIndex := 0
 	i, dataLen := 0, len(data)
 	var pairIDs [3]uint64
 
-	// Byte-by-byte parsing without string allocations or intermediate buffers for maximum efficiency
+	// Parse byte-by-byte for efficiency
 	for i < dataLen && cycleIndex < lineCount {
 		pairCount := 0
 
-		// Parse up to 3 pair IDs from the current line
+		// Parse up to 3 pair IDs per line
 		for pairCount < 3 && i < dataLen && data[i] != '\n' {
-			// Locate opening parenthesis
+			// Find opening parenthesis
 			for i < dataLen && data[i] != '(' && data[i] != '\n' {
 				i++
 			}
 			if i >= dataLen || data[i] == '\n' {
 				break
 			}
-			i++ // Skip opening parenthesis
+			i++ // Skip '('
 
-			// Parse numeric value with overflow protection
+			// Parse numeric ID
 			pairID := uint64(0)
 			for i < dataLen && data[i] >= '0' && data[i] <= '9' {
 				if pairID > (^uint64(0)-10)/10 {
-					break // Prevent integer overflow
+					break // Prevent overflow
 				}
 				pairID = pairID*10 + uint64(data[i]-'0')
 				i++
@@ -240,12 +239,12 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 				pairCount++
 			}
 
-			// Advance to closing parenthesis
+			// Find closing parenthesis
 			for i < dataLen && data[i] != ')' && data[i] != '\n' {
 				i++
 			}
 			if i < dataLen && data[i] == ')' {
-				i++ // Skip closing parenthesis
+				i++ // Skip ')'
 			}
 		}
 
@@ -254,10 +253,10 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 			i++
 		}
 		if i < dataLen {
-			i++ // Skip newline character
+			i++ // Skip newline
 		}
 
-		// Store arbitrage triangle at exact index position
+		// Store parsed triangle
 		cycles[cycleIndex] = router.ArbitrageTriangle{
 			router.TradingPairID(pairIDs[0]),
 			router.TradingPairID(pairIDs[1]),
@@ -266,7 +265,7 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 		cycleIndex++
 	}
 
-	// Validate that cycles were successfully loaded
+	// Verify cycles were loaded
 	if cycleIndex == 0 {
 		panic("No valid arbitrage cycles found in configuration file")
 	}
@@ -277,292 +276,235 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 // INITIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// init orchestrates the complete high-frequency arbitrage detection system initialization.
-// The system operates through carefully orchestrated phases to maximize performance,
-// minimize latency, and ensure robust operation in production trading environments.
-//
-// System Architecture Overview:
-//
-//	Phase 0: Foundation - Load configuration data and initialize core structures
-//	Phase 1: Synchronization - Achieve blockchain state consistency
-//	Phase 2: Optimization - Memory management and performance tuning
+// init performs complete system initialization in three phases.
+// Phase 0: Load configuration and initialize core structures
+// Phase 1: Synchronize with blockchain state
+// Phase 2: Optimize memory and activate production mode
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
 func init() {
-	// Opportunistic cleanup of temporary file from previous runs
-	// Remove any leftover temp file to ensure clean state initialization
-	os.Remove(constants.HarvesterTempPath) // Ignore errors - file is expected to not exist
+	// Clean up any leftover temporary files
+	os.Remove(constants.HarvesterTempPath) // Ignore errors - file may not exist
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 0: FOUNDATION INITIALIZATION
 	//═══════════════════════════════════════════════════════════════════════════════════════
-	// Establish system foundations with precise resource allocation and configuration loading.
-	// All initialization uses exact memory allocation to prevent fragmentation during operation.
+	// Load configuration data and initialize core system components.
 
 	debug.DropMessage("INIT", "System startup")
 
-	// Database Configuration Loading
-	// Load trading pair registry from SQLite with optimized query patterns.
-	// Connection is ephemeral - closed immediately after data extraction.
+	// Load trading pairs from database
 	db := openDatabase("uniswap_pairs.db")
 	pools := loadPoolsFromDatabase(db)
 	db.Close()
 
-	// Address Registration Infrastructure
-	// Populate Robin Hood hash table for O(1) contract address resolution.
-	// Critical for real-time event processing performance.
+	// Register addresses for fast lookup
 	for _, pool := range pools {
 		router.RegisterTradingPairAddress([]byte(pool.Address[2:]), router.TradingPairID(pool.ID))
 	}
 
-	// Arbitrage Cycle Configuration
-	// Parse triangular arbitrage definitions with zero-copy algorithms.
-	// Each cycle represents a potential profit opportunity path.
+	// Load arbitrage cycle definitions
 	cycles := loadArbitrageCyclesFromFile("cycles_3_3.txt")
 
 	debug.DropMessage("LOAD", utils.Itoa(len(pools))+" pools, "+utils.Itoa(len(cycles))+" cycles")
 
-	// System Lifecycle Management
-	// Configure graceful shutdown coordination for production reliability.
+	// Configure shutdown handling
 	setupSignalHandling()
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 1: BLOCKCHAIN SYNCHRONIZATION
 	//═══════════════════════════════════════════════════════════════════════════════════════
-	// Achieve complete blockchain state consistency before arbitrage detection begins.
-	// Retry loop ensures robustness against network instability and RPC provider issues.
+	// Ensure system is synchronized with current blockchain state.
 
 	for {
 		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
 		if err != nil {
 			debug.DropMessage("SYNC", "Requirement check failed: "+err.Error())
-			continue // Resilient against transient network failures
+			continue // Retry on error
 		}
 		if !syncNeeded {
-			break // Synchronization complete - proceed to arbitrage system initialization
+			break // Already synchronized
 		}
 
 		blocksBehind := targetBlock - lastBlock
 		debug.DropMessage("SYNC", utils.Itoa(int(blocksBehind))+" blocks behind")
 
-		// Execute Historical Data Harvesting
-		// Multi-connection parallel processing with adaptive batch sizing.
-		// Metadata is updated atomically only upon successful completion.
+		// Harvest historical data
 		err = syncharvester.ExecuteHarvesting()
 		if err != nil {
 			debug.DropMessage("SYNC", "Block harvesting failed: "+err.Error())
-			continue // Retry until successful synchronization achieved
+			continue // Retry until successful
 		}
 	}
 
-	// Arbitrage Engine Initialization
-	// Instantiate 30,000 priority queues with lock-free coordination.
-	// Memory layout optimized for cache efficiency and NUMA awareness.
+	// Initialize arbitrage detection system
 	router.InitializeArbitrageSystem(cycles)
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
-	// PHASE 2: MEMORY OPTIMIZATION AND PERFORMANCE TUNING
+	// PHASE 2: MEMORY OPTIMIZATION
 	//═══════════════════════════════════════════════════════════════════════════════════════
-	// Prepare system for production operation with aggressive memory management.
-	// Multiple garbage collection passes ensure optimal heap layout.
+	// Optimize memory layout and prepare for production operation.
 
-	// Initial Memory Optimization Pass
-	// Force garbage collection to establish clean memory baseline.
+	// Initial garbage collection
 	runtime.GC()
 	runtime.GC()
 	rtdebug.FreeOSMemory()
 
-	// Post-Optimization Synchronization Verification
-	// Ensure blockchain consistency after memory management operations.
-	// Guards against edge cases where GC pressure affects synchronization state.
+	// Verify synchronization after GC
 	for {
 		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
 		if err != nil {
 			debug.DropMessage("SYNC", "Post-GC requirement check failed: "+err.Error())
-			continue // Handle transient issues with exponential backoff behavior
+			continue
 		}
 		if !syncNeeded {
-			break // Verified synchronization - proceed to reserve data loading
+			break
 		}
 
 		blocksBehind := targetBlock - lastBlock
 		debug.DropMessage("SYNC", "Post-GC: "+utils.Itoa(int(blocksBehind))+" blocks behind")
 
-		// Incremental Synchronization Recovery
-		// Address any blocks that arrived during memory optimization phase.
+		// Re-synchronize if needed
 		err = syncharvester.ExecuteHarvesting()
 		if err != nil {
 			debug.DropMessage("SYNC", "Post-GC harvesting failed: "+err.Error())
-			continue // Maintain synchronization integrity through retry logic
+			continue
 		}
 	}
 
-	// Reserve State Integration
-	// Load historical reserve data into arbitrage engine for accurate profit calculations.
-	// Critical operation - system cannot proceed without complete reserve state.
+	// Load reserve data into arbitrage engine
 	if err := syncharvester.FlushHarvestedReservesToRouter(); err != nil {
-		panic("Critical system failure: Reserve data flush to router failed - " + err.Error())
+		panic("Critical: Reserve data flush failed - " + err.Error())
 	}
 
-	// Final Production Optimization Pass
-	// Second memory management phase for optimal production performance.
+	// Final memory optimization
 	runtime.GC()
 	runtime.GC()
 	rtdebug.FreeOSMemory()
 
-	// Production Mode Activation
-	// Configure runtime for maximum performance with disabled garbage collection.
-	// Lock OS thread for consistent NUMA locality and minimal context switching.
+	// Activate production mode
 	debug.DropMessage("PROD", "Production mode active")
 	runtime.LockOSThread()
-	rtdebug.SetGCPercent(-1) // Disable automatic garbage collection
-	control.ForceActive()    // Activate production control systems
+	rtdebug.SetGCPercent(-1) // Disable automatic GC
+	control.ForceActive()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // MAIN ORCHESTRATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// main runs the real-time arbitrage detection engine.
-//
-// System Architecture Overview:
-//
-//	Phase 3: Production - Real-time arbitrage detection with sub-microsecond latency
+// main executes the real-time arbitrage detection engine.
+// Phase 3: Continuous event processing with automatic reconnection.
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
 func main() {
-	// Panic Recovery Handler
-	// Ensures system resilience by catching and logging any unexpected panics
+	// Panic recovery for system resilience
 	defer func() {
 		if r := recover(); r != nil {
 			debug.DropMessage("PANIC", "System panic recovered: "+fmt.Sprintf("%v", r))
 			debug.DropMessage("STACK", string(rtdebug.Stack()))
-
-			// Continue execution after panic recovery
-			// System will attempt to reconnect and resume operations
+			// Continue execution after recovery
 		}
 	}()
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
-	// PHASE 3: REAL-TIME ARBITRAGE DETECTION ENGINE
+	// PHASE 3: REAL-TIME EVENT PROCESSING
 	//═══════════════════════════════════════════════════════════════════════════════════════
-	// Continuous operation mode with 160ns latency targets and anti-fragile architecture.
-	// Every connection failure triggers automatic resynchronization for enhanced reliability.
+	// Main event processing loop with automatic reconnection on failure.
 
-	// Temporary Synchronization State Management
-	// Maintain independent progress tracking for incremental sync operations.
-	// Stack variable persists across all WebSocket reconnection cycles.
+	// Track synchronization progress across reconnections
 	latestTempSyncedBlock := syncharvester.LoadMetadata()
 
-	// Infinite Production Loop
-	// Self-healing architecture where connection failures strengthen system state.
+	// Main processing loop
 	for {
-		// Network Connection Establishment with Advanced Optimizations
-		// Raw TCP socket configuration for minimum latency and maximum throughput.
+		// Establish TCP connection with optimizations
 		raw, _ := net.Dial("tcp", constants.WsDialAddr)
 		tcpConn := raw.(*net.TCPConn)
 
-		// TCP Protocol Optimization Suite
-		// Configure socket parameters for high-frequency trading requirements.
-		tcpConn.SetNoDelay(true)                       // Disable Nagle's algorithm for immediate transmission
-		tcpConn.SetReadBuffer(constants.MaxFrameSize)  // Optimize kernel read buffer allocation
-		tcpConn.SetWriteBuffer(constants.MaxFrameSize) // Optimize kernel write buffer allocation
+		// Configure TCP socket options
+		tcpConn.SetNoDelay(true)                       // Disable Nagle's algorithm
+		tcpConn.SetReadBuffer(constants.MaxFrameSize)  // Set read buffer size
+		tcpConn.SetWriteBuffer(constants.MaxFrameSize) // Set write buffer size
 
-		// Advanced Socket Configuration via System Calls
-		// Apply low-level optimizations using direct kernel interface.
+		// Apply socket-level optimizations
 		rawFile, _ := tcpConn.File()
 		fd := int(rawFile.Fd())
 
-		// Cross-Platform Socket Optimizations
-		// Standard TCP optimizations for all supported platforms.
+		// Standard TCP optimizations
 		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
 		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, constants.MaxFrameSize)
 		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, constants.MaxFrameSize)
 
-		// Platform-Specific Network Stack Enhancements
-		// Apply OS-specific optimizations for maximum performance.
+		// Platform-specific optimizations
 		switch runtime.GOOS {
 		case "linux":
-			syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 46, 1)         // SO_REUSEPORT for load balancing
-			syscall.SetsockoptString(fd, syscall.IPPROTO_TCP, 13, "bbr") // BBR congestion control algorithm
+			syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 46, 1)         // SO_REUSEPORT
+			syscall.SetsockoptString(fd, syscall.IPPROTO_TCP, 13, "bbr") // BBR congestion control
 		case "darwin":
-			syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 0x1006, 1) // SO_REUSEPORT for macOS compatibility
+			syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 0x1006, 1) // SO_REUSEPORT on macOS
 		}
-		rawFile.Close() // Release file descriptor wrapper to prevent resource leakage
+		rawFile.Close() // Release file descriptor
 
-		// Opportunistic Incremental Synchronization
-		// Leverage optimized TCP connection for blockchain state updates before WebSocket establishment.
-		// Retry-resilient design ensures synchronization completion despite transient failures.
+		// Synchronize any missing blocks before WebSocket connection
 		for {
 			syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirementFromBlock(latestTempSyncedBlock)
 			if err != nil {
 				debug.DropMessage("SYNC", "Temp requirement check failed: "+err.Error())
-				continue // Resilient against RPC provider instability and network fluctuations
+				continue
 			}
 			if !syncNeeded {
-				break // Synchronization current - proceed to WebSocket handshake
+				break
 			}
 
 			blocksBehind := targetBlock - lastBlock
 			debug.DropMessage("SYNC", "Temp sync: "+utils.Itoa(int(blocksBehind))+" blocks behind")
 
-			// Temporary Storage Harvesting with Progress Tracking
-			// Isolated synchronization that preserves main metadata state integrity.
+			// Harvest to temporary storage
 			newLastProcessed, err := syncharvester.ExecuteHarvestingToTemp(constants.DefaultConnections)
 			if err != nil {
 				debug.DropMessage("SYNC", "Temp harvesting failed: "+err.Error())
-				continue // Retry from current position - no progress lost
+				continue
 			}
 
-			// Progress State Advancement
-			// Update temporary synchronization checkpoint for monotonic progress.
+			// Update progress tracker
 			latestTempSyncedBlock = newLastProcessed
 		}
 
-		// Reserve Data Integration with Retry Resilience
-		// Critical operation ensuring arbitrage engine operates on latest market state.
-		// Retry loop guarantees completion despite transient file system issues.
+		// Load reserve data from temporary storage
 		for {
 			err := syncharvester.FlushHarvestedReservesToRouterFromTemp()
 			if err == nil {
-				break // Reserve data successfully integrated - proceed to WebSocket establishment
+				break
 			}
 			debug.DropMessage("SYNC", "Temporary reserve data flush failed: "+err.Error())
-			// Retry until successful - arbitrage accuracy depends on fresh reserve data
+			// Retry until successful
 		}
 
-		// Secure WebSocket Connection Establishment
-		// TLS-encrypted connection over optimized TCP transport for maximum security and performance.
+		// Establish secure WebSocket connection
 		conn := tls.Client(raw, &tls.Config{ServerName: constants.WsHost})
 
-		// WebSocket Protocol Negotiation and Event Subscription
-		// Establish real-time event stream for Uniswap V2 Sync events.
+		// Initialize WebSocket and subscribe to events
 		ws.Handshake(conn)
 		ws.SendSubscription(conn)
 
-		// High-Frequency Event Processing Loop
-		// Core arbitrage detection engine operating at 160ns latency targets.
-		// Runs until connection failure triggers automatic reconnection with resynchronization.
+		// Event processing loop
 		for {
-			// Message Frame Reception with Error Detection
-			// Block until complete WebSocket message received or connection failure detected.
+			// Receive WebSocket message
 			payload, err := ws.SpinUntilCompleteMessage(conn)
 			if err != nil {
 				conn.Close()
-				break // Connection failure - trigger reconnection with automatic resync
+				break // Reconnect on error
 			}
 
-			// Real-Time Arbitrage Detection Pipeline
-			// Dispatch to parser subsystem for 160ns end-to-end processing.
-			// Feeds 30,000 priority queues for comprehensive opportunity detection.
+			// Process arbitrage opportunities
 			parser.HandleFrame(payload)
 		}
-		// Connection terminated - outer loop will establish new connection with fresh synchronization
+		// Connection lost - loop will reconnect with synchronization
 	}
 }
