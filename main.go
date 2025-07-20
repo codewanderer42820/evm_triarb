@@ -67,7 +67,7 @@ func setupSignalHandling() {
 	// Background goroutine for coordinated shutdown handling
 	go func() {
 		<-sigChan
-		debug.DropMessage("SIGNAL", "Shutdown initiated")
+		debug.DropMessage("SIG", "Shutdown initiated")
 
 		// Signal shutdown to all registered subsystems
 		control.Shutdown()
@@ -75,7 +75,7 @@ func setupSignalHandling() {
 		// Wait for all subsystems to complete their graceful shutdown procedures
 		control.ShutdownWG.Wait()
 
-		debug.DropMessage("SIGNAL", "Shutdown complete")
+		debug.DropMessage("SIG", "Shutdown complete")
 		os.Exit(0)
 	}()
 }
@@ -315,7 +315,7 @@ func main() {
 	// Load triangular arbitrage cycle configurations from file
 	cycles := loadArbitrageCyclesFromFile("cycles_3_3.txt")
 
-	debug.DropMessage("LOADED", utils.Itoa(len(pools))+" pools, "+utils.Itoa(len(cycles))+" cycles")
+	debug.DropMessage("LOAD", utils.Itoa(len(pools))+" pools, "+utils.Itoa(len(cycles))+" cycles")
 
 	setupSignalHandling()
 
