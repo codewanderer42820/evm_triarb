@@ -104,7 +104,7 @@ type SynchronizationHarvester struct {
 	rpcEndpoint string     // RPC endpoint URL for HTTP requests (16B)
 	outputFile  *os.File   // CSV output file handle (8B)
 	fileMutex   sync.Mutex // Protects concurrent file writes (8B)
-	batchSizes  []uint64   // Dynamic batch sizes per connection (24B) - moved here for hot access
+	batchSizes  []uint64   // Dynamic batch sizes per connection (24B)
 
 	// Cache Line 2: Hot fields accessed frequently during processing
 	csvBufferSizes       []int  // Current buffer sizes for CSV data (24B)
@@ -148,6 +148,55 @@ var (
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
+// METADATA MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// loadMetadata reads the last processed block height from binary metadata file.
+// Returns deployment block if metadata file is missing or corrupted.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func loadMetadata() uint64 {
+	var buf [8]byte
+	file, err := os.Open(constants.HarvesterMetadataPath)
+	if err != nil {
+		return constants.HarvesterDeploymentBlock
+	}
+	defer file.Close()
+
+	if n, err := file.Read(buf[:]); err != nil || n != 8 {
+		return constants.HarvesterDeploymentBlock
+	}
+
+	return utils.Load64(buf[:])
+}
+
+// saveMetadata writes the last processed block height to binary metadata file.
+// Creates new file if it doesn't exist, overwrites existing content.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func saveMetadata(block uint64) error {
+	buf := [8]byte{
+		byte(block), byte(block >> 8), byte(block >> 16), byte(block >> 24),
+		byte(block >> 32), byte(block >> 40), byte(block >> 48), byte(block >> 56),
+	}
+
+	file, err := os.OpenFile(constants.HarvesterMetadataPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	_, err = file.Write(buf[:])
+	return err
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
 // HTTP TRANSPORT OPTIMIZATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -182,50 +231,76 @@ func buildHTTPTransport() *http.Transport {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// METADATA MANAGEMENT
+// SIMD-OPTIMIZED HEX PROCESSING
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// loadMetadata reads the last processed block height from binary metadata file.
+// countHexLeadingZeros performs leading zero counting using SIMD-style operations.
+// Optimized for processing 32-character hex segments from Ethereum event data.
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
-func loadMetadata() uint64 {
-	var buf [8]byte
-	file, err := os.Open(constants.HarvesterMetadataPath)
-	if err != nil {
-		return constants.HarvesterDeploymentBlock
-	}
-	defer file.Close()
+func countHexLeadingZeros(hexSegment []byte) int {
+	// 64-bit pattern representing eight consecutive ASCII '0' characters
+	const ZERO_PATTERN = 0x3030303030303030
 
-	if n, err := file.Read(buf[:]); err != nil || n != 8 {
-		return constants.HarvesterDeploymentBlock
+	// Process four 8-byte chunks simultaneously using SIMD-style operations
+	chunk0 := utils.Load64(hexSegment[0:8]) ^ ZERO_PATTERN   // XOR reveals non-zero bytes
+	chunk1 := utils.Load64(hexSegment[8:16]) ^ ZERO_PATTERN  // Process second chunk
+	chunk2 := utils.Load64(hexSegment[16:24]) ^ ZERO_PATTERN // Process third chunk
+	chunk3 := utils.Load64(hexSegment[24:32]) ^ ZERO_PATTERN // Process fourth chunk
+
+	// Create bitmask indicating which chunks contain non-zero characters
+	chunkMask := ((chunk0|(^chunk0+1))>>63)<<0 | ((chunk1|(^chunk1+1))>>63)<<1 |
+		((chunk2|(^chunk2+1))>>63)<<2 | ((chunk3|(^chunk3+1))>>63)<<3
+
+	// Find first chunk containing non-zero character using bit operations
+	firstNonZeroChunk := bits.TrailingZeros64(chunkMask)
+	if firstNonZeroChunk == 64 {
+		return 32 // All 32 characters are zeros
 	}
 
-	return utils.Load64(buf[:])
+	// Within the first non-zero chunk, locate first non-zero byte
+	chunks := [4]uint64{chunk0, chunk1, chunk2, chunk3}
+	firstNonZeroByte := bits.TrailingZeros64(chunks[firstNonZeroChunk]) >> 3
+
+	// Calculate total leading zero count across all processed chunks
+	return (firstNonZeroChunk << 3) + firstNonZeroByte
 }
 
-// saveMetadata writes the last processed block height to binary metadata file.
+// parseReservesToZeroTrimmed extracts and trims reserve values from Sync event data.
+// Processes 128-character hex strings representing reserve0 and reserve1 values.
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
-func saveMetadata(block uint64) error {
-	buf := [8]byte{
-		byte(block), byte(block >> 8), byte(block >> 16), byte(block >> 24),
-		byte(block >> 32), byte(block >> 40), byte(block >> 48), byte(block >> 56),
+func parseReservesToZeroTrimmed(eventData string) (string, string) {
+	// Convert string to byte slice for SIMD processing efficiency
+	dataBytes := unsafe.Slice(unsafe.StringData(eventData), len(eventData))
+
+	// Parse reserve0 from bytes 32-64 (32 hex characters representing first reserve)
+	leadingZeros0 := countHexLeadingZeros(dataBytes[32:64])
+	reserve0Start := 32 + leadingZeros0
+	var reserve0 string
+	if reserve0Start >= 64 {
+		reserve0 = "0" // Handle all-zeros case efficiently
+	} else {
+		reserve0 = eventData[reserve0Start:64]
 	}
 
-	file, err := os.OpenFile(constants.HarvesterMetadataPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		return err
+	// Parse reserve1 from bytes 96-128 (32 hex characters representing second reserve)
+	leadingZeros1 := countHexLeadingZeros(dataBytes[96:128])
+	reserve1Start := 96 + leadingZeros1
+	var reserve1 string
+	if reserve1Start >= 128 {
+		reserve1 = "0" // Handle all-zeros case efficiently
+	} else {
+		reserve1 = eventData[reserve1Start:128]
 	}
-	defer file.Close()
 
-	_, err = file.Write(buf[:])
-	return err
+	return reserve0, reserve1
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -313,6 +388,7 @@ func newSynchronizationHarvester(connectionCount int, outputPath string) *Synchr
 }
 
 // reportStatistics provides periodic progress updates during harvesting operation.
+// Displays event count and block progress for each connection sector.
 //
 //go:norace
 //go:nocheckptr
@@ -340,6 +416,21 @@ func (harvester *SynchronizationHarvester) reportStatistics() {
 		case <-harvester.processingContext.Done():
 			return
 		}
+	}
+}
+
+// cleanup ensures all resources are properly released and data is flushed.
+// Called during harvester shutdown to prevent data loss.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func (harvester *SynchronizationHarvester) cleanup() {
+	harvester.flushAllBuffers()
+
+	if harvester.outputFile != nil {
+		harvester.outputFile.Close()
 	}
 }
 
@@ -537,83 +628,11 @@ func (harvester *SynchronizationHarvester) parseLogsWithSonnet(jsonData []byte, 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SIMD-OPTIMIZED HEX PROCESSING
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// countHexLeadingZeros performs leading zero counting using SIMD-style operations.
-// Optimized for processing 32-character hex segments from Ethereum event data.
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func countHexLeadingZeros(hexSegment []byte) int {
-	// 64-bit pattern representing eight consecutive ASCII '0' characters
-	const ZERO_PATTERN = 0x3030303030303030
-
-	// Process four 8-byte chunks simultaneously using SIMD-style operations
-	chunk0 := utils.Load64(hexSegment[0:8]) ^ ZERO_PATTERN   // XOR reveals non-zero bytes
-	chunk1 := utils.Load64(hexSegment[8:16]) ^ ZERO_PATTERN  // Process second chunk
-	chunk2 := utils.Load64(hexSegment[16:24]) ^ ZERO_PATTERN // Process third chunk
-	chunk3 := utils.Load64(hexSegment[24:32]) ^ ZERO_PATTERN // Process fourth chunk
-
-	// Create bitmask indicating which chunks contain non-zero characters
-	chunkMask := ((chunk0|(^chunk0+1))>>63)<<0 | ((chunk1|(^chunk1+1))>>63)<<1 |
-		((chunk2|(^chunk2+1))>>63)<<2 | ((chunk3|(^chunk3+1))>>63)<<3
-
-	// Find first chunk containing non-zero character using bit operations
-	firstNonZeroChunk := bits.TrailingZeros64(chunkMask)
-	if firstNonZeroChunk == 64 {
-		return 32 // All 32 characters are zeros
-	}
-
-	// Within the first non-zero chunk, locate first non-zero byte
-	chunks := [4]uint64{chunk0, chunk1, chunk2, chunk3}
-	firstNonZeroByte := bits.TrailingZeros64(chunks[firstNonZeroChunk]) >> 3
-
-	// Calculate total leading zero count across all processed chunks
-	return (firstNonZeroChunk << 3) + firstNonZeroByte
-}
-
-// parseReservesToZeroTrimmed extracts and trims reserve values from Sync event data.
-// Processes 128-character hex strings representing reserve0 and reserve1 values.
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func parseReservesToZeroTrimmed(eventData string) (string, string) {
-	// Convert string to byte slice for SIMD processing efficiency
-	dataBytes := unsafe.Slice(unsafe.StringData(eventData), len(eventData))
-
-	// Parse reserve0 from bytes 32-64 (32 hex characters representing first reserve)
-	leadingZeros0 := countHexLeadingZeros(dataBytes[32:64])
-	reserve0Start := 32 + leadingZeros0
-	var reserve0 string
-	if reserve0Start >= 64 {
-		reserve0 = "0" // Handle all-zeros case efficiently
-	} else {
-		reserve0 = eventData[reserve0Start:64]
-	}
-
-	// Parse reserve1 from bytes 96-128 (32 hex characters representing second reserve)
-	leadingZeros1 := countHexLeadingZeros(dataBytes[96:128])
-	reserve1Start := 96 + leadingZeros1
-	var reserve1 string
-	if reserve1Start >= 128 {
-		reserve1 = "0" // Handle all-zeros case efficiently
-	} else {
-		reserve1 = eventData[reserve1Start:128]
-	}
-
-	return reserve0, reserve1
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
 // CSV OUTPUT OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // writeCSVRecord constructs and buffers a CSV record for batch writing.
+// Automatically flushes buffer when approaching capacity limits.
 //
 //go:norace
 //go:nocheckptr
@@ -651,6 +670,7 @@ func (harvester *SynchronizationHarvester) writeCSVRecord(address string, blockH
 }
 
 // flushCSVBuffer writes accumulated CSV data to disk with mutex protection.
+// Thread-safe operation for concurrent buffer flushing.
 //
 //go:norace
 //go:nocheckptr
@@ -669,6 +689,7 @@ func (harvester *SynchronizationHarvester) flushCSVBuffer(connectionID int) {
 }
 
 // flushAllBuffers ensures all pending CSV data is written to disk and synced.
+// Flushes all connection buffers and forces filesystem synchronization.
 //
 //go:norace
 //go:nocheckptr
@@ -704,7 +725,7 @@ func (harvester *SynchronizationHarvester) processLogFromGlobalBuffer(logEntry *
 
 // executeHarvesting orchestrates the complete harvesting process with intelligent work distribution.
 // Implements dynamic sector allocation and parallel processing for maximum throughput.
-// NOTE: Metadata saving is the responsibility of the caller.
+// Metadata saving is the responsibility of the caller.
 //
 //go:norace
 //go:nocheckptr
@@ -837,67 +858,225 @@ func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint
 	}
 }
 
-// cleanup ensures all resources are properly released and data is flushed.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ROUTER STATE MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// processLine parses a single CSV line and updates the router with optimized zero-copy operations.
+// Parameters are ordered by usage frequency for optimal register allocation and cache efficiency.
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
-func (harvester *SynchronizationHarvester) cleanup() {
-	harvester.flushAllBuffers()
-
-	if harvester.outputFile != nil {
-		harvester.outputFile.Close()
+func processLine(line []byte, processed *int, offset int64, blocks []uint64, addressBuf, dataBuf []byte, v *types.LogView) {
+	// CSV delimiter discovery using linear scan
+	c1, c2, c3 := -1, -1, -1
+	for i, b := range line {
+		if b == ',' {
+			if c1 == -1 {
+				c1 = i // First comma: separates address from block
+			} else if c2 == -1 {
+				c2 = i // Second comma: separates block from reserve0
+			} else if c3 == -1 {
+				c3 = i // Third comma: separates reserve0 from reserve1
+				break  // Early termination after finding all required delimiters
+			}
+		}
 	}
+
+	// Header detection and validation
+	if c1 == 7 {
+		return // Skip header row to avoid processing metadata as data
+	}
+
+	// Validate CSV structure integrity with detailed error reporting
+	if c1 == -1 || c2 == -1 || c3 == -1 {
+		panic(fmt.Sprintf("malformed CSV line at offset %d (after %d events): expected 3 commas, found: comma1=%d, comma2=%d, comma3=%d, line: %q", offset, *processed, c1, c2, c3, string(line)))
+	}
+
+	// Pair existence verification using zero-copy address lookup
+	pairID := router.LookupPairByAddress(line[0:c1])
+	if pairID == 0 {
+		return // Skip unknown pairs to avoid processing irrelevant data
+	}
+
+	// Block freshness validation for deduplication
+	block := utils.ParseHexU64(line[c1+1 : c2])
+
+	// Skip stale or duplicate block data to maintain state consistency
+	if block <= blocks[pairID] {
+		return // Ignore older blocks to preserve latest state
+	}
+	blocks[pairID] = block // Update block tracking for this pair
+
+	// Address buffer preparation using SIMD-style operations
+	addrWords := (*[5]uint64)(unsafe.Pointer(&addressBuf[2]))
+	addrWords[0] = utils.Load64(line[0:8])   // Characters 0-7
+	addrWords[1] = utils.Load64(line[8:16])  // Characters 8-15
+	addrWords[2] = utils.Load64(line[16:24]) // Characters 16-23
+	addrWords[3] = utils.Load64(line[24:32]) // Characters 24-31
+	addrWords[4] = utils.Load64(line[32:40]) // Characters 32-39
+
+	// Reserve data buffer initialization with pattern fills
+	r0 := (*[4]uint64)(unsafe.Pointer(&dataBuf[34])) // Reserve0 data region
+	r1 := (*[4]uint64)(unsafe.Pointer(&dataBuf[98])) // Reserve1 data region
+	for i := 0; i < 4; i++ {
+		r0[i] = 0x3030303030303030 // Eight ASCII '0' characters per 64-bit word
+		r1[i] = 0x3030303030303030 // Ensures consistent zero-padding format
+	}
+
+	// Reserve value extraction from CSV fields
+	res0 := line[c2+1 : c3] // Reserve0 field from CSV
+	res1 := line[c3+1:]     // Reserve1 field from CSV (to end of line)
+
+	// Right-aligned hex placement for standardized formatting
+	copy(dataBuf[66-len(res0):66], res0)   // Right-align reserve0 in its 32-char field
+	copy(dataBuf[130-len(res1):130], res1) // Right-align reserve1 in its 32-char field
+
+	// Router dispatch and progress tracking
+	router.DispatchPriceUpdate(v) // Trigger price recalculation and arbitrage detection
+	*processed++                  // Increment processed event counter for progress reporting
+}
+
+// flushHarvestedReservesToRouterFromFile performs backwards streaming CSV ingestion for router state initialization.
+// Processes historical reserve data in reverse chronological order to ensure latest state consistency.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func flushHarvestedReservesToRouterFromFile(filePath string) error {
+	// Database capacity planning and resource allocation
+	db, err := sql.Open("sqlite3", "uniswap_pairs.db")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Retrieve exact pair count for buffer sizing and processing termination
+	var totalPairs int
+	if err := db.QueryRow("SELECT COUNT(*) FROM pools").Scan(&totalPairs); err != nil {
+		return err
+	}
+	if totalPairs == 0 {
+		return fmt.Errorf("no pairs found in database")
+	}
+
+	// File system initialization and metadata extraction
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// Extract file size for backwards reading position calculations
+	stat, err := file.Stat()
+	if err != nil {
+		return err
+	}
+
+	// LogView structure initialization for router communication
+	var logView types.LogView
+
+	// Address buffer preparation with Ethereum formatting
+	addressBuffer := make([]byte, 42)
+	addressBuffer[0], addressBuffer[1] = '0', 'x' // Ethereum address prefix
+
+	// Sync event data buffer allocation with Uniswap V2 format
+	dataBuffer := make([]byte, 130)
+	dataBuffer[0], dataBuffer[1] = '0', 'x' // Event data prefix
+
+	// Reserve data pre-initialization using 64-bit pattern fills
+	zeros1 := (*[4]uint64)(unsafe.Pointer(&dataBuffer[34])) // Reserve0 data region
+	zeros2 := (*[4]uint64)(unsafe.Pointer(&dataBuffer[98])) // Reserve1 data region
+	for i := 0; i < 4; i++ {
+		zeros1[i] = 0x3030303030303030 // Eight ASCII '0' characters per 64-bit word
+		zeros2[i] = 0x3030303030303030 // Ensures consistent zero-padding format
+	}
+
+	// LogView buffer binding for zero-copy router communication
+	logView.Addr = addressBuffer // Bind address buffer for contract identification
+	logView.Data = dataBuffer    // Bind data buffer for reserve value transmission
+
+	// Deduplication infrastructure with block height tracking
+	blockHeights := make([]uint64, totalPairs+1) // Array index corresponds to pair ID
+	processedEvents := 0                         // Progress counter for logging and debugging
+
+	// Backwards file reading infrastructure with zero-allocation management
+	const bufferSize = 8192                     // Primary read buffer size for I/O optimization
+	readBuffer := make([]byte, bufferSize)      // Primary file reading buffer
+	workingBuffer := make([]byte, bufferSize*2) // Pre-allocated for chunk combination
+	lineBuffer := make([]byte, bufferSize)      // Pre-allocated for partial line storage
+	lineBufferUsed := 0                         // Track occupied bytes in line buffer
+	currentPosition := stat.Size()              // Start from end of file for reverse traversal
+
+	// Backwards streaming loop with chunk-based processing
+	for currentPosition > 0 {
+		// Calculate optimal read size for current chunk
+		readSize := bufferSize
+		if currentPosition < bufferSize {
+			readSize = int(currentPosition) // Handle final chunk at beginning of file
+		}
+		currentPosition -= int64(readSize) // Update position for next iteration
+
+		// Perform positioned file read for current chunk
+		_, err := file.ReadAt(readBuffer[:readSize], currentPosition)
+		if err != nil {
+			return err
+		}
+
+		// Chunk combination with leftover line data
+		var processingData []byte
+		if lineBufferUsed > 0 {
+			// Combine buffers: current chunk + leftover from previous iteration
+			copy(workingBuffer, readBuffer[:readSize])                  // Copy current chunk
+			copy(workingBuffer[readSize:], lineBuffer[:lineBufferUsed]) // Append leftover data
+			processingData = workingBuffer[:readSize+lineBufferUsed]    // Create combined slice
+			lineBufferUsed = 0                                          // Reset line buffer for next iteration
+		} else {
+			// Direct processing: no leftover data from previous iteration
+			processingData = readBuffer[:readSize] // Process current chunk directly
+		}
+
+		// Backwards line extraction with newline boundary detection
+		endPosition := len(processingData) // Start scanning from end of data
+		for scanIndex := len(processingData) - 1; scanIndex >= 0; scanIndex-- {
+			if processingData[scanIndex] == '\n' {
+				// Found newline: extract complete line for processing
+				if scanIndex+1 < endPosition {
+					lineData := processingData[scanIndex+1 : endPosition] // Extract line content
+					if len(lineData) > 0 {
+						// Process complete line with router integration
+						fileOffset := currentPosition + int64(scanIndex+1)
+						processLine(lineData, &processedEvents, fileOffset, blockHeights, addressBuffer, dataBuffer, &logView)
+					}
+				}
+				endPosition = scanIndex // Update end position for next line extraction
+			}
+		}
+
+		// Partial line preservation for next iteration
+		if endPosition > 0 {
+			copy(lineBuffer, processingData[:endPosition]) // Preserve partial line
+			lineBufferUsed = endPosition                   // Track preserved data length
+		}
+	}
+
+	// Final line processing for file beginning
+	if lineBufferUsed > 0 {
+		// Process final line with zero file offset (beginning of file)
+		processLine(lineBuffer[:lineBufferUsed], &processedEvents, 0, blockHeights, addressBuffer, dataBuffer, &logView)
+	}
+
+	// Completion reporting and resource cleanup
+	debug.DropMessage("HARVEST", utils.Itoa(processedEvents)+" reserve states loaded into router")
+	return nil
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // PUBLIC API OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// ExecuteHarvesting starts the harvesting process with default connection settings.
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func ExecuteHarvesting() error {
-	return ExecuteHarvestingWithConnections(constants.DefaultConnections)
-}
-
-// ExecuteHarvestingWithConnections starts the harvesting process with specified connection count.
-// Updates metadata file upon successful completion.
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func ExecuteHarvestingWithConnections(connectionCount int) error {
-	harvester := newSynchronizationHarvester(connectionCount, constants.HarvesterOutputPath)
-	defer harvester.cleanup()
-
-	err := harvester.executeHarvesting()
-	if err == nil {
-		// Save metadata only after successful harvesting
-		saveMetadata(harvester.syncTarget)
-	}
-	return err
-}
-
-// ExecuteHarvestingToTemp starts the harvesting process with specified connection count and writes to temp file.
-// Does NOT update metadata file to maintain isolation from main harvesting operations.
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func ExecuteHarvestingToTemp(connectionCount int) error {
-	harvester := newSynchronizationHarvester(connectionCount, constants.HarvesterTempPath)
-	defer harvester.cleanup()
-
-	// Execute harvesting without updating metadata (temp mode isolation)
-	return harvester.executeHarvesting()
-}
 
 // CheckHarvestingRequirement determines if harvesting is needed by comparing block heights.
 // Provides a quick check to avoid unnecessary harvesting operations.
@@ -942,27 +1121,53 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 	return false, 0, 0, fmt.Errorf("invalid response format")
 }
 
+// ExecuteHarvesting starts the harvesting process with default connection settings.
+// Uses standard configuration for routine synchronization operations.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func ExecuteHarvesting() error {
+	return ExecuteHarvestingWithConnections(constants.DefaultConnections)
+}
+
+// ExecuteHarvestingWithConnections starts the harvesting process with specified connection count.
+// Updates metadata file upon successful completion.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func ExecuteHarvestingWithConnections(connectionCount int) error {
+	harvester := newSynchronizationHarvester(connectionCount, constants.HarvesterOutputPath)
+	defer harvester.cleanup()
+
+	err := harvester.executeHarvesting()
+	if err == nil {
+		// Save metadata only after successful harvesting
+		saveMetadata(harvester.syncTarget)
+	}
+	return err
+}
+
+// ExecuteHarvestingToTemp starts the harvesting process with specified connection count and writes to temp file.
+// Does not update metadata file to maintain isolation from main harvesting operations.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func ExecuteHarvestingToTemp(connectionCount int) error {
+	harvester := newSynchronizationHarvester(connectionCount, constants.HarvesterTempPath)
+	defer harvester.cleanup()
+
+	// Execute harvesting without updating metadata (temp mode isolation)
+	return harvester.executeHarvesting()
+}
+
 // FlushHarvestedReservesToRouter performs backwards streaming CSV ingestion for router state initialization.
 // Processes historical reserve data in reverse chronological order to ensure latest state consistency.
-//
-// Architecture Overview:
-//   - Backwards file streaming with zero-allocation buffer management
-//   - Deduplication using per-pair block height tracking
-//   - Zero-copy CSV parsing with SIMD-style address operations
-//   - Direct router dispatch for immediate arbitrage engine activation
-//
-// Performance Characteristics:
-//   - Memory-mapped file access patterns for optimal I/O throughput
-//   - Pre-allocated buffers eliminate garbage collection pressure
-//   - Cache-optimized data structures minimize memory bandwidth usage
-//   - Lock-free processing ensures linear scalability
-//
-// Data Flow Pipeline:
-//  1. Database pair enumeration for capacity planning
-//  2. Backwards file streaming with chunk-based processing
-//  3. Line-by-line CSV parsing with field extraction
-//  4. Freshness validation using block height comparison
-//  5. Router state dispatch for arbitrage engine integration
 //
 //go:norace
 //go:nocheckptr
@@ -973,6 +1178,7 @@ func FlushHarvestedReservesToRouter() error {
 }
 
 // FlushHarvestedReservesToRouterFromTemp performs the same operation but reads from the temp file.
+// Allows testing and validation without affecting production router state.
 //
 //go:norace
 //go:nocheckptr
@@ -980,272 +1186,4 @@ func FlushHarvestedReservesToRouter() error {
 //go:registerparams
 func FlushHarvestedReservesToRouterFromTemp() error {
 	return flushHarvestedReservesToRouterFromFile(constants.HarvesterTempPath)
-}
-
-// flushHarvestedReservesToRouterFromFile performs backwards streaming CSV ingestion for router state initialization.
-// This is the internal implementation that can read from any specified file path.
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func flushHarvestedReservesToRouterFromFile(filePath string) error {
-	// Phase 1: Database capacity planning and resource allocation
-	// Query total pair count for precise memory allocation and termination logic
-	// This prevents over-allocation and provides exact loop bounds for processing
-	db, err := sql.Open("sqlite3", "uniswap_pairs.db")
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	// Retrieve exact pair count for buffer sizing and processing termination
-	var totalPairs int
-	if err := db.QueryRow("SELECT COUNT(*) FROM pools").Scan(&totalPairs); err != nil {
-		return err
-	}
-	if totalPairs == 0 {
-		return fmt.Errorf("no pairs found in database")
-	}
-
-	// Phase 2: File system initialization and metadata extraction
-	// Open CSV file for backwards streaming with optimal read access patterns
-	file, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	// Extract file size for backwards reading position calculations
-	// Required for reverse traversal algorithms and chunk boundary management
-	stat, err := file.Stat()
-	if err != nil {
-		return err
-	}
-
-	// Phase 3: LogView structure initialization for router communication
-	// Single reusable LogView eliminates allocation overhead during processing
-	// Pre-configured with fixed-size buffers for predictable memory usage
-	var logView types.LogView
-
-	// Phase 4: Address buffer preparation with Ethereum formatting
-	// Pre-allocated buffer: "0x" prefix + 40 hex characters = 42 bytes total
-	// Layout: [0x][40 hex chars] for standard Ethereum address representation
-	addressBuffer := make([]byte, 42)
-	addressBuffer[0], addressBuffer[1] = '0', 'x' // Ethereum address prefix
-
-	// Phase 5: Sync event data buffer allocation with Uniswap V2 format
-	// Pre-allocated buffer: "0x" prefix + 128 hex characters = 130 bytes total
-	// Layout: [0x][32 bytes reserve0][32 bytes reserve1][64 bytes padding] in hex
-	dataBuffer := make([]byte, 130)
-	dataBuffer[0], dataBuffer[1] = '0', 'x' // Event data prefix
-
-	// Phase 6: Reserve data pre-initialization using 64-bit pattern fills
-	// Pre-zero reserve sections with ASCII '0' characters for consistent formatting
-	// Reserve0: positions 34-65 (32 bytes), Reserve1: positions 98-129 (32 bytes)
-	// Using unsafe pointer casting for efficient 64-bit word operations
-	zeros1 := (*[4]uint64)(unsafe.Pointer(&dataBuffer[34])) // Reserve0 data region
-	zeros2 := (*[4]uint64)(unsafe.Pointer(&dataBuffer[98])) // Reserve1 data region
-	for i := 0; i < 4; i++ {
-		zeros1[i] = 0x3030303030303030 // Eight ASCII '0' characters per 64-bit word
-		zeros2[i] = 0x3030303030303030 // Ensures consistent zero-padding format
-	}
-
-	// Phase 7: LogView buffer binding for zero-copy router communication
-	// Connect pre-allocated buffers to LogView structure for efficient dispatch
-	logView.Addr = addressBuffer // Bind address buffer for contract identification
-	logView.Data = dataBuffer    // Bind data buffer for reserve value transmission
-
-	// Phase 8: Deduplication infrastructure with block height tracking
-	// Track latest processed block per pair to prevent stale data ingestion
-	// Array index corresponds to pair ID for O(1) lookup performance
-	blockHeights := make([]uint64, totalPairs+1) // +1 for pair ID indexing safety
-	processedEvents := 0                         // Progress counter for logging and debugging
-
-	// Phase 9: Backwards file reading infrastructure with zero-allocation management
-	// Constants for buffer management and chunk processing optimization
-	const bufferSize = 8192                     // Primary read buffer size for I/O optimization
-	readBuffer := make([]byte, bufferSize)      // Primary file reading buffer
-	workingBuffer := make([]byte, bufferSize*2) // Pre-allocated for chunk combination
-	lineBuffer := make([]byte, bufferSize)      // Pre-allocated for partial line storage
-	lineBufferUsed := 0                         // Track occupied bytes in line buffer
-	currentPosition := stat.Size()              // Start from end of file for reverse traversal
-
-	// Phase 10: Backwards streaming loop with chunk-based processing
-	// Process file in reverse order to ensure chronological consistency
-	// Latest data overwrites older data during deduplication process
-	for currentPosition > 0 {
-		// Calculate optimal read size for current chunk
-		// Ensures we don't read beyond file boundaries or buffer limits
-		readSize := bufferSize
-		if currentPosition < bufferSize {
-			readSize = int(currentPosition) // Handle final chunk at beginning of file
-		}
-		currentPosition -= int64(readSize) // Update position for next iteration
-
-		// Perform positioned file read for current chunk
-		// ReadAt provides thread-safe positioned access without seek operations
-		_, err := file.ReadAt(readBuffer[:readSize], currentPosition)
-		if err != nil {
-			return err
-		}
-
-		// Phase 11: Chunk combination with leftover line data
-		// Combine current chunk with any partial line from previous iteration
-		// Eliminates line boundary artifacts during backwards processing
-		var processingData []byte
-		if lineBufferUsed > 0 {
-			// Combine buffers: [current chunk][leftover from previous iteration]
-			copy(workingBuffer, readBuffer[:readSize])                  // Copy current chunk
-			copy(workingBuffer[readSize:], lineBuffer[:lineBufferUsed]) // Append leftover data
-			processingData = workingBuffer[:readSize+lineBufferUsed]    // Create combined slice
-			lineBufferUsed = 0                                          // Reset line buffer for next iteration
-		} else {
-			// Direct processing: no leftover data from previous iteration
-			processingData = readBuffer[:readSize] // Process current chunk directly
-		}
-
-		// Phase 12: Backwards line extraction with newline boundary detection
-		// Scan chunk in reverse to identify complete lines for processing
-		// Handles partial lines at chunk boundaries gracefully
-		endPosition := len(processingData) // Start scanning from end of data
-		for scanIndex := len(processingData) - 1; scanIndex >= 0; scanIndex-- {
-			if processingData[scanIndex] == '\n' {
-				// Found newline: extract complete line for processing
-				if scanIndex+1 < endPosition {
-					lineData := processingData[scanIndex+1 : endPosition] // Extract line content
-					if len(lineData) > 0 {
-						// Process complete line with router integration
-						// Calculate file offset for error reporting and debugging
-						fileOffset := currentPosition + int64(scanIndex+1)
-						processLine(lineData, &processedEvents, fileOffset, blockHeights, addressBuffer, dataBuffer, &logView)
-					}
-				}
-				endPosition = scanIndex // Update end position for next line extraction
-			}
-		}
-
-		// Phase 13: Partial line preservation for next iteration
-		// Save incomplete line at chunk beginning for combination with next chunk
-		// Ensures no data loss at chunk boundaries during backwards processing
-		if endPosition > 0 {
-			copy(lineBuffer, processingData[:endPosition]) // Preserve partial line
-			lineBufferUsed = endPosition                   // Track preserved data length
-		}
-	}
-
-	// Phase 14: Final line processing for file beginning
-	// Process any remaining data that wasn't terminated by newline
-	// Handles edge case where file doesn't end with newline character
-	if lineBufferUsed > 0 {
-		// Process final line with zero file offset (beginning of file)
-		processLine(lineBuffer[:lineBufferUsed], &processedEvents, 0, blockHeights, addressBuffer, dataBuffer, &logView)
-	}
-
-	// Phase 15: Completion reporting and resource cleanup
-	// Log final statistics for monitoring and performance analysis
-	debug.DropMessage("HARVEST", utils.Itoa(processedEvents)+" reserve states loaded into router")
-	return nil
-}
-
-// processLine parses a single CSV line and updates the router with optimized zero-copy operations.
-// Parameters are ordered by usage frequency for optimal register allocation and cache efficiency.
-//
-// Processing pipeline:
-//  1. Parse CSV delimiters from raw line data
-//  2. Validate line format and skip header rows
-//  3. Check pair existence and block freshness
-//  4. Prepare address and reserve data buffers
-//  5. Dispatch price update to routing engine
-//
-// Memory layout optimizations:
-//   - Zero-copy CSV parsing using direct slicing
-//   - SIMD-style 64-bit address copying operations
-//   - Right-aligned hex reserve placement for consistent formatting
-//   - Pre-zeroed reserve buffers using pattern fills
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func processLine(line []byte, processed *int, offset int64, blocks []uint64, addressBuf, dataBuf []byte, v *types.LogView) {
-	// Phase 1: CSV delimiter discovery using linear scan
-	// Identifies comma positions for field extraction without string allocation
-	c1, c2, c3 := -1, -1, -1
-	for i, b := range line {
-		if b == ',' {
-			if c1 == -1 {
-				c1 = i // First comma: separates address from block
-			} else if c2 == -1 {
-				c2 = i // Second comma: separates block from reserve0
-			} else if c3 == -1 {
-				c3 = i // Third comma: separates reserve0 from reserve1
-				break  // Early termination after finding all required delimiters
-			}
-		}
-	}
-
-	// Phase 2: Header detection and validation
-	// CSV header line has comma at position 7 ("address,block,reserve0,reserve1")
-	if c1 == 7 {
-		return // Skip header row to avoid processing metadata as data
-	}
-
-	// Validate CSV structure integrity with detailed error reporting
-	if c1 == -1 || c2 == -1 || c3 == -1 {
-		panic(fmt.Sprintf("malformed CSV line at offset %d (after %d events): expected 3 commas, found: comma1=%d, comma2=%d, comma3=%d, line: %q", offset, *processed, c1, c2, c3, string(line)))
-	}
-
-	// Phase 3: Pair existence verification using zero-copy address lookup
-	// Direct slice prevents unnecessary memory allocation during router query
-	pairID := router.LookupPairByAddress(line[0:c1])
-	if pairID == 0 {
-		return // Skip unknown pairs to avoid processing irrelevant data
-	}
-
-	// Phase 4: Block freshness validation for deduplication
-	// Parse hex block number from CSV field for timestamp comparison
-	block := utils.ParseHexU64(line[c1+1 : c2])
-
-	// Skip stale or duplicate block data to maintain state consistency
-	if block <= blocks[pairID] {
-		return // Ignore older blocks to preserve latest state
-	}
-	blocks[pairID] = block // Update block tracking for this pair
-
-	// Phase 5: Address buffer preparation using SIMD-style operations
-	// Copy 40-character hex address into pre-allocated buffer with "0x" prefix
-	// Uses 64-bit word copying for maximum memory throughput
-	addrWords := (*[5]uint64)(unsafe.Pointer(&addressBuf[2]))
-	addrWords[0] = utils.Load64(line[0:8])   // Characters 0-7
-	addrWords[1] = utils.Load64(line[8:16])  // Characters 8-15
-	addrWords[2] = utils.Load64(line[16:24]) // Characters 16-23
-	addrWords[3] = utils.Load64(line[24:32]) // Characters 24-31
-	addrWords[4] = utils.Load64(line[32:40]) // Characters 32-39
-
-	// Phase 6: Reserve data buffer initialization with pattern fills
-	// Clear reserve sections using 64-bit ASCII zero patterns for consistent formatting
-	// Reserve0: positions 34-65 (32 bytes), Reserve1: positions 98-129 (32 bytes)
-	r0 := (*[4]uint64)(unsafe.Pointer(&dataBuf[34])) // Reserve0 data region
-	r1 := (*[4]uint64)(unsafe.Pointer(&dataBuf[98])) // Reserve1 data region
-	for i := 0; i < 4; i++ {
-		r0[i] = 0x3030303030303030 // Eight ASCII '0' characters per 64-bit word
-		r1[i] = 0x3030303030303030 // Ensures consistent zero-padding format
-	}
-
-	// Phase 7: Reserve value extraction from CSV fields
-	// Direct slicing avoids string allocation during field parsing
-	res0 := line[c2+1 : c3] // Reserve0 field from CSV
-	res1 := line[c3+1:]     // Reserve1 field from CSV (to end of line)
-
-	// Phase 8: Right-aligned hex placement for standardized formatting
-	// Places reserve values at correct positions within 128-character hex string
-	// Reserve0: positions 34-65, Reserve1: positions 98-129
-	copy(dataBuf[66-len(res0):66], res0)   // Right-align reserve0 in its 32-char field
-	copy(dataBuf[130-len(res1):130], res1) // Right-align reserve1 in its 32-char field
-
-	// Phase 9: Router dispatch and progress tracking
-	// Send prepared LogView to routing engine for price update processing
-	router.DispatchPriceUpdate(v) // Trigger price recalculation and arbitrage detection
-	*processed++                  // Increment processed event counter for progress reporting
 }
