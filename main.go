@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // Arbitrage Detection System - Main Entry Point
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// 🇯🇵 MADE IN JAPAN. INSPIRED BY JAPANESE ENGINEERING. FROM NIIKAPPU HIDAKA HOKKAIDO 🇯🇵
+// 🇯🇵 MADE IN JAPAN. INSPIRED BY JAPANESE ENGINEERING. FROM NIIKAPPU HIDAKA HOKKAIDO. 🇯🇵
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 // Project: Arbitrage Detection System
 // Component: Main Entry Point & System Orchestration
