@@ -567,25 +567,6 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 	}
 }
 
-// processArbitrageUpdateLoop implements the tight hot-spinning loop for arbitrage detection.
-// This function continuously processes price updates from the ring buffer without any blocking.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func processArbitrageUpdateLoop(engine *ArbitrageEngine, ring *ring24.Ring) {
-	for {
-		// Attempt to pop a message from the ring buffer
-		if p := ring.Pop(); p != nil {
-			// Convert the raw message bytes to a price update and process it
-			processArbitrageUpdate(engine, (*PriceUpdateMessage)(unsafe.Pointer(p)))
-		}
-		// No pause or yield - this is a hot spinning loop
-	}
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // ADDRESS PROCESSING INFRASTRUCTURE
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1124,8 +1105,32 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	// Wait for GC to complete before starting hot spin
 	<-gcComplete
 
-	// Start the hot-spinning processing loop directly
-	processArbitrageUpdateLoop(engine, coreRings[coreID])
+	ring := coreRings[coreID]
+
+	for {
+		// Check if GC is complete - exit immediately if channel is closed
+		select {
+		case <-gcComplete:
+			return
+		default:
+		}
+
+		// Process messages if available
+		if p := ring.Pop(); p != nil {
+			processArbitrageUpdate(engine, (*PriceUpdateMessage)(unsafe.Pointer(p)))
+		}
+
+		// Yield to scheduler every cycle
+		runtime.Gosched()
+	}
+
+	for {
+		// Process messages without any yielding or blocking
+		if p := ring.Pop(); p != nil {
+			processArbitrageUpdate(engine, (*PriceUpdateMessage)(unsafe.Pointer(p)))
+		}
+		// Pure hot spin - no pause or yield
+	}
 }
 
 // InitializeArbitrageSystem orchestrates complete system bootstrap and activation.
