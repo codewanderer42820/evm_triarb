@@ -155,9 +155,8 @@ type ArbitrageEngine struct {
 	// CACHE LINE 5+: Extraction buffer (1024B = 16 cache lines)
 	extractedCycles [32]ExtractedCycle // 1024B - Warm: only used for profitable cycles
 
-	// COLD: Initialization and shutdown only
-	nextHandle      pooledquantumqueue.Handle // 8B - Cold: only during queue setup
-	shutdownChannel <-chan struct{}           // 8B - Cold: only for shutdown coordination
+	// COLD: Initialization only
+	nextHandle pooledquantumqueue.Handle // 8B - Cold: only during queue setup
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -565,14 +564,13 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 //go:norace
 //go:nocheckptr
 //go:nosplit
-//go:inline
 //go:registerparams
 func processArbitrageUpdateLoop(engine *ArbitrageEngine, ring *ring24.Ring) {
 	for {
 		// Attempt to pop a message from the ring buffer
-		if messagePtr := ring.Pop(); messagePtr != nil {
-			// Convert the message bytes to a PriceUpdateMessage and process it
-			processArbitrageUpdate(engine, (*PriceUpdateMessage)(unsafe.Pointer(messagePtr)))
+		if p := ring.Pop(); p != nil {
+			// Convert the raw message bytes to a price update and process it
+			processArbitrageUpdate(engine, (*PriceUpdateMessage)(unsafe.Pointer(p)))
 		}
 		// No pause or yield - this is a hot spinning loop
 	}
@@ -1070,14 +1068,8 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 //go:inline
 //go:registerparams
 func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairWorkloadShard, initWaitGroup *sync.WaitGroup) {
-	// Ensure we signal completion regardless of initialization outcome
-	defer initWaitGroup.Done()
-
 	// Lock this goroutine to the current OS thread for consistent NUMA locality
 	runtime.LockOSThread()
-
-	// Create a channel for coordinating graceful shutdown of this worker
-	shutdownChannel := make(chan struct{})
 
 	// Collect all workload shards assigned to this core before allocating any memory
 	// This zero-fragmentation approach ensures we know exact requirements upfront
@@ -1101,7 +1093,6 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 		// sharedArena: will be set in initializeArbitrageQueues
 		// extractedCycles: zero value is fine
 		// nextHandle: zero value is fine
-		shutdownChannel: shutdownChannel,
 	}
 
 	// Register this engine in the global core array for message routing
@@ -1117,11 +1108,11 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	// Log successful core initialization with concise format
 	debug.DropMessage("CORE", "Core "+utils.Itoa(coreID)+" ready")
 
+	// Signal that this core's initialization is complete
+	initWaitGroup.Done()
+
 	// Start the hot-spinning processing loop directly
 	processArbitrageUpdateLoop(engine, coreRings[coreID])
-
-	// Signal shutdown completion (will never be reached in pure hot spin)
-	close(shutdownChannel)
 }
 
 // InitializeArbitrageSystem orchestrates complete system bootstrap and activation.
