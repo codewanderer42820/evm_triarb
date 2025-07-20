@@ -151,7 +151,7 @@ var (
 // METADATA MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// loadMetadata reads the last processed block height from binary metadata file.
+// LoadMetadata reads the last processed block height from binary metadata file.
 // Returns deployment block if metadata file is missing or corrupted.
 //
 //go:norace
@@ -159,7 +159,7 @@ var (
 //go:nosplit
 //go:inline
 //go:registerparams
-func loadMetadata() uint64 {
+func LoadMetadata() uint64 {
 	var buf [8]byte
 	file, err := os.Open(constants.HarvesterMetadataPath)
 	if err != nil {
@@ -322,7 +322,7 @@ func parseReservesToZeroTrimmed(eventData string) (string, string) {
 //go:registerparams
 func newSynchronizationHarvester(connectionCount int, outputPath string) *SynchronizationHarvester {
 	ctx, cancel := context.WithCancel(context.Background())
-	lastProcessed := loadMetadata()
+	lastProcessed := LoadMetadata()
 
 	harvester := &SynchronizationHarvester{
 		// Cache Line 1: Hottest fields accessed during every operation
@@ -1131,8 +1131,51 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 
 	if len(blockResponse.Result) > 2 {
 		currentHeight := utils.ParseHexU64([]byte(blockResponse.Result[2:]))
-		lastProcessed := loadMetadata()
+		lastProcessed := LoadMetadata()
 		return lastProcessed < currentHeight, lastProcessed, currentHeight, nil
+	}
+
+	return false, 0, 0, fmt.Errorf("invalid response format")
+}
+
+// CheckHarvestingRequirementFromBlock determines if harvesting is needed using provided last block.
+// Allows temp harvesting to track its own progress independently.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func CheckHarvestingRequirementFromBlock(lastProcessedBlock uint64) (bool, uint64, uint64, error) {
+	client := &http.Client{Timeout: 10 * time.Second, Transport: buildHTTPTransport()}
+	rpcEndpoint := "https://" + constants.HarvesterHost + constants.HarvesterPath
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", rpcEndpoint, strings.NewReader(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`))
+	if err != nil {
+		return false, 0, 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	response, err := client.Do(req)
+	if err != nil {
+		return false, 0, 0, err
+	}
+	defer response.Body.Close()
+
+	var buf [128]byte
+	n, _ := response.Body.Read(buf[:])
+
+	var blockResponse EthereumBlockResponse
+	if err := sonnet.Unmarshal(buf[:n], &blockResponse); err != nil {
+		return false, 0, 0, err
+	}
+
+	if len(blockResponse.Result) > 2 {
+		currentHeight := utils.ParseHexU64([]byte(blockResponse.Result[2:]))
+		return lastProcessedBlock < currentHeight, lastProcessedBlock, currentHeight, nil
 	}
 
 	return false, 0, 0, fmt.Errorf("invalid response format")
@@ -1169,19 +1212,23 @@ func ExecuteHarvestingWithConnections(connectionCount int) error {
 	return err
 }
 
-// ExecuteHarvestingToTemp starts the harvesting process with specified connection count and writes to temp file.
-// Does not update metadata file to maintain isolation from main harvesting operations.
+// ExecuteHarvestingToTemp performs temp harvesting and returns the last processed block.
+// Does not update metadata file to maintain isolation.
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
-func ExecuteHarvestingToTemp(connectionCount int) error {
+func ExecuteHarvestingToTemp(connectionCount int) (uint64, error) {
 	harvester := newSynchronizationHarvester(connectionCount, constants.HarvesterTempPath)
 	defer harvester.cleanup()
 
-	// Execute harvesting without updating metadata (temp mode isolation)
-	return harvester.executeHarvesting()
+	err := harvester.executeHarvesting()
+	if err != nil {
+		return 0, err
+	}
+
+	return harvester.syncTarget, nil
 }
 
 // FlushHarvestedReservesToRouter performs backwards streaming CSV ingestion for router state initialization.
