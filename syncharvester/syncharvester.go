@@ -157,7 +157,6 @@ var (
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func buildHTTPTransport() *http.Transport {
@@ -191,7 +190,6 @@ func buildHTTPTransport() *http.Transport {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func loadMetadata() uint64 {
@@ -213,7 +211,6 @@ func loadMetadata() uint64 {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func saveMetadata(block uint64) error {
@@ -241,7 +238,6 @@ func saveMetadata(block uint64) error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func newSynchronizationHarvester(connectionCount int, outputPath string) *SynchronizationHarvester {
@@ -321,7 +317,6 @@ func newSynchronizationHarvester(connectionCount int, outputPath string) *Synchr
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) reportStatistics() {
@@ -358,7 +353,6 @@ func (harvester *SynchronizationHarvester) reportStatistics() {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
@@ -499,7 +493,6 @@ func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock ui
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) parseLogsWithSonnet(jsonData []byte, connectionID int) (int, error) {
@@ -553,7 +546,6 @@ func (harvester *SynchronizationHarvester) parseLogsWithSonnet(jsonData []byte, 
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func countHexLeadingZeros(hexSegment []byte) int {
@@ -589,7 +581,6 @@ func countHexLeadingZeros(hexSegment []byte) int {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func parseReservesToZeroTrimmed(eventData string) (string, string) {
@@ -627,7 +618,6 @@ func parseReservesToZeroTrimmed(eventData string) (string, string) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) writeCSVRecord(address string, blockHeight string,
@@ -665,7 +655,6 @@ func (harvester *SynchronizationHarvester) writeCSVRecord(address string, blockH
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) flushCSVBuffer(connectionID int) {
@@ -684,7 +673,6 @@ func (harvester *SynchronizationHarvester) flushCSVBuffer(connectionID int) {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) flushAllBuffers() {
@@ -699,7 +687,6 @@ func (harvester *SynchronizationHarvester) flushAllBuffers() {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) processLogFromGlobalBuffer(logEntry *ProcessedReserveEntry, connectionID int) {
@@ -718,10 +705,10 @@ func (harvester *SynchronizationHarvester) processLogFromGlobalBuffer(logEntry *
 
 // executeHarvesting orchestrates the complete harvesting process with intelligent work distribution.
 // Implements dynamic sector allocation and parallel processing for maximum throughput.
+// NOTE: Metadata saving is now the responsibility of the caller.
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) executeHarvesting() error {
@@ -732,7 +719,7 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 		return nil
 	}
 
-	saveMetadata(harvester.syncTarget)
+	// Metadata saving removed - caller's responsibility now
 
 	totalBlocks := harvester.syncTarget - harvester.lastProcessed
 	connectionCount := len(harvester.httpClients)
@@ -857,7 +844,6 @@ func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) cleanup() {
@@ -876,7 +862,6 @@ func (harvester *SynchronizationHarvester) cleanup() {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func ExecuteHarvesting() error {
@@ -884,30 +869,36 @@ func ExecuteHarvesting() error {
 }
 
 // ExecuteHarvestingWithConnections starts the harvesting process with specified connection count.
+// Updates metadata file upon successful completion.
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func ExecuteHarvestingWithConnections(connectionCount int) error {
 	harvester := newSynchronizationHarvester(connectionCount, constants.HarvesterOutputPath)
 	defer harvester.cleanup()
 
-	return harvester.executeHarvesting()
+	err := harvester.executeHarvesting()
+	if err == nil {
+		// Save metadata only after successful harvesting
+		saveMetadata(harvester.syncTarget)
+	}
+	return err
 }
 
 // ExecuteHarvestingToTemp starts the harvesting process with specified connection count and writes to temp file.
+// Does NOT update metadata file to maintain isolation from main harvesting operations.
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func ExecuteHarvestingToTemp(connectionCount int) error {
 	harvester := newSynchronizationHarvester(connectionCount, constants.HarvesterTempPath)
 	defer harvester.cleanup()
 
+	// Execute harvesting without updating metadata (temp mode isolation)
 	return harvester.executeHarvesting()
 }
 
@@ -916,7 +907,6 @@ func ExecuteHarvestingToTemp(connectionCount int) error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
