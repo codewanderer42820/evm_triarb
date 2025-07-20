@@ -1107,11 +1107,12 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 
 	ring := coreRings[coreID]
 
+gcLoop:
 	for {
 		// Check if GC is complete - exit immediately if channel is closed
 		select {
 		case <-gcComplete:
-			return
+			break gcLoop
 		default:
 		}
 
