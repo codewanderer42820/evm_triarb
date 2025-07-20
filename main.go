@@ -272,7 +272,6 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func processEventStream() error {
@@ -334,7 +333,6 @@ func processEventStream() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func main() {
