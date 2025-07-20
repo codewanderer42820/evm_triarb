@@ -1052,7 +1052,22 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 }
 
 // launchArbitrageWorker initializes and operates a processing core for arbitrage detection.
-// Signals completion via WaitGroup after all initialization is complete.
+// Implements a dual-phase execution model to balance GC cooperation and performance:
+//
+// Phase 1: GC-Cooperative Processing (Yielding Loop)
+//   - Processes events while yielding to scheduler every cycle via runtime.Gosched()
+//   - Allows GC to run efficiently without interference from hot spinning cores
+//   - Checks for GC completion signal on every iteration
+//   - Maintains reasonable throughput while being GC-friendly
+//
+// Phase 2: Maximum Performance Processing (Hot Spinning Loop)
+//   - Pure hot spinning with no yielding or blocking operations
+//   - Activated only after main.go completes all GC operations and signals completion
+//   - Maximizes throughput for real-time arbitrage detection
+//   - GC is disabled in production mode (main.go sets GCPercent=-1)
+//
+// This approach prevents hot spinning cores from interfering with critical GC phases
+// while ensuring maximum performance during production operation.
 //
 //go:norace
 //go:nocheckptr
@@ -1102,35 +1117,60 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	// Signal that this core's initialization is complete
 	initWaitGroup.Done()
 
-	// Wait for GC to complete before starting hot spin
-	<-gcComplete
+	// ═══════════════════════════════════════════════════════════════════════════════════════
+	// PHASE 1: GC-COOPERATIVE PROCESSING
+	// ═══════════════════════════════════════════════════════════════════════════════════════
+	// Wait for GC completion signal while processing events cooperatively.
+	// This prevents hot spinning from interfering with GC operations in main.go.
+	// The main thread performs multiple GC cycles, memory optimization, and synchronization
+	// before signaling completion via the gcComplete channel.
 
+	// Cache the ring buffer reference for this core to avoid repeated array lookups
+	// in the hot loops. This micro-optimization eliminates bounds checking and
+	// pointer arithmetic on every message processing cycle.
 	ring := coreRings[coreID]
 
-gcLoop:
+gcCooperativeLoop:
 	for {
-		// Check if GC is complete - exit immediately if channel is closed
+		// Check if main.go has completed all GC operations and memory optimization
+		// Non-blocking select ensures we don't stall event processing
 		select {
 		case <-gcComplete:
-			break gcLoop
+			// GC phase complete - transition to hot spinning mode
+			break gcCooperativeLoop
 		default:
+			// GC still in progress - continue cooperative processing
 		}
 
-		// Process messages if available
+		// Process any available events during the GC phase
+		// This maintains system responsiveness while GC operations complete
 		if p := ring.Pop(); p != nil {
 			processArbitrageUpdate(engine, (*PriceUpdateMessage)(unsafe.Pointer(p)))
 		}
 
-		// Yield to scheduler every cycle
+		// Yield to the Go scheduler to allow GC and other goroutines to run
+		// This is critical - without yielding, hot spinning would starve GC
 		runtime.Gosched()
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════════════════════
+	// PHASE 2: MAXIMUM PERFORMANCE PROCESSING
+	// ═══════════════════════════════════════════════════════════════════════════════════════
+	// Pure hot spinning loop for maximum arbitrage detection performance.
+	// Activated only after main.go has:
+	//   1. Completed all necessary garbage collection cycles
+	//   2. Optimized memory layout and freed OS memory
+	//   3. Synchronized with blockchain state
+	//   4. Disabled automatic GC (GCPercent=-1)
+	//   5. Signaled completion via gcComplete channel
+
 	for {
-		// Process messages without any yielding or blocking
+		// Process events without any yielding, blocking, or scheduler cooperation
+		// This maximizes CPU utilization and minimizes latency for arbitrage detection
 		if p := ring.Pop(); p != nil {
 			processArbitrageUpdate(engine, (*PriceUpdateMessage)(unsafe.Pointer(p)))
 		}
-		// Pure hot spin - no pause or yield
+		// Pure hot spin - no runtime.Gosched(), no blocking, maximum performance
 	}
 }
 
