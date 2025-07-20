@@ -398,7 +398,7 @@ func main() {
 			syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirementFromBlock(latestTempSyncedBlock)
 			if err != nil {
 				debug.DropMessage("SYNC", "Temp requirement check failed: "+err.Error())
-				break // Don't block WebSocket connection establishment
+				continue // RETRY - this is just RPC/network flakiness
 			}
 			if !syncNeeded {
 				break // Already caught up - proceed to WebSocket
@@ -407,11 +407,11 @@ func main() {
 			blocksBehind := targetBlock - lastBlock
 			debug.DropMessage("SYNC", "Temp sync: "+utils.Itoa(int(blocksBehind))+" blocks behind")
 
-			// Execute temporary harvesting with progress return for state tracking
+			// Execute temporary harvesting starting from our known good position
 			newLastProcessed, err := syncharvester.ExecuteHarvestingToTemp(constants.DefaultConnections)
 			if err != nil {
 				debug.DropMessage("SYNC", "Temp harvesting failed: "+err.Error())
-				break // Don't retry indefinitely - establish WebSocket and try again later
+				continue // RETRY from the same position
 			}
 
 			// Update stack variable with successfully processed block height
@@ -419,9 +419,13 @@ func main() {
 		}
 
 		// Load any newly harvested reserve data from temporary storage into router
-		if err := syncharvester.FlushHarvestedReservesToRouterFromTemp(); err != nil {
+		for {
+			err := syncharvester.FlushHarvestedReservesToRouterFromTemp()
+			if err == nil {
+				break // Success - proceed to WebSocket
+			}
 			debug.DropMessage("SYNC", "Temporary reserve data flush failed: "+err.Error())
-			// Continue anyway - don't panic in production loop
+			// RETRY - this is critical for arbitrage engine accuracy
 		}
 
 		// Establish TLS connection over the optimized TCP socket
