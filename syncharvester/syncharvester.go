@@ -107,10 +107,9 @@ type SynchronizationHarvester struct {
 	batchSizes  []uint64   // Dynamic batch sizes per connection (24B) - moved here for hot access
 
 	// Cache Line 2: Hot fields accessed frequently during processing
-	csvBufferSizes       []int   // Current buffer sizes for CSV data (24B)
-	consecutiveSuccesses []int   // Success counters for batch size adaptation (24B)
-	outputPath           string  // Output file path for this harvester instance (16B) - ADDED
-	_                    [8]byte // Padding to complete cache line alignment
+	csvBufferSizes       []int  // Current buffer sizes for CSV data (24B)
+	consecutiveSuccesses []int  // Success counters for batch size adaptation (24B)
+	outputPath           string // Output file path for this harvester instance (16B) - ADDED
 
 	// Cache Line 3: Warm fields accessed during batch completion
 	currentBlocks []uint64       // Current block heights per connection
