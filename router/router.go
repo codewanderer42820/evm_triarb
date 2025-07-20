@@ -564,6 +564,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 //go:norace
 //go:nocheckptr
 //go:nosplit
+//go:inline
 //go:registerparams
 func processArbitrageUpdateLoop(engine *ArbitrageEngine, ring *ring24.Ring) {
 	for {
