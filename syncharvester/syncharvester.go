@@ -254,7 +254,7 @@ func newSynchronizationHarvester(connectionCount int, outputPath string) *Synchr
 		// Cache Line 2: Hot fields accessed frequently during processing
 		csvBufferSizes:       make([]int, connectionCount),
 		consecutiveSuccesses: make([]int, connectionCount),
-		outputPath:           outputPath, // Store the output path
+		outputPath:           outputPath,
 
 		// Cache Line 3: Warm fields accessed during batch completion
 		currentBlocks: make([]uint64, connectionCount),
@@ -704,7 +704,7 @@ func (harvester *SynchronizationHarvester) processLogFromGlobalBuffer(logEntry *
 
 // executeHarvesting orchestrates the complete harvesting process with intelligent work distribution.
 // Implements dynamic sector allocation and parallel processing for maximum throughput.
-// NOTE: Metadata saving is now the responsibility of the caller.
+// NOTE: Metadata saving is the responsibility of the caller.
 //
 //go:norace
 //go:nocheckptr
@@ -717,8 +717,6 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 		debug.DropMessage("HARVEST", "Already synced to latest block")
 		return nil
 	}
-
-	// Metadata saving removed - caller's responsibility now
 
 	totalBlocks := harvester.syncTarget - harvester.lastProcessed
 	connectionCount := len(harvester.httpClients)
