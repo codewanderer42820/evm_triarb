@@ -26,7 +26,6 @@ import (
 	"unsafe"
 
 	"main/constants"
-	"main/control"
 	"main/debug"
 	"main/fastuni"
 	"main/localidx"
@@ -557,6 +556,25 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 			// Update the cycle's position in its priority queue to reflect new profitability
 			engine.priorityQueues[fanoutEntry.queueIndex].MoveTick(fanoutEntry.queueHandle, newPriority)
 		}
+	}
+}
+
+// processArbitrageUpdateLoop implements the tight hot-spinning loop for arbitrage detection.
+// This function continuously processes price updates from the ring buffer without any blocking.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func processArbitrageUpdateLoop(engine *ArbitrageEngine, ring *ring24.Ring) {
+	for {
+		// Attempt to pop a message from the ring buffer
+		if messagePtr := ring.Pop(); messagePtr != nil {
+			// Convert the message bytes to a PriceUpdateMessage and process it
+			processArbitrageUpdate(engine, (*PriceUpdateMessage)(unsafe.Pointer(messagePtr)))
+		}
+		// No pause or yield - this is a hot spinning loop
 	}
 }
 
@@ -1096,19 +1114,14 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	// Release the workload shards immediately after initialization
 	allShards = nil
 
-	// Integrate with the control system for monitoring and shutdown coordination
-	stopFlag, hotFlag := control.Flags()
-
 	// Log successful core initialization with concise format
 	debug.DropMessage("CORE", "Core "+utils.Itoa(coreID)+" ready")
 
-	// Start the main processing loop - this is the core's primary work function
-	// PinnedConsumer runs a tight loop consuming messages from the ring buffer
-	ring24.PinnedConsumer(coreID, coreRings[coreID], stopFlag, hotFlag,
-		func(messagePtr *[24]byte) {
-			// Convert the raw message bytes to a price update and process it
-			processArbitrageUpdate(engine, (*PriceUpdateMessage)(unsafe.Pointer(messagePtr)))
-		}, shutdownChannel)
+	// Start the hot-spinning processing loop directly
+	processArbitrageUpdateLoop(engine, coreRings[coreID])
+
+	// Signal shutdown completion (will never be reached in pure hot spin)
+	close(shutdownChannel)
 }
 
 // InitializeArbitrageSystem orchestrates complete system bootstrap and activation.
