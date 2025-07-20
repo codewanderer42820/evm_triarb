@@ -176,12 +176,40 @@ func main() {
 		}
 	}
 
-	// Load reserve data into router
+	// Load reserve data into router from main CSV file
 	if err := syncharvester.FlushHarvestedReservesToRouter(); err != nil {
 		debug.DropMessage("ERROR", "Reserve flush failed: "+err.Error())
 	}
 
-	// PHASE 3: Production mode
+	// PHASE 4: Final quick sync to temporary file
+	debug.DropMessage("SYNC", "Final quick sync to temp file")
+	for {
+		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
+		if err != nil {
+			debug.DropMessage("ERROR", "Temp sync check failed: "+err.Error())
+			break
+		}
+		if !syncNeeded {
+			debug.DropMessage("SYNC", "Temp sync verification complete")
+			break
+		}
+
+		blocksBehind := targetBlock - lastBlock
+		debug.DropMessage("SYNC", "Temp sync processing "+utils.Itoa(int(blocksBehind))+" blocks")
+
+		err = syncharvester.ExecuteHarvestingToTemp(constants.DefaultConnections)
+		if err != nil {
+			debug.DropMessage("ERROR", "Temp harvest failed: "+err.Error())
+			break
+		}
+	}
+
+	// Load any new reserve data from temp file into router
+	if err := syncharvester.FlushHarvestedReservesToRouterFromTemp(); err != nil {
+		debug.DropMessage("ERROR", "Temp reserve flush failed: "+err.Error())
+	}
+
+	// PHASE 5: Production mode
 	debug.DropMessage("PROD", "Entering production mode")
 
 	// Main event processing loop

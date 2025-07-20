@@ -107,9 +107,10 @@ type SynchronizationHarvester struct {
 	batchSizes  []uint64   // Dynamic batch sizes per connection (24B) - moved here for hot access
 
 	// Cache Line 2: Hot fields accessed frequently during processing
-	csvBufferSizes       []int    // Current buffer sizes for CSV data (24B)
-	consecutiveSuccesses []int    // Success counters for batch size adaptation (24B)
-	_                    [16]byte // Padding to complete cache line alignment
+	csvBufferSizes       []int   // Current buffer sizes for CSV data (24B)
+	consecutiveSuccesses []int   // Success counters for batch size adaptation (24B)
+	outputPath           string  // Output file path for this harvester instance (16B) - ADDED
+	_                    [8]byte // Padding to complete cache line alignment
 
 	// Cache Line 3: Warm fields accessed during batch completion
 	currentBlocks []uint64       // Current block heights per connection
@@ -243,7 +244,7 @@ func saveMetadata(block uint64) error {
 //go:nosplit
 //go:inline
 //go:registerparams
-func newSynchronizationHarvester(connectionCount int) *SynchronizationHarvester {
+func newSynchronizationHarvester(connectionCount int, outputPath string) *SynchronizationHarvester {
 	ctx, cancel := context.WithCancel(context.Background())
 	lastProcessed := loadMetadata()
 
@@ -258,6 +259,7 @@ func newSynchronizationHarvester(connectionCount int) *SynchronizationHarvester 
 		// Cache Line 2: Hot fields accessed frequently during processing
 		csvBufferSizes:       make([]int, connectionCount),
 		consecutiveSuccesses: make([]int, connectionCount),
+		outputPath:           outputPath, // Store the output path
 
 		// Cache Line 3: Warm fields accessed during batch completion
 		currentBlocks: make([]uint64, connectionCount),
@@ -300,7 +302,7 @@ func newSynchronizationHarvester(connectionCount int) *SynchronizationHarvester 
 		fileMode |= os.O_APPEND // Resume existing file
 	}
 
-	harvester.outputFile, err = os.OpenFile(constants.HarvesterOutputPath, fileMode, 0644)
+	harvester.outputFile, err = os.OpenFile(outputPath, fileMode, 0644)
 	if err != nil {
 		panic(err)
 	}
@@ -889,7 +891,21 @@ func ExecuteHarvesting() error {
 //go:inline
 //go:registerparams
 func ExecuteHarvestingWithConnections(connectionCount int) error {
-	harvester := newSynchronizationHarvester(connectionCount)
+	harvester := newSynchronizationHarvester(connectionCount, constants.HarvesterOutputPath)
+	defer harvester.cleanup()
+
+	return harvester.executeHarvesting()
+}
+
+// ExecuteHarvestingToTemp starts the harvesting process with specified connection count and writes to temp file.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func ExecuteHarvestingToTemp(connectionCount int) error {
+	harvester := newSynchronizationHarvester(connectionCount, constants.HarvesterTempPath)
 	defer harvester.cleanup()
 
 	return harvester.executeHarvesting()
@@ -966,6 +982,27 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 //go:inline
 //go:registerparams
 func FlushHarvestedReservesToRouter() error {
+	return flushHarvestedReservesToRouterFromFile(constants.HarvesterOutputPath)
+}
+
+// FlushHarvestedReservesToRouterFromTemp performs the same operation but reads from the temp file.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func FlushHarvestedReservesToRouterFromTemp() error {
+	return flushHarvestedReservesToRouterFromFile(constants.HarvesterTempPath)
+}
+
+// flushHarvestedReservesToRouterFromFile performs backwards streaming CSV ingestion for router state initialization.
+// This is the internal implementation that can read from any specified file path.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func flushHarvestedReservesToRouterFromFile(filePath string) error {
 	// Phase 1: Database capacity planning and resource allocation
 	// Query total pair count for precise memory allocation and termination logic
 	// This prevents over-allocation and provides exact loop bounds for processing
@@ -986,7 +1023,7 @@ func FlushHarvestedReservesToRouter() error {
 
 	// Phase 2: File system initialization and metadata extraction
 	// Open CSV file for backwards streaming with optimal read access patterns
-	file, err := os.Open(constants.HarvesterOutputPath)
+	file, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
