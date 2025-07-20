@@ -424,7 +424,7 @@ func main() {
 
 	// PHASE 3: Final incremental synchronization using temporary storage with isolated progress tracking
 	// Initialize temporary progress tracking from current persistent metadata position
-	tempLastProcessed := loadMetadata()
+	tempLastProcessed := syncharvester.LoadMetadata()
 
 	// Temporary synchronization loop with independent block progression tracking
 	for {
