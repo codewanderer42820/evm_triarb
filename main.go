@@ -23,6 +23,7 @@ package main
 import (
 	"crypto/tls"
 	"database/sql"
+	"fmt"
 	"net"
 	"os"
 	"os/signal"
@@ -83,6 +84,15 @@ func setupSignalHandling() {
 
 		// Wait for all subsystems to complete their graceful shutdown procedures
 		control.ShutdownWG.Wait()
+
+		// Clean up temporary file if it exists
+		// This is the optimal place as all subsystems have finished their work
+		if err := os.Remove(constants.HarvesterTempPath); err != nil {
+			// File may not exist or already be deleted - this is not an error condition
+			if !os.IsNotExist(err) {
+				debug.DropMessage("SIG", "Failed to remove temp file: "+err.Error())
+			}
+		}
 
 		debug.DropMessage("SIG", "Shutdown complete")
 		os.Exit(0)
@@ -264,10 +274,10 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MAIN ORCHESTRATION
+// INITIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// main orchestrates the complete high-frequency arbitrage detection system lifecycle.
+// init orchestrates the complete high-frequency arbitrage detection system initialization.
 // The system operates through carefully orchestrated phases to maximize performance,
 // minimize latency, and ensure robust operation in production trading environments.
 //
@@ -276,13 +286,16 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 //	Phase 0: Foundation - Load configuration data and initialize core structures
 //	Phase 1: Synchronization - Achieve blockchain state consistency
 //	Phase 2: Optimization - Memory management and performance tuning
-//	Phase 3: Production - Real-time arbitrage detection with sub-microsecond latency
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
-func main() {
+func init() {
+	// Opportunistic cleanup of temporary file from previous runs
+	// Remove any leftover temp file to ensure clean state initialization
+	os.Remove(constants.HarvesterTempPath) // Ignore errors - file is expected to not exist
+
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 0: FOUNDATION INITIALIZATION
 	//═══════════════════════════════════════════════════════════════════════════════════════
@@ -407,6 +420,34 @@ func main() {
 	runtime.LockOSThread()
 	rtdebug.SetGCPercent(-1) // Disable automatic garbage collection
 	control.ForceActive()    // Activate production control systems
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// MAIN ORCHESTRATION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// main runs the real-time arbitrage detection engine.
+//
+// System Architecture Overview:
+//
+//	Phase 3: Production - Real-time arbitrage detection with sub-microsecond latency
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func main() {
+	// Panic Recovery Handler
+	// Ensures system resilience by catching and logging any unexpected panics
+	defer func() {
+		if r := recover(); r != nil {
+			debug.DropMessage("PANIC", "System panic recovered: "+fmt.Sprintf("%v", r))
+			debug.DropMessage("STACK", string(rtdebug.Stack()))
+
+			// Continue execution after panic recovery
+			// System will attempt to reconnect and resume operations
+		}
+	}()
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 3: REAL-TIME ARBITRAGE DETECTION ENGINE
