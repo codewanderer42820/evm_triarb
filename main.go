@@ -422,25 +422,33 @@ func main() {
 	rtdebug.SetGCPercent(-1)
 	control.ForceActive()
 
-	// PHASE 3: Final incremental synchronization using temporary storage
+	// PHASE 3: Final incremental synchronization using temporary storage with isolated progress tracking
+	// Initialize temporary progress tracking from current persistent metadata position
+	tempLastProcessed := loadMetadata()
+
+	// Temporary synchronization loop with independent block progression tracking
 	for {
-		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
+		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirementFromBlock(tempLastProcessed)
 		if err != nil {
 			debug.DropMessage("SYNC", "Temp requirement check failed: "+err.Error())
 			continue
 		}
 		if !syncNeeded {
-			break
+			break // Temporary synchronization complete - proceed to event processing
 		}
 
 		blocksBehind := targetBlock - lastBlock
 		debug.DropMessage("SYNC", "Temp sync: "+utils.Itoa(int(blocksBehind))+" blocks behind")
 
-		err = syncharvester.ExecuteHarvestingToTemp(constants.DefaultConnections)
+		// Execute temporary harvesting with progress return for state tracking
+		newLastProcessed, err := syncharvester.ExecuteHarvestingToTemp(constants.DefaultConnections)
 		if err != nil {
 			debug.DropMessage("SYNC", "Temp harvesting failed: "+err.Error())
 			continue
 		}
+
+		// Update temporary progress tracking with successfully processed block height
+		tempLastProcessed = newLastProcessed
 	}
 
 	// Load any newly harvested reserve data from temporary storage into router
