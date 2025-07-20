@@ -264,67 +264,6 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// NETWORK OPERATIONS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// processEventStream establishes an optimized WebSocket connection and processes events until connection failure.
-// Implements comprehensive connection-level optimizations and handles low-level network protocol details.
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func processEventStream() error {
-	// Establish raw TCP connection with target endpoint
-	raw, _ := net.Dial("tcp", constants.WsDialAddr)
-	tcpConn := raw.(*net.TCPConn)
-
-	// Configure TCP-level optimizations for low-latency operation
-	tcpConn.SetNoDelay(true)                       // Disable Nagle's algorithm for immediate packet transmission
-	tcpConn.SetReadBuffer(constants.MaxFrameSize)  // Optimize kernel read buffer size
-	tcpConn.SetWriteBuffer(constants.MaxFrameSize) // Optimize kernel write buffer size
-
-	// Apply advanced socket optimizations using direct syscalls
-	rawFile, _ := tcpConn.File()
-	fd := int(rawFile.Fd())
-
-	// Standard TCP socket optimizations
-	syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
-	syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, constants.MaxFrameSize)
-	syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, constants.MaxFrameSize)
-
-	// Platform-specific network stack optimizations
-	switch runtime.GOOS {
-	case "linux":
-		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 46, 1)         // SO_REUSEPORT for load balancing
-		syscall.SetsockoptString(fd, syscall.IPPROTO_TCP, 13, "bbr") // BBR congestion control algorithm
-	case "darwin":
-		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 0x1006, 1) // SO_REUSEPORT for macOS
-	}
-	rawFile.Close() // Close file descriptor wrapper to prevent resource leak
-
-	// Establish TLS connection over the optimized TCP socket
-	conn := tls.Client(raw, &tls.Config{ServerName: constants.WsHost})
-
-	// Perform WebSocket handshake and establish event subscription
-	ws.Handshake(conn)
-	ws.SendSubscription(conn)
-
-	// Main event processing loop - runs until connection failure
-	for {
-		// Wait for complete WebSocket message frame with proper framing
-		payload, err := ws.SpinUntilCompleteMessage(conn)
-		if err != nil {
-			conn.Close()
-			return err // Return error to trigger connection retry logic
-		}
-
-		// Dispatch message payload to parser subsystem for event processing
-		parser.HandleFrame(payload)
-	}
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
 // MAIN ORCHESTRATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -422,42 +361,87 @@ func main() {
 	rtdebug.SetGCPercent(-1)
 	control.ForceActive()
 
-	// PHASE 3: Final incremental synchronization using temporary storage with isolated progress tracking
-	// Initialize temporary progress tracking from current persistent metadata position
-	tempLastProcessed := syncharvester.LoadMetadata()
+	// PHASE 3: Production mode - Continuous real-time event processing with integrated temp sync
+	latestTempSyncedBlock := syncharvester.LoadMetadata()
 
-	// Temporary synchronization loop with independent block progression tracking
 	for {
-		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirementFromBlock(tempLastProcessed)
-		if err != nil {
-			debug.DropMessage("SYNC", "Temp requirement check failed: "+err.Error())
-			continue
+		// Establish raw TCP connection with target endpoint
+		raw, _ := net.Dial("tcp", constants.WsDialAddr)
+		tcpConn := raw.(*net.TCPConn)
+
+		// Configure TCP-level optimizations for low-latency operation
+		tcpConn.SetNoDelay(true)                       // Disable Nagle's algorithm for immediate packet transmission
+		tcpConn.SetReadBuffer(constants.MaxFrameSize)  // Optimize kernel read buffer size
+		tcpConn.SetWriteBuffer(constants.MaxFrameSize) // Optimize kernel write buffer size
+
+		// Apply advanced socket optimizations using direct syscalls
+		rawFile, _ := tcpConn.File()
+		fd := int(rawFile.Fd())
+
+		// Standard TCP socket optimizations
+		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
+		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, constants.MaxFrameSize)
+		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, constants.MaxFrameSize)
+
+		// Platform-specific network stack optimizations
+		switch runtime.GOOS {
+		case "linux":
+			syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 46, 1)         // SO_REUSEPORT for load balancing
+			syscall.SetsockoptString(fd, syscall.IPPROTO_TCP, 13, "bbr") // BBR congestion control algorithm
+		case "darwin":
+			syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 0x1006, 1) // SO_REUSEPORT for macOS
 		}
-		if !syncNeeded {
-			break // Temporary synchronization complete - proceed to event processing
+		rawFile.Close() // Close file descriptor wrapper to prevent resource leak
+
+		// Opportunistic temp sync using optimized TCP connection before WebSocket handshake
+		for {
+			syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirementFromBlock(latestTempSyncedBlock)
+			if err != nil {
+				debug.DropMessage("SYNC", "Temp requirement check failed: "+err.Error())
+				break // Don't block WebSocket connection establishment
+			}
+			if !syncNeeded {
+				break // Already caught up - proceed to WebSocket
+			}
+
+			blocksBehind := targetBlock - lastBlock
+			debug.DropMessage("SYNC", "Temp sync: "+utils.Itoa(int(blocksBehind))+" blocks behind")
+
+			// Execute temporary harvesting with progress return for state tracking
+			newLastProcessed, err := syncharvester.ExecuteHarvestingToTemp(constants.DefaultConnections)
+			if err != nil {
+				debug.DropMessage("SYNC", "Temp harvesting failed: "+err.Error())
+				break // Don't retry indefinitely - establish WebSocket and try again later
+			}
+
+			// Update stack variable with successfully processed block height
+			latestTempSyncedBlock = newLastProcessed
 		}
 
-		blocksBehind := targetBlock - lastBlock
-		debug.DropMessage("SYNC", "Temp sync: "+utils.Itoa(int(blocksBehind))+" blocks behind")
-
-		// Execute temporary harvesting with progress return for state tracking
-		newLastProcessed, err := syncharvester.ExecuteHarvestingToTemp(constants.DefaultConnections)
-		if err != nil {
-			debug.DropMessage("SYNC", "Temp harvesting failed: "+err.Error())
-			continue
+		// Load any newly harvested reserve data from temporary storage into router
+		if err := syncharvester.FlushHarvestedReservesToRouterFromTemp(); err != nil {
+			debug.DropMessage("SYNC", "Temporary reserve data flush failed: "+err.Error())
+			// Continue anyway - don't panic in production loop
 		}
 
-		// Update temporary progress tracking with successfully processed block height
-		tempLastProcessed = newLastProcessed
-	}
+		// Establish TLS connection over the optimized TCP socket
+		conn := tls.Client(raw, &tls.Config{ServerName: constants.WsHost})
 
-	// Load any newly harvested reserve data from temporary storage into router
-	if err := syncharvester.FlushHarvestedReservesToRouterFromTemp(); err != nil {
-		panic("Critical system failure: Temporary reserve data flush failed - " + err.Error())
-	}
+		// Perform WebSocket handshake and establish event subscription
+		ws.Handshake(conn)
+		ws.SendSubscription(conn)
 
-	// PHASE 4: Production mode - Continuous real-time event processing
-	for {
-		processEventStream()
+		// Main event processing loop - runs until connection failure
+		for {
+			// Wait for complete WebSocket message frame with proper framing
+			payload, err := ws.SpinUntilCompleteMessage(conn)
+			if err != nil {
+				conn.Close()
+				break // Break inner loop to trigger reconnection with temp sync
+			}
+
+			// Dispatch message payload to parser subsystem for event processing
+			parser.HandleFrame(payload)
+		}
 	}
 }
