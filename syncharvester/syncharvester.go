@@ -510,7 +510,6 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock uint64, connectionID int) (int, error) {
@@ -825,7 +824,6 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint64, connectionID int) {
@@ -962,7 +960,6 @@ func processLine(line []byte, processed *int, offset int64, blocks []uint64, add
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func flushHarvestedReservesToRouterFromFile(filePath string) error {
@@ -1158,7 +1155,6 @@ func ExecuteHarvesting() error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func ExecuteHarvestingWithConnections(connectionCount int) error {
@@ -1178,7 +1174,6 @@ func ExecuteHarvestingWithConnections(connectionCount int) error {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func ExecuteHarvestingToTemp(connectionCount int) error {
