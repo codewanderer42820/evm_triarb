@@ -48,6 +48,9 @@ import (
 
 // Pool represents a trading pair with its database identifier and contract address.
 // Optimized for cache efficiency with 32-byte alignment for improved memory access patterns.
+//
+//go:notinheap
+//go:align 32
 type Pool struct {
 	ID      int64   // Database identifier for the trading pair
 	Address string  // Ethereum contract address (hex format)
@@ -60,6 +63,12 @@ type Pool struct {
 
 // setupSignalHandling configures graceful shutdown coordination for SIGINT and SIGTERM signals.
 // Utilizes the control package's ShutdownWG for proper subsystem shutdown coordination.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func setupSignalHandling() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -86,6 +95,12 @@ func setupSignalHandling() {
 
 // openDatabase establishes a SQLite database connection for pool data initialization.
 // The connection is designed to be closed immediately after loading, as syncharvester manages its own connection pool.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func openDatabase(dbPath string) *sql.DB {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
@@ -96,6 +111,12 @@ func openDatabase(dbPath string) *sql.DB {
 
 // loadPoolsFromDatabase retrieves all trading pairs from the database with precise memory allocation.
 // Uses a COUNT query to determine exact capacity requirements before data loading for optimal memory usage.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func loadPoolsFromDatabase(db *sql.DB) []Pool {
 	// Determine exact number of pools for precise memory allocation
 	var poolCount int
@@ -150,6 +171,12 @@ func loadPoolsFromDatabase(db *sql.DB) []Pool {
 
 // loadArbitrageCyclesFromFile parses triangular arbitrage cycles from a structured text file.
 // Processes lines in format "(12345) → (67890) → (11111)" with exact memory allocation and zero-copy parsing.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 	data, err := os.ReadFile(filename)
 	if err != nil {
@@ -242,6 +269,12 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 
 // processEventStream establishes an optimized WebSocket connection and processes events until connection failure.
 // Implements comprehensive connection-level optimizations and handles low-level network protocol details.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func processEventStream() error {
 	// Establish raw TCP connection with target endpoint
 	raw, _ := net.Dial("tcp", constants.WsDialAddr)
@@ -298,6 +331,12 @@ func processEventStream() error {
 
 // main orchestrates the complete system lifecycle through distinct operational phases.
 // Each phase has specific responsibilities and memory/performance optimization characteristics.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
 func main() {
 	// PHASE 0: System initialization and foundational data loading
 	debug.DropMessage("INIT", "System startup")
