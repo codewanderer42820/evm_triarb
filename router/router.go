@@ -333,7 +333,8 @@ func DispatchPriceUpdate(logView *types.LogView) {
 	// Construct the price update message to send to processing cores
 	var message PriceUpdateMessage
 	if err != nil {
-		// If reserve calculation fails (e.g., due to zero reserves), generate a safe fallback
+		// This branch should rarely execute due to branchless zero-handling above
+		// If reserve calculation fails, generate a safe fallback
 		// We use deterministic pseudo-randomness to prevent systematic biases in the system
 		addrHash := utils.Mix64(uint64(pairID))           // Create hash from pair ID
 		randBits := addrHash & 0x1FFF                     // Extract 13 bits (0-8191 range)
