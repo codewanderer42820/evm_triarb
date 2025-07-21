@@ -316,16 +316,16 @@ func DispatchPriceUpdate(logView *types.LogView) {
 
 	// Force minimum value of 1 to avoid log(0) errors using branchless logic
 	// This creates a mask that's all 1s if reserve is 0, all 0s otherwise
-	mask0 := ^(reserve0 | -reserve0) >> 63 // 1 if reserve0 == 0, else 0
-	mask1 := ^(reserve1 | -reserve1) >> 63 // 1 if reserve1 == 0, else 0
-	reserve0 |= mask0                      // OR with 1 if zero, OR with 0 if non-zero
-	reserve1 |= mask1                      // OR with 1 if zero, OR with 0 if non-zero
 	// This approach preserves true price magnitude relationships:
 	// - Empty pools (0:0) become (1:1) = 1:1 ratio = neutral tick
 	// - Near-empty pools (0:1000000) become (1:1000000) = extreme tick
 	// - Normal pools unchanged
 	// The tick values remain economically meaningful rather than being
 	// artificially deprioritized through error handling
+	mask0 := ^(reserve0 | -reserve0) >> 63 // 1 if reserve0 == 0, else 0
+	mask1 := ^(reserve1 | -reserve1) >> 63 // 1 if reserve1 == 0, else 0
+	reserve0 |= mask0                      // OR with 1 if zero, OR with 0 if non-zero
+	reserve1 |= mask1                      // OR with 1 if zero, OR with 0 if non-zero
 
 	// Calculate the logarithmic price ratio between the two token reserves
 	tickValue, err := fastuni.Log2ReserveRatio(reserve0, reserve1)
