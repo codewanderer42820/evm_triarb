@@ -314,6 +314,13 @@ func DispatchPriceUpdate(logView *types.LogView) {
 	reserve0 := utils.ParseHexU64(logView.Data[offsetA : offsetA+remaining])
 	reserve1 := utils.ParseHexU64(logView.Data[offsetB : offsetB+remaining])
 
+	// Force minimum value of 1 to avoid log(0) errors using branchless logic
+	// This creates a mask that's all 1s if reserve is 0, all 0s otherwise
+	mask0 := ^(reserve0 | -reserve0) >> 63 // 1 if reserve0 == 0, else 0
+	mask1 := ^(reserve1 | -reserve1) >> 63 // 1 if reserve1 == 0, else 0
+	reserve0 |= mask0                      // OR with 1 if zero, OR with 0 if non-zero
+	reserve1 |= mask1                      // OR with 1 if zero, OR with 0 if non-zero
+
 	// Calculate the logarithmic price ratio between the two token reserves
 	tickValue, err := fastuni.Log2ReserveRatio(reserve0, reserve1)
 
