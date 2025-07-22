@@ -314,21 +314,12 @@ func DispatchPriceUpdate(logView *types.LogView) {
 	reserve0 := utils.ParseHexU64(logView.Data[offsetA : offsetA+remaining])
 	reserve1 := utils.ParseHexU64(logView.Data[offsetB : offsetB+remaining])
 
-	// Original sophisticated approach (preserved for reference):
-	// mask0 := ^(reserve0 | -reserve0) >> 63 // 1 if reserve0 == 0, else 0
-	// mask1 := ^(reserve1 | -reserve1) >> 63 // 1 if reserve1 == 0, else 0
-	// reserve0 |= mask0                      // OR with 1 if zero, OR with 0 if non-zero
-	// reserve1 |= mask1                      // OR with 1 if zero, OR with 0 if non-zero
-
 	// Force LSB to 1 - elegantly prevents log(0) with minimal precision impact
-	// This approach:
-	// - Guarantees non-zero values for log calculation
-	// - Preserves economic relationships (1M becomes 1M|1, negligible 0.0001% error)
-	// - Single-instruction performance vs complex masking
-	// - Empty pools (0:0) become (1:1) = balanced
-	// - Near-empty (0:large) become (1:large) = extreme tick preserved
+	// Empty pools (0:0) become (1:1) representing balanced state
+	// Near-empty pools (0:large) become (1:large) preserving extreme price ratios
+	// The maximum error of 1 unit in millions is economically negligible
 	reserve0 |= 1 // Ensure non-zero by setting lowest bit
-	reserve1 |= 1 // Maximum 1-unit error in potentially millions
+	reserve1 |= 1 // Single-instruction performance vs complex masking
 
 	// Calculate the logarithmic price ratio between the two token reserves
 	tickValue, err := fastuni.Log2ReserveRatio(reserve0, reserve1)
@@ -336,9 +327,8 @@ func DispatchPriceUpdate(logView *types.LogView) {
 	// Construct the price update message to send to processing cores
 	var message PriceUpdateMessage
 	if err != nil {
-		// This branch should rarely execute due to branchless zero-handling above
-		// If reserve calculation fails, generate a safe fallback
-		// We use deterministic pseudo-randomness to prevent systematic biases in the system
+		// Fallback path for unexpected calculation failures
+		// Generate deterministic pseudo-random tick to prevent systematic biases
 		addrHash := utils.Mix64(uint64(pairID))           // Create hash from pair ID
 		randBits := addrHash & 0x1FFF                     // Extract 13 bits (0-8191 range)
 		placeholder := 50.2 + float64(randBits)*0.0015625 // Scale to reasonable tick range
