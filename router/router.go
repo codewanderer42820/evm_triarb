@@ -13,6 +13,7 @@
 //   - Address resolution using Robin Hood hashing
 //   - SIMD-optimized hex parsing operations
 //   - Linear core scaling architecture
+//   - Bit shift optimizations for all hot paths
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -1097,7 +1098,7 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	// This prevents any memory fragmentation during the operational phase
 	engine := &ArbitrageEngine{
 		pairToQueueLookup:  localidx.New(constants.DefaultLocalIdxSize),
-		pairToFanoutIndex:  localidx.New(constants.DefaultLocalIdxSize * 2), // Larger for all pairs
+		pairToFanoutIndex:  localidx.New(constants.DefaultLocalIdxSize << 1), // Use shift for doubling
 		isReverseDirection: coreID >= forwardCoreCount,
 		// Skip padding fields in initialization
 		// priorityQueues: will be set in initializeArbitrageQueues
@@ -1123,14 +1124,6 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 
 	// Signal that this core's initialization is complete
 	initWaitGroup.Done()
-
-	// ═══════════════════════════════════════════════════════════════════════════════════════
-	// PHASE 1: GC-COOPERATIVE PROCESSING
-	// ═══════════════════════════════════════════════════════════════════════════════════════
-	// Wait for GC completion signal while processing events cooperatively.
-	// This prevents hot spinning from interfering with GC operations in main.go.
-	// The main thread performs multiple GC cycles, memory optimization, and synchronization
-	// before signaling completion via the gcComplete channel.
 
 	// Cache the ring buffer reference for this core to avoid repeated array lookups
 	// in the hot loops. This micro-optimization eliminates bounds checking and
@@ -1159,17 +1152,6 @@ gcCooperativeLoop:
 		// This is critical - without yielding, hot spinning would starve GC
 		runtime.Gosched()
 	}
-
-	// ═══════════════════════════════════════════════════════════════════════════════════════
-	// PHASE 2: MAXIMUM PERFORMANCE PROCESSING
-	// ═══════════════════════════════════════════════════════════════════════════════════════
-	// Pure hot spinning loop for maximum arbitrage detection performance.
-	// Activated only after main.go has:
-	//   1. Completed all necessary garbage collection cycles
-	//   2. Optimized memory layout and freed OS memory
-	//   3. Synchronized with blockchain state
-	//   4. Disabled automatic GC (GCPercent=-1)
-	//   5. Signaled completion via gcComplete channel
 
 	for {
 		// Process events without any yielding, blocking, or scheduler cooperation
@@ -1200,14 +1182,14 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 	// Build the infrastructure for distributing workload across cores
 	buildWorkloadShards(arbitrageTriangles)
 
-	// COMPLETE TRAVERSAL: Count exact total shards for perfect channel sizing
+	// Count exact total shards for perfect channel sizing
 	totalShards := 0
 	for _, shardBuckets := range pairWorkloadShards {
 		totalShards += len(shardBuckets)
 	}
 
 	// Each shard goes to both forward and reverse cores, so multiply by 2
-	totalShardDeliveries := totalShards * 2
+	totalShardDeliveries := totalShards << 1
 	maxShardsPerCore := (totalShardDeliveries + coreCount - 1) / coreCount // Ceiling division
 
 	// Create synchronization mechanism for core initialization
