@@ -59,6 +59,17 @@ type Pool struct {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
+// GLOBAL RESOURCE TRACKING
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Global variables for resource cleanup and synchronization tracking
+var (
+	rawConn               net.Conn
+	tlsConn               net.Conn
+	latestTempSyncedBlock uint64
+)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
 // SYSTEM LIFECYCLE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -399,11 +410,29 @@ func init() {
 //go:inline
 //go:registerparams
 func main() {
-	// Panic recovery for system resilience
+	// Panic recovery for system resilience with resource cleanup
 	defer func() {
 		if r := recover(); r != nil {
 			debug.DropMessage("PANIC", "System panic recovered: "+fmt.Sprintf("%v", r))
 			debug.DropMessage("STACK", string(rtdebug.Stack()))
+
+			// Close TLS connection
+			if tlsConn != nil {
+				tlsConn.Close()
+				tlsConn = nil
+			}
+
+			// Close raw TCP connection
+			if rawConn != nil {
+				rawConn.Close()
+				rawConn = nil
+			}
+
+			// Clean up temporary files
+			os.Remove(constants.HarvesterTempPath)
+
+			debug.DropMessage("CLEANUP", "All resources cleaned up after panic")
+
 			// Continue execution after recovery
 		}
 	}()
@@ -414,13 +443,13 @@ func main() {
 	// Main event processing loop with automatic reconnection on failure.
 
 	// Track synchronization progress across reconnections
-	latestTempSyncedBlock := syncharvester.LoadMetadata()
+	latestTempSyncedBlock = syncharvester.LoadMetadata()
 
 	// Main processing loop
 	for {
 		// Establish TCP connection with optimizations
-		raw, _ := net.Dial("tcp", constants.WsDialAddr)
-		tcpConn := raw.(*net.TCPConn)
+		rawConn, _ = net.Dial("tcp", constants.WsDialAddr)
+		tcpConn := rawConn.(*net.TCPConn)
 
 		// Configure TCP socket options
 		tcpConn.SetNoDelay(true)                       // Disable Nagle's algorithm
@@ -484,18 +513,18 @@ func main() {
 		}
 
 		// Establish secure WebSocket connection
-		conn := tls.Client(raw, &tls.Config{ServerName: constants.WsHost})
+		tlsConn = tls.Client(rawConn, &tls.Config{ServerName: constants.WsHost})
 
 		// Initialize WebSocket and subscribe to events
-		ws.Handshake(conn)
-		ws.SendSubscription(conn)
+		ws.Handshake(tlsConn)
+		ws.SendSubscription(tlsConn)
 
 		// Event processing loop
 		for {
 			// Receive WebSocket message
-			payload, err := ws.SpinUntilCompleteMessage(conn)
+			payload, err := ws.SpinUntilCompleteMessage(tlsConn)
 			if err != nil {
-				conn.Close()
+				tlsConn.Close()
 				break // Reconnect on error
 			}
 
@@ -506,4 +535,4 @@ func main() {
 	}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
