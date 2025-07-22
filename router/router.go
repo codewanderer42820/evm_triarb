@@ -39,15 +39,6 @@ import (
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// GLOBAL SYNCHRONIZATION
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// gcComplete is a channel used for two-stage initialization.
-// Workers block on this channel after initialization until GC is complete.
-// Closing this channel releases all workers to start hot spinning.
-var gcComplete = make(chan struct{})
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
 // CORE TYPE DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -239,10 +230,18 @@ var (
 	// CACHE LINE GROUP 3: Ring buffers (NUCLEAR HOT - accessed after routing)
 	coreRings [constants.MaxSupportedCores]*ring24.Ring
 
+	// CACHE LINE GROUP 4: Synchronization (accessed during phase transitions)
+	gcComplete chan struct{} // Channel used for two-stage initialization coordination
+
 	// COLD: Only accessed during initialization
 	coreEngines        [constants.MaxSupportedCores]*ArbitrageEngine
 	pairWorkloadShards map[TradingPairID][]PairWorkloadShard
 )
+
+// Initialize the GC completion channel during package initialization
+func init() {
+	gcComplete = make(chan struct{})
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // CORE ENGINE METHODS
@@ -899,11 +898,7 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 		}
 	}
 
-	// Clean up temporary structures immediately after use
 	temporaryEdges = nil
-	edgeCounts = nil
-	shardCounts = nil
-	edgeIndices = nil
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -965,7 +960,6 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		allPairsList[pairIdx] = pairID
 		pairIdx++
 	}
-	allPairsSet = nil // Clean up after conversion to slice
 
 	for i, pairID := range allPairsList {
 		exactCount := fanoutCounts[pairID]
@@ -996,7 +990,6 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		pairsWithQueuesList[queueIdx] = pairID
 		queueIdx++
 	}
-	pairsWithQueuesSet = nil // Clean up after conversion to slice
 
 	for i, pairID := range pairsWithQueuesList {
 		engine.pairToQueueLookup.Put(uint32(pairID), uint32(i))
@@ -1055,12 +1048,6 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			cycleStateIdx++
 		}
 	}
-
-	// Clean up temporary structures immediately after population
-	fanoutCounts = nil
-	fanoutIndices = nil
-	allPairsList = nil
-	pairsWithQueuesList = nil
 
 	// Calculate total fanout entries for logging
 	totalFanoutEntries := 0
