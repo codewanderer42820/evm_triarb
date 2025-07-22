@@ -73,7 +73,7 @@ var (
 	rawConn               net.Conn // Raw TCP connection to WebSocket server for immediate cleanup
 	tlsConn               net.Conn // TLS-wrapped connection for secure WebSocket communication
 	latestTempSyncedBlock uint64   // Last processed block for temporary synchronization tracking
-	_                     [40]byte // Padding to complete cache line alignment
+	_                     [24]byte // Padding to complete cache line alignment
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
