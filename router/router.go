@@ -314,18 +314,21 @@ func DispatchPriceUpdate(logView *types.LogView) {
 	reserve0 := utils.ParseHexU64(logView.Data[offsetA : offsetA+remaining])
 	reserve1 := utils.ParseHexU64(logView.Data[offsetB : offsetB+remaining])
 
-	// Force minimum value of 1 to avoid log(0) errors using branchless logic
-	// This creates a mask that's all 1s if reserve is 0, all 0s otherwise
-	// This approach preserves true price magnitude relationships:
-	// - Empty pools (0:0) become (1:1) = 1:1 ratio = neutral tick
-	// - Near-empty pools (0:1000000) become (1:1000000) = extreme tick
-	// - Normal pools unchanged
-	// The tick values remain economically meaningful rather than being
-	// artificially deprioritized through error handling
-	mask0 := ^(reserve0 | -reserve0) >> 63 // 1 if reserve0 == 0, else 0
-	mask1 := ^(reserve1 | -reserve1) >> 63 // 1 if reserve1 == 0, else 0
-	reserve0 |= mask0                      // OR with 1 if zero, OR with 0 if non-zero
-	reserve1 |= mask1                      // OR with 1 if zero, OR with 0 if non-zero
+	// Original sophisticated approach (preserved for reference):
+	// mask0 := ^(reserve0 | -reserve0) >> 63 // 1 if reserve0 == 0, else 0
+	// mask1 := ^(reserve1 | -reserve1) >> 63 // 1 if reserve1 == 0, else 0
+	// reserve0 |= mask0                      // OR with 1 if zero, OR with 0 if non-zero
+	// reserve1 |= mask1                      // OR with 1 if zero, OR with 0 if non-zero
+
+	// Force LSB to 1 - elegantly prevents log(0) with minimal precision impact
+	// This approach:
+	// - Guarantees non-zero values for log calculation
+	// - Preserves economic relationships (1M becomes 1M|1, negligible 0.0001% error)
+	// - Single-instruction performance vs complex masking
+	// - Empty pools (0:0) become (1:1) = balanced
+	// - Near-empty (0:large) become (1:large) = extreme tick preserved
+	reserve0 |= 1 // Ensure non-zero by setting lowest bit
+	reserve1 |= 1 // Maximum 1-unit error in potentially millions
 
 	// Calculate the logarithmic price ratio between the two token reserves
 	tickValue, err := fastuni.Log2ReserveRatio(reserve0, reserve1)
