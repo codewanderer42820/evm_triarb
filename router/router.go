@@ -38,11 +38,6 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-// Initialize the GC completion channel during package initialization
-func init() {
-	gcComplete = make(chan struct{})
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // CORE TYPE DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
