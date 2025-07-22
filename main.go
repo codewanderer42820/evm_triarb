@@ -293,13 +293,16 @@ func init() {
 	for _, pool := range pools {
 		router.RegisterTradingPairAddress([]byte(pool.Address[2:]), router.TradingPairID(pool.ID))
 	}
+	debug.DropMessage("ADDR", "Registered "+utils.Itoa(len(pools))+" addresses")
 
 	// Load arbitrage cycle definitions
 	cycles := loadArbitrageCyclesFromFile("cycles_3_3.txt")
+	debug.DropMessage("CYCLE", "Loaded "+utils.Itoa(len(cycles))+" cycles")
 
 	debug.DropMessage("LOAD", utils.Itoa(len(pools))+"p "+utils.Itoa(len(cycles))+"c")
 
 	setupSignalHandling()
+	debug.DropMessage("SIG", "Handler ready")
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 1: BLOCKCHAIN SYNCHRONIZATION
@@ -327,14 +330,17 @@ func init() {
 
 	// Initialize arbitrage detection system
 	router.InitializeArbitrageSystem(cycles)
+	debug.DropMessage("ARB", "System initialized")
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 2: MEMORY OPTIMIZATION
 	//═══════════════════════════════════════════════════════════════════════════════════════
 
+	debug.DropMessage("GC", "Starting optimization")
 	runtime.GC()
 	runtime.GC()
 	rtdebug.FreeOSMemory()
+	debug.DropMessage("GC", "Initial complete")
 
 	// Verify synchronization after GC
 	for {
@@ -359,21 +365,27 @@ func init() {
 
 	// Track synchronization progress across reconnections
 	latestTempSyncedBlock = syncharvester.LoadMetadata()
+	debug.DropMessage("META", "Sync block "+utils.Itoa(int(latestTempSyncedBlock)))
 
 	// Load reserve data into arbitrage engine
 	if err := syncharvester.FlushHarvestedReservesToRouter(); err != nil {
 		panic("Reserve data flush failed: " + err.Error())
 	}
+	debug.DropMessage("RSRV", "Data loaded")
 
+	debug.DropMessage("GC", "Final optimization")
 	runtime.GC()
 	runtime.GC()
 	rtdebug.FreeOSMemory()
+	debug.DropMessage("GC", "Final complete")
 
 	// Disable automatic GC permanently for hot spinning
 	rtdebug.SetGCPercent(-1)
+	debug.DropMessage("GC", "Disabled")
 
 	// Signal workers: GC disabled, hot spin mode safe
 	router.SignalGCComplete()
+	debug.DropMessage("HOT", "Spin mode enabled")
 
 	debug.DropMessage("PROD", "Active")
 	runtime.LockOSThread()
@@ -423,6 +435,7 @@ func main() {
 
 	for {
 		// Establish TCP connection with optimizations
+		debug.DropMessage("CONN", "Establishing")
 		rawConn, _ = net.Dial("tcp", constants.WsDialAddr)
 		tcpConn := rawConn.(*net.TCPConn)
 
@@ -449,6 +462,7 @@ func main() {
 			syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 0x1006, 1) // SO_REUSEPORT on macOS
 		}
 		rawFile.Close()
+		debug.DropMessage("OPT", "Socket optimized")
 
 		// Synchronize missing blocks before WebSocket connection
 		for {
@@ -482,6 +496,7 @@ func main() {
 			}
 			debug.DropMessage("SYNC", "Temp flush failed: "+err.Error())
 		}
+		debug.DropMessage("SYNC", "Temp data loaded")
 
 		// Establish secure WebSocket connection
 		tlsConn = tls.Client(rawConn, &tls.Config{ServerName: constants.WsHost})
@@ -489,11 +504,14 @@ func main() {
 		// Initialize WebSocket and subscribe to events
 		ws.Handshake(tlsConn)
 		ws.SendSubscription(tlsConn)
+		debug.DropMessage("WS", "Connected")
 
 		// Event processing loop
+		debug.DropMessage("PROC", "Starting")
 		for {
 			payload, err := ws.SpinUntilCompleteMessage(tlsConn)
 			if err != nil {
+				debug.DropMessage("CONN", "Lost, reconnecting")
 				tlsConn.Close()
 				break
 			}
