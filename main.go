@@ -285,17 +285,21 @@ func init() {
 	debug.DropMessage("INIT", "System startup")
 
 	// Load trading pairs from database
+	debug.DropMessage("DB", "Loading pools")
 	db := openDatabase("uniswap_pairs.db")
 	pools := loadPoolsFromDatabase(db)
 	db.Close()
+	debug.DropMessage("DB", "Loaded "+utils.Itoa(len(pools))+" pools")
 
 	// Register addresses for fast lookup
+	debug.DropMessage("ADDR", "Registering addresses")
 	for _, pool := range pools {
 		router.RegisterTradingPairAddress([]byte(pool.Address[2:]), router.TradingPairID(pool.ID))
 	}
-	debug.DropMessage("ADDR", "Registered "+utils.Itoa(len(pools))+" addresses")
+	debug.DropMessage("ADDR", "Registered "+utils.Itoa(len(pools))+" pairs")
 
 	// Load arbitrage cycle definitions
+	debug.DropMessage("CYCLE", "Loading cycles")
 	cycles := loadArbitrageCyclesFromFile("cycles_3_3.txt")
 	debug.DropMessage("CYCLE", "Loaded "+utils.Itoa(len(cycles))+" cycles")
 
@@ -329,18 +333,19 @@ func init() {
 	}
 
 	// Initialize arbitrage detection system
+	debug.DropMessage("ARB", "Initializing system")
 	router.InitializeArbitrageSystem(cycles)
-	debug.DropMessage("ARB", "System initialized")
+	debug.DropMessage("ARB", "System ready")
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 2: MEMORY OPTIMIZATION
 	//═══════════════════════════════════════════════════════════════════════════════════════
 
-	debug.DropMessage("GC", "Starting optimization")
+	debug.DropMessage("MEM", "Starting optimization")
 	runtime.GC()
 	runtime.GC()
 	rtdebug.FreeOSMemory()
-	debug.DropMessage("GC", "Initial complete")
+	debug.DropMessage("MEM", "Initial GC complete")
 
 	// Verify synchronization after GC
 	for {
@@ -365,27 +370,28 @@ func init() {
 
 	// Track synchronization progress across reconnections
 	latestTempSyncedBlock = syncharvester.LoadMetadata()
-	debug.DropMessage("META", "Sync block "+utils.Itoa(int(latestTempSyncedBlock)))
+	debug.DropMessage("META", "Last block "+utils.Itoa(int(latestTempSyncedBlock)))
 
 	// Load reserve data into arbitrage engine
+	debug.DropMessage("DATA", "Loading reserves")
 	if err := syncharvester.FlushHarvestedReservesToRouter(); err != nil {
 		panic("Reserve data flush failed: " + err.Error())
 	}
-	debug.DropMessage("RSRV", "Data loaded")
+	debug.DropMessage("DATA", "Reserves loaded")
 
-	debug.DropMessage("GC", "Final optimization")
+	debug.DropMessage("MEM", "Final optimization")
 	runtime.GC()
 	runtime.GC()
 	rtdebug.FreeOSMemory()
-	debug.DropMessage("GC", "Final complete")
+	debug.DropMessage("MEM", "Final GC complete")
 
 	// Disable automatic GC permanently for hot spinning
 	rtdebug.SetGCPercent(-1)
-	debug.DropMessage("GC", "Disabled")
+	debug.DropMessage("MEM", "GC disabled")
 
 	// Signal workers: GC disabled, hot spin mode safe
 	router.SignalGCComplete()
-	debug.DropMessage("HOT", "Spin mode enabled")
+	debug.DropMessage("SPIN", "Hot mode enabled")
 
 	debug.DropMessage("PROD", "Active")
 	runtime.LockOSThread()
@@ -435,8 +441,8 @@ func main() {
 
 	for {
 		// Establish TCP connection with optimizations
-		debug.DropMessage("CONN", "Establishing")
 		rawConn, _ = net.Dial("tcp", constants.WsDialAddr)
+		debug.DropMessage("CONN", "TCP established")
 		tcpConn := rawConn.(*net.TCPConn)
 
 		// Configure TCP socket options
@@ -462,7 +468,7 @@ func main() {
 			syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 0x1006, 1) // SO_REUSEPORT on macOS
 		}
 		rawFile.Close()
-		debug.DropMessage("OPT", "Socket optimized")
+		debug.DropMessage("SOCK", "Optimized")
 
 		// Synchronize missing blocks before WebSocket connection
 		for {
@@ -492,11 +498,11 @@ func main() {
 			err := syncharvester.FlushHarvestedReservesToRouterFromTemp()
 			if err == nil {
 				os.Remove(constants.HarvesterTempPath)
+				debug.DropMessage("TEMP", "Data loaded")
 				break
 			}
 			debug.DropMessage("SYNC", "Temp flush failed: "+err.Error())
 		}
-		debug.DropMessage("SYNC", "Temp data loaded")
 
 		// Establish secure WebSocket connection
 		tlsConn = tls.Client(rawConn, &tls.Config{ServerName: constants.WsHost})
@@ -507,11 +513,11 @@ func main() {
 		debug.DropMessage("WS", "Connected")
 
 		// Event processing loop
-		debug.DropMessage("PROC", "Starting")
+		debug.DropMessage("LOOP", "Processing events")
 		for {
 			payload, err := ws.SpinUntilCompleteMessage(tlsConn)
 			if err != nil {
-				debug.DropMessage("CONN", "Lost, reconnecting")
+				debug.DropMessage("CONN", "Lost")
 				tlsConn.Close()
 				break
 			}
