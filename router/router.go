@@ -899,7 +899,11 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 		}
 	}
 
+	// Clean up temporary structures immediately after use
 	temporaryEdges = nil
+	edgeCounts = nil
+	shardCounts = nil
+	edgeIndices = nil
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -961,6 +965,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		allPairsList[pairIdx] = pairID
 		pairIdx++
 	}
+	allPairsSet = nil // Clean up after conversion to slice
 
 	for i, pairID := range allPairsList {
 		exactCount := fanoutCounts[pairID]
@@ -991,6 +996,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		pairsWithQueuesList[queueIdx] = pairID
 		queueIdx++
 	}
+	pairsWithQueuesSet = nil // Clean up after conversion to slice
 
 	for i, pairID := range pairsWithQueuesList {
 		engine.pairToQueueLookup.Put(uint32(pairID), uint32(i))
@@ -1049,6 +1055,12 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			cycleStateIdx++
 		}
 	}
+
+	// Clean up temporary structures immediately after population
+	fanoutCounts = nil
+	fanoutIndices = nil
+	allPairsList = nil
+	pairsWithQueuesList = nil
 
 	// Calculate total fanout entries for logging
 	totalFanoutEntries := 0

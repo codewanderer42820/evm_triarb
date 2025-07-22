@@ -441,6 +441,12 @@ func (harvester *SynchronizationHarvester) cleanup() {
 	if harvester.outputFile != nil {
 		harvester.outputFile.Close()
 	}
+
+	// Clean up global buffers immediately after final use
+	responseBuffers = nil
+	processedLogs = nil
+	csvOutputBuffers = nil
+	csvStringBuilders = nil
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
