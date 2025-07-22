@@ -38,6 +38,11 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
+// Initialize the GC completion channel during package initialization
+func init() {
+	gcComplete = make(chan struct{})
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // CORE TYPE DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1048,6 +1053,12 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			cycleStateIdx++
 		}
 	}
+
+	// Clean up large temporary data structures immediately after use
+	fanoutCounts = nil
+	fanoutIndices = nil
+	allPairsList = nil
+	pairsWithQueuesList = nil
 
 	// Calculate total fanout entries for logging
 	totalFanoutEntries := 0
