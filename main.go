@@ -47,13 +47,13 @@ import (
 // CORE DATA STRUCTURES
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Pool represents a trading pair with its database identifier and contract address.
-// Structure is aligned for memory efficiency.
+// Pool represents a trading pair with database ID and contract address.
+// Structure aligned for memory efficiency.
 //
 //go:notinheap
 //go:align 32
 type Pool struct {
-	ID      int64   // Database identifier for the trading pair
+	ID      int64   // Database identifier for trading pair
 	Address string  // Ethereum contract address (hex format)
 	_       [8]byte // Padding for memory alignment
 }
@@ -62,19 +62,26 @@ type Pool struct {
 // GLOBAL RESOURCE TRACKING
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Global variables for resource cleanup and synchronization tracking
+// Global resource tracking variables for emergency cleanup and connection management.
+// Cache-aligned for optimal memory access patterns during high-frequency operations.
+// These variables are accessed from both normal error handling and panic recovery paths.
+//
+//go:notinheap
+//go:align 64
 var (
-	rawConn               net.Conn
-	tlsConn               net.Conn
-	latestTempSyncedBlock uint64
+	// CACHE LINE 1: Connection management (accessed together during cleanup)
+	rawConn               net.Conn // Raw TCP connection to WebSocket server for immediate cleanup
+	tlsConn               net.Conn // TLS-wrapped connection for secure WebSocket communication
+	latestTempSyncedBlock uint64   // Last processed block for temporary synchronization tracking
+	_                     [40]byte // Padding to complete cache line alignment
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // SYSTEM LIFECYCLE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// setupSignalHandling configures graceful shutdown for SIGINT and SIGTERM signals.
-// Coordinates shutdown across all subsystems using the control package.
+// setupSignalHandling configures graceful shutdown for SIGINT and SIGTERM.
+// Coordinates shutdown across all subsystems.
 //
 //go:norace
 //go:nocheckptr
@@ -85,18 +92,12 @@ func setupSignalHandling() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Background handler for graceful shutdown
 	go func() {
 		<-sigChan
 		debug.DropMessage("SIG", "Shutdown initiated")
-
-		// Signal shutdown to all subsystems
 		control.Shutdown()
-
-		// Wait for graceful completion
 		control.ShutdownWG.Wait()
-
-		debug.DropMessage("SIG", "Shutdown complete")
+		debug.DropMessage("SIG", "Complete")
 		os.Exit(0)
 	}()
 }
@@ -105,8 +106,8 @@ func setupSignalHandling() {
 // DATABASE OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// openDatabase establishes a SQLite database connection.
-// Connection should be closed after initial data loading.
+// openDatabase establishes SQLite database connection.
+// Connection closed after initial data loading.
 //
 //go:norace
 //go:nocheckptr
@@ -116,12 +117,12 @@ func setupSignalHandling() {
 func openDatabase(dbPath string) *sql.DB {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		panic("Failed to establish database connection to " + dbPath + ": " + err.Error())
+		panic("Failed database connection to " + dbPath + ": " + err.Error())
 	}
 	return db
 }
 
-// loadPoolsFromDatabase retrieves all trading pairs from the database.
+// loadPoolsFromDatabase retrieves all trading pairs from database.
 // Pre-allocates memory based on exact count for efficiency.
 //
 //go:norace
@@ -130,37 +131,29 @@ func openDatabase(dbPath string) *sql.DB {
 //go:inline
 //go:registerparams
 func loadPoolsFromDatabase(db *sql.DB) []Pool {
-	// Get total count for memory allocation
 	var poolCount int
 	err := db.QueryRow("SELECT COUNT(*) FROM pools").Scan(&poolCount)
 	if err != nil {
-		panic("Failed to retrieve pool count from database: " + err.Error())
+		panic("Failed pool count query: " + err.Error())
 	}
-
 	if poolCount == 0 {
-		panic("Database contains no trading pairs")
+		panic("No trading pairs in database")
 	}
 
-	// Allocate exact capacity
 	pools := make([]Pool, poolCount)
 	poolIndex := 0
 
-	// Load pools ordered by ID
-	rows, err := db.Query(`
-		SELECT p.id, p.pool_address 
-		FROM pools p
-		ORDER BY p.id`)
+	rows, err := db.Query(`SELECT p.id, p.pool_address FROM pools p ORDER BY p.id`)
 	if err != nil {
-		panic("Failed to execute pool query: " + err.Error())
+		panic("Failed pool query: " + err.Error())
 	}
 	defer rows.Close()
 
-	// Populate pools array
 	for rows.Next() && poolIndex < poolCount {
 		var pairID int64
 		var poolAddress string
 		if err := rows.Scan(&pairID, &poolAddress); err != nil {
-			panic("Failed to scan pool row data: " + err.Error())
+			panic("Failed pool scan: " + err.Error())
 		}
 
 		pools[poolIndex] = Pool{
@@ -171,7 +164,7 @@ func loadPoolsFromDatabase(db *sql.DB) []Pool {
 	}
 
 	if err := rows.Err(); err != nil {
-		panic("Database iteration error encountered: " + err.Error())
+		panic("Database iteration error: " + err.Error())
 	}
 
 	return pools
@@ -181,7 +174,7 @@ func loadPoolsFromDatabase(db *sql.DB) []Pool {
 // FILE PARSING OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// loadArbitrageCyclesFromFile parses triangular arbitrage cycles from a text file.
+// loadArbitrageCyclesFromFile parses triangular arbitrage cycles from text file.
 // Expected format: "(12345) → (67890) → (11111)" per line.
 //
 //go:norace
@@ -192,7 +185,7 @@ func loadPoolsFromDatabase(db *sql.DB) []Pool {
 func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 	data, err := os.ReadFile(filename)
 	if err != nil {
-		panic("Failed to read arbitrage cycles file: " + err.Error())
+		panic("Failed reading cycles file: " + err.Error())
 	}
 
 	// Count lines for allocation
@@ -203,10 +196,9 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 		}
 	}
 	if len(data) > 0 && data[len(data)-1] != '\n' {
-		lineCount++ // Account for last line without newline
+		lineCount++
 	}
 
-	// Pre-allocate result array
 	cycles := make([]router.ArbitrageTriangle, lineCount)
 	cycleIndex := 0
 	i, dataLen := 0, len(data)
@@ -216,7 +208,6 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 	for i < dataLen && cycleIndex < lineCount {
 		pairCount := 0
 
-		// Parse up to 3 pair IDs per line
 		for pairCount < 3 && i < dataLen && data[i] != '\n' {
 			// Find opening parenthesis
 			for i < dataLen && data[i] != '(' && data[i] != '\n' {
@@ -225,13 +216,13 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 			if i >= dataLen || data[i] == '\n' {
 				break
 			}
-			i++ // Skip '('
+			i++
 
 			// Parse numeric ID
 			pairID := uint64(0)
 			for i < dataLen && data[i] >= '0' && data[i] <= '9' {
 				if pairID > (^uint64(0)-10)/10 {
-					break // Prevent overflow
+					break
 				}
 				pairID = pairID*10 + uint64(data[i]-'0')
 				i++
@@ -247,7 +238,7 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 				i++
 			}
 			if i < dataLen && data[i] == ')' {
-				i++ // Skip ')'
+				i++
 			}
 		}
 
@@ -256,10 +247,9 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 			i++
 		}
 		if i < dataLen {
-			i++ // Skip newline
+			i++
 		}
 
-		// Store parsed triangle
 		cycles[cycleIndex] = router.ArbitrageTriangle{
 			router.TradingPairID(pairIDs[0]),
 			router.TradingPairID(pairIDs[1]),
@@ -268,9 +258,8 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 		cycleIndex++
 	}
 
-	// Verify cycles were loaded
 	if cycleIndex == 0 {
-		panic("No valid arbitrage cycles found in configuration file")
+		panic("No valid cycles found in configuration")
 	}
 	return cycles
 }
@@ -292,7 +281,6 @@ func init() {
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 0: FOUNDATION INITIALIZATION
 	//═══════════════════════════════════════════════════════════════════════════════════════
-	// Load configuration data and initialize core system components.
 
 	debug.DropMessage("INIT", "System startup")
 
@@ -309,47 +297,41 @@ func init() {
 	// Load arbitrage cycle definitions
 	cycles := loadArbitrageCyclesFromFile("cycles_3_3.txt")
 
-	debug.DropMessage("LOAD", utils.Itoa(len(pools))+" pools, "+utils.Itoa(len(cycles))+" cycles")
+	debug.DropMessage("LOAD", utils.Itoa(len(pools))+"p "+utils.Itoa(len(cycles))+"c")
 
-	// Configure shutdown handling
 	setupSignalHandling()
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 1: BLOCKCHAIN SYNCHRONIZATION
 	//═══════════════════════════════════════════════════════════════════════════════════════
-	// Ensure system is synchronized with current blockchain state.
 
 	for {
 		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
 		if err != nil {
-			debug.DropMessage("SYNC", "Requirement check failed: "+err.Error())
-			continue // Retry on error
+			debug.DropMessage("SYNC", "Check failed: "+err.Error())
+			continue
 		}
 		if !syncNeeded {
-			break // Already synchronized
+			break
 		}
 
 		blocksBehind := targetBlock - lastBlock
-		debug.DropMessage("SYNC", utils.Itoa(int(blocksBehind))+" blocks behind")
+		debug.DropMessage("SYNC", utils.Itoa(int(blocksBehind))+" behind")
 
-		// Harvest historical data
 		err = syncharvester.ExecuteHarvesting()
 		if err != nil {
-			debug.DropMessage("SYNC", "Block harvesting failed: "+err.Error())
-			continue // Retry until successful
+			debug.DropMessage("SYNC", "Harvest failed: "+err.Error())
+			continue
 		}
 	}
 
 	// Initialize arbitrage detection system
-	// Workers will initialize but wait for GC before hot spinning
 	router.InitializeArbitrageSystem(cycles)
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 2: MEMORY OPTIMIZATION
 	//═══════════════════════════════════════════════════════════════════════════════════════
-	// Optimize memory layout and prepare for production operation.
 
-	// Initial garbage collection
 	runtime.GC()
 	runtime.GC()
 	rtdebug.FreeOSMemory()
@@ -358,7 +340,7 @@ func init() {
 	for {
 		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
 		if err != nil {
-			debug.DropMessage("SYNC", "Post-GC requirement check failed: "+err.Error())
+			debug.DropMessage("SYNC", "Post-GC check failed: "+err.Error())
 			continue
 		}
 		if !syncNeeded {
@@ -366,34 +348,34 @@ func init() {
 		}
 
 		blocksBehind := targetBlock - lastBlock
-		debug.DropMessage("SYNC", "Post-GC: "+utils.Itoa(int(blocksBehind))+" blocks behind")
+		debug.DropMessage("SYNC", "Post-GC "+utils.Itoa(int(blocksBehind))+" behind")
 
-		// Re-synchronize if needed
 		err = syncharvester.ExecuteHarvesting()
 		if err != nil {
-			debug.DropMessage("SYNC", "Post-GC harvesting failed: "+err.Error())
+			debug.DropMessage("SYNC", "Post-GC harvest failed: "+err.Error())
 			continue
 		}
 	}
 
+	// Track synchronization progress across reconnections
+	latestTempSyncedBlock = syncharvester.LoadMetadata()
+
 	// Load reserve data into arbitrage engine
 	if err := syncharvester.FlushHarvestedReservesToRouter(); err != nil {
-		panic("Critical: Reserve data flush failed - " + err.Error())
+		panic("Reserve data flush failed: " + err.Error())
 	}
 
-	// Final memory optimization
 	runtime.GC()
 	runtime.GC()
 	rtdebug.FreeOSMemory()
 
-	// Disable automatic GC permanently - create safe environment for hot spinning
+	// Disable automatic GC permanently for hot spinning
 	rtdebug.SetGCPercent(-1)
 
-	// Signal all workers: "GC is permanently disabled, hot spin mode is safe"
+	// Signal workers: GC disabled, hot spin mode safe
 	router.SignalGCComplete()
 
-	// Activate production mode
-	debug.DropMessage("PROD", "Production mode active")
+	debug.DropMessage("PROD", "Active")
 	runtime.LockOSThread()
 	control.ForceActive()
 }
@@ -402,7 +384,7 @@ func init() {
 // MAIN ORCHESTRATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// main executes the real-time arbitrage detection engine.
+// main executes real-time arbitrage detection engine.
 // Phase 3: Continuous event processing with automatic reconnection.
 //
 //go:norace
@@ -410,10 +392,10 @@ func init() {
 //go:inline
 //go:registerparams
 func main() {
-	// Panic recovery for system resilience with resource cleanup
+	// Panic recovery with resource cleanup
 	defer func() {
 		if r := recover(); r != nil {
-			debug.DropMessage("PANIC", "System panic recovered: "+fmt.Sprintf("%v", r))
+			debug.DropMessage("PANIC", "Recovered: "+fmt.Sprintf("%v", r))
 			debug.DropMessage("STACK", string(rtdebug.Stack()))
 
 			// Close TLS connection
@@ -431,30 +413,23 @@ func main() {
 			// Clean up temporary files
 			os.Remove(constants.HarvesterTempPath)
 
-			debug.DropMessage("CLEANUP", "All resources cleaned up after panic")
-
-			// Continue execution after recovery
+			debug.DropMessage("CLEAN", "Resources cleaned")
 		}
 	}()
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 3: REAL-TIME EVENT PROCESSING
 	//═══════════════════════════════════════════════════════════════════════════════════════
-	// Main event processing loop with automatic reconnection on failure.
 
-	// Track synchronization progress across reconnections
-	latestTempSyncedBlock = syncharvester.LoadMetadata()
-
-	// Main processing loop
 	for {
 		// Establish TCP connection with optimizations
 		rawConn, _ = net.Dial("tcp", constants.WsDialAddr)
 		tcpConn := rawConn.(*net.TCPConn)
 
 		// Configure TCP socket options
-		tcpConn.SetNoDelay(true)                       // Disable Nagle's algorithm
-		tcpConn.SetReadBuffer(constants.MaxFrameSize)  // Set read buffer size
-		tcpConn.SetWriteBuffer(constants.MaxFrameSize) // Set write buffer size
+		tcpConn.SetNoDelay(true)
+		tcpConn.SetReadBuffer(constants.MaxFrameSize)
+		tcpConn.SetWriteBuffer(constants.MaxFrameSize)
 
 		// Apply socket-level optimizations
 		rawFile, _ := tcpConn.File()
@@ -473,13 +448,13 @@ func main() {
 		case "darwin":
 			syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 0x1006, 1) // SO_REUSEPORT on macOS
 		}
-		rawFile.Close() // Release file descriptor
+		rawFile.Close()
 
-		// Synchronize any missing blocks before WebSocket connection
+		// Synchronize missing blocks before WebSocket connection
 		for {
 			syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirementFromBlock(latestTempSyncedBlock)
 			if err != nil {
-				debug.DropMessage("SYNC", "Temp requirement check failed: "+err.Error())
+				debug.DropMessage("SYNC", "Temp check failed: "+err.Error())
 				continue
 			}
 			if !syncNeeded {
@@ -487,16 +462,14 @@ func main() {
 			}
 
 			blocksBehind := targetBlock - lastBlock
-			debug.DropMessage("SYNC", "Temp sync: "+utils.Itoa(int(blocksBehind))+" blocks behind")
+			debug.DropMessage("SYNC", "Temp "+utils.Itoa(int(blocksBehind))+" behind")
 
-			// Harvest to temporary storage
 			newLastProcessed, err := syncharvester.ExecuteHarvestingToTemp(constants.DefaultConnections)
 			if err != nil {
-				debug.DropMessage("SYNC", "Temp harvesting failed: "+err.Error())
+				debug.DropMessage("SYNC", "Temp harvest failed: "+err.Error())
 				continue
 			}
 
-			// Update progress tracker
 			latestTempSyncedBlock = newLastProcessed
 		}
 
@@ -504,12 +477,10 @@ func main() {
 		for {
 			err := syncharvester.FlushHarvestedReservesToRouterFromTemp()
 			if err == nil {
-				// Data successfully loaded, temp file no longer needed
 				os.Remove(constants.HarvesterTempPath)
 				break
 			}
-			debug.DropMessage("SYNC", "Temporary reserve data flush failed: "+err.Error())
-			// Retry until successful
+			debug.DropMessage("SYNC", "Temp flush failed: "+err.Error())
 		}
 
 		// Establish secure WebSocket connection
@@ -521,17 +492,14 @@ func main() {
 
 		// Event processing loop
 		for {
-			// Receive WebSocket message
 			payload, err := ws.SpinUntilCompleteMessage(tlsConn)
 			if err != nil {
 				tlsConn.Close()
-				break // Reconnect on error
+				break
 			}
 
-			// Process arbitrage opportunities
 			parser.HandleFrame(payload)
 		}
-		// Connection lost - loop will reconnect with synchronization
 	}
 }
 
