@@ -13,6 +13,7 @@
 //   - SIMD-optimized hex parsing operations for maximum throughput
 //   - Dynamic batch sizing with convergence for optimal performance
 //   - Multi-connection parallel harvesting with intelligent load balancing
+//   - Bit shift optimizations for all hot paths
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -554,15 +555,16 @@ func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock ui
 		return 0, fmt.Errorf("HTTP %d", response.StatusCode)
 	}
 
-	// Read response data with size limits for safety
+	// Cache-line aligned read operations
 	totalBytes := 0
 	responseBuffer := responseBuffers[connectionID]
-	maxReadSize := len(responseBuffer) - 1024 // Reserve space for safety
+	maxReadSize := (len(responseBuffer) - 1024) &^ 63
 
 	for totalBytes < maxReadSize {
-		readSize := constants.ReadBufferSize
+		// Align read sizes to cache boundaries
+		readSize := constants.ReadBufferSize &^ 15
 		if totalBytes+readSize > maxReadSize {
-			readSize = maxReadSize - totalBytes
+			readSize = (maxReadSize - totalBytes) &^ 15
 		}
 
 		bytesRead, err := response.Body.Read(responseBuffer[totalBytes : totalBytes+readSize])
@@ -669,7 +671,9 @@ func (harvester *SynchronizationHarvester) writeCSVRecord(address string, blockH
 	currentBufferSize := harvester.csvBufferSizes[connectionID]
 	newBufferSize := currentBufferSize + len(csvRecord)
 
-	if newBufferSize >= (constants.CSVBufferSize * 9 / 10) {
+	// Use bit operations for threshold calculation
+	threshold := constants.CSVBufferSize - (constants.CSVBufferSize >> 3)
+	if newBufferSize >= threshold {
 		harvester.flushCSVBuffer(connectionID)
 		currentBufferSize = 0
 		newBufferSize = len(csvRecord)
@@ -770,11 +774,11 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 		fromBlock := sectorStart
 		sectorSize := blocksPerSector
 		if uint64(i) < extraBlocks {
-			sectorSize++ // Distribute remainder blocks to first connections
+			sectorSize++
 		}
 		toBlock := fromBlock + sectorSize - 1
 		if i == connectionCount-1 {
-			toBlock = harvester.syncTarget // Ensure last sector reaches target
+			toBlock = harvester.syncTarget
 		}
 		workSectors[i] = [2]uint64{fromBlock, toBlock}
 		sectorStart = toBlock + 1
@@ -1019,13 +1023,13 @@ func flushHarvestedReservesToRouterFromFile(filePath string) error {
 	blockHeights := make([]uint64, totalPairs+1) // Array index corresponds to pair ID
 	processedEvents := 0                         // Progress counter for logging and debugging
 
-	// Backwards file reading infrastructure with zero-allocation management
-	const bufferSize = 8192                     // Primary read buffer size for I/O optimization
-	readBuffer := make([]byte, bufferSize)      // Primary file reading buffer
-	workingBuffer := make([]byte, bufferSize*2) // Pre-allocated for chunk combination
-	lineBuffer := make([]byte, bufferSize)      // Pre-allocated for partial line storage
-	lineBufferUsed := 0                         // Track occupied bytes in line buffer
-	currentPosition := stat.Size()              // Start from end of file for reverse traversal
+	// Backwards file reading with power-of-2 buffer sizes
+	const bufferSize = 8192
+	readBuffer := make([]byte, bufferSize)
+	workingBuffer := make([]byte, bufferSize<<1)
+	lineBuffer := make([]byte, bufferSize)
+	lineBufferUsed := 0
+	currentPosition := stat.Size()
 
 	// Backwards streaming loop with chunk-based processing
 	for currentPosition > 0 {
