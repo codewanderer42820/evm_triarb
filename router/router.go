@@ -897,8 +897,6 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 			shardIdx++
 		}
 	}
-
-	temporaryEdges = nil
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1049,12 +1047,6 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		}
 	}
 
-	// Clean up large temporary data structures immediately after use
-	fanoutCounts = nil
-	fanoutIndices = nil
-	allPairsList = nil
-	pairsWithQueuesList = nil
-
 	// Calculate total fanout entries for logging
 	totalFanoutEntries := 0
 	for _, fanoutSlice := range engine.cycleFanoutTable {
@@ -1121,14 +1113,18 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	// Perform zero-fragmentation initialization of all queue structures
 	initializeArbitrageQueues(engine, allShards)
 
-	// Release the workload shards immediately after initialization
+	// Clean up initialization variables immediately after use
 	allShards = nil
+	shardInput = nil
 
 	// Log successful core initialization with concise format
 	debug.DropMessage("CORE", "Core "+utils.Itoa(coreID)+" ready")
 
 	// Signal that this core's initialization is complete
 	initWaitGroup.Done()
+
+	// Clean up synchronization variables after use
+	initWaitGroup = nil
 
 	// Cache the ring buffer reference for this core to avoid repeated array lookups
 	// in the hot loops. This micro-optimization eliminates bounds checking and
