@@ -815,8 +815,8 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 	}
 
 	// Pre-allocate all structures with exact capacities
-	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard, len(edgeCounts))
 	temporaryEdges := make(map[TradingPairID][]CycleEdge, len(edgeCounts))
+	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard, len(edgeCounts))
 
 	for pairID, edgeCount := range edgeCounts {
 		temporaryEdges[pairID] = make([]CycleEdge, edgeCount)
