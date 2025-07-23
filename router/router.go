@@ -208,9 +208,8 @@ type PairWorkloadShard struct {
 //go:notinheap
 //go:align 64
 type CryptoRandomGenerator struct {
-	counter uint64    // 8B - Unique sequence number for each random generation
-	seed    [32]byte  // 32B - Cryptographic seed for deterministic random generation
-	hasher  hash.Hash // 24B - Keccak-256 hash function for random number generation
+	input  [40]byte  // 40B - Seed + counter buffer: bytes 0-31 seed, bytes 32-39 counter
+	hasher hash.Hash // 24B - Keccak-256 hash function for random number generation
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -715,21 +714,20 @@ func RegisterPairToCoreRouting(pairID TradingPairID, coreID uint8) {
 //go:inline
 //go:registerparams
 func newCryptoRandomGenerator(initialSeed []byte) *CryptoRandomGenerator {
-	// Initialize a 256-bit seed array
-	var seed [32]byte
-
 	// Hash the initial seed to create a uniform 256-bit cryptographic seed
 	// This ensures good randomness distribution regardless of input seed quality
 	hasher := sha3.NewLegacyKeccak256()
 	hasher.Write(initialSeed)
-	copy(seed[:], hasher.Sum(nil))
 
-	// Create and return the random generator with initialized state
-	return &CryptoRandomGenerator{
-		counter: 0,                         // Start with counter at zero
-		seed:    seed,                      // Use the hashed seed
-		hasher:  sha3.NewLegacyKeccak256(), // Create a fresh hasher for generation
+	rng := &CryptoRandomGenerator{
+		hasher: sha3.NewLegacyKeccak256(), // Create a fresh hasher for generation
 	}
+
+	// Pre-populate input buffer with seed and initialize counter to zero
+	copy(rng.input[:32], hasher.Sum(nil))
+	*(*uint64)(unsafe.Pointer(&rng.input[32])) = 0 // Initialize counter to zero
+
+	return rng
 }
 
 // generateRandomUint64 generates cryptographically strong random values in deterministic sequences.
@@ -740,18 +738,14 @@ func newCryptoRandomGenerator(initialSeed []byte) *CryptoRandomGenerator {
 //go:inline
 //go:registerparams
 func (rng *CryptoRandomGenerator) generateRandomUint64() uint64 {
-	// Create input buffer containing seed + counter for unique hash input
-	var input [40]byte
-	copy(input[:32], rng.seed[:])                        // Copy the 32-byte seed
-	*(*uint64)(unsafe.Pointer(&input[32])) = rng.counter // Append the 8-byte counter
-
 	// Generate a hash from the seed+counter combination
 	rng.hasher.Reset()
-	rng.hasher.Write(input[:])
+	rng.hasher.Write(rng.input[:])
 	output := rng.hasher.Sum(nil)
 
 	// Increment counter for the next generation to ensure unique sequences
-	rng.counter++
+	counter := (*uint64)(unsafe.Pointer(&rng.input[32]))
+	*counter++
 
 	// Extract and return the first 64 bits from the hash output
 	return utils.Load64(output[:8])
