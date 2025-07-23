@@ -282,43 +282,45 @@ func init() {
 	// PHASE 0: FOUNDATION INITIALIZATION
 	//═══════════════════════════════════════════════════════════════════════════════════════
 
-	debug.DropMessage("INIT", "System startup")
+	debug.DropMessage("INIT", "Starting")
 
 	// Load trading pairs from database
-	debug.DropMessage("DB", "Loading pools")
+	debug.DropMessage("DB", "Opening")
 	db := openDatabase("uniswap_pairs.db")
 	pools := loadPoolsFromDatabase(db)
 	db.Close()
-	debug.DropMessage("DB", "Loaded "+utils.Itoa(len(pools))+" pools")
+	debug.DropMessage("DB", utils.Itoa(len(pools))+" pools")
 
 	// Register addresses for fast lookup
-	debug.DropMessage("ADDR", "Registering addresses")
+	debug.DropMessage("ADDR", "Indexing")
 	for _, pool := range pools {
 		router.RegisterTradingPairAddress([]byte(pool.Address[2:]), router.TradingPairID(pool.ID))
 	}
-	debug.DropMessage("ADDR", "Registered "+utils.Itoa(len(pools))+" pairs")
+	debug.DropMessage("ADDR", utils.Itoa(len(pools))+" indexed")
 
 	// Load arbitrage cycle definitions
-	debug.DropMessage("CYCLE", "Loading cycles")
+	debug.DropMessage("CYCLE", "Loading")
 	cycles := loadArbitrageCyclesFromFile("cycles_3_3.txt")
-	debug.DropMessage("CYCLE", "Loaded "+utils.Itoa(len(cycles))+" cycles")
+	debug.DropMessage("CYCLE", utils.Itoa(len(cycles))+" loaded")
 
-	debug.DropMessage("LOAD", utils.Itoa(len(pools))+"p "+utils.Itoa(len(cycles))+"c")
+	debug.DropMessage("BOOT", utils.Itoa(len(pools))+"p "+utils.Itoa(len(cycles))+"c")
 
 	setupSignalHandling()
-	debug.DropMessage("SIG", "Handler ready")
+	debug.DropMessage("SIG", "Ready")
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 1: BLOCKCHAIN SYNCHRONIZATION
 	//═══════════════════════════════════════════════════════════════════════════════════════
 
+	debug.DropMessage("SYNC", "Starting")
 	for {
 		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
 		if err != nil {
-			debug.DropMessage("SYNC", "Check failed: "+err.Error())
+			debug.DropMessage("SYNC", "Check error: "+err.Error())
 			continue
 		}
 		if !syncNeeded {
+			debug.DropMessage("SYNC", "Current")
 			break
 		}
 
@@ -327,31 +329,31 @@ func init() {
 
 		err = syncharvester.ExecuteHarvesting()
 		if err != nil {
-			debug.DropMessage("SYNC", "Harvest failed: "+err.Error())
+			debug.DropMessage("SYNC", "Harvest error: "+err.Error())
 			continue
 		}
 	}
 
 	// Initialize arbitrage detection system
-	debug.DropMessage("ARB", "Initializing system")
+	debug.DropMessage("ARB", "Init")
 	router.InitializeArbitrageSystem(cycles)
-	debug.DropMessage("ARB", "System ready")
+	debug.DropMessage("ARB", "Ready")
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 2: MEMORY OPTIMIZATION
 	//═══════════════════════════════════════════════════════════════════════════════════════
 
-	debug.DropMessage("MEM", "Starting optimization")
+	debug.DropMessage("MEM", "GC start")
 	runtime.GC()
 	runtime.GC()
 	rtdebug.FreeOSMemory()
-	debug.DropMessage("MEM", "Initial GC complete")
+	debug.DropMessage("MEM", "GC done")
 
 	// Verify synchronization after GC
 	for {
 		syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirement()
 		if err != nil {
-			debug.DropMessage("SYNC", "Post-GC check failed: "+err.Error())
+			debug.DropMessage("SYNC", "Post-GC error: "+err.Error())
 			continue
 		}
 		if !syncNeeded {
@@ -363,37 +365,36 @@ func init() {
 
 		err = syncharvester.ExecuteHarvesting()
 		if err != nil {
-			debug.DropMessage("SYNC", "Post-GC harvest failed: "+err.Error())
+			debug.DropMessage("SYNC", "Post-GC error: "+err.Error())
 			continue
 		}
 	}
 
 	// Track synchronization progress across reconnections
 	latestTempSyncedBlock = syncharvester.LoadMetadata()
-	debug.DropMessage("META", "Last block "+utils.Itoa(int(latestTempSyncedBlock)))
+	debug.DropMessage("META", "Block "+utils.Itoa(int(latestTempSyncedBlock)))
 
 	// Load reserve data into arbitrage engine
-	debug.DropMessage("DATA", "Loading reserves")
+	debug.DropMessage("DATA", "Loading")
 	if err := syncharvester.FlushHarvestedReservesToRouter(); err != nil {
 		panic("Reserve data flush failed: " + err.Error())
 	}
-	debug.DropMessage("DATA", "Reserves loaded")
+	debug.DropMessage("DATA", "Ready")
 
-	debug.DropMessage("MEM", "Final optimization")
+	debug.DropMessage("MEM", "Final GC")
 	runtime.GC()
 	runtime.GC()
 	rtdebug.FreeOSMemory()
-	debug.DropMessage("MEM", "Final GC complete")
+	debug.DropMessage("MEM", "GC off")
 
 	// Disable automatic GC permanently for hot spinning
 	rtdebug.SetGCPercent(-1)
-	debug.DropMessage("MEM", "GC disabled")
 
 	// Signal workers: GC disabled, hot spin mode safe
 	router.SignalGCComplete()
-	debug.DropMessage("SPIN", "Hot mode enabled")
+	debug.DropMessage("SPIN", "Hot")
 
-	debug.DropMessage("PROD", "Active")
+	debug.DropMessage("PROD", "Live")
 	runtime.LockOSThread()
 	control.ForceActive()
 }
@@ -440,41 +441,11 @@ func main() {
 	//═══════════════════════════════════════════════════════════════════════════════════════
 
 	for {
-		// Establish TCP connection with optimizations
-		rawConn, _ = net.Dial("tcp", constants.WsDialAddr)
-		debug.DropMessage("CONN", "TCP established")
-		tcpConn := rawConn.(*net.TCPConn)
-
-		// Configure TCP socket options
-		tcpConn.SetNoDelay(true)
-		tcpConn.SetReadBuffer(constants.MaxFrameSize)
-		tcpConn.SetWriteBuffer(constants.MaxFrameSize)
-
-		// Apply socket-level optimizations
-		rawFile, _ := tcpConn.File()
-		fd := int(rawFile.Fd())
-
-		// Standard TCP optimizations
-		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
-		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, constants.MaxFrameSize)
-		syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, constants.MaxFrameSize)
-
-		// Platform-specific optimizations
-		switch runtime.GOOS {
-		case "linux":
-			syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 46, 1)         // SO_REUSEPORT
-			syscall.SetsockoptString(fd, syscall.IPPROTO_TCP, 13, "bbr") // BBR congestion control
-		case "darwin":
-			syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, 0x1006, 1) // SO_REUSEPORT on macOS
-		}
-		rawFile.Close()
-		debug.DropMessage("SOCK", "Optimized")
-
 		// Synchronize missing blocks before WebSocket connection
 		for {
 			syncNeeded, lastBlock, targetBlock, err := syncharvester.CheckHarvestingRequirementFromBlock(latestTempSyncedBlock)
 			if err != nil {
-				debug.DropMessage("SYNC", "Temp check failed: "+err.Error())
+				debug.DropMessage("SYNC", "Temp error: "+err.Error())
 				continue
 			}
 			if !syncNeeded {
@@ -486,7 +457,7 @@ func main() {
 
 			newLastProcessed, err := syncharvester.ExecuteHarvestingToTemp(constants.DefaultConnections)
 			if err != nil {
-				debug.DropMessage("SYNC", "Temp harvest failed: "+err.Error())
+				debug.DropMessage("SYNC", "Temp error: "+err.Error())
 				continue
 			}
 
@@ -498,10 +469,79 @@ func main() {
 			err := syncharvester.FlushHarvestedReservesToRouterFromTemp()
 			if err == nil {
 				os.Remove(constants.HarvesterTempPath)
-				debug.DropMessage("TEMP", "Data loaded")
+				debug.DropMessage("TEMP", "Loaded")
 				break
 			}
-			debug.DropMessage("SYNC", "Temp flush failed: "+err.Error())
+			debug.DropMessage("TEMP", "Error: "+err.Error())
+		}
+
+		// Establish TCP connection with optimizations
+		var err error
+		rawConn, err = net.Dial("tcp", constants.WsDialAddr)
+		if err != nil {
+			debug.DropMessage("CONN", "Dial error: "+err.Error())
+			continue
+		}
+		debug.DropMessage("CONN", "TCP up")
+		tcpConn := rawConn.(*net.TCPConn)
+
+		// Configure TCP socket options
+		tcpConn.SetNoDelay(true)
+		tcpConn.SetReadBuffer(constants.MaxFrameSize)
+		tcpConn.SetWriteBuffer(constants.MaxFrameSize)
+
+		// Apply socket-level optimizations using RawConn
+		rawSysConn, err := tcpConn.SyscallConn()
+		if err != nil {
+			debug.DropMessage("SOCK", "RawConn error: "+err.Error())
+		} else {
+			err = rawSysConn.Control(func(fd uintptr) {
+				fdInt := int(fd)
+
+				// Standard TCP optimizations
+				if err := syscall.SetsockoptInt(fdInt, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1); err != nil {
+					debug.DropMessage("SOCK", "NODELAY error: "+err.Error())
+				}
+
+				if err := syscall.SetsockoptInt(fdInt, syscall.SOL_SOCKET, syscall.SO_RCVBUF, constants.MaxFrameSize); err != nil {
+					debug.DropMessage("SOCK", "RCVBUF error: "+err.Error())
+				}
+
+				if err := syscall.SetsockoptInt(fdInt, syscall.SOL_SOCKET, syscall.SO_SNDBUF, constants.MaxFrameSize); err != nil {
+					debug.DropMessage("SOCK", "SNDBUF error: "+err.Error())
+				}
+
+				// Platform-specific optimizations
+				switch runtime.GOOS {
+				case "linux":
+					// SO_REUSEPORT - note: may not be available on all Linux versions
+					if err := syscall.SetsockoptInt(fdInt, syscall.SOL_SOCKET, 15, 1); err != nil {
+						debug.DropMessage("SOCK", "REUSEPORT error: "+err.Error())
+					}
+
+					// TCP_CONGESTION for BBR - note: requires kernel support
+					if err := syscall.SetsockoptString(fdInt, syscall.IPPROTO_TCP, 13, "bbr"); err != nil {
+						debug.DropMessage("SOCK", "BBR error: "+err.Error())
+					}
+
+				case "darwin":
+					// SO_REUSEPORT on macOS
+					if err := syscall.SetsockoptInt(fdInt, syscall.SOL_SOCKET, 0x0200, 1); err != nil {
+						debug.DropMessage("SOCK", "REUSEPORT error: "+err.Error())
+					}
+				}
+
+				// Optional: Verify critical settings
+				if val, err := syscall.GetsockoptInt(fdInt, syscall.IPPROTO_TCP, syscall.TCP_NODELAY); err == nil && val == 1 {
+					debug.DropMessage("SOCK", "NODELAY ok")
+				}
+			})
+
+			if err != nil {
+				debug.DropMessage("SOCK", "Control error: "+err.Error())
+			} else {
+				debug.DropMessage("SOCK", "Optimized")
+			}
 		}
 
 		// Establish secure WebSocket connection
@@ -513,7 +553,7 @@ func main() {
 		debug.DropMessage("WS", "Connected")
 
 		// Event processing loop
-		debug.DropMessage("LOOP", "Processing events")
+		debug.DropMessage("LOOP", "Start")
 		for {
 			payload, err := ws.SpinUntilCompleteMessage(tlsConn)
 			if err != nil {
