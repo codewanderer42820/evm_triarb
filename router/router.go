@@ -481,7 +481,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 
 			// Report profitable opportunities for potential execution
 			if isProfitable {
-				emitArbitrageOpportunity(cycle, currentTick)
+				emitArbitrageOpportunity(cycle, currentTick, engine)
 			}
 
 			// Stop extracting if we hit a non-profitable cycle or reached our extraction limit
