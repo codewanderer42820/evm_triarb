@@ -23,7 +23,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"math/bits"
 	"net"
 	"net/http"
 	"os"
@@ -247,42 +246,6 @@ func buildHTTPTransport() *http.Transport {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // SIMD-OPTIMIZED HEX PROCESSING
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// countHexLeadingZeros performs leading zero counting using SIMD-style operations.
-// Processing variables ordered by computation dependency.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func countHexLeadingZeros(hexSegment []byte) int {
-	// Pattern definition (compile-time constant)
-	const ZERO_PATTERN = 0x3030303030303030
-
-	// Process four 8-byte chunks simultaneously (dependency order: c0→c1→c2→c3)
-	chunk0 := utils.Load64(hexSegment[0:8]) ^ ZERO_PATTERN   // XOR reveals non-zero bytes
-	chunk1 := utils.Load64(hexSegment[8:16]) ^ ZERO_PATTERN  // Process second chunk
-	chunk2 := utils.Load64(hexSegment[16:24]) ^ ZERO_PATTERN // Process third chunk
-	chunk3 := utils.Load64(hexSegment[24:32]) ^ ZERO_PATTERN // Process fourth chunk
-
-	// Create bitmask indicating which chunks contain non-zero characters
-	chunkMask := ((chunk0|(^chunk0+1))>>63)<<0 | ((chunk1|(^chunk1+1))>>63)<<1 |
-		((chunk2|(^chunk2+1))>>63)<<2 | ((chunk3|(^chunk3+1))>>63)<<3
-
-	// Find first chunk containing non-zero character using bit operations
-	firstNonZeroChunk := bits.TrailingZeros64(chunkMask)
-	if firstNonZeroChunk == 64 {
-		return 32 // All 32 characters are zeros
-	}
-
-	// Within the first non-zero chunk, locate first non-zero byte
-	chunks := [4]uint64{chunk0, chunk1, chunk2, chunk3}
-	firstNonZeroByte := bits.TrailingZeros64(chunks[firstNonZeroChunk]) >> 3
-
-	// Calculate total leading zero count across all processed chunks
-	return (firstNonZeroChunk << 3) + firstNonZeroByte
-}
 
 // parseReservesToZeroTrimmed extracts and trims reserve values from Sync event data.
 // Processing variables ordered by usage sequence: dataBytes first, then reserve processing.
