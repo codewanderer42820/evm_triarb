@@ -19,6 +19,7 @@
 package utils
 
 import (
+	"math/bits"
 	"syscall"
 	"unsafe"
 )
@@ -551,6 +552,63 @@ func ParseEthereumAddress(b []byte) [20]byte {
 	}
 
 	return result
+}
+
+// CountHexLeadingZeros efficiently counts leading zero characters in hex-encoded data.
+// Uses SIMD-style operations to process 32 hex characters in parallel, optimized for
+// cryptocurrency address validation and numeric analysis.
+//
+// Algorithm:
+//  1. Load 32 hex characters as four 8-byte chunks
+//  2. XOR each chunk with ASCII '0' pattern to identify zero characters
+//  3. Create bitmask indicating which chunks contain non-zero characters
+//  4. Use bit manipulation to find first non-zero position
+//
+// Input requirements:
+//   - Exactly 32 hex characters (typical for 128-bit values)
+//   - Valid ASCII hex characters only
+//   - No validation performed for maximum performance
+//
+// Returns: Number of leading zero characters (0-32)
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func CountHexLeadingZeros(segment []byte) int {
+	// Define the 64-bit pattern representing eight consecutive ASCII '0' characters
+	const ZERO_PATTERN = 0x3030303030303030
+
+	// Process the 32-byte hex segment in four 8-byte chunks simultaneously
+	// XOR with ZERO_PATTERN converts zero bytes to 0x00 and non-zero bytes to non-zero values
+	c0 := Load64(segment[0:8]) ^ ZERO_PATTERN   // Process bytes 0-7
+	c1 := Load64(segment[8:16]) ^ ZERO_PATTERN  // Process bytes 8-15
+	c2 := Load64(segment[16:24]) ^ ZERO_PATTERN // Process bytes 16-23
+	c3 := Load64(segment[24:32]) ^ ZERO_PATTERN // Process bytes 24-31
+
+	// Create a bitmask indicating which 8-byte chunks contain only zero characters
+	// The expression (x|(^x+1))>>63 produces 1 if any byte in x is non-zero, 0 if all bytes are zero
+	mask := ((c0|(^c0+1))>>63)<<0 | ((c1|(^c1+1))>>63)<<1 |
+		((c2|(^c2+1))>>63)<<2 | ((c3|(^c3+1))>>63)<<3
+
+	// Find the first chunk that contains a non-zero character
+	firstChunk := bits.TrailingZeros64(mask)
+
+	// Handle the special case where all 32 hex characters are zeros
+	if firstChunk == 64 {
+		return 32 // All characters in the segment are zeros
+	}
+
+	// Create an array to access the processed chunks by index
+	chunks := [4]uint64{c0, c1, c2, c3}
+
+	// Within the first non-zero chunk, find the first non-zero byte
+	// Divide by 8 to convert bit position to byte position within the chunk
+	firstByte := bits.TrailingZeros64(chunks[firstChunk]) >> 3
+
+	// Calculate the total number of leading zero characters
+	return (firstChunk << 3) + firstByte
 }
 
 // ============================================================================
