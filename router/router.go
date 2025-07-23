@@ -648,15 +648,15 @@ func RegisterTradingPairAddress(address40HexChars []byte, pairID TradingPairID) 
 	for {
 		currentPairID := addressToPairMap[i]
 
-		// If we find an empty slot, insert our entry here
+		// Check termination conditions for the search
 		if currentPairID == 0 {
+			// If we find an empty slot, insert our entry here
 			packedAddressKeys[i] = key
 			addressToPairMap[i] = pairID
 			return
 		}
-
-		// If we find an existing entry with the same key, update it
 		if packedAddressKeys[i].isEqual(key) {
+			// If we find an existing entry with the same key, update it
 			addressToPairMap[i] = pairID // Update existing entry
 			return
 		}
