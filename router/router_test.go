@@ -26,6 +26,7 @@ import (
 	"main/pooledquantumqueue"
 	"main/ring24"
 	"main/types"
+	"main/utils"
 	"runtime"
 	"sync"
 	"testing"
@@ -275,7 +276,7 @@ func TestCountHexLeadingZeros(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := countHexLeadingZeros([]byte(tc.input))
+			result := utils.CountHexLeadingZeros([]byte(tc.input))
 			if result != tc.expected {
 				t.Errorf("Expected %d leading zeros, got %d for input %s", tc.expected, result, tc.input)
 			}

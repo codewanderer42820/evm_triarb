@@ -291,8 +291,8 @@ func DispatchPriceUpdate(logView *types.LogView) {
 	hexData := logView.Data[2:130]
 
 	// Count leading zeros in each reserve value to determine precision requirements
-	leadingZerosA := countHexLeadingZeros(hexData[32:64])  // Analyze reserve A (first token)
-	leadingZerosB := countHexLeadingZeros(hexData[96:128]) // Analyze reserve B (second token)
+	leadingZerosA := utils.CountHexLeadingZeros(hexData[32:64])  // Analyze reserve A (first token)
+	leadingZerosB := utils.CountHexLeadingZeros(hexData[96:128]) // Analyze reserve B (second token)
 
 	// Calculate the minimum leading zeros to preserve maximum precision in both reserves
 	// Using branchless programming to avoid CPU pipeline stalls from conditional branches

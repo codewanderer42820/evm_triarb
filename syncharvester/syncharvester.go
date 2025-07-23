@@ -260,7 +260,7 @@ func parseReservesToZeroTrimmed(eventData string) (string, string) {
 	dataBytes := unsafe.Slice(unsafe.StringData(eventData), len(eventData))
 
 	// Parse reserve0 from bytes 32-64 (processed first)
-	leadingZeros0 := countHexLeadingZeros(dataBytes[32:64])
+	leadingZeros0 := utils.CountHexLeadingZeros(dataBytes[32:64])
 	// Optimization: for all-zeros case, keep one zero to avoid "0" string allocation
 	if leadingZeros0 == 32 {
 		leadingZeros0 = 31 // Keep last zero character
@@ -269,7 +269,7 @@ func parseReservesToZeroTrimmed(eventData string) (string, string) {
 	reserve0 := eventData[reserve0Start:64]
 
 	// Parse reserve1 from bytes 96-128 (processed second)
-	leadingZeros1 := countHexLeadingZeros(dataBytes[96:128])
+	leadingZeros1 := utils.CountHexLeadingZeros(dataBytes[96:128])
 	// Optimization: for all-zeros case, keep one zero to avoid "0" string allocation
 	if leadingZeros1 == 32 {
 		leadingZeros1 = 31 // Keep last zero character
