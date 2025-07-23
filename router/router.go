@@ -612,15 +612,24 @@ func (a PackedAddress) isEqual(b PackedAddress) bool {
 //go:nosplit
 //go:inline
 //go:registerparams
-func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64) {
+func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64, engine *ArbitrageEngine) {
 	// Calculate total profitability for the opportunity
 	totalProfit := newTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
 
-	// Single-line arbitrage opportunity report matching main.go style
-	opportunity := "(" + utils.Itoa(int(cycle.pairIDs[0])) + ")→(" +
-		utils.Itoa(int(cycle.pairIDs[1])) + ")→(" +
-		utils.Itoa(int(cycle.pairIDs[2])) + ") profit=" +
-		utils.Ftoa(totalProfit)
+	var opportunity string
+	if engine.isReverseDirection {
+		// Reverse core: flip arrow directions to show reverse trading path
+		opportunity = "(" + utils.Itoa(int(cycle.pairIDs[2])) + ")←(" +
+			utils.Itoa(int(cycle.pairIDs[1])) + ")←(" +
+			utils.Itoa(int(cycle.pairIDs[0])) + ") profit=" +
+			utils.Ftoa(totalProfit)
+	} else {
+		// Forward core: normal arrow directions
+		opportunity = "(" + utils.Itoa(int(cycle.pairIDs[0])) + ")→(" +
+			utils.Itoa(int(cycle.pairIDs[1])) + ")→(" +
+			utils.Itoa(int(cycle.pairIDs[2])) + ") profit=" +
+			utils.Ftoa(totalProfit)
+	}
 
 	debug.DropMessage("ARB", opportunity)
 }
