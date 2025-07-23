@@ -779,9 +779,8 @@ func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
 
 	// Create a deterministic seed based on the pair ID for reproducible shuffling
 	// This ensures the same pair ID always produces the same shuffle order
-	var seedInput [8]byte
-	*(*uint64)(unsafe.Pointer(&seedInput[0])) = utils.Mix64(uint64(pairID))
-	rng := newCryptoRandomGenerator(seedInput[:])
+	seed := utils.Mix64(uint64(pairID))
+	rng := newCryptoRandomGenerator((*[8]byte)(unsafe.Pointer(&seed))[:])
 
 	// Perform Fisher-Yates shuffle algorithm for uniform random permutation
 	// Start from the last element and work backwards to the second element
