@@ -288,23 +288,21 @@ func parseReservesToZeroTrimmed(eventData string) (string, string) {
 
 	// Parse reserve0 from bytes 32-64 (32 hex characters representing first reserve)
 	leadingZeros0 := countHexLeadingZeros(dataBytes[32:64])
-	reserve0Start := 32 + leadingZeros0
-	var reserve0 string
-	if reserve0Start >= 64 {
-		reserve0 = "0" // Handle all-zeros case efficiently
-	} else {
-		reserve0 = eventData[reserve0Start:64]
+	// Optimization: for all-zeros case, keep one zero to avoid "0" string allocation
+	if leadingZeros0 == 32 {
+		leadingZeros0 = 31 // Keep last zero character
 	}
+	reserve0Start := 32 + leadingZeros0
+	reserve0 := eventData[reserve0Start:64]
 
 	// Parse reserve1 from bytes 96-128 (32 hex characters representing second reserve)
 	leadingZeros1 := countHexLeadingZeros(dataBytes[96:128])
-	reserve1Start := 96 + leadingZeros1
-	var reserve1 string
-	if reserve1Start >= 128 {
-		reserve1 = "0" // Handle all-zeros case efficiently
-	} else {
-		reserve1 = eventData[reserve1Start:128]
+	// Optimization: for all-zeros case, keep one zero to avoid "0" string allocation
+	if leadingZeros1 == 32 {
+		leadingZeros1 = 31 // Keep last zero character
 	}
+	reserve1Start := 96 + leadingZeros1
+	reserve1 := eventData[reserve1Start:128]
 
 	return reserve0, reserve1
 }
