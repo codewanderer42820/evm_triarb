@@ -27,6 +27,10 @@ import (
 // COORDINATION STATE VARIABLES
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// Lock-free coordination state with cache line optimization for syscall-free timing.
+// Variables ordered by access frequency during polling operations to maximize cache
+// efficiency and minimize coordination overhead between worker threads.
+//
 //go:notinheap
 //go:align 64
 var (

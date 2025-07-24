@@ -29,6 +29,10 @@ import (
 // ERROR DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// Mathematical computation error instances with cache line isolation for error handling.
+// Pre-allocated errors prevent heap allocations during mathematical edge cases and
+// maintain consistent memory access patterns during logarithmic computations.
+//
 //go:notinheap
 //go:align 64
 var (
@@ -39,6 +43,9 @@ var (
 	// ErrOutOfRange indicates the input exceeds valid computational bounds.
 	// This protects against overflow conditions in fixed-point arithmetic.
 	ErrOutOfRange = errors.New("input out of valid range")
+
+	// Padding to complete cache line and prevent false sharing
+	_ [32]byte // Cache line padding for isolation from other global state
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════

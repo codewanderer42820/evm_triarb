@@ -124,20 +124,22 @@ type SynchronizationHarvester struct {
 // GLOBAL PROCESSING BUFFERS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Global buffers eliminate allocation overhead during processing operations.
+// Harvesting operation buffers with cache line optimization for zero-allocation processing.
+// Buffers ordered by access frequency during harvesting operations to maximize cache
+// efficiency and minimize memory allocation overhead during batch processing.
 //
 //go:notinheap
 //go:align 64
 var (
-	// Cache Line 1: Ultra hot - accessed during every HTTP request (64B)
+	// Cache Line 1: Ultra hot - accessed during every HTTP request
 	responseBuffers [][]byte                // 24B - HTTP response buffers (read/written every request)
 	processedLogs   []ProcessedReserveEntry // 24B - Log processing buffer (accessed every batch)
-	_               [16]byte                // 16B - Cache line padding
+	_               [16]byte                // 16B - Padding to complete cache line alignment
 
-	// Cache Line 2: Hot - accessed during CSV operations (64B)
+	// Cache Line 2: Hot - accessed during CSV operations
 	csvOutputBuffers  [][]byte          // 24B - CSV output buffers for batched writes (written every record)
 	csvStringBuilders []strings.Builder // 24B - String builders for zero-allocation CSV construction
-	_                 [16]byte          // 16B - Cache line padding
+	_                 [16]byte          // 16B - Padding to complete cache line alignment
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════

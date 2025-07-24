@@ -32,6 +32,10 @@ import (
 // GLOBAL STATE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// Event processing state with cache line isolation for concurrent access patterns.
+// Deduplication engine accessed on every event, block state updated less frequently.
+// Alignment prevents false sharing between hot deduplication path and warm block tracking.
+//
 //go:notinheap
 //go:align 64
 var (
@@ -40,13 +44,9 @@ var (
 	// Cache-aligned for optimal access patterns during deduplication checks.
 	dedup dedupe.Deduper
 
-	// BLOCK STATE TRACKING (WARM PATH - UPDATED PER BLOCK)
-	// Tracks the highest block number processed to maintain chain consistency.
-	// Aligned to prevent false sharing with the deduplication engine.
-
 	// Ensure latestBlk doesn't share cache line with dedup
 	_         [64]byte // Force new cache line
-	latestBlk uint32
+	latestBlk uint32   // BLOCK STATE TRACKING (WARM PATH - UPDATED PER BLOCK)
 	_         [60]byte // Pad rest of cache line
 )
 

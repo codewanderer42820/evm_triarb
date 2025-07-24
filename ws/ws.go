@@ -49,16 +49,20 @@ const subscribeFrameLen = 8 + subscribePayloadLen
 // ERROR DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Pre-allocated error instances to avoid heap allocations during error handling.
+// WebSocket error instances with cache line isolation to avoid heap allocations during
+// error handling. Aligned to prevent false sharing with other global state and ensure
+// predictable memory access patterns during exceptional conditions.
 //
 //go:notinheap
 //go:align 64
 var (
-	errUpgradeFailed    = errors.New("upgrade failed")
-	errHandshakeTimeout = errors.New("handshake timeout")
-	errFrameTooLarge    = errors.New("frame too large")
-	errMessageTooLarge  = errors.New("message too large")
-	errBoundsViolation  = errors.New("bounds violation")
+	// WebSocket protocol errors (accessed during connection failures)
+	errUpgradeFailed    = errors.New("upgrade failed")    // Error for WebSocket upgrade failures
+	errHandshakeTimeout = errors.New("handshake timeout") // Error for connection timeout
+	errFrameTooLarge    = errors.New("frame too large")   // Error for oversized frames
+	errMessageTooLarge  = errors.New("message too large") // Error for oversized messages
+	errBoundsViolation  = errors.New("bounds violation")  // Error for buffer overflows
+	_                   [24]byte                          // Padding to complete cache line
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -81,8 +85,9 @@ type WebSocketProcessor struct {
 	subscribeFrame [128]byte
 }
 
-// Global processor instance eliminates allocation overhead.
-// Page alignment ensures optimal CPU cache line usage during frame processing.
+// WebSocket processor global instance with page alignment for optimal cache utilization.
+// Page-aligned allocation ensures processor buffers don't cross page boundaries and
+// maximizes memory bandwidth during frame processing operations.
 //
 //go:notinheap
 //go:align 16384

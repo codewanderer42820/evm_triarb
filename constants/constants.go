@@ -164,17 +164,21 @@ const (
 // COMPUTED RUNTIME VALUES
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// Runtime configuration values with cache line optimization for frequent polling operations.
+// Variables ordered by access frequency during polling loops and grouped to maximize
+// cache line utilization. Alignment prevents false sharing with other global state.
+//
 //go:notinheap
 //go:align 64
 var (
-	// CACHE LINE 1: Primary cooldown calculations
-	CooldownPolls       = (ActiveCooldownMs * ActivePollRate) / 1000 // 8B
-	CooldownPolls500ms  = (CooldownMs500 * ActivePollRate) / 1000    // 8B
-	CooldownPolls250ms  = (CooldownMs250 * ActivePollRate) / 1000    // 8B
-	CooldownPolls100ms  = (CooldownMs100 * ActivePollRate) / 1000    // 8B
-	CooldownPolls50ms   = (CooldownMs50 * ActivePollRate) / 1000     // 8B
-	CooldownPolls1000ms = (CooldownMs1000 * ActivePollRate) / 1000   // 8B
-	CooldownPolls2000ms = (CooldownMs2000 * ActivePollRate) / 1000   // 8B
+	// CACHE LINE 1: Primary cooldown calculations (accessed every poll cycle)
+	CooldownPolls       = (ActiveCooldownMs * ActivePollRate) / 1000 // 8B - Nuclear hot: main cooldown
+	CooldownPolls500ms  = (CooldownMs500 * ActivePollRate) / 1000    // 8B - Hot: 500ms variant
+	CooldownPolls250ms  = (CooldownMs250 * ActivePollRate) / 1000    // 8B - Hot: 250ms variant
+	CooldownPolls100ms  = (CooldownMs100 * ActivePollRate) / 1000    // 8B - Warm: 100ms variant
+	CooldownPolls50ms   = (CooldownMs50 * ActivePollRate) / 1000     // 8B - Warm: 50ms variant
+	CooldownPolls1000ms = (CooldownMs1000 * ActivePollRate) / 1000   // 8B - Cold: 1000ms variant
+	CooldownPolls2000ms = (CooldownMs2000 * ActivePollRate) / 1000   // 8B - Cold: 2000ms variant
 	_                   [8]byte                                      // 8B - Padding to fill cache line
 )
 
@@ -182,21 +186,25 @@ var (
 // JSON PARSING LOOKUP TABLES
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+// JSON parsing lookup tables with cache line optimization for hot path field detection.
+// Key patterns ordered by access frequency during JSON parsing operations to maximize
+// cache hit rates and minimize memory stalls during event processing.
+//
 //go:notinheap
 //go:align 64
 var (
 	// CACHE LINE 1: Most frequently accessed keys during JSON parsing
-	KeyAddress        = [8]byte{'"', 'a', 'd', 'd', 'r', 'e', 's', 's'} // 8B
-	KeyData           = [8]byte{'"', 'd', 'a', 't', 'a', '"', ':', '"'} // 8B
-	KeyTopics         = [8]byte{'"', 't', 'o', 'p', 'i', 'c', 's', '"'} // 8B
-	KeyBlockNumber    = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'N', 'u'} // 8B
-	KeyBlockHash      = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'H', 'a'} // 8B
-	KeyBlockTimestamp = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'T', 'i'} // 8B
-	KeyLogIndex       = [8]byte{'"', 'l', 'o', 'g', 'I', 'n', 'd', 'e'} // 8B
-	KeyTransaction    = [8]byte{'"', 't', 'r', 'a', 'n', 's', 'a', 'c'} // 8B
+	KeyAddress        = [8]byte{'"', 'a', 'd', 'd', 'r', 'e', 's', 's'} // 8B - Nuclear hot: address field
+	KeyData           = [8]byte{'"', 'd', 'a', 't', 'a', '"', ':', '"'} // 8B - Nuclear hot: data field
+	KeyTopics         = [8]byte{'"', 't', 'o', 'p', 'i', 'c', 's', '"'} // 8B - Nuclear hot: topics field
+	KeyBlockNumber    = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'N', 'u'} // 8B - Hot: block number field
+	KeyBlockHash      = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'H', 'a'} // 8B - Warm: block hash field
+	KeyBlockTimestamp = [8]byte{'"', 'b', 'l', 'o', 'c', 'k', 'T', 'i'} // 8B - Warm: timestamp field
+	KeyLogIndex       = [8]byte{'"', 'l', 'o', 'g', 'I', 'n', 'd', 'e'} // 8B - Hot: log index field
+	KeyTransaction    = [8]byte{'"', 't', 'r', 'a', 'n', 's', 'a', 'c'} // 8B - Warm: transaction field
 
-	// CACHE LINE 2: Less frequently accessed keys
-	KeyRemoved    = [8]byte{'"', 'r', 'e', 'm', 'o', 'v', 'e', 'd'} // 8B
-	SigSyncPrefix = [8]byte{'1', 'c', '4', '1', '1', 'e', '9', 'a'} // 8B
+	// CACHE LINE 2: Less frequently accessed keys and signatures
+	KeyRemoved    = [8]byte{'"', 'r', 'e', 'm', 'o', 'v', 'e', 'd'} // 8B - Cold: removed flag field
+	SigSyncPrefix = [8]byte{'1', 'c', '4', '1', '1', 'e', '9', 'a'} // 8B - Hot: Sync event signature
 	_             [48]byte                                          // 48B - Padding to fill cache line
 )
