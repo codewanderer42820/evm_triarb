@@ -31,7 +31,7 @@ import (
 	"main/fastuni"
 	"main/localidx"
 	"main/pooledquantumqueue"
-	"main/ring24"
+	"main/ring56"
 	"main/types"
 	"main/utils"
 
@@ -62,12 +62,14 @@ type CycleIndex uint64
 // PriceUpdateMessage represents a price change notification sent between CPU cores.
 // When a trading pair's price changes, this message is distributed to all cores
 // that need to update arbitrage cycles involving that pair.
+// Padded to 56 bytes for ring56 compatibility.
 //
 //go:notinheap
 type PriceUpdateMessage struct {
 	pairID      TradingPairID // 8B - Trading pair that experienced the price change
 	forwardTick float64       // 8B - Logarithmic price ratio in forward direction
 	reverseTick float64       // 8B - Same price change in opposite direction (negative of forwardTick)
+	_           [32]byte      // 32B - Padding to reach exactly 56 bytes for ring56
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -227,7 +229,7 @@ var (
 	pairToCoreRouting [constants.PairRoutingTableCapacity]uint64
 
 	// CACHE LINE GROUP 3: Ring buffers (NUCLEAR HOT - accessed after routing)
-	coreRings [constants.MaxSupportedCores]*ring24.Ring
+	coreRings [constants.MaxSupportedCores]*ring56.Ring
 
 	// CACHE LINE GROUP 4: Synchronization (accessed during phase transitions)
 	gcComplete chan struct{} // Channel used for two-stage initialization coordination
@@ -444,7 +446,7 @@ func DispatchPriceUpdate(logView *types.LogView) {
 	// Distribute the price update message to all CPU cores that process this trading pair
 	// We use guaranteed delivery to ensure no core misses important price updates
 	coreAssignments := pairToCoreRouting[pairID]          // Get bitmask of target cores
-	messageBytes := (*[24]byte)(unsafe.Pointer(&message)) // Convert to byte array for ring buffer
+	messageBytes := (*[56]byte)(unsafe.Pointer(&message)) // Convert to 56-byte array for ring56
 
 	// Continue delivery attempts until all cores have received the message
 	for coreAssignments != 0 {
@@ -1031,8 +1033,8 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 		// nextHandle: zero value is fine
 	}
 
-	// Create ring buffer locally (no global visibility yet)
-	ring := ring24.New(constants.DefaultRingSize)
+	// Create ring56 buffer locally (no global visibility yet)
+	ring := ring56.New(constants.DefaultRingSize)
 
 	// Perform zero-fragmentation initialization of all queue structures
 	initializeArbitrageQueues(engine, allShards)

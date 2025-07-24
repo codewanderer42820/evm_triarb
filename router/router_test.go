@@ -24,7 +24,7 @@ import (
 	"main/control"
 	"main/localidx"
 	"main/pooledquantumqueue"
-	"main/ring24"
+	"main/ring56"
 	"main/types"
 	"main/utils"
 	"runtime"
@@ -68,7 +68,7 @@ func testSetup(_ *testing.T) func() {
 
 	// Reset global state
 	coreEngines = [constants.MaxSupportedCores]*ArbitrageEngine{}
-	coreRings = [constants.MaxSupportedCores]*ring24.Ring{}
+	coreRings = [constants.MaxSupportedCores]*ring56.Ring{}
 	pairToCoreRouting = [constants.PairRoutingTableCapacity]uint64{}
 	addressToPairMap = [constants.AddressTableCapacity]TradingPairID{}
 	packedAddressKeys = [constants.AddressTableCapacity]PackedAddress{}
@@ -293,7 +293,7 @@ func TestDispatchPriceUpdateBasic(t *testing.T) {
 	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
 
 	// Initialize minimal core setup
-	coreRings[0] = ring24.New(constants.DefaultRingSize)
+	coreRings[0] = ring56.New(constants.DefaultRingSize)
 
 	// Create test log with valid Uniswap V2 Sync event data
 	// Format: 0x + 64 chars (reserve0) + 64 chars (reserve1)
@@ -333,7 +333,7 @@ func TestDispatchPriceUpdateMultiCore(t *testing.T) {
 	// Setup multiple cores
 	numCores := 4
 	for i := 0; i < numCores; i++ {
-		coreRings[i] = ring24.New(constants.DefaultRingSize)
+		coreRings[i] = ring56.New(constants.DefaultRingSize)
 		RegisterPairToCoreRouting(TestPairETH_DAI, uint8(i))
 	}
 
@@ -371,7 +371,7 @@ func TestDispatchPriceUpdateUnknownAddress(t *testing.T) {
 	defer cleanup()
 
 	// Setup core but don't register the address
-	coreRings[0] = ring24.New(constants.DefaultRingSize)
+	coreRings[0] = ring56.New(constants.DefaultRingSize)
 
 	// Create test event for unregistered address
 	syncData := "0x" +
@@ -399,7 +399,7 @@ func TestDispatchPriceUpdateInvalidData(t *testing.T) {
 	// Register test pair and setup core
 	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
 	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
-	coreRings[0] = ring24.New(constants.DefaultRingSize)
+	coreRings[0] = ring56.New(constants.DefaultRingSize)
 
 	// Test cases for legitimate on-chain scenarios that should be handled gracefully
 	testCases := []struct {
@@ -465,7 +465,7 @@ func TestDispatchPriceUpdateMalformedDataPanic(t *testing.T) {
 	// Register test pair and setup core
 	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
 	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
-	coreRings[0] = ring24.New(constants.DefaultRingSize)
+	coreRings[0] = ring56.New(constants.DefaultRingSize)
 
 	// Test that malformed data causes expected panic (performance-critical code should fail fast on bad input)
 	t.Run("Malformed data should panic (by design)", func(t *testing.T) {
@@ -952,7 +952,7 @@ func TestShutdownWithActiveTraffic(t *testing.T) {
 	// Setup system with registered addresses
 	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
 	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
-	coreRings[0] = ring24.New(constants.DefaultRingSize)
+	coreRings[0] = ring56.New(constants.DefaultRingSize)
 
 	// Create traffic generator
 	trafficDone := make(chan bool)
@@ -1065,7 +1065,7 @@ func TestHighVolumeStressTest(t *testing.T) {
 	// Setup single pair to avoid complexity
 	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
 	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
-	coreRings[0] = ring24.New(constants.DefaultRingSize)
+	coreRings[0] = ring56.New(constants.DefaultRingSize)
 
 	// Fixed sync data pattern - no dynamic generation
 	syncData := "0x" +
