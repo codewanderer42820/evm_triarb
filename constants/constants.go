@@ -106,7 +106,7 @@ const (
 const (
 	HarvesterDeploymentBlock = uint64(10000835)
 	HarvesterOutputPath      = "uniswap_v2.csv"
-	HarvesterTempPath        = "uniswap_v2.csv.tmp" // Added for temporary sync file
+	HarvesterTempPath        = "uniswap_v2.csv.tmp"
 	HarvesterMetadataPath    = HarvesterOutputPath + ".meta"
 	SyncEventSignature       = "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"
 	OptimalBatchSize         = uint64(8_000)
