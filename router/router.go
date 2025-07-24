@@ -480,7 +480,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 
 			// Report profitable opportunities for potential execution
 			if isProfitable {
-				emitArbitrageOpportunity(cycle, currentTick, engine)
+				emitArbitrageOpportunity(engine, cycle, currentTick)
 			}
 
 			// Stop extracting if we hit a non-profitable cycle or reached our extraction limit
@@ -611,7 +611,7 @@ func (a PackedAddress) isEqual(b PackedAddress) bool {
 //go:nosplit
 //go:inline
 //go:registerparams
-func emitArbitrageOpportunity(cycle *ArbitrageCycleState, newTick float64, engine *ArbitrageEngine) {
+func emitArbitrageOpportunity(engine *ArbitrageEngine, cycle *ArbitrageCycleState, newTick float64) {
 	// Calculate total profitability for the opportunity
 	totalProfit := newTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
 
@@ -656,15 +656,15 @@ func RegisterTradingPairAddress(address40HexChars []byte, pairID TradingPairID) 
 	for {
 		currentPairID := addressToPairMap[i]
 
-		// Check termination conditions for the search
+		// If we find an empty slot, insert our entry here
 		if currentPairID == 0 {
-			// If we find an empty slot, insert our entry here
 			packedAddressKeys[i] = key
 			addressToPairMap[i] = pairID
 			return
 		}
+
+		// If we find an existing entry with the same key, update it
 		if packedAddressKeys[i].isEqual(key) {
-			// If we find an existing entry with the same key, update it
 			addressToPairMap[i] = pairID // Update existing entry
 			return
 		}
@@ -700,96 +700,6 @@ func RegisterPairToCoreRouting(pairID TradingPairID, coreID uint8) {
 	// Add this core to the bitmask of cores that should receive updates for this pair
 	// Multiple cores can process the same pair for load balancing and redundancy
 	pairToCoreRouting[pairID] |= 1 << coreID
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CRYPTOGRAPHIC RANDOM GENERATION
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// newCryptoRandomGenerator creates deterministic random number generators for load balancing.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func newCryptoRandomGenerator(initialSeed []byte) *CryptoRandomGenerator {
-	// Hash the initial seed to create a uniform 256-bit cryptographic seed
-	// This ensures good randomness distribution regardless of input seed quality
-	hasher := sha3.NewLegacyKeccak256()
-	hasher.Write(initialSeed)
-
-	rng := &CryptoRandomGenerator{
-		hasher: sha3.NewLegacyKeccak256(), // Create a fresh hasher for generation
-	}
-
-	// Pre-populate input buffer with seed and initialize counter to zero
-	copy(rng.input[:32], hasher.Sum(nil))
-	*(*uint64)(unsafe.Pointer(&rng.input[32])) = 0 // Initialize counter to zero
-
-	return rng
-}
-
-// generateRandomUint64 generates cryptographically strong random values in deterministic sequences.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func (rng *CryptoRandomGenerator) generateRandomUint64() uint64 {
-	// Generate a hash from the seed+counter combination
-	rng.hasher.Reset()
-	rng.hasher.Write(rng.input[:])
-	output := rng.hasher.Sum(nil)
-
-	// Increment counter for the next generation to ensure unique sequences
-	counter := (*uint64)(unsafe.Pointer(&rng.input[32]))
-	*counter++
-
-	// Extract and return the first 64 bits from the hash output
-	return utils.Load64(output[:8])
-}
-
-// generateRandomInt generates random integers within specified bounds for distribution algorithms.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func (rng *CryptoRandomGenerator) generateRandomInt(upperBound int) int {
-	// Generate a random 64-bit value and reduce it to the desired range
-	// This provides uniform distribution across the range [0, upperBound)
-	return int(rng.generateRandomUint64() % uint64(upperBound))
-}
-
-// shuffleCycleEdges performs deterministic Fisher-Yates shuffling for load balancing.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
-	// Skip shuffling if there's nothing to shuffle or only one element
-	if len(cycleEdges) <= 1 {
-		return
-	}
-
-	// Create a deterministic seed based on the pair ID for reproducible shuffling
-	// This ensures the same pair ID always produces the same shuffle order
-	seed := utils.Mix64(uint64(pairID))
-	rng := newCryptoRandomGenerator((*[8]byte)(unsafe.Pointer(&seed))[:])
-
-	// Perform Fisher-Yates shuffle algorithm for uniform random permutation
-	// Start from the last element and work backwards to the second element
-	for i := len(cycleEdges) - 1; i > 0; i-- {
-		// Generate a random index in the range [0, i] inclusive
-		j := rng.generateRandomInt(i + 1)
-		// Swap the current element with the randomly selected element
-		cycleEdges[i], cycleEdges[j] = cycleEdges[j], cycleEdges[i]
-	}
 }
 
 // buildWorkloadShards distributes arbitrage cycles across processing cores for load balancing.
@@ -856,6 +766,92 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 			}
 			shardIdx++
 		}
+	}
+}
+
+// newCryptoRandomGenerator creates deterministic random number generators for load balancing.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func newCryptoRandomGenerator(seed uint64) *CryptoRandomGenerator {
+	// Hash the seed value directly
+	hasher := sha3.NewLegacyKeccak256()
+	seedBytes := (*[8]byte)(unsafe.Pointer(&seed))[:]
+	hasher.Write(seedBytes)
+
+	rng := &CryptoRandomGenerator{
+		hasher: sha3.NewLegacyKeccak256(), // Create a fresh hasher for generation
+	}
+
+	// Pre-populate input buffer with seed and initialize counter to zero
+	copy(rng.input[:32], hasher.Sum(nil))
+	*(*uint64)(unsafe.Pointer(&rng.input[32])) = 0 // Initialize counter to zero
+
+	return rng
+}
+
+// generateRandomUint64 generates cryptographically strong random values in deterministic sequences.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func (rng *CryptoRandomGenerator) generateRandomUint64() uint64 {
+	// Generate a hash from the seed+counter combination
+	rng.hasher.Reset()
+	rng.hasher.Write(rng.input[:])
+	output := rng.hasher.Sum(nil)
+
+	// Increment counter for the next generation to ensure unique sequences
+	counter := (*uint64)(unsafe.Pointer(&rng.input[32]))
+	*counter++
+
+	// Extract and return the first 64 bits from the hash output
+	return utils.Load64(output[:8])
+}
+
+// generateRandomInt generates random integers within specified bounds for distribution algorithms.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func (rng *CryptoRandomGenerator) generateRandomInt(upperBound int) int {
+	// Generate a random 64-bit value and reduce it to the desired range
+	// This provides uniform distribution across the range [0, upperBound)
+	return int(rng.generateRandomUint64() % uint64(upperBound))
+}
+
+// shuffleCycleEdges performs deterministic Fisher-Yates shuffling for load balancing.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
+	// Skip shuffling if there's nothing to shuffle or only one element
+	if len(cycleEdges) <= 1 {
+		return
+	}
+
+	// Create a deterministic seed based on the pair ID for reproducible shuffling
+	// This ensures the same pair ID always produces the same shuffle order
+	seed := utils.Mix64(uint64(pairID))
+	rng := newCryptoRandomGenerator(seed)
+
+	// Perform Fisher-Yates shuffle algorithm for uniform random permutation
+	// Start from the last element and work backwards to the second element
+	for i := len(cycleEdges) - 1; i > 0; i-- {
+		// Generate a random index in the range [0, i] inclusive
+		j := rng.generateRandomInt(i + 1)
+		// Swap the current element with the randomly selected element
+		cycleEdges[i], cycleEdges[j] = cycleEdges[j], cycleEdges[i]
 	}
 }
 
