@@ -138,16 +138,36 @@ func TestQueueStressRandomOperations(t *testing.T) {
 				break
 			}
 
-			q.MoveTick(h, tick)
-
+			// Locate and extract existing entry from reference heap
+			var oldSeq int
+			var oldTick int64
+			var found bool
 			for j := len(*ref) - 1; j >= 0; j-- {
 				if (*ref)[j].h == h {
+					oldSeq = (*ref)[j].seq
+					oldTick = (*ref)[j].tick
+					found = true
 					heap.Remove(ref, j)
 					break
 				}
 			}
-			heap.Push(ref, &stressItem{h: h, tick: tick, seq: seq})
-			seq++
+
+			if !found {
+				continue // Entry not found in reference heap
+			}
+
+			// Apply tick relocation
+			q.MoveTick(h, tick)
+
+			// Update reference heap: preserve sequence for no-op moves
+			if oldTick != tick {
+				// Actual relocation: assign new sequence for LIFO ordering
+				heap.Push(ref, &stressItem{h: h, tick: tick, seq: seq})
+				seq++
+			} else {
+				// No-op relocation: maintain original sequence number
+				heap.Push(ref, &stressItem{h: h, tick: tick, seq: oldSeq})
+			}
 
 		case 2: // POP
 			if q.Empty() {

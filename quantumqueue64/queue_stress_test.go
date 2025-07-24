@@ -169,31 +169,47 @@ func TestQueueStressRandomOperations(t *testing.T) {
 		// ──────────────────────────────────────────────────────────────────
 		// MOVE OPERATION: Tick relocation for existing entry
 		// ──────────────────────────────────────────────────────────────────
-		case 1:
-			// Skip if no active entries
+		case 1: // MOVE
 			if len(live) == 0 {
 				continue
 			}
 
-			// Select arbitrary active handle
 			var h Handle
 			for k := range live {
 				h = k
 				break
 			}
 
+			// Locate and extract existing entry from reference heap
+			var oldSeq int
+			var oldTick int64
+			var found bool
+			for j := len(*ref) - 1; j >= 0; j-- {
+				if (*ref)[j].h == h {
+					oldSeq = (*ref)[j].seq
+					oldTick = (*ref)[j].tick
+					found = true
+					heap.Remove(ref, j)
+					break
+				}
+			}
+
+			if !found {
+				continue // Entry not found in reference heap
+			}
+
 			// Apply tick relocation
 			q.MoveTick(h, tick)
 
-			// Update reference heap: remove old entry, insert new
-			for j := len(*ref) - 1; j >= 0; j-- {
-				if (*ref)[j].h == h {
-					heap.Remove(ref, j)
-					break // FIXED: Add break to only remove one entry
-				}
+			// Update reference heap: preserve sequence for no-op moves
+			if oldTick != tick {
+				// Actual relocation: assign new sequence for LIFO ordering
+				heap.Push(ref, &stressItem{h: h, tick: tick, seq: seq})
+				seq++
+			} else {
+				// No-op relocation: maintain original sequence number
+				heap.Push(ref, &stressItem{h: h, tick: tick, seq: oldSeq})
 			}
-			heap.Push(ref, &stressItem{h: h, tick: tick, seq: seq})
-			seq++
 
 		// ──────────────────────────────────────────────────────────────────
 		// POP OPERATION: Minimum extraction with validation
