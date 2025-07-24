@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// CompactQueue128 - MINIMAL but IDENTICAL bit logic to original
+// CompactQueue128 - TRULY MINIMAL with exact bitmap logic clone
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Strategy: Use IDENTICAL bit manipulation as original, but with minimal storage
+// Strategy: Use IDENTICAL bit manipulation as original, but with truly minimal storage
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package compactqueue128
@@ -12,7 +12,7 @@ import (
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CONFIGURATION CONSTANTS - IDENTICAL TO ORIGINAL
+// CONFIGURATION CONSTANTS - Keep originals for bit math compatibility
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const (
@@ -31,10 +31,6 @@ type Handle uint64
 
 const nilIdx Handle = ^Handle(0)
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SHARED MEMORY ENTRY - IDENTICAL
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
 //go:notinheap
 //go:align 32
 type Entry struct {
@@ -45,7 +41,7 @@ type Entry struct {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MINIMAL STORAGE WITH ORIGINAL ACCESS PATTERN
+// TRULY MINIMAL STORAGE - Only what we actually need
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // groupBlock - minimal version that only stores what we need
@@ -55,7 +51,7 @@ type Entry struct {
 type groupBlock struct {
 	l1Summary uint64    // 8B - Only bits 63,62 used (lanes 0,1)
 	l2        [2]uint64 // 16B - Only l2[0] and l2[1] used
-	_         [40]byte  // 40B - Padding
+	_         [40]byte  // 40B - Padding to 64 bytes
 }
 
 //go:notinheap
@@ -69,9 +65,9 @@ type CompactQueue128 struct {
 	// Padding to cache line boundary (40 bytes)
 	_ [40]byte
 
-	// Minimal storage - only what we actually need
-	buckets [BucketCount]Handle // 128 buckets
-	groups  [1]groupBlock       // Only group 0
+	// Truly minimal storage - only what we actually need
+	buckets [BucketCount]Handle // 128 buckets × 8B = 1024B
+	groups  [1]groupBlock       // 1 group × 64B = 64B
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -230,7 +226,7 @@ func (q *CompactQueue128) Push(tick int64, h Handle, val uint64) {
 		q.unlink(h)
 	}
 	q.linkAtHead(h, tick)
-	entry.Data = val // Set data AFTER linking (original order)
+	entry.Data = val
 }
 
 //go:norace
@@ -279,12 +275,15 @@ func (q *CompactQueue128) UnlinkMin(h Handle) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MEMORY USAGE: Truly minimal while maintaining compatibility
+// MEMORY USAGE: Truly minimal while maintaining exact bitmap compatibility
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// - summary: 8 bytes (only bit 63 used)
-// - groups[0].l1Summary: 8 bytes (only bits 63,62 used)
-// - groups[0].l2[0]: 8 bytes (64 buckets for ticks 0-63)
-// - groups[0].l2[1]: 8 bytes (64 buckets for ticks 64-127)
-// - buckets[128]: 1024 bytes
-// Total: ~1KB vs 37KB+ for original = 97% reduction
+// Core struct: 64B (hot path + padding)
+// buckets[128]: 1024B (128 × 8B handles)
+// groups[1]: 64B (1 × 64B groupBlock)
+// groupBlock contains:
+//   - l1Summary: 8B (only bits 63,62 used for lanes 0,1)
+//   - l2[2]: 16B (l2[0] for ticks 0-63, l2[1] for ticks 64-127)
+//   - padding: 40B
+//
+// Total: ~1.1KB vs 37KB+ for original = 97% memory reduction
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
