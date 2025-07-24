@@ -65,10 +65,12 @@ type CycleIndex uint64
 //
 //go:notinheap
 type PriceUpdateMessage struct {
-	pairID      TradingPairID // 8B - Trading pair that experienced the price change
-	forwardTick float64       // 8B - Logarithmic price ratio in forward direction
-	reverseTick float64       // 8B - Same price change in opposite direction (negative of forwardTick)
-	_           [32]byte      // 32B - Padding to reach exactly 56 bytes for ring56
+	pairID        TradingPairID // 8B - Trading pair that experienced the price change
+	forwardTick   float64       // 8B - Logarithmic price ratio in forward direction
+	reverseTick   float64       // 8B - Same price change in opposite direction (negative of forwardTick)
+	leadingZerosA uint64        // 8B - Leading zero count for reserve A (first token)
+	leadingZerosB uint64        // 8B - Leading zero count for reserve B (second token)
+	_             [16]byte      // 16B - Padding to reach exactly 56 bytes for ring56
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -338,9 +340,12 @@ func (a PackedAddress) isEqual(b PackedAddress) bool {
 //go:nosplit
 //go:inline
 //go:registerparams
-func emitArbitrageOpportunity(engine *ArbitrageEngine, cycle *ArbitrageCycleState, newTick float64) {
+func emitArbitrageOpportunity(update *PriceUpdateMessage, cycle *ArbitrageCycleState, newTick float64, engine *ArbitrageEngine) {
 	// Calculate total profitability for the opportunity
 	totalProfit := newTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
+
+	// Calculate the sum of leading zeros for priority calculation
+	totalLeadingZeros := int(update.leadingZerosA + update.leadingZerosB)
 
 	var opportunity string
 	if engine.isReverseDirection {
@@ -348,13 +353,13 @@ func emitArbitrageOpportunity(engine *ArbitrageEngine, cycle *ArbitrageCycleStat
 		opportunity = "(" + utils.Itoa(int(cycle.pairIDs[2])) + ")←(" +
 			utils.Itoa(int(cycle.pairIDs[1])) + ")←(" +
 			utils.Itoa(int(cycle.pairIDs[0])) + ") profit=" +
-			utils.Ftoa(totalProfit)
+			utils.Ftoa(totalProfit) + " zeros=" + utils.Itoa(totalLeadingZeros)
 	} else {
 		// Forward core: normal arrow directions
 		opportunity = "(" + utils.Itoa(int(cycle.pairIDs[0])) + ")→(" +
 			utils.Itoa(int(cycle.pairIDs[1])) + ")→(" +
 			utils.Itoa(int(cycle.pairIDs[2])) + ") profit=" +
-			utils.Ftoa(totalProfit)
+			utils.Ftoa(totalProfit) + " zeros=" + utils.Itoa(totalLeadingZeros)
 	}
 
 	debug.DropMessage("ARB", opportunity)
@@ -428,17 +433,21 @@ func DispatchPriceUpdate(logView *types.LogView) {
 		placeholder := 50.2 + float64(randBits)*0.0015625 // Scale to reasonable tick range
 
 		message = PriceUpdateMessage{
-			pairID:      pairID,
-			forwardTick: placeholder, // Positive values deprioritize cycles (less profitable)
-			reverseTick: placeholder, // Same value for both directions maintains consistency
+			pairID:        pairID,
+			forwardTick:   placeholder, // Positive values deprioritize cycles (less profitable)
+			reverseTick:   placeholder, // Same value for both directions maintains consistency
+			leadingZerosA: uint64(leadingZerosA),
+			leadingZerosB: uint64(leadingZerosB),
 		}
 	} else {
 		// Normal case: use the calculated logarithmic ratio with opposite signs
 		// Forward and reverse directions have opposite signs for bidirectional arbitrage detection
 		message = PriceUpdateMessage{
-			pairID:      pairID,
-			forwardTick: tickValue,  // Actual calculated tick value
-			reverseTick: -tickValue, // Negative for reverse direction processing
+			pairID:        pairID,
+			forwardTick:   tickValue,  // Actual calculated tick value
+			reverseTick:   -tickValue, // Negative for reverse direction processing
+			leadingZerosA: uint64(leadingZerosA),
+			leadingZerosB: uint64(leadingZerosB),
 		}
 	}
 
@@ -570,7 +579,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 
 			// Report profitable opportunities for potential execution
 			if isProfitable {
-				emitArbitrageOpportunity(engine, cycle, currentTick)
+				emitArbitrageOpportunity(update, cycle, currentTick, engine)
 			}
 
 			// Stop extracting if we hit a non-profitable cycle or reached our extraction limit
