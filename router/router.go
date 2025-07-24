@@ -995,12 +995,6 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 
 // launchArbitrageWorker initializes and operates a processing core for arbitrage detection.
 //
-// launchArbitrageWorker initializes and operates a processing core for arbitrage detection.
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
 //go:norace
 //go:nocheckptr
 //go:inline
