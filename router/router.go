@@ -68,8 +68,8 @@ type PriceUpdateMessage struct {
 	pairID        TradingPairID // 8B - Trading pair that experienced the price change
 	forwardTick   float64       // 8B - Logarithmic price ratio in forward direction
 	reverseTick   float64       // 8B - Same price change in opposite direction (negative of forwardTick)
-	leadingZerosA uint64        // 8B - Leading zero count for reserve A (first token)
-	leadingZerosB uint64        // 8B - Leading zero count for reserve B (second token)
+	leadingZeros0 uint64        // 8B - Leading zero count for reserve0 (first token)
+	leadingZeros1 uint64        // 8B - Leading zero count for reserve1 (second token)
 	_             [16]byte      // 16B - Padding to reach exactly 56 bytes for ring56
 }
 
@@ -86,8 +86,13 @@ type PriceUpdateMessage struct {
 // Total profit = log(r1) + log(r2) + log(r3) = log(r1 * r2 * r3)
 // Profitable when: r1 * r2 * r3 > 1, or equivalently: log(r1 * r2 * r3) > 0
 //
+// Liquidity Tracking:
+// Leading zero counts from reserve parsing provide instant liquidity approximation for
+// execution risk assessment and slippage prediction without additional on-chain calls.
+// Like tick values, one position is always zero (the queue's primary pair).
+//
 //go:notinheap
-//go:align 64
+//go:align 32
 type ArbitrageCycleState struct {
 	// tickValues stores the logarithmic price ratios for each of the three pairs in the cycle.
 	// One of these is intentionally always zero so that the common tick for the entire queue
@@ -96,7 +101,12 @@ type ArbitrageCycleState struct {
 	tickValues [3]float64 // 24B - Index corresponds to pair position, one always zero
 
 	pairIDs [3]TradingPairID // 24B - The three trading pairs that form this arbitrage cycle
-	_       [16]byte         // 16B - Padding for cache line boundary alignment
+
+	// Liquidity assessment through leading zero counts for execution risk evaluation
+	// Each pair's liquidity approximated by hex leading zeros: more zeros = less liquidity
+	// Like tickValues, one position is always zero (the queue's primary pair position)
+	leadingZeros0 [3]uint64 // 24B - Reserve0 leading zero counts for each pair in cycle
+	leadingZeros1 [3]uint64 // 24B - Reserve1 leading zero counts for each pair in cycle
 }
 
 // CycleFanoutEntry defines how price updates propagate to affected arbitrage cycles.
@@ -339,12 +349,14 @@ func (a PackedAddress) isEqual(b PackedAddress) bool {
 //go:nocheckptr
 //go:inline
 //go:registerparams
-func emitArbitrageOpportunity(newTick float64, cycle *ArbitrageCycleState, update *PriceUpdateMessage, engine *ArbitrageEngine) {
+func emitArbitrageOpportunity(update *PriceUpdateMessage, cycle *ArbitrageCycleState, currentTick float64, engine *ArbitrageEngine) {
 	// Calculate total profitability for the opportunity
-	totalProfit := newTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
+	totalProfit := currentTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
 
-	// Calculate the sum of leading zeros for priority calculation
-	totalLeadingZeros := int(update.leadingZerosA + update.leadingZerosB)
+	// Calculate aggregate liquidity assessment from all pairs in the cycle
+	// Add the new leading zeros to the stored cycle zeros for complete assessment
+	totalZeros0 := update.leadingZeros0 + cycle.leadingZeros0[0] + cycle.leadingZeros0[1] + cycle.leadingZeros0[2]
+	totalZeros1 := update.leadingZeros1 + cycle.leadingZeros1[0] + cycle.leadingZeros1[1] + cycle.leadingZeros1[2]
 
 	var opportunity string
 	if engine.isReverseDirection {
@@ -352,13 +364,15 @@ func emitArbitrageOpportunity(newTick float64, cycle *ArbitrageCycleState, updat
 		opportunity = "(" + utils.Itoa(int(cycle.pairIDs[2])) + ")←(" +
 			utils.Itoa(int(cycle.pairIDs[1])) + ")←(" +
 			utils.Itoa(int(cycle.pairIDs[0])) + ") profit=" +
-			utils.Ftoa(totalProfit) + " zeros=" + utils.Itoa(totalLeadingZeros)
+			utils.Ftoa(totalProfit) + " zeros0=" + utils.Itoa(int(totalZeros0)) +
+			" zeros1=" + utils.Itoa(int(totalZeros1))
 	} else {
 		// Forward core: normal arrow directions
 		opportunity = "(" + utils.Itoa(int(cycle.pairIDs[0])) + ")→(" +
 			utils.Itoa(int(cycle.pairIDs[1])) + ")→(" +
 			utils.Itoa(int(cycle.pairIDs[2])) + ") profit=" +
-			utils.Ftoa(totalProfit) + " zeros=" + utils.Itoa(totalLeadingZeros)
+			utils.Ftoa(totalProfit) + " zeros0=" + utils.Itoa(int(totalZeros0)) +
+			" zeros1=" + utils.Itoa(int(totalZeros1))
 	}
 
 	debug.DropMessage("ARB", opportunity)
@@ -389,14 +403,14 @@ func DispatchPriceUpdate(logView *types.LogView) {
 	hexData := logView.Data[2:130]
 
 	// Count leading zeros in each reserve value to determine precision requirements
-	leadingZerosA := utils.CountHexLeadingZeros(hexData[32:64])  // Analyze reserve A (first token)
-	leadingZerosB := utils.CountHexLeadingZeros(hexData[96:128]) // Analyze reserve B (second token)
+	leadingZeros0 := utils.CountHexLeadingZeros(hexData[32:64])  // Analyze reserve0 (first token)
+	leadingZeros1 := utils.CountHexLeadingZeros(hexData[96:128]) // Analyze reserve1 (second token)
 
 	// Calculate the minimum leading zeros to preserve maximum precision in both reserves
 	// Using branchless programming to avoid CPU pipeline stalls from conditional branches
-	cond := leadingZerosA - leadingZerosB
+	cond := leadingZeros0 - leadingZeros1
 	mask := cond >> 31                                                   // Arithmetic right shift creates all-1s mask if cond is negative
-	minZeros := leadingZerosB ^ ((leadingZerosA ^ leadingZerosB) & mask) // Branchless min()
+	minZeros := leadingZeros1 ^ ((leadingZeros0 ^ leadingZeros1) & mask) // Branchless min()
 
 	// Calculate where to start extracting meaningful digits from the hex data
 	offsetA := 2 + 32 + minZeros // Position for reserve A extraction
@@ -435,8 +449,8 @@ func DispatchPriceUpdate(logView *types.LogView) {
 			pairID:        pairID,
 			forwardTick:   placeholder, // Positive values deprioritize cycles (less profitable)
 			reverseTick:   placeholder, // Same value for both directions maintains consistency
-			leadingZerosA: uint64(leadingZerosA),
-			leadingZerosB: uint64(leadingZerosB),
+			leadingZeros0: uint64(leadingZeros0),
+			leadingZeros1: uint64(leadingZeros1),
 		}
 	} else {
 		// Normal case: use the calculated logarithmic ratio with opposite signs
@@ -445,8 +459,8 @@ func DispatchPriceUpdate(logView *types.LogView) {
 			pairID:        pairID,
 			forwardTick:   tickValue,  // Actual calculated tick value
 			reverseTick:   -tickValue, // Negative for reverse direction processing
-			leadingZerosA: uint64(leadingZerosA),
-			leadingZerosB: uint64(leadingZerosB),
+			leadingZeros0: uint64(leadingZeros0),
+			leadingZeros1: uint64(leadingZeros1),
 		}
 	}
 
@@ -578,7 +592,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 
 			// Report profitable opportunities for potential execution
 			if isProfitable {
-				emitArbitrageOpportunity(currentTick, cycle, update, engine)
+				emitArbitrageOpportunity(update, cycle, currentTick, engine)
 			}
 
 			// Stop extracting if we hit a non-profitable cycle or reached our extraction limit
@@ -614,6 +628,11 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 			// Update the tick value for this pair's position within the cycle
 			// This is NOT the main pair position, so we store the actual tick value
 			cycle.tickValues[fanoutEntry.edgeIndex] = currentTick
+
+			// Update liquidity tracking for this pair within the cycle
+			// Store leading zero counts for instant liquidity assessment
+			cycle.leadingZeros0[fanoutEntry.edgeIndex] = update.leadingZeros0
+			cycle.leadingZeros1[fanoutEntry.edgeIndex] = update.leadingZeros1
 
 			// Recalculate the cycle's priority based on its new total profitability
 			// Note: One of these tick values is always zero (the main pair's position)
@@ -950,10 +969,15 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 
 			// Initialize cycle state
 			engine.cycleStates[cycleStateIdx] = ArbitrageCycleState{
-				pairIDs:    cycleEdge.cyclePairs,
-				tickValues: [3]float64{64.0, 64.0, 64.0},
+				pairIDs:       cycleEdge.cyclePairs,         // The three trading pairs forming this cycle
+				tickValues:    [3]float64{64.0, 64.0, 64.0}, // Initialize with worst possible values (maximum deprioritization)
+				leadingZeros0: [3]uint64{32, 32, 32},        // Initialize with worst possible values (maximum leading zeros = minimum liquidity)
+				leadingZeros1: [3]uint64{32, 32, 32},        // Initialize with worst possible values (maximum leading zeros = minimum liquidity)
 			}
+			// Set the primary pair position to zero for both ticks and leading zeros
 			engine.cycleStates[cycleStateIdx].tickValues[cycleEdge.edgeIndex] = 0.0
+			engine.cycleStates[cycleStateIdx].leadingZeros0[cycleEdge.edgeIndex] = 0
+			engine.cycleStates[cycleStateIdx].leadingZeros1[cycleEdge.edgeIndex] = 0
 
 			// Enqueue cycle with initial priority
 			cycleHash := utils.Mix64(uint64(cycleStateIdx))
