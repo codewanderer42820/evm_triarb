@@ -68,8 +68,8 @@ type PriceUpdateMessage struct {
 	pairID        TradingPairID // 8B - Trading pair that experienced the price change
 	forwardTick   float64       // 8B - Logarithmic price ratio in forward direction
 	reverseTick   float64       // 8B - Same price change in opposite direction (negative of forwardTick)
-	leadingZeros0 uint64        // 8B - Leading zero count for reserve0 (first token)
-	leadingZeros1 uint64        // 8B - Leading zero count for reserve1 (second token)
+	leadingZerosA uint64        // 8B - Leading zero count for reserveA (first token)
+	leadingZerosB uint64        // 8B - Leading zero count for reserveB (second token)
 	_             [16]byte      // 16B - Padding to reach exactly 56 bytes for ring56
 }
 
@@ -105,8 +105,8 @@ type ArbitrageCycleState struct {
 	// Liquidity assessment through leading zero counts for execution risk evaluation
 	// Each pair's liquidity approximated by hex leading zeros: more zeros = less liquidity
 	// Like tickValues, one position is always zero (the queue's primary pair position)
-	leadingZeros0 [3]uint64 // 24B - Reserve0 leading zero counts for each pair in cycle
-	leadingZeros1 [3]uint64 // 24B - Reserve1 leading zero counts for each pair in cycle
+	leadingZerosA [3]uint64 // 24B - ReserveA leading zero counts for each pair in cycle
+	leadingZerosB [3]uint64 // 24B - ReserveB leading zero counts for each pair in cycle
 }
 
 // CycleFanoutEntry defines how price updates propagate to affected arbitrage cycles.
@@ -307,8 +307,8 @@ func packEthereumAddress(address40HexChars []byte) PackedAddress {
 //go:inline
 //go:registerparams
 func hashAddressToIndex(address40HexChars []byte) uint64 {
-	// Parse the last 16 hex characters of the address as a 64-bit hash value
-	// This provides good distribution across the hash table
+	// Parse the middle 16 hex characters of the address as a 64-bit hash value
+	// This avoids vanity address patterns at the front and back for better distribution
 	hash64 := utils.ParseHexU64(address40HexChars[12:28])
 
 	// Mask the hash to fit within the hash table bounds
@@ -355,24 +355,24 @@ func emitArbitrageOpportunity(update *PriceUpdateMessage, cycle *ArbitrageCycleS
 
 	// Calculate aggregate liquidity assessment from all pairs in the cycle
 	// Add the new leading zeros to the stored cycle zeros for complete assessment
-	totalZeros0 := update.leadingZeros0 + cycle.leadingZeros0[0] + cycle.leadingZeros0[1] + cycle.leadingZeros0[2]
-	totalZeros1 := update.leadingZeros1 + cycle.leadingZeros1[0] + cycle.leadingZeros1[1] + cycle.leadingZeros1[2]
+	totalZerosA := update.leadingZerosA + cycle.leadingZerosA[0] + cycle.leadingZerosA[1] + cycle.leadingZerosA[2]
+	totalZerosB := update.leadingZerosB + cycle.leadingZerosB[0] + cycle.leadingZerosB[1] + cycle.leadingZerosB[2]
 
 	var opportunity string
 	if engine.isReverseDirection {
 		// Reverse core: flip arrow directions to show reverse trading path
-		opportunity = "(" + utils.Itoa(int(cycle.pairIDs[2])) + ")←(" +
+		opportunity = "(" + utils.Itoa(int(cycle.pairIDs[0])) + ")←(" +
 			utils.Itoa(int(cycle.pairIDs[1])) + ")←(" +
-			utils.Itoa(int(cycle.pairIDs[0])) + ") profit=" +
-			utils.Ftoa(totalProfit) + " zeros0=" + utils.Itoa(int(totalZeros0)) +
-			" zeros1=" + utils.Itoa(int(totalZeros1))
+			utils.Itoa(int(cycle.pairIDs[2])) + ") profit=" +
+			utils.Ftoa(totalProfit) + " zeros0=" + utils.Itoa(int(totalZerosA)) +
+			" zeros1=" + utils.Itoa(int(totalZerosB))
 	} else {
 		// Forward core: normal arrow directions
 		opportunity = "(" + utils.Itoa(int(cycle.pairIDs[0])) + ")→(" +
 			utils.Itoa(int(cycle.pairIDs[1])) + ")→(" +
 			utils.Itoa(int(cycle.pairIDs[2])) + ") profit=" +
-			utils.Ftoa(totalProfit) + " zeros0=" + utils.Itoa(int(totalZeros0)) +
-			" zeros1=" + utils.Itoa(int(totalZeros1))
+			utils.Ftoa(totalProfit) + " zeros0=" + utils.Itoa(int(totalZerosA)) +
+			" zeros1=" + utils.Itoa(int(totalZerosB))
 	}
 
 	debug.DropMessage("ARB", opportunity)
@@ -403,18 +403,18 @@ func DispatchPriceUpdate(logView *types.LogView) {
 	hexData := logView.Data[2:130]
 
 	// Count leading zeros in each reserve value to determine precision requirements
-	leadingZeros0 := utils.CountHexLeadingZeros(hexData[32:64])  // Analyze reserve0 (first token)
-	leadingZeros1 := utils.CountHexLeadingZeros(hexData[96:128]) // Analyze reserve1 (second token)
+	leadingZerosA := utils.CountHexLeadingZeros(hexData[32:64])  // Analyze reserveA (first token)
+	leadingZerosB := utils.CountHexLeadingZeros(hexData[96:128]) // Analyze reserveB (second token)
 
 	// Calculate the minimum leading zeros to preserve maximum precision in both reserves
 	// Using branchless programming to avoid CPU pipeline stalls from conditional branches
-	cond := leadingZeros0 - leadingZeros1
+	cond := leadingZerosA - leadingZerosB
 	mask := cond >> 31                                                   // Arithmetic right shift creates all-1s mask if cond is negative
-	minZeros := leadingZeros1 ^ ((leadingZeros0 ^ leadingZeros1) & mask) // Branchless min()
+	minZeros := leadingZerosB ^ ((leadingZerosA ^ leadingZerosB) & mask) // Branchless min()
 
 	// Calculate where to start extracting meaningful digits from the hex data
-	offsetA := 2 + 32 + minZeros // Position for reserve A extraction
-	offsetB := offsetA + 64      // Reserve B is 64 hex characters after reserve A
+	offsetA := 2 + 32 + minZeros // Position for reserveA extraction
+	offsetB := offsetA + 64      // ReserveB is 64 hex characters after reserveA
 
 	// Calculate how many hex characters we can meaningfully extract from each reserve
 	available := 32 - minZeros                         // Available significant digits after leading zeros
@@ -423,18 +423,18 @@ func DispatchPriceUpdate(logView *types.LogView) {
 	remaining := available ^ ((16 ^ available) & mask) // Branchless min(16, available)
 
 	// Convert the hex strings to 64-bit unsigned integers representing token reserves
-	reserve0 := utils.ParseHexU64(logView.Data[offsetA : offsetA+remaining])
-	reserve1 := utils.ParseHexU64(logView.Data[offsetB : offsetB+remaining])
+	reserveA := utils.ParseHexU64(logView.Data[offsetA : offsetA+remaining])
+	reserveB := utils.ParseHexU64(logView.Data[offsetB : offsetB+remaining])
 
 	// Force LSB to 1 - elegantly prevents log(0) with minimal precision impact
 	// Empty pools (0:0) become (1:1) representing balanced state
 	// Near-empty pools (0:large) become (1:large) preserving extreme price ratios
 	// The maximum error of 1 unit in millions is economically negligible
-	reserve0 |= 1 // Ensure non-zero by setting lowest bit
-	reserve1 |= 1 // Single-instruction performance vs complex masking
+	reserveA |= 1 // Ensure non-zero by setting lowest bit
+	reserveB |= 1 // Single-instruction performance vs complex masking
 
 	// Calculate the logarithmic price ratio between the two token reserves
-	tickValue, err := fastuni.Log2ReserveRatio(reserve0, reserve1)
+	tickValue, err := fastuni.Log2ReserveRatio(reserveA, reserveB)
 
 	// Construct the price update message to send to processing cores
 	var message PriceUpdateMessage
@@ -449,8 +449,8 @@ func DispatchPriceUpdate(logView *types.LogView) {
 			pairID:        pairID,
 			forwardTick:   placeholder, // Positive values deprioritize cycles (less profitable)
 			reverseTick:   placeholder, // Same value for both directions maintains consistency
-			leadingZeros0: uint64(leadingZeros0),
-			leadingZeros1: uint64(leadingZeros1),
+			leadingZerosA: uint64(leadingZerosA),
+			leadingZerosB: uint64(leadingZerosB),
 		}
 	} else {
 		// Normal case: use the calculated logarithmic ratio with opposite signs
@@ -459,8 +459,8 @@ func DispatchPriceUpdate(logView *types.LogView) {
 			pairID:        pairID,
 			forwardTick:   tickValue,  // Actual calculated tick value
 			reverseTick:   -tickValue, // Negative for reverse direction processing
-			leadingZeros0: uint64(leadingZeros0),
-			leadingZeros1: uint64(leadingZeros1),
+			leadingZerosA: uint64(leadingZerosA),
+			leadingZerosB: uint64(leadingZerosB),
 		}
 	}
 
@@ -631,8 +631,8 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 
 			// Update liquidity tracking for this pair within the cycle
 			// Store leading zero counts for instant liquidity assessment
-			cycle.leadingZeros0[fanoutEntry.edgeIndex] = update.leadingZeros0
-			cycle.leadingZeros1[fanoutEntry.edgeIndex] = update.leadingZeros1
+			cycle.leadingZerosA[fanoutEntry.edgeIndex] = update.leadingZerosA
+			cycle.leadingZerosB[fanoutEntry.edgeIndex] = update.leadingZerosB
 
 			// Recalculate the cycle's priority based on its new total profitability
 			// Note: One of these tick values is always zero (the main pair's position)
@@ -971,13 +971,13 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			engine.cycleStates[cycleStateIdx] = ArbitrageCycleState{
 				pairIDs:       cycleEdge.cyclePairs,         // The three trading pairs forming this cycle
 				tickValues:    [3]float64{64.0, 64.0, 64.0}, // Initialize with worst possible values (maximum deprioritization)
-				leadingZeros0: [3]uint64{32, 32, 32},        // Initialize with worst possible values (maximum leading zeros = minimum liquidity)
-				leadingZeros1: [3]uint64{32, 32, 32},        // Initialize with worst possible values (maximum leading zeros = minimum liquidity)
+				leadingZerosA: [3]uint64{32, 32, 32},        // Initialize with worst possible values (maximum leading zeros = minimum liquidity)
+				leadingZerosB: [3]uint64{32, 32, 32},        // Initialize with worst possible values (maximum leading zeros = minimum liquidity)
 			}
 			// Set the primary pair position to zero for both ticks and leading zeros
 			engine.cycleStates[cycleStateIdx].tickValues[cycleEdge.edgeIndex] = 0.0
-			engine.cycleStates[cycleStateIdx].leadingZeros0[cycleEdge.edgeIndex] = 0
-			engine.cycleStates[cycleStateIdx].leadingZeros1[cycleEdge.edgeIndex] = 0
+			engine.cycleStates[cycleStateIdx].leadingZerosA[cycleEdge.edgeIndex] = 0
+			engine.cycleStates[cycleStateIdx].leadingZerosB[cycleEdge.edgeIndex] = 0
 
 			// Enqueue cycle with initial priority
 			cycleHash := utils.Mix64(uint64(cycleStateIdx))
