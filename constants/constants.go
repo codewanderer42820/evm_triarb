@@ -112,7 +112,7 @@ const (
 	OptimalBatchSize         = uint64(8_000)
 	MinBatchSize             = uint64(1)
 	MaxLogSliceSize          = 1_000_000
-	DefaultConnections       = 1
+	DefaultConnections       = 2
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
