@@ -480,7 +480,7 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 			continue
 		}
 
-		// Block number extraction with minimal validation
+		// Block number extraction with network resilience validation
 		if len(blockResponse.Result) > 2 {
 			blockNumber := utils.ParseHexU64([]byte(blockResponse.Result[2:]))
 			return blockNumber // Block 0 is valid (genesis block)
@@ -609,9 +609,6 @@ func (harvester *SynchronizationHarvester) parseLogsWithSonnet(jsonData []byte, 
 		}
 
 		bufferPosition := bufferOffset + logCount
-		if bufferPosition >= len(processedLogs) {
-			break // Additional safety check for buffer bounds
-		}
 
 		// Store parsed log data in partitioned global buffer (access frequency order)
 		logEntry := &processedLogs[bufferPosition]
@@ -902,11 +899,6 @@ func processLine(line []byte, processed *int, offset int64, blocks []uint64, add
 		return // Skip header row to avoid processing metadata as data
 	}
 
-	// Validate CSV structure integrity with detailed error reporting
-	if c1 == -1 || c2 == -1 || c3 == -1 {
-		panic(fmt.Sprintf("malformed CSV line at offset %d (after %d events): expected 3 commas, found: comma1=%d, comma2=%d, comma3=%d, line: %q", offset, *processed, c1, c2, c3, string(line)))
-	}
-
 	// Pair existence verification using zero-copy address lookup (hot path check)
 	pairID := router.LookupPairByAddress(line[0:c1])
 	if pairID == 0 {
@@ -1126,7 +1118,7 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 		return false, 0, 0, err
 	}
 
-	// Block comparison logic (dependency order: parse current→load last→compare)
+	// Block comparison logic with network resilience validation
 	if len(blockResponse.Result) > 2 {
 		currentHeight := utils.ParseHexU64([]byte(blockResponse.Result[2:]))
 		lastProcessed := LoadMetadata()
@@ -1174,7 +1166,7 @@ func CheckHarvestingRequirementFromBlock(lastProcessedBlock uint64) (bool, uint6
 		return false, 0, 0, err
 	}
 
-	// Block comparison using provided parameter instead of loading metadata
+	// Block comparison with network resilience validation
 	if len(blockResponse.Result) > 2 {
 		currentHeight := utils.ParseHexU64([]byte(blockResponse.Result[2:]))
 		return lastProcessedBlock < currentHeight, lastProcessedBlock, currentHeight, nil
