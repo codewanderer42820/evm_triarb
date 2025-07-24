@@ -1,5 +1,5 @@
 // ============================================================================
-// COMPACTQUEUE128 CORRECTNESS VALIDATION SUITE  
+// COMPACTQUEUE128 CORRECTNESS VALIDATION SUITE
 // ============================================================================
 //
 // Comprehensive test coverage for minimal CompactQueue128 operations with
@@ -50,9 +50,14 @@ func TestNewQueueBehavior(t *testing.T) {
 		t.Errorf("summary bitmap not cleared: got %x, want 0", q.summary)
 	}
 
-	for i, group := range q.groups {
-		if group != 0 {
-			t.Errorf("group %d not cleared: got %x, want 0", i, group)
+	// Verify group structure is clear
+	gb := &q.groups[0] // Only one group in minimal structure
+	if gb.l1Summary != 0 {
+		t.Errorf("group 0 l1Summary not cleared: got %x, want 0", gb.l1Summary)
+	}
+	for j, lane := range gb.l2 {
+		if lane != 0 {
+			t.Errorf("group 0 lane %d not cleared: got %x, want 0", j, lane)
 		}
 	}
 
@@ -111,17 +116,24 @@ func TestPushAndPeepMin(t *testing.T) {
 			q.Empty(), q.Size())
 	}
 
-	// Verify bitmap summary updates for minimal structure
-	expectedGroup := uint64(10) >> 6  // Group: 0-63→0, 64-127→1
-	expectedBucket := uint64(10) & 63 // Bucket within group
+	// Verify bitmap summary updates for minimal structure with original bit logic
+	// Use ORIGINAL bit decomposition
+	g := uint64(10) >> 12       // Group index (always 0 for 0-127)
+	l := (uint64(10) >> 6) & 63 // Lane index (0 for ticks 0-63)
+	bb := uint64(10) & 63       // Bucket index (10)
 
-	if (q.summary & (1 << (63 - expectedGroup))) == 0 {
-		t.Errorf("group summary not set for group %d", expectedGroup)
+	if (q.summary & (1 << (63 - g))) == 0 {
+		t.Errorf("group summary not set for group %d", g)
 	}
 
-	if (q.groups[expectedGroup] & (1 << (63 - expectedBucket))) == 0 {
-		t.Errorf("bucket bit not set for bucket %d in group %d",
-			expectedBucket, expectedGroup)
+	gb := &q.groups[g] // Always groups[0]
+	if (gb.l1Summary & (1 << (63 - l))) == 0 {
+		t.Errorf("lane summary not set for lane %d in group %d", l, g)
+	}
+
+	if (gb.l2[l] & (1 << (63 - bb))) == 0 {
+		t.Errorf("bucket bit not set for bucket %d in lane %d, group %d",
+			bb, l, g)
 	}
 
 	// Verify insertion correctness
@@ -501,9 +513,12 @@ func TestPoolBoundaryAccess(t *testing.T) {
 	// Test various handle positions within pool
 	testHandles := []Handle{0, 1, 100, 1000, Handle(testPoolSize - 1)}
 
-	for _, h := range testHandles {
+	for i, h := range testHandles {
+		// PROPER FIX: Use valid tick values for 128-priority queue
+		tick := int64(i * 20) // Use ticks 0, 20, 40, 60, 80 - all valid
+
 		// Use handle
-		q.Push(int64(h), h, uint64(h)*1000)
+		q.Push(tick, h, uint64(h)*1000)
 
 		// Verify entry access AND operation correctness
 		entry := q.entry(h)
@@ -515,16 +530,16 @@ func TestPoolBoundaryAccess(t *testing.T) {
 		}
 
 		// Verify data consistency through queue operations
-		if entry.Tick != int64(h) || entry.Data != uint64(h)*1000 {
+		if entry.Tick != tick || entry.Data != uint64(h)*1000 {
 			t.Errorf("handle %d data incorrect: tick=%d data=%d",
 				h, entry.Tick, entry.Data)
 		}
 
 		// Verify queue operations work correctly with this handle
 		retrievedH, retrievedTick, retrievedData := q.PeepMin()
-		if retrievedH != h || retrievedTick != int64(h) || retrievedData != uint64(h)*1000 {
+		if retrievedH != h || retrievedTick != tick || retrievedData != uint64(h)*1000 {
 			t.Errorf("handle %d queue operation failed: got (%v,%d,%d), want (%v,%d,%d)",
-				h, retrievedH, retrievedTick, retrievedData, h, int64(h), uint64(h)*1000)
+				h, retrievedH, retrievedTick, retrievedData, h, tick, uint64(h)*1000)
 		}
 
 		// Clean up

@@ -1,19 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// CompactQueue128 - TRULY MINIMAL (3 uint64s) - Tests Must Be Updated
+// CompactQueue128 - MINIMAL but IDENTICAL bit logic to original
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// Project: Arbitrage Detection System  
-// Component: Absolute Minimal Memory Priority Queue
-//
-// MEMORY OPTIMIZATION ACHIEVED:
-//   - Bitmap hierarchy: EXACTLY 3 uint64s (24 bytes total)
-//   - 1 summary + 2 groups = optimal for 128 priorities
-//   - ~97% memory reduction vs full quantum queue bitmap
-//
-// TRADE-OFF: Tests cannot be 100% compatible due to Go language limitations:
-//   - Direct field access (gb.l1Summary) cannot be intercepted/overridden
-//   - Tests must be updated to work with simplified structure
-//   - All functionality remains identical, just different internal layout
-//
+// Strategy: Use IDENTICAL bit manipulation as original, but with minimal storage
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package compactqueue128
@@ -24,72 +12,84 @@ import (
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CONFIGURATION CONSTANTS
+// CONFIGURATION CONSTANTS - IDENTICAL TO ORIGINAL
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const (
-	BucketCount = 128 // Exactly 128 priorities (0-127)
-	GroupCount = 2    // 2 groups of 64 priorities each
+	BucketCount = 128 // Only 128 priorities supported
+
+	// Keep original constants for bit manipulation compatibility
+	GroupCount = 64 // Original, but we only use group 0
+	LaneCount  = 64 // Original, but we only use lanes 0-1
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// TYPE DEFINITIONS  
+// TYPE DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 type Handle uint64
+
 const nilIdx Handle = ^Handle(0)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SHARED MEMORY ENTRY
+// SHARED MEMORY ENTRY - IDENTICAL
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 //go:notinheap
 //go:align 32
 type Entry struct {
 	Tick int64  // 8B - Active tick or -1 if free
-	Data uint64 // 8B - Compact payload  
+	Data uint64 // 8B - Compact payload
 	Next Handle // 8B - Next in chain
 	Prev Handle // 8B - Previous in chain
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MINIMAL QUEUE STRUCTURE - EXACTLY 3 UINT64S FOR BITMAP
+// MINIMAL STORAGE WITH ORIGINAL ACCESS PATTERN
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// groupBlock - minimal version that only stores what we need
+//
+//go:notinheap
+//go:align 64
+type groupBlock struct {
+	l1Summary uint64    // 8B - Only bits 63,62 used (lanes 0,1)
+	l2        [2]uint64 // 16B - Only l2[0] and l2[1] used
+	_         [40]byte  // 40B - Padding
+}
 
 //go:notinheap
 //go:align 64
 type CompactQueue128 struct {
-	// Hot path metadata (32 bytes)
-	summary uint64    // 8B - Group activity mask (2 bits used)
-	size    int       // 8B - Current entry count
-	arena   uintptr   // 8B - Base pointer to shared pool  
-	groups  [2]uint64 // 16B - THE MINIMAL BITMAP: exactly 2 uint64s for 128 priorities
+	// Hot path metadata (24 bytes)
+	summary uint64  // 8B - Only bit 63 used (group 0)
+	size    int     // 8B - Current entry count
+	arena   uintptr // 8B - Base pointer to shared pool
 
-	// Padding to cache line boundary (32 bytes)
-	_ [32]byte
+	// Padding to cache line boundary (40 bytes)
+	_ [40]byte
 
-	// Bucket chain heads (1024 bytes)  
-	buckets [BucketCount]Handle // 128 × 8B per handle
+	// Minimal storage - only what we actually need
+	buckets [BucketCount]Handle // 128 buckets
+	groups  [1]groupBlock       // Only group 0
 }
-
-// TOTAL BITMAP MEMORY: summary(8) + groups[2](16) = 24 bytes = 3 uint64s ✓
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // INITIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-//go:norace  
+//go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
 func New(arena unsafe.Pointer) *CompactQueue128 {
 	q := &CompactQueue128{arena: uintptr(arena)}
-	
+
 	for i := range q.buckets {
 		q.buckets[i] = nilIdx
 	}
-	
+
 	return q
 }
 
@@ -98,7 +98,7 @@ func New(arena unsafe.Pointer) *CompactQueue128 {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 //go:norace
-//go:nocheckptr  
+//go:nocheckptr
 //go:nosplit
 //go:inline
 //go:registerparams
@@ -112,7 +112,7 @@ func (q *CompactQueue128) entry(h Handle) *Entry {
 
 //go:norace
 //go:nocheckptr
-//go:nosplit  
+//go:nosplit
 //go:inline
 //go:registerparams
 func (q *CompactQueue128) Size() int {
@@ -122,26 +122,26 @@ func (q *CompactQueue128) Size() int {
 //go:norace
 //go:nocheckptr
 //go:nosplit
-//go:inline  
+//go:inline
 //go:registerparams
 func (q *CompactQueue128) Empty() bool {
 	return q.size == 0
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// INTERNAL OPERATIONS - OPTIMAL MINIMAL BITMAP LOGIC
+// INTERNAL OPERATIONS - IDENTICAL BIT LOGIC TO ORIGINAL
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 //go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
-//go:registerparams  
+//go:registerparams
 func (q *CompactQueue128) unlink(h Handle) {
 	entry := q.entry(h)
 	b := Handle(entry.Tick)
 
-	// Update doubly-linked list
+	// IDENTICAL doubly-linked list logic
 	if entry.Prev != nilIdx {
 		q.entry(entry.Prev).Next = entry.Next
 	} else {
@@ -149,21 +149,24 @@ func (q *CompactQueue128) unlink(h Handle) {
 	}
 
 	if entry.Next != nilIdx {
-		q.entry(entry.Next).Prev = entry.Prev  
+		q.entry(entry.Next).Prev = entry.Prev
 	}
 
-	// Update minimal bitmap when bucket becomes empty
+	// IDENTICAL bitmap logic to original
 	if q.buckets[b] == nilIdx {
-		tick := uint64(entry.Tick)
-		g := tick >> 6      // Group: 0-63→0, 64-127→1
-		bb := tick & 63     // Bucket within group
+		// IDENTICAL bit decomposition
+		g := uint64(entry.Tick) >> 12       // Group index (always 0 for 0-127)
+		l := (uint64(entry.Tick) >> 6) & 63 // Lane index (0 or 1 for 0-127)
+		bb := uint64(entry.Tick) & 63       // Bucket index
 
-		// Clear bucket bit in group
-		q.groups[g] &^= 1 << (63 - bb)
-		
-		// Clear group bit if group becomes empty
-		if q.groups[g] == 0 {
-			q.summary &^= 1 << (63 - g)
+		gb := &q.groups[g]          // Always groups[0]
+		gb.l2[l] &^= 1 << (63 - bb) // Clear bucket bit
+
+		if gb.l2[l] == 0 { // Lane became empty
+			gb.l1Summary &^= 1 << (63 - l) // Clear lane bit
+			if gb.l1Summary == 0 {         // Group became empty
+				q.summary &^= 1 << (63 - g) // Clear group bit
+			}
 		}
 	}
 
@@ -183,7 +186,7 @@ func (q *CompactQueue128) linkAtHead(h Handle, tick int64) {
 	entry := q.entry(h)
 	b := Handle(uint64(tick))
 
-	// Insert at head of bucket chain
+	// IDENTICAL insertion logic
 	entry.Tick = tick
 	entry.Prev = nilIdx
 	entry.Next = q.buckets[b]
@@ -192,20 +195,21 @@ func (q *CompactQueue128) linkAtHead(h Handle, tick int64) {
 	}
 	q.buckets[b] = h
 
-	// Update minimal bitmap
-	utick := uint64(tick)
-	g := utick >> 6      // Group: 0-63→0, 64-127→1
-	bb := utick & 63     // Bucket within group
+	// IDENTICAL bitmap logic to original
+	g := uint64(tick) >> 12       // Group index (always 0 for 0-127)
+	l := (uint64(tick) >> 6) & 63 // Lane index (0 or 1 for 0-127)
+	bb := uint64(tick) & 63       // Bucket index
 
-	// Set bucket and group bits  
-	q.groups[g] |= 1 << (63 - bb)
-	q.summary |= 1 << (63 - g)
+	gb := &q.groups[g]            // Always groups[0]
+	gb.l2[l] |= 1 << (63 - bb)    // Set bucket bit
+	gb.l1Summary |= 1 << (63 - l) // Set lane bit
+	q.summary |= 1 << (63 - g)    // Set group bit
 
 	q.size++
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// PUBLIC OPERATIONS
+// PUBLIC OPERATIONS - IDENTICAL TO ORIGINAL
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 //go:norace
@@ -216,18 +220,17 @@ func (q *CompactQueue128) linkAtHead(h Handle, tick int64) {
 func (q *CompactQueue128) Push(tick int64, h Handle, val uint64) {
 	entry := q.entry(h)
 
-	// Hot path: same tick update
+	// IDENTICAL logic to original
 	if entry.Tick == tick {
 		entry.Data = val
 		return
 	}
 
-	// Cold path: relocation
 	if entry.Tick >= 0 {
 		q.unlink(h)
 	}
 	q.linkAtHead(h, tick)
-	entry.Data = val
+	entry.Data = val // Set data AFTER linking (original order)
 }
 
 //go:norace
@@ -236,14 +239,14 @@ func (q *CompactQueue128) Push(tick int64, h Handle, val uint64) {
 //go:inline
 //go:registerparams
 func (q *CompactQueue128) PeepMin() (Handle, int64, uint64) {
-	// Find minimum group using CLZ
+	// IDENTICAL bitmap traversal to original
 	g := bits.LeadingZeros64(q.summary)
-	
-	// Find minimum bucket within group using CLZ
-	bb := bits.LeadingZeros64(q.groups[g])
-	
-	// Reconstruct bucket: group * 64 + bucket_offset
-	b := Handle((uint64(g) << 6) | uint64(bb))
+	gb := &q.groups[g] // Always groups[0]
+	l := bits.LeadingZeros64(gb.l1Summary)
+	t := bits.LeadingZeros64(gb.l2[l])
+
+	// IDENTICAL bucket reconstruction
+	b := Handle((uint64(g) << 12) | (uint64(l) << 6) | uint64(t))
 	h := q.buckets[b]
 
 	entry := q.entry(h)
@@ -257,7 +260,7 @@ func (q *CompactQueue128) PeepMin() (Handle, int64, uint64) {
 //go:registerparams
 func (q *CompactQueue128) MoveTick(h Handle, newTick int64) {
 	entry := q.entry(h)
-	
+
 	if entry.Tick == newTick {
 		return
 	}
@@ -266,7 +269,7 @@ func (q *CompactQueue128) MoveTick(h Handle, newTick int64) {
 	q.linkAtHead(h, newTick)
 }
 
-//go:norace  
+//go:norace
 //go:nocheckptr
 //go:nosplit
 //go:inline
@@ -276,21 +279,12 @@ func (q *CompactQueue128) UnlinkMin(h Handle) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MEMORY USAGE SUMMARY
+// MEMORY USAGE: Truly minimal while maintaining compatibility
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-//
-// Bitmap Memory (the critical optimization):
-//   - summary:    8 bytes (1 uint64) 
-//   - groups[2]: 16 bytes (2 uint64)
-//   - TOTAL:     24 bytes (3 uint64) ✓
-//
-// Compare to original quantum queue bitmap:
-//   - summary:     8 bytes
-//   - groups[64]:  64 × 576 bytes = 36,864 bytes  
-//   - TOTAL:      36,872 bytes
-//
-// Memory reduction: 36,872 → 24 = 99.93% reduction in bitmap memory ✓
-//
-// Total structure size: ~1.1KB vs ~37KB = 97% total reduction ✓
-//
+// - summary: 8 bytes (only bit 63 used)
+// - groups[0].l1Summary: 8 bytes (only bits 63,62 used)
+// - groups[0].l2[0]: 8 bytes (64 buckets for ticks 0-63)
+// - groups[0].l2[1]: 8 bytes (64 buckets for ticks 64-127)
+// - buckets[128]: 1024 bytes
+// Total: ~1KB vs 37KB+ for original = 97% reduction
 // ═══════════════════════════════════════════════════════════════════════════════════════════════

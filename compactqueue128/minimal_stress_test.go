@@ -472,20 +472,27 @@ func TestBitmapConsistencyUnderStress(t *testing.T) {
 
 // validateMinimalBitmapSummaries performs bitmap consistency validation for minimal structure.
 func validateMinimalBitmapSummaries(t *testing.T, q *CompactQueue128, handleTracker map[Handle]int64) {
-	// Build expected bitmap state from handle tracker
+	// Build expected bitmap state from handle tracker using ORIGINAL bit logic
 	expectedGroups := make(map[uint64]bool)
+	expectedLanes := make(map[uint64]map[uint64]bool)
 	expectedBuckets := make(map[uint64]bool)
 
 	for _, tick := range handleTracker {
-		g := uint64(tick) >> 6  // Group for minimal structure
-		b := uint64(tick)       // Bucket index
+		// Use IDENTICAL bit decomposition as the original
+		g := uint64(tick) >> 12       // Group index (always 0 for 0-127)
+		l := (uint64(tick) >> 6) & 63 // Lane index (0 or 1 for 0-127)
+		b := uint64(tick)             // Bucket index
 
 		expectedGroups[g] = true
+		if expectedLanes[g] == nil {
+			expectedLanes[g] = make(map[uint64]bool)
+		}
+		expectedLanes[g][l] = true
 		expectedBuckets[b] = true
 	}
 
-	// Validate global summary for minimal structure (only 2 groups)
-	for g := uint64(0); g < GroupCount; g++ {
+	// Validate global summary (only group 0 can be active for 128 priorities)
+	for g := uint64(0); g < 1; g++ { // Only validate group 0
 		expectedActive := expectedGroups[g]
 		actualActive := (q.summary & (1 << (63 - g))) != 0
 
@@ -494,17 +501,31 @@ func validateMinimalBitmapSummaries(t *testing.T, q *CompactQueue128, handleTrac
 				g, expectedActive, actualActive)
 		}
 
-		// Validate group-level bitmap
+		// Validate group-level summaries
 		if expectedActive {
-			// Check individual bucket bits within group
-			for bb := uint64(0); bb < 64; bb++ {
-				tick := (g << 6) | bb
-				expectedBucketActive := expectedBuckets[tick]
-				actualBucketActive := (q.groups[g] & (1 << (63 - bb))) != 0
+			gb := &q.groups[g]
+			// Only validate lanes 0 and 1 (used for 128 priorities)
+			for l := uint64(0); l < 2; l++ {
+				expectedLaneActive := expectedLanes[g][l]
+				actualLaneActive := (gb.l1Summary & (1 << (63 - l))) != 0
 
-				if expectedBucketActive != actualBucketActive {
-					t.Fatalf("Group %d bucket %d mismatch: tick=%d expected=%v actual=%v",
-						g, bb, tick, expectedBucketActive, actualBucketActive)
+				if expectedLaneActive != actualLaneActive {
+					t.Fatalf("Group %d lane %d summary mismatch: expected=%v actual=%v",
+						g, l, expectedLaneActive, actualLaneActive)
+				}
+
+				// Validate individual bucket bits in this lane
+				if expectedLaneActive {
+					for bb := uint64(0); bb < 64; bb++ {
+						tick := (l << 6) | bb // Reconstruct tick from lane and bucket
+						expectedBucketActive := expectedBuckets[tick]
+						actualBucketActive := (gb.l2[l] & (1 << (63 - bb))) != 0
+
+						if expectedBucketActive != actualBucketActive {
+							t.Fatalf("Group %d lane %d bucket %d mismatch: tick=%d expected=%v actual=%v",
+								g, l, bb, tick, expectedBucketActive, actualBucketActive)
+						}
+					}
 				}
 			}
 		}
