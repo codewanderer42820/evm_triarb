@@ -855,9 +855,9 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 	}
 
 	// Count total cycles and identify all pairs through complete traversal
+	pairsWithQueuesSet := make(map[TradingPairID]struct{})
 	totalCycles := 0
 	allPairsSet := make(map[TradingPairID]struct{})
-	pairsWithQueuesSet := make(map[TradingPairID]struct{})
 
 	for _, shard := range workloadShards {
 		pairsWithQueuesSet[shard.pairID] = struct{}{}
