@@ -62,7 +62,6 @@ type CycleIndex uint64
 // PriceUpdateMessage represents a price change notification sent between CPU cores.
 // When a trading pair's price changes, this message is distributed to all cores
 // that need to update arbitrage cycles involving that pair.
-// Padded to 56 bytes for ring56 compatibility.
 //
 //go:notinheap
 type PriceUpdateMessage struct {
