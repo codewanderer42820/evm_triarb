@@ -36,10 +36,15 @@ package localidx
 //go:notinheap
 //go:align 64
 type Hash struct {
-	keys []uint32 // Key array (0 = empty sentinel)
-	vals []uint32 // Value array (parallel to keys)
-	mask uint32   // Size mask for fast modulo operation
-	_    [12]byte // Padding to 64-byte cache line boundary
+	// NUCLEAR HOT: Accessed together during every lookup and insertion operation
+	keys []uint32 // 24B - Key array (0 = empty sentinel) - accessed first for key comparison
+	vals []uint32 // 24B - Value array (parallel to keys) - accessed second for value retrieval
+
+	// HOT: Accessed during every hash calculation and bounds checking
+	mask uint32 // 4B - Size mask for fast modulo operation - used in every hash calculation
+
+	// Padding to prevent false sharing with adjacent structures
+	_ [12]byte // 12B - Cache line padding to complete 64-byte alignment
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
