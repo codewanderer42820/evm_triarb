@@ -169,7 +169,7 @@ func TestQueueStressRandomOperations(t *testing.T) {
 		// ──────────────────────────────────────────────────────────────────
 		// MOVE OPERATION: Tick relocation for existing entry
 		// ──────────────────────────────────────────────────────────────────
-		case 1: // MOVE
+		case 1:
 			if len(live) == 0 {
 				continue
 			}
