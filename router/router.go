@@ -243,7 +243,7 @@ func init() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CORE ENGINE METHODS
+// CORE UTILITY FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // allocateQueueHandle returns the next available handle from the shared arena.
@@ -265,8 +265,102 @@ func (engine *ArbitrageEngine) allocateQueueHandle() pooledquantumqueue.Handle {
 	return handle
 }
 
+// packEthereumAddress converts hex address strings to optimized internal representation.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func packEthereumAddress(address40HexChars []byte) PackedAddress {
+	// Parse the 40-character hex string into a 20-byte binary address
+	parsedAddress := utils.ParseEthereumAddress(address40HexChars)
+
+	// Pack the 20-byte address into three 64-bit words for efficient comparison
+	word0 := utils.Load64(parsedAddress[0:8])                       // Load first 8 bytes
+	word1 := utils.Load64(parsedAddress[8:16])                      // Load middle 8 bytes
+	word2 := uint64(*(*uint32)(unsafe.Pointer(&parsedAddress[16]))) // Load last 4 bytes as uint64
+
+	return PackedAddress{
+		words: [3]uint64{word0, word1, word2},
+	}
+}
+
+// hashAddressToIndex computes hash table indices from raw hex addresses.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func hashAddressToIndex(address40HexChars []byte) uint64 {
+	// Parse the last 16 hex characters of the address as a 64-bit hash value
+	// This provides good distribution across the hash table
+	hash64 := utils.ParseHexU64(address40HexChars[12:28])
+
+	// Mask the hash to fit within the hash table bounds
+	return hash64 & uint64(constants.AddressTableMask)
+}
+
+// hashPackedAddressToIndex computes hash values from stored PackedAddress structures.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func hashPackedAddressToIndex(key PackedAddress) uint64 {
+	// Use the third word as the hash value since it contains the address suffix
+	// Mask it to fit within the hash table bounds
+	return key.words[2] & uint64(constants.AddressTableMask)
+}
+
+// isEqual performs efficient comparison between PackedAddress structures.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func (a PackedAddress) isEqual(b PackedAddress) bool {
+	// Compare all three 64-bit words - addresses are equal only if all words match exactly
+	return a.words[0] == b.words[0] &&
+		a.words[1] == b.words[1] &&
+		a.words[2] == b.words[2]
+}
+
+// emitArbitrageOpportunity provides concise logging for profitable arbitrage cycles.
+// Reports cycle details and total profitability in single-line format.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func emitArbitrageOpportunity(engine *ArbitrageEngine, cycle *ArbitrageCycleState, newTick float64) {
+	// Calculate total profitability for the opportunity
+	totalProfit := newTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
+
+	var opportunity string
+	if engine.isReverseDirection {
+		// Reverse core: flip arrow directions to show reverse trading path
+		opportunity = "(" + utils.Itoa(int(cycle.pairIDs[2])) + ")←(" +
+			utils.Itoa(int(cycle.pairIDs[1])) + ")←(" +
+			utils.Itoa(int(cycle.pairIDs[0])) + ") profit=" +
+			utils.Ftoa(totalProfit)
+	} else {
+		// Forward core: normal arrow directions
+		opportunity = "(" + utils.Itoa(int(cycle.pairIDs[0])) + ")→(" +
+			utils.Itoa(int(cycle.pairIDs[1])) + ")→(" +
+			utils.Itoa(int(cycle.pairIDs[2])) + ") profit=" +
+			utils.Ftoa(totalProfit)
+	}
+
+	debug.DropMessage("ARB", opportunity)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// EVENT DISPATCH PIPELINE
+// MAIN EVENT PROCESSING PIPELINE (HOT PATH)
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // DispatchPriceUpdate processes Uniswap V2 Sync events and distributes price updates to cores.
@@ -430,10 +524,6 @@ func LookupPairByAddress(address40HexChars []byte) TradingPairID {
 	}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CORE PROCESSING PIPELINE
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
 // processArbitrageUpdate orchestrates arbitrage detection for incoming price updates.
 //
 //go:norace
@@ -532,109 +622,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ADDRESS PROCESSING INFRASTRUCTURE
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// packEthereumAddress converts hex address strings to optimized internal representation.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func packEthereumAddress(address40HexChars []byte) PackedAddress {
-	// Parse the 40-character hex string into a 20-byte binary address
-	parsedAddress := utils.ParseEthereumAddress(address40HexChars)
-
-	// Pack the 20-byte address into three 64-bit words for efficient comparison
-	word0 := utils.Load64(parsedAddress[0:8])                       // Load first 8 bytes
-	word1 := utils.Load64(parsedAddress[8:16])                      // Load middle 8 bytes
-	word2 := uint64(*(*uint32)(unsafe.Pointer(&parsedAddress[16]))) // Load last 4 bytes as uint64
-
-	return PackedAddress{
-		words: [3]uint64{word0, word1, word2},
-	}
-}
-
-// hashAddressToIndex computes hash table indices from raw hex addresses.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func hashAddressToIndex(address40HexChars []byte) uint64 {
-	// Parse the last 16 hex characters of the address as a 64-bit hash value
-	// This provides good distribution across the hash table
-	hash64 := utils.ParseHexU64(address40HexChars[12:28])
-
-	// Mask the hash to fit within the hash table bounds
-	return hash64 & uint64(constants.AddressTableMask)
-}
-
-// hashPackedAddressToIndex computes hash values from stored PackedAddress structures.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func hashPackedAddressToIndex(key PackedAddress) uint64 {
-	// Use the third word as the hash value since it contains the address suffix
-	// Mask it to fit within the hash table bounds
-	return key.words[2] & uint64(constants.AddressTableMask)
-}
-
-// isEqual performs efficient comparison between PackedAddress structures.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func (a PackedAddress) isEqual(b PackedAddress) bool {
-	// Compare all three 64-bit words - addresses are equal only if all words match exactly
-	return a.words[0] == b.words[0] &&
-		a.words[1] == b.words[1] &&
-		a.words[2] == b.words[2]
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MONITORING AND OBSERVABILITY
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// emitArbitrageOpportunity provides concise logging for profitable arbitrage cycles.
-// Reports cycle details and total profitability in single-line format.
-//
-//go:norace
-//go:nocheckptr
-//go:nosplit
-//go:inline
-//go:registerparams
-func emitArbitrageOpportunity(engine *ArbitrageEngine, cycle *ArbitrageCycleState, newTick float64) {
-	// Calculate total profitability for the opportunity
-	totalProfit := newTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
-
-	var opportunity string
-	if engine.isReverseDirection {
-		// Reverse core: flip arrow directions to show reverse trading path
-		opportunity = "(" + utils.Itoa(int(cycle.pairIDs[2])) + ")←(" +
-			utils.Itoa(int(cycle.pairIDs[1])) + ")←(" +
-			utils.Itoa(int(cycle.pairIDs[0])) + ") profit=" +
-			utils.Ftoa(totalProfit)
-	} else {
-		// Forward core: normal arrow directions
-		opportunity = "(" + utils.Itoa(int(cycle.pairIDs[0])) + ")→(" +
-			utils.Itoa(int(cycle.pairIDs[1])) + ")→(" +
-			utils.Itoa(int(cycle.pairIDs[2])) + ") profit=" +
-			utils.Ftoa(totalProfit)
-	}
-
-	debug.DropMessage("ARB", opportunity)
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SYSTEM INITIALIZATION AND CONFIGURATION
+// SYSTEM INITIALIZATION FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // RegisterTradingPairAddress populates the Robin Hood hash table with address-to-pair mappings.
@@ -700,73 +688,6 @@ func RegisterPairToCoreRouting(pairID TradingPairID, coreID uint8) {
 	// Add this core to the bitmask of cores that should receive updates for this pair
 	// Multiple cores can process the same pair for load balancing and redundancy
 	pairToCoreRouting[pairID] |= 1 << coreID
-}
-
-// buildWorkloadShards distributes arbitrage cycles across processing cores for load balancing.
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
-func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
-	// Count edges per pair through complete traversal
-	edgeCounts := make(map[TradingPairID]int)
-	for _, triangle := range arbitrageTriangles {
-		for i := 0; i < 3; i++ {
-			edgeCounts[triangle[i]]++
-		}
-	}
-
-	// Calculate shard requirements per pair
-	shardCounts := make(map[TradingPairID]int)
-	for pairID, edgeCount := range edgeCounts {
-		shardCount := (edgeCount + constants.MaxCyclesPerShard - 1) / constants.MaxCyclesPerShard
-		shardCounts[pairID] = shardCount
-	}
-
-	// Pre-allocate all structures with exact capacities
-	temporaryEdges := make(map[TradingPairID][]CycleEdge, len(edgeCounts))
-	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard, len(edgeCounts))
-
-	for pairID, edgeCount := range edgeCounts {
-		temporaryEdges[pairID] = make([]CycleEdge, edgeCount)
-		shardCount := shardCounts[pairID]
-		pairWorkloadShards[pairID] = make([]PairWorkloadShard, shardCount)
-	}
-
-	// Populate edges using direct indexing to avoid reallocations
-	edgeIndices := make(map[TradingPairID]int, len(edgeCounts))
-
-	for _, triangle := range arbitrageTriangles {
-		for i := 0; i < 3; i++ {
-			pairID := triangle[i]
-			idx := edgeIndices[pairID]
-			temporaryEdges[pairID][idx] = CycleEdge{
-				cyclePairs: triangle,
-				edgeIndex:  uint64(i),
-			}
-			edgeIndices[pairID]++
-		}
-	}
-
-	// Create shards with deterministic shuffle for load balancing
-	for pairID, cycleEdges := range temporaryEdges {
-		shuffleCycleEdges(cycleEdges, pairID)
-
-		shardIdx := 0
-		for offset := 0; offset < len(cycleEdges); offset += constants.MaxCyclesPerShard {
-			endOffset := offset + constants.MaxCyclesPerShard
-			if endOffset > len(cycleEdges) {
-				endOffset = len(cycleEdges)
-			}
-
-			pairWorkloadShards[pairID][shardIdx] = PairWorkloadShard{
-				pairID:     pairID,
-				cycleEdges: cycleEdges[offset:endOffset],
-			}
-			shardIdx++
-		}
-	}
 }
 
 // newCryptoRandomGenerator creates deterministic random number generators for load balancing.
@@ -855,9 +776,72 @@ func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
 	}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// QUEUE INITIALIZATION SYSTEM
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// buildWorkloadShards distributes arbitrage cycles across processing cores for load balancing.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
+func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
+	// Count edges per pair through complete traversal
+	edgeCounts := make(map[TradingPairID]int)
+	for _, triangle := range arbitrageTriangles {
+		for i := 0; i < 3; i++ {
+			edgeCounts[triangle[i]]++
+		}
+	}
+
+	// Calculate shard requirements per pair
+	shardCounts := make(map[TradingPairID]int)
+	for pairID, edgeCount := range edgeCounts {
+		shardCount := (edgeCount + constants.MaxCyclesPerShard - 1) / constants.MaxCyclesPerShard
+		shardCounts[pairID] = shardCount
+	}
+
+	// Pre-allocate all structures with exact capacities
+	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard, len(edgeCounts))
+	temporaryEdges := make(map[TradingPairID][]CycleEdge, len(edgeCounts))
+
+	for pairID, edgeCount := range edgeCounts {
+		shardCount := shardCounts[pairID]
+		pairWorkloadShards[pairID] = make([]PairWorkloadShard, shardCount)
+		temporaryEdges[pairID] = make([]CycleEdge, edgeCount)
+	}
+
+	// Populate edges using direct indexing to avoid reallocations
+	edgeIndices := make(map[TradingPairID]int, len(edgeCounts))
+
+	for _, triangle := range arbitrageTriangles {
+		for i := 0; i < 3; i++ {
+			pairID := triangle[i]
+			idx := edgeIndices[pairID]
+			temporaryEdges[pairID][idx] = CycleEdge{
+				cyclePairs: triangle,
+				edgeIndex:  uint64(i),
+			}
+			edgeIndices[pairID]++
+		}
+	}
+
+	// Create shards with deterministic shuffle for load balancing
+	for pairID, cycleEdges := range temporaryEdges {
+		shuffleCycleEdges(cycleEdges, pairID)
+
+		shardIdx := 0
+		for offset := 0; offset < len(cycleEdges); offset += constants.MaxCyclesPerShard {
+			endOffset := offset + constants.MaxCyclesPerShard
+			if endOffset > len(cycleEdges) {
+				endOffset = len(cycleEdges)
+			}
+
+			pairWorkloadShards[pairID][shardIdx] = PairWorkloadShard{
+				pairID:     pairID,
+				cycleEdges: cycleEdges[offset:endOffset],
+			}
+			shardIdx++
+		}
+	}
+}
 
 // initializeArbitrageQueues allocates priority queues and fanout tables for core arbitrage processing.
 //
@@ -902,10 +886,10 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 	}
 
 	// Allocate all arrays with exact sizes
+	engine.cycleStates = make([]ArbitrageCycleState, totalCycles)
 	engine.sharedArena = make([]pooledquantumqueue.Entry, totalCycles)
 	engine.priorityQueues = make([]pooledquantumqueue.PooledQuantumQueue, totalQueues)
 	engine.cycleFanoutTable = make([][]CycleFanoutEntry, totalFanoutSlots)
-	engine.cycleStates = make([]ArbitrageCycleState, totalCycles)
 
 	// Create deterministic ordering and pre-allocate fanout slices
 	allPairsList := make([]TradingPairID, totalFanoutSlots)
@@ -916,9 +900,9 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 	}
 
 	for i, pairID := range allPairsList {
+		engine.pairToFanoutIndex.Put(uint32(pairID), uint32(i))
 		exactCount := fanoutCounts[pairID]
 		engine.cycleFanoutTable[i] = make([]CycleFanoutEntry, exactCount)
-		engine.pairToFanoutIndex.Put(uint32(pairID), uint32(i))
 	}
 
 	// Initialize arena entries with sentinel values
@@ -960,18 +944,20 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 		for _, cycleEdge := range shard.cycleEdges {
 			handle := engine.allocateQueueHandle()
 
+			// Initialize cycle state
 			engine.cycleStates[cycleStateIdx] = ArbitrageCycleState{
-				tickValues: [3]float64{64.0, 64.0, 64.0},
 				pairIDs:    cycleEdge.cyclePairs,
+				tickValues: [3]float64{64.0, 64.0, 64.0},
 			}
 			engine.cycleStates[cycleStateIdx].tickValues[cycleEdge.edgeIndex] = 0.0
 
+			// Enqueue cycle with initial priority
 			cycleHash := utils.Mix64(uint64(cycleStateIdx))
 			randBits := cycleHash & 0xFFFF
 			initPriority := int64(196608 + randBits)
-
 			queue.Push(initPriority, handle, uint64(cycleStateIdx))
 
+			// Configure fanout entries
 			otherEdge1 := (cycleEdge.edgeIndex + 1) % 3
 			otherEdge2 := (cycleEdge.edgeIndex + 2) % 3
 
@@ -1013,22 +999,6 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 }
 
 // launchArbitrageWorker initializes and operates a processing core for arbitrage detection.
-// Implements a dual-phase execution model to balance GC cooperation and performance:
-//
-// Phase 1: GC-Cooperative Processing (Yielding Loop)
-//   - Processes events while yielding to scheduler every cycle via runtime.Gosched()
-//   - Allows GC to run efficiently without interference from hot spinning cores
-//   - Checks for GC completion signal on every iteration
-//   - Maintains reasonable throughput while being GC-friendly
-//
-// Phase 2: Maximum Performance Processing (Hot Spinning Loop)
-//   - Pure hot spinning with no yielding or blocking operations
-//   - Activated only after main.go completes all GC operations and signals completion
-//   - Maximizes throughput for real-time arbitrage detection
-//   - GC is disabled in production mode (main.go sets GCPercent=-1)
-//
-// This approach prevents hot spinning cores from interfering with critical GC phases
-// while ensuring maximum performance during production operation.
 //
 //go:norace
 //go:nocheckptr
