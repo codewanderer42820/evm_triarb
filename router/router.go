@@ -598,9 +598,6 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 
 	// Only process fanout if this pair has fanout entries
 	if hasFanout {
-		tickClampingBound := constants.TickClampingBound
-		quantizationScale := constants.QuantizationScale
-
 		for _, fanoutEntry := range engine.cycleFanoutTable[fanoutIndex] {
 			// Get the specific cycle that needs updating
 			cycle := &engine.cycleStates[fanoutEntry.cycleIndex]
@@ -612,7 +609,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 			// Recalculate the cycle's priority based on its new total profitability
 			// Note: One of these tick values is always zero (the main pair's position)
 			tickSum := cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
-			newPriority := int64((tickSum + tickClampingBound) * quantizationScale)
+			newPriority := int64((tickSum + constants.TickClampingBound) * constants.QuantizationScale)
 
 			// Update the cycle's position in its priority queue to reflect new profitability
 			engine.priorityQueues[fanoutEntry.queueIndex].MoveTick(fanoutEntry.queueHandle, newPriority)
