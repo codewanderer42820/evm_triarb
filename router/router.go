@@ -1057,14 +1057,14 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	// pointer arithmetic on every message processing cycle.
 	ring := coreRings[coreID]
 
-gcCooperativeLoop:
+gcCooperativeSpin:
 	for {
 		// Check if main.go has completed all GC operations and memory optimization
 		// Non-blocking select ensures we don't stall event processing
 		select {
 		case <-gcComplete:
 			// GC phase complete - transition to hot spinning mode
-			break gcCooperativeLoop
+			break gcCooperativeSpin
 		default:
 			// GC still in progress - continue cooperative processing
 		}
