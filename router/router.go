@@ -340,7 +340,7 @@ func (a PackedAddress) isEqual(b PackedAddress) bool {
 //go:nosplit
 //go:inline
 //go:registerparams
-func emitArbitrageOpportunity(update *PriceUpdateMessage, cycle *ArbitrageCycleState, newTick float64, engine *ArbitrageEngine) {
+func emitArbitrageOpportunity(newTick float64, cycle *ArbitrageCycleState, update *PriceUpdateMessage, engine *ArbitrageEngine) {
 	// Calculate total profitability for the opportunity
 	totalProfit := newTick + cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
 
@@ -579,7 +579,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 
 			// Report profitable opportunities for potential execution
 			if isProfitable {
-				emitArbitrageOpportunity(update, cycle, currentTick, engine)
+				emitArbitrageOpportunity(currentTick, cycle, update, engine)
 			}
 
 			// Stop extracting if we hit a non-profitable cycle or reached our extraction limit
