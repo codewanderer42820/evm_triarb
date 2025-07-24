@@ -806,7 +806,6 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 
 	// Populate edges using direct indexing to avoid reallocations
 	edgeIndices := make(map[TradingPairID]int, len(edgeCounts))
-
 	for _, triangle := range arbitrageTriangles {
 		for i := 0; i < 3; i++ {
 			pairID := triangle[i]
