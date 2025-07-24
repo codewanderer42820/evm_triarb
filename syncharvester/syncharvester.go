@@ -47,7 +47,6 @@ import (
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // EthereumLog represents a single log entry from Ethereum JSON-RPC responses.
-// Fields ordered by access frequency during JSON unmarshaling and processing.
 //
 //go:notinheap
 //go:align 64
@@ -55,11 +54,10 @@ type EthereumLog struct {
 	Data        string   // 16B - Hex-encoded event data payload (accessed first during processing)
 	Address     string   // 16B - Contract address for the log event (accessed for pair lookup)
 	BlockNumber string   // 16B - Block number in hex format (accessed for deduplication)
-	_           [16]byte // 16B - Padding to complete cache line alignment
+	_           [16]byte // 16B - Cache line padding
 }
 
 // EthereumLogsResponse encapsulates JSON-RPC log query responses.
-// Fields ordered by processing priority: Result array accessed first, Error only on failure.
 //
 //go:notinheap
 //go:align 64
@@ -68,21 +66,19 @@ type EthereumLogsResponse struct {
 	Error  *struct {     // 8B - Error information from RPC provider (cold path)
 		Message string // Error message if request failed
 	}
-	_ [32]byte // 32B - Padding to complete cache line alignment
+	_ [32]byte // 32B - Cache line padding
 }
 
 // EthereumBlockResponse handles block number queries from JSON-RPC.
-// Single field structure optimized for quick block number extraction.
 //
 //go:notinheap
 //go:align 64
 type EthereumBlockResponse struct {
-	Result string   // 16B - Current block number in hex format (only field accessed)
-	_      [48]byte // 48B - Padding to complete cache line alignment
+	Result string   // 16B - Current block number in hex format
+	_      [48]byte // 48B - Cache line padding
 }
 
 // ProcessedReserveEntry represents a single reserve state after parsing.
-// Fields ordered by processing sequence: address lookup first, then data parsing, then block tracking.
 //
 //go:notinheap
 //go:align 64
@@ -90,11 +86,10 @@ type ProcessedReserveEntry struct {
 	contractAddress string   // 16B - Uniswap V2 pair contract address (used first for router lookup)
 	eventData       string   // 16B - Raw hex data from Sync event (used second for reserve parsing)
 	blockHeight     string   // 16B - Block number in hex format (used third for deduplication)
-	_               [16]byte // 16B - Padding to complete cache line alignment
+	_               [16]byte // 16B - Cache line padding
 }
 
 // SynchronizationHarvester orchestrates historical data extraction.
-// Fields organized by access frequency and cache line boundaries for maximum efficiency.
 //
 //go:notinheap
 //go:align 64
@@ -109,20 +104,20 @@ type SynchronizationHarvester struct {
 	// Cache Line 2: Very hot - accessed frequently during processing (64B)
 	csvBufferSizes       []int  // 24B - Current buffer sizes for CSV data (updated every record)
 	consecutiveSuccesses []int  // 24B - Success counters for batch adaptation (updated every success)
-	outputPath           string // 16B - Output file path for this harvester instance (read during init)
+	outputPath           string // 16B - Output file path for this harvester instance
 
 	// Cache Line 3: Hot - accessed during batch operations (64B)
 	currentBlocks []uint64       // 24B - Current block heights per connection (updated every batch)
 	httpClients   []*http.Client // 24B - HTTP clients for parallel requests (used every request)
-	_             [16]byte       // 16B - Padding to complete cache line alignment
+	_             [16]byte       // 16B - Cache line padding
 
 	// Cache Line 4: Warm - accessed during coordination (64B)
-	syncTarget        uint64             // 8B - Target block height for synchronization (read at start/end)
-	lastProcessed     uint64             // 8B - Last successfully processed block (read at start)
-	startTime         time.Time          // 24B - Processing start timestamp (read for reporting)
-	processingContext context.Context    // 8B - Context for cancellation handling (checked periodically)
-	cancelFunc        context.CancelFunc // 8B - Function to cancel processing context (called at cleanup)
-	_                 [8]byte            // 8B - Padding to complete cache line alignment
+	syncTarget        uint64             // 8B - Target block height for synchronization
+	lastProcessed     uint64             // 8B - Last successfully processed block
+	startTime         time.Time          // 24B - Processing start timestamp for reporting
+	processingContext context.Context    // 8B - Context for cancellation handling
+	cancelFunc        context.CancelFunc // 8B - Function to cancel processing context
+	_                 [8]byte            // 8B - Cache line padding
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -130,7 +125,6 @@ type SynchronizationHarvester struct {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // Global buffers eliminate allocation overhead during processing operations.
-// Ordered by access frequency: response buffers used most, CSV builders least frequently.
 //
 //go:notinheap
 //go:align 64
@@ -138,12 +132,12 @@ var (
 	// Cache Line 1: Ultra hot - accessed during every HTTP request (64B)
 	responseBuffers [][]byte                // 24B - HTTP response buffers (read/written every request)
 	processedLogs   []ProcessedReserveEntry // 24B - Log processing buffer (accessed every batch)
-	_               [16]byte                // 16B - Padding to complete cache line alignment
+	_               [16]byte                // 16B - Cache line padding
 
 	// Cache Line 2: Hot - accessed during CSV operations (64B)
 	csvOutputBuffers  [][]byte          // 24B - CSV output buffers for batched writes (written every record)
-	csvStringBuilders []strings.Builder // 24B - String builders for zero-allocation CSV construction (used every record)
-	_                 [16]byte          // 16B - Padding to complete cache line alignment
+	csvStringBuilders []strings.Builder // 24B - String builders for zero-allocation CSV construction
+	_                 [16]byte          // 16B - Cache line padding
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -174,7 +168,6 @@ func LoadMetadata() uint64 {
 }
 
 // saveMetadata writes the last processed block height to binary metadata file.
-// Creates new file if it doesn't exist, overwrites existing content.
 //
 //go:norace
 //go:nocheckptr
@@ -202,7 +195,6 @@ func saveMetadata(block uint64) error {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // buildHTTPTransport creates an optimized HTTP transport for maximum throughput operations.
-// Configuration fields ordered by performance impact and access frequency.
 //
 //go:norace
 //go:nocheckptr
@@ -213,33 +205,33 @@ func buildHTTPTransport() *http.Transport {
 	return &http.Transport{
 		// Connection establishment (ultra hot - every new connection)
 		DialContext: (&net.Dialer{
-			Timeout:   3 * time.Second,  // Connection establishment timeout (checked every dial)
-			KeepAlive: 60 * time.Second, // Connection keep-alive duration (affects pool efficiency)
-			DualStack: true,             // Enable IPv4/IPv6 fallback support (affects connection success)
+			Timeout:   3 * time.Second,  // Connection establishment timeout
+			KeepAlive: 60 * time.Second, // Connection keep-alive duration
+			DualStack: true,             // Enable IPv4/IPv6 fallback support
 		}).DialContext,
 
 		// Connection pooling (very hot - accessed during every request)
-		MaxIdleConns:        800, // Global connection pool size (checked on every pool operation)
-		MaxIdleConnsPerHost: 150, // Per-host connection limit (checked per host)
-		MaxConnsPerHost:     300, // Maximum concurrent connections per host (checked per connection)
+		MaxIdleConns:        800, // Global connection pool size
+		MaxIdleConnsPerHost: 150, // Per-host connection limit
+		MaxConnsPerHost:     300, // Maximum concurrent connections per host
 
 		// Timeout configuration (hot - checked during request lifecycle)
-		IdleConnTimeout:       120 * time.Second,      // Idle connection timeout (affects pool cleanup)
-		TLSHandshakeTimeout:   4 * time.Second,        // TLS negotiation timeout (HTTPS only)
-		ResponseHeaderTimeout: 12 * time.Second,       // Response header timeout (checked per request)
-		ExpectContinueTimeout: 500 * time.Millisecond, // Continue expectation timeout (HTTP/1.1)
+		IdleConnTimeout:       120 * time.Second,      // Idle connection timeout
+		TLSHandshakeTimeout:   4 * time.Second,        // TLS negotiation timeout
+		ResponseHeaderTimeout: 12 * time.Second,       // Response header timeout
+		ExpectContinueTimeout: 500 * time.Millisecond, // Continue expectation timeout
 
-		// Performance flags (warm - affect request processing)
-		DisableCompression: true,  // Disable compression for speed (CPU vs bandwidth tradeoff)
-		DisableKeepAlives:  false, // Enable connection reuse (essential for performance)
-		ForceAttemptHTTP2:  true,  // Use HTTP/2 when available (better multiplexing)
+		// Performance flags
+		DisableCompression: true,  // Disable compression for speed
+		DisableKeepAlives:  false, // Enable connection reuse
+		ForceAttemptHTTP2:  true,  // Use HTTP/2 when available
 
-		// Buffer configuration (warm - affect memory allocation patterns)
-		WriteBufferSize: 128 * 1024, // Write buffer size (affects memory usage)
-		ReadBufferSize:  128 * 1024, // Read buffer size (affects read performance)
+		// Buffer configuration
+		WriteBufferSize: 128 * 1024, // Write buffer size
+		ReadBufferSize:  128 * 1024, // Read buffer size
 
-		// Environment configuration (cold - read once during initialization)
-		Proxy: http.ProxyFromEnvironment, // Environment proxy settings (rarely used)
+		// Environment configuration
+		Proxy: http.ProxyFromEnvironment,
 	}
 }
 
@@ -248,7 +240,6 @@ func buildHTTPTransport() *http.Transport {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // parseReservesToZeroTrimmed extracts and trims reserve values from Sync event data.
-// Processing variables ordered by usage sequence: dataBytes first, then reserve processing.
 //
 //go:norace
 //go:nocheckptr
@@ -256,23 +247,21 @@ func buildHTTPTransport() *http.Transport {
 //go:inline
 //go:registerparams
 func parseReservesToZeroTrimmed(eventData string) (string, string) {
-	// Convert string to byte slice for SIMD processing efficiency (used immediately)
+	// Convert string to byte slice for SIMD processing efficiency
 	dataBytes := unsafe.Slice(unsafe.StringData(eventData), len(eventData))
 
-	// Parse reserve0 from bytes 32-64 (processed first)
+	// Parse reserve0 from bytes 32-64
 	leadingZeros0 := utils.CountHexLeadingZeros(dataBytes[32:64])
-	// Optimization: for all-zeros case, keep one zero to avoid "0" string allocation
 	if leadingZeros0 == 32 {
-		leadingZeros0 = 31 // Keep last zero character
+		leadingZeros0 = 31 // Keep one zero for "0" representation
 	}
 	reserve0Start := 32 + leadingZeros0
 	reserve0 := eventData[reserve0Start:64]
 
-	// Parse reserve1 from bytes 96-128 (processed second)
+	// Parse reserve1 from bytes 96-128
 	leadingZeros1 := utils.CountHexLeadingZeros(dataBytes[96:128])
-	// Optimization: for all-zeros case, keep one zero to avoid "0" string allocation
 	if leadingZeros1 == 32 {
-		leadingZeros1 = 31 // Keep last zero character
+		leadingZeros1 = 31 // Keep one zero for "0" representation
 	}
 	reserve1Start := 96 + leadingZeros1
 	reserve1 := eventData[reserve1Start:128]
@@ -285,7 +274,6 @@ func parseReservesToZeroTrimmed(eventData string) (string, string) {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // newSynchronizationHarvester creates a fully initialized harvester with optimized buffers and transport.
-// Initialization variables ordered by dependency and usage frequency.
 //
 //go:norace
 //go:nocheckptr
@@ -293,28 +281,27 @@ func parseReservesToZeroTrimmed(eventData string) (string, string) {
 //go:inline
 //go:registerparams
 func newSynchronizationHarvester(connectionCount int, outputPath string) *SynchronizationHarvester {
-	// Dependency order: context needed first, then metadata for initialization decisions
 	ctx, cancel := context.WithCancel(context.Background())
 	lastProcessed := LoadMetadata()
 
 	harvester := &SynchronizationHarvester{
-		// Cache Line 1: Nuclear hot fields (access frequency order)
-		totalEvents: 0,                                                              // 8B - Will be incremented constantly
+		// Cache Line 1: Nuclear hot fields
+		totalEvents: 0,                                                              // 8B - Incremented constantly
 		rpcEndpoint: "https://" + constants.HarvesterHost + constants.HarvesterPath, // 16B - Used in every HTTP request
-		outputFile:  nil,                                                            // 8B - Will be set below, used in every flush
+		outputFile:  nil,                                                            // 8B - Set below, used in every flush
 		fileMutex:   sync.Mutex{},                                                   // 8B - Locked during every flush operation
 		batchSizes:  make([]uint64, connectionCount),                                // 24B - Read during every batch operation
 
-		// Cache Line 2: Very hot fields (processing frequency order)
+		// Cache Line 2: Very hot fields
 		csvBufferSizes:       make([]int, connectionCount), // 24B - Updated with every CSV record
 		consecutiveSuccesses: make([]int, connectionCount), // 24B - Updated after every successful batch
-		outputPath:           outputPath,                   // 16B - Used during initialization only
+		outputPath:           outputPath,                   // 16B - Used during initialization
 
-		// Cache Line 3: Hot fields (batch operation frequency)
+		// Cache Line 3: Hot fields
 		currentBlocks: make([]uint64, connectionCount),       // 24B - Updated once per batch
 		httpClients:   make([]*http.Client, connectionCount), // 24B - Used for every HTTP request
 
-		// Cache Line 4: Warm fields (coordination frequency)
+		// Cache Line 4: Warm fields
 		syncTarget:        0,             // 8B - Set once at start, read at end
 		lastProcessed:     lastProcessed, // 8B - Read at start for resumption logic
 		startTime:         time.Now(),    // 24B - Set once, read periodically for reporting
@@ -322,31 +309,30 @@ func newSynchronizationHarvester(connectionCount int, outputPath string) *Synchr
 		cancelFunc:        cancel,        // 8B - Called once during cleanup
 	}
 
-	// Initialize batch sizes to optimal default values (hot path initialization)
+	// Initialize batch sizes to optimal defaults
 	for i := range harvester.batchSizes {
 		harvester.batchSizes[i] = constants.OptimalBatchSize
 	}
 
-	// Initialize global buffers in access frequency order
-	responseBuffers = make([][]byte, connectionCount)                        // Used every HTTP request
-	processedLogs = make([]ProcessedReserveEntry, constants.MaxLogSliceSize) // Used every batch
-	csvOutputBuffers = make([][]byte, connectionCount)                       // Used every CSV write
-	csvStringBuilders = make([]strings.Builder, connectionCount)             // Used every CSV construction
+	// Initialize global buffers
+	responseBuffers = make([][]byte, connectionCount)
+	processedLogs = make([]ProcessedReserveEntry, constants.MaxLogSliceSize)
+	csvOutputBuffers = make([][]byte, connectionCount)
+	csvStringBuilders = make([]strings.Builder, connectionCount)
 
 	// Create shared HTTP transport for connection pooling efficiency
 	sharedTransport := buildHTTPTransport()
 	for i := 0; i < connectionCount; i++ {
-		// Initialize buffers in usage order: response buffer used first, then CSV operations
 		responseBuffers[i] = make([]byte, constants.ResponseBufferSize)
 		csvOutputBuffers[i] = make([]byte, constants.CSVBufferSize)
 		csvStringBuilders[i].Grow(constants.CSVBufferSize)
 		harvester.httpClients[i] = &http.Client{
-			Timeout:   30 * time.Second, // Checked during every request
-			Transport: sharedTransport,  // Used for connection pooling
+			Timeout:   30 * time.Second,
+			Transport: sharedTransport,
 		}
 	}
 
-	// File mode calculation based on resumption state (dependency order)
+	// File mode calculation based on resumption state
 	var err error
 	fileMode := os.O_CREATE | os.O_WRONLY
 	if lastProcessed == constants.HarvesterDeploymentBlock {
@@ -360,18 +346,17 @@ func newSynchronizationHarvester(connectionCount int, outputPath string) *Synchr
 		panic(err)
 	}
 
-	// Write CSV header for new files only (conditional based on file mode)
+	// Write CSV header for new files only
 	if lastProcessed == constants.HarvesterDeploymentBlock {
 		harvester.outputFile.WriteString("address,block,reserve0,reserve1\n")
 	}
 
-	// Start background reporting goroutine (least critical initialization)
+	// Start background reporting goroutine
 	go harvester.reportStatistics()
 	return harvester
 }
 
 // reportStatistics provides periodic progress updates during harvesting operation.
-// Local variables ordered by access frequency within the reporting loop.
 //
 //go:norace
 //go:nocheckptr
@@ -385,14 +370,11 @@ func (harvester *SynchronizationHarvester) reportStatistics() {
 	for {
 		select {
 		case <-ticker.C:
-			// Most frequently accessed: atomic load of total events (every reporting cycle)
 			events := atomic.LoadInt64(&harvester.totalEvents)
 			debug.DropMessage("HARVEST", utils.Itoa(int(events))+" events processed")
 
-			// Less frequently accessed: iterate through sector progress (per sector per cycle)
 			for sectorID := 0; sectorID < len(harvester.currentBlocks); sectorID++ {
-				// Racey read of current block height for this sector
-				currentBlock := harvester.currentBlocks[sectorID]
+				currentBlock := harvester.currentBlocks[sectorID] // Racey read for best-effort reporting
 				if currentBlock > 0 {
 					debug.DropMessage("HARVEST", "Sector "+utils.Itoa(sectorID)+" at block "+utils.Itoa(int(currentBlock)))
 				}
@@ -405,7 +387,6 @@ func (harvester *SynchronizationHarvester) reportStatistics() {
 }
 
 // cleanup ensures all resources are properly released and data is flushed.
-// Cleanup operations ordered by criticality: data safety first, then resource cleanup.
 //
 //go:norace
 //go:nocheckptr
@@ -413,15 +394,15 @@ func (harvester *SynchronizationHarvester) reportStatistics() {
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) cleanup() {
-	// Most critical: ensure all data is written to disk
+	// Data safety first
 	harvester.flushAllBuffers()
 
-	// File cleanup (data safety)
+	// File cleanup
 	if harvester.outputFile != nil {
 		harvester.outputFile.Close()
 	}
 
-	// Memory cleanup (resource management, done last)
+	// Memory cleanup
 	responseBuffers = nil
 	processedLogs = nil
 	csvOutputBuffers = nil
@@ -433,7 +414,6 @@ func (harvester *SynchronizationHarvester) cleanup() {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // getCurrentBlockNumber queries the latest block number from the Ethereum node.
-// Local variables ordered by usage: requestJSON used first, then response processing variables.
 //
 //go:norace
 //go:nocheckptr
@@ -441,11 +421,10 @@ func (harvester *SynchronizationHarvester) cleanup() {
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
-	requestJSON := `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}` // Used immediately in request
-	maxRetries := 3                                                                  // Used in loop condition
+	requestJSON := `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`
+	maxRetries := 3
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		// Request creation (dependency order: context→request→header)
 		ctx, cancel := context.WithTimeout(harvester.processingContext, 8*time.Second)
 		req, err := http.NewRequestWithContext(ctx, "POST", harvester.rpcEndpoint, strings.NewReader(requestJSON))
 		if err != nil {
@@ -454,7 +433,6 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 		}
 		req.Header.Set("Content-Type", "application/json")
 
-		// HTTP execution (using first client for block queries)
 		response, err := harvester.httpClients[0].Do(req)
 		if err != nil {
 			cancel()
@@ -462,17 +440,15 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 			continue
 		}
 
-		// Response processing (order: read→close→cancel to ensure proper resource cleanup)
 		bytesRead, _ := response.Body.Read(responseBuffers[0][:512])
 		response.Body.Close()
-		cancel() // Safe to cancel after response processing complete
+		cancel()
 
 		if bytesRead == 0 {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
-		// JSON parsing and validation
 		var blockResponse EthereumBlockResponse
 		err = sonnet.Unmarshal(responseBuffers[0][:bytesRead], &blockResponse)
 		if err != nil {
@@ -480,10 +456,10 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 			continue
 		}
 
-		// Block number extraction with network resilience validation
+		// Validate response format for network resilience
 		if len(blockResponse.Result) > 2 {
 			blockNumber := utils.ParseHexU64([]byte(blockResponse.Result[2:]))
-			return blockNumber // Block 0 is valid (genesis block)
+			return blockNumber
 		}
 
 		time.Sleep(5 * time.Millisecond)
@@ -493,18 +469,15 @@ func (harvester *SynchronizationHarvester) getCurrentBlockNumber() uint64 {
 }
 
 // extractLogBatch retrieves and processes logs for a specific block range.
-// Parameters ordered by access frequency: blocks used first for JSON, connectionID used throughout.
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock uint64, connectionID int) (int, error) {
-	// Most frequently accessed: string builder for JSON construction
 	builder := &csvStringBuilders[connectionID]
 	builder.Reset()
 
-	// Block conversion for JSON construction (dependency order)
 	fromHex := fmt.Sprintf("%x", fromBlock)
 	toHex := fmt.Sprintf("%x", toBlock)
 
@@ -519,7 +492,6 @@ func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock ui
 
 	requestJSON := builder.String()
 
-	// Request creation with timeout context
 	ctx, cancel := context.WithTimeout(harvester.processingContext, 25*time.Second)
 	defer cancel()
 
@@ -529,26 +501,23 @@ func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock ui
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Execute HTTP request using connection-specific client
 	response, err := harvester.httpClients[connectionID].Do(req)
 	if err != nil {
 		return 0, err
 	}
 	defer response.Body.Close()
 
-	// Validate response status
 	if response.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("HTTP %d", response.StatusCode)
 	}
 
-	// Response reading with cache-aligned operations (access frequency order)
+	// Response reading with cache-aligned operations
 	totalBytes := 0
-	responseBuffer := responseBuffers[connectionID]   // Most frequently accessed
-	maxReadSize := (len(responseBuffer) - 1024) &^ 63 // Calculated once, used in loop
+	responseBuffer := responseBuffers[connectionID]
+	maxReadSize := (len(responseBuffer) - 1024) &^ 63 // Cache line alignment
 
 	for totalBytes < maxReadSize {
-		// Align read sizes to cache boundaries
-		readSize := constants.ReadBufferSize &^ 15
+		readSize := constants.ReadBufferSize &^ 15 // 16-byte alignment
 		if totalBytes+readSize > maxReadSize {
 			readSize = (maxReadSize - totalBytes) &^ 15
 		}
@@ -569,14 +538,13 @@ func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock ui
 	}
 
 	if totalBytes == 0 {
-		return 0, fmt.Errorf("empty response")
+		return 0, fmt.Errorf("empty response") // Network resilience check
 	}
 
 	return harvester.parseLogsWithSonnet(responseBuffer[:totalBytes], connectionID)
 }
 
 // parseLogsWithSonnet processes JSON-RPC log responses using optimized parsing.
-// Variables ordered by computation dependency: counts first, then buffer calculations.
 //
 //go:norace
 //go:nocheckptr
@@ -584,25 +552,21 @@ func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock ui
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) parseLogsWithSonnet(jsonData []byte, connectionID int) (int, error) {
-	// Buffer partitioning calculations (dependency order)
 	connectionCount := len(harvester.httpClients)
 	bufferOffset := connectionID * (len(processedLogs) / connectionCount)
 	maxLogsPerConnection := len(processedLogs) / connectionCount
 	logCount := 0
 
-	// Parse JSON response using high-performance sonnet library
 	var logsResponse EthereumLogsResponse
 	err := sonnet.Unmarshal(jsonData, &logsResponse)
 	if err != nil {
 		return 0, err
 	}
 
-	// Check for RPC errors in response
 	if logsResponse.Error != nil {
 		return 0, fmt.Errorf("RPC error: %s", logsResponse.Error.Message)
 	}
 
-	// Process each log entry with minimal validation for maximum speed
 	for _, ethereumLog := range logsResponse.Result {
 		if logCount >= maxLogsPerConnection {
 			break // Prevent buffer overflow
@@ -610,11 +574,10 @@ func (harvester *SynchronizationHarvester) parseLogsWithSonnet(jsonData []byte, 
 
 		bufferPosition := bufferOffset + logCount
 
-		// Store parsed log data in partitioned global buffer (access frequency order)
 		logEntry := &processedLogs[bufferPosition]
-		logEntry.contractAddress = ethereumLog.Address[2:] // Remove 0x prefix (accessed first for lookup)
-		logEntry.eventData = ethereumLog.Data[2:]          // Remove 0x prefix (accessed second for parsing)
-		logEntry.blockHeight = ethereumLog.BlockNumber[2:] // Remove 0x prefix (accessed third for deduplication)
+		logEntry.contractAddress = ethereumLog.Address[2:] // Remove 0x prefix
+		logEntry.eventData = ethereumLog.Data[2:]          // Remove 0x prefix
+		logEntry.blockHeight = ethereumLog.BlockNumber[2:] // Remove 0x prefix
 
 		logCount++
 	}
@@ -627,7 +590,6 @@ func (harvester *SynchronizationHarvester) parseLogsWithSonnet(jsonData []byte, 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // writeCSVRecord constructs and buffers a CSV record for batch writing.
-// Parameters ordered by CSV construction sequence: address first, then block, then reserves.
 //
 //go:norace
 //go:nocheckptr
@@ -635,11 +597,9 @@ func (harvester *SynchronizationHarvester) parseLogsWithSonnet(jsonData []byte, 
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) writeCSVRecord(address, blockHeight, reserve0, reserve1 string, connectionID int) {
-	// Most frequently accessed: string builder for CSV construction
 	builder := &csvStringBuilders[connectionID]
 	builder.Reset()
 
-	// CSV field construction in output order
 	builder.WriteString(address)
 	builder.WriteByte(',')
 	builder.WriteString(blockHeight)
@@ -651,12 +611,10 @@ func (harvester *SynchronizationHarvester) writeCSVRecord(address, blockHeight, 
 
 	csvRecord := builder.String()
 
-	// Buffer management (access frequency order)
-	currentBufferSize := harvester.csvBufferSizes[connectionID] // Read frequently
-	newBufferSize := currentBufferSize + len(csvRecord)         // Calculated once
+	currentBufferSize := harvester.csvBufferSizes[connectionID]
+	newBufferSize := currentBufferSize + len(csvRecord)
 
-	// Use bit operations for threshold calculation
-	threshold := constants.CSVBufferSize - (constants.CSVBufferSize >> 3)
+	threshold := constants.CSVBufferSize - (constants.CSVBufferSize >> 3) // 87.5% threshold
 	if newBufferSize >= threshold {
 		harvester.flushCSVBuffer(connectionID)
 		currentBufferSize = 0
@@ -669,7 +627,6 @@ func (harvester *SynchronizationHarvester) writeCSVRecord(address, blockHeight, 
 }
 
 // flushCSVBuffer writes accumulated CSV data to disk with mutex protection.
-// Early return for empty buffers to avoid unnecessary lock contention.
 //
 //go:norace
 //go:nocheckptr
@@ -689,7 +646,6 @@ func (harvester *SynchronizationHarvester) flushCSVBuffer(connectionID int) {
 }
 
 // flushAllBuffers ensures all pending CSV data is written to disk and synced.
-// Iterates through all connections to ensure complete data safety.
 //
 //go:norace
 //go:nocheckptr
@@ -704,7 +660,6 @@ func (harvester *SynchronizationHarvester) flushAllBuffers() {
 }
 
 // processLogFromGlobalBuffer converts parsed log data into CSV format and tracks block progress.
-// Processing order: reserve parsing first (most CPU intensive), then CSV writing, then block tracking.
 //
 //go:norace
 //go:nocheckptr
@@ -712,13 +667,10 @@ func (harvester *SynchronizationHarvester) flushAllBuffers() {
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) processLogFromGlobalBuffer(logEntry *ProcessedReserveEntry, connectionID int) {
-	// Most CPU-intensive operation first: reserve parsing
 	reserve0, reserve1 := parseReservesToZeroTrimmed(logEntry.eventData)
 
-	// CSV writing (I/O operation)
 	harvester.writeCSVRecord(logEntry.contractAddress, logEntry.blockHeight, reserve0, reserve1, connectionID)
 
-	// Block tracking (least frequent operation - only when block advances)
 	blockNumber := utils.ParseHexU64([]byte(logEntry.blockHeight))
 	if blockNumber > harvester.currentBlocks[connectionID] {
 		harvester.currentBlocks[connectionID] = blockNumber
@@ -730,7 +682,6 @@ func (harvester *SynchronizationHarvester) processLogFromGlobalBuffer(logEntry *
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // executeHarvesting orchestrates the complete harvesting process with intelligent work distribution.
-// Processing variables ordered by calculation dependency and usage frequency.
 //
 //go:norace
 //go:nocheckptr
@@ -745,12 +696,11 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 		return nil
 	}
 
-	// Work distribution calculations (dependency order)
-	totalBlocks := harvester.syncTarget - harvester.lastProcessed // Used for logging and calculations
-	connectionCount := len(harvester.httpClients)                 // Used throughout distribution logic
-	blocksPerSector := totalBlocks / uint64(connectionCount)      // Base blocks per connection
-	extraBlocks := totalBlocks % uint64(connectionCount)          // Remainder blocks to distribute
-	sectorStart := harvester.lastProcessed + 1                    // Starting block for distribution
+	totalBlocks := harvester.syncTarget - harvester.lastProcessed
+	connectionCount := len(harvester.httpClients)
+	blocksPerSector := totalBlocks / uint64(connectionCount)
+	extraBlocks := totalBlocks % uint64(connectionCount)
+	sectorStart := harvester.lastProcessed + 1
 
 	debug.DropMessage("HARVEST", fmt.Sprintf("Resuming from block %d, %d blocks remaining, %d connections",
 		harvester.lastProcessed, totalBlocks, connectionCount))
@@ -758,7 +708,6 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 	// Calculate work distribution across connections with load balancing
 	workSectors := make([][2]uint64, connectionCount)
 	for i := 0; i < connectionCount; i++ {
-		// Sector calculation (dependency order: fromBlock→sectorSize→toBlock→next sectorStart)
 		fromBlock := sectorStart
 		sectorSize := blocksPerSector
 		if uint64(i) < extraBlocks {
@@ -797,10 +746,8 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 		}(connectionID, workSectors[connectionID])
 	}
 
-	// Wait for all workers to complete processing
 	workerWG.Wait()
 
-	// Cleanup operations (order: stop background tasks→flush data→report completion)
 	harvester.cancelFunc()
 	harvester.flushAllBuffers()
 
@@ -811,21 +758,18 @@ func (harvester *SynchronizationHarvester) executeHarvesting() error {
 }
 
 // harvestSector processes a continuous range of blocks for a specific connection.
-// Local variables ordered by usage frequency: currentBlock used in loop, bufferOffset calculated once.
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
 func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint64, connectionID int) {
-	// Pre-calculate buffer partition once for this connection (used in every log processing)
 	bufferOffset := connectionID * (len(processedLogs) / len(harvester.httpClients))
-	currentBlock := fromBlock // Most frequently accessed variable in the loop
+	currentBlock := fromBlock
 
 	for currentBlock <= toBlock {
-		// Batch size management (access frequency order)
-		batchSize := harvester.batchSizes[connectionID] // Read every iteration
-		batchEnd := currentBlock + batchSize - 1        // Calculated every iteration
+		batchSize := harvester.batchSizes[connectionID]
+		batchEnd := currentBlock + batchSize - 1
 		if batchEnd > toBlock {
 			batchEnd = toBlock
 		}
@@ -854,9 +798,8 @@ func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint
 			harvester.processLogFromGlobalBuffer(&processedLogs[logPosition], connectionID)
 		}
 
-		// Batch completion and adaptive sizing (access frequency order)
-		currentBlock = batchEnd + 1                    // Most critical: advance to next batch
-		harvester.consecutiveSuccesses[connectionID]++ // Track success for adaptation
+		currentBlock = batchEnd + 1
+		harvester.consecutiveSuccesses[connectionID]++
 
 		// Increase batch size after consecutive successes for adaptive optimization
 		if harvester.consecutiveSuccesses[connectionID] >= 3 {
@@ -871,7 +814,6 @@ func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // processLine parses a single CSV line and updates the router with optimized zero-copy operations.
-// Parameters ordered by usage frequency: line used immediately, processed and blocks accessed frequently.
 //
 //go:norace
 //go:nocheckptr
@@ -879,7 +821,7 @@ func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint
 //go:inline
 //go:registerparams
 func processLine(line []byte, processed *int, offset int64, blocks []uint64, addressBuf, dataBuf []byte, v *types.LogView) {
-	// CSV delimiter discovery using linear scan (dependency order: c1→c2→c3)
+	// CSV delimiter discovery using linear scan
 	c1, c2, c3 := -1, -1, -1
 	for i, b := range line {
 		if b == ',' {
@@ -889,31 +831,27 @@ func processLine(line []byte, processed *int, offset int64, blocks []uint64, add
 				c2 = i // Second comma: separates block from reserve0
 			} else if c3 == -1 {
 				c3 = i // Third comma: separates reserve0 from reserve1
-				break  // Early termination after finding all required delimiters
+				break
 			}
 		}
 	}
 
-	// Header detection and validation (fastest check first)
 	if c1 == 7 {
-		return // Skip header row to avoid processing metadata as data
+		return // Skip header row
 	}
 
-	// Pair existence verification using zero-copy address lookup (hot path check)
 	pairID := router.LookupPairByAddress(line[0:c1])
 	if pairID == 0 {
-		return // Skip unknown pairs to avoid processing irrelevant data
+		return // Skip unknown pairs
 	}
 
-	// Block freshness validation for deduplication (dependency order: parse→compare→update)
 	block := utils.ParseHexU64(line[c1+1 : c2])
-	// Skip stale or duplicate block data to maintain state consistency
 	if block <= blocks[pairID] {
-		return // Ignore older blocks to preserve latest state
+		return // Skip stale blocks
 	}
-	blocks[pairID] = block // Update block tracking for this pair
+	blocks[pairID] = block
 
-	// Address buffer preparation using SIMD-style operations (access pattern order)
+	// Address buffer preparation using SIMD-style operations
 	addrWords := (*[5]uint64)(unsafe.Pointer(&addressBuf[2]))
 	addrWords[0] = utils.Load64(line[0:8])   // Characters 0-7
 	addrWords[1] = utils.Load64(line[8:16])  // Characters 8-15
@@ -921,7 +859,7 @@ func processLine(line []byte, processed *int, offset int64, blocks []uint64, add
 	addrWords[3] = utils.Load64(line[24:32]) // Characters 24-31
 	addrWords[4] = utils.Load64(line[32:40]) // Characters 32-39
 
-	// Reserve data buffer initialization with pattern fills (memory layout order)
+	// Reserve data buffer initialization with pattern fills
 	r0 := (*[4]uint64)(unsafe.Pointer(&dataBuf[34])) // Reserve0 data region
 	r1 := (*[4]uint64)(unsafe.Pointer(&dataBuf[98])) // Reserve1 data region
 	for i := 0; i < 4; i++ {
@@ -929,35 +867,30 @@ func processLine(line []byte, processed *int, offset int64, blocks []uint64, add
 		r1[i] = 0x3030303030303030 // Ensures consistent zero-padding format
 	}
 
-	// Reserve value extraction from CSV fields (parsing order)
 	res0 := line[c2+1 : c3] // Reserve0 field from CSV
-	res1 := line[c3+1:]     // Reserve1 field from CSV (to end of line)
+	res1 := line[c3+1:]     // Reserve1 field from CSV
 
-	// Right-aligned hex placement for standardized formatting (layout order)
+	// Right-aligned hex placement for standardized formatting
 	copy(dataBuf[66-len(res0):66], res0)   // Right-align reserve0 in its 32-char field
 	copy(dataBuf[130-len(res1):130], res1) // Right-align reserve1 in its 32-char field
 
-	// Router dispatch and progress tracking (operation order: dispatch first, then count)
-	router.DispatchPriceUpdate(v) // Trigger price recalculation and arbitrage detection
-	*processed++                  // Increment processed event counter for progress reporting
+	router.DispatchPriceUpdate(v)
+	*processed++
 }
 
 // flushHarvestedReservesToRouterFromFile performs backwards streaming CSV ingestion for router state initialization.
-// Variables ordered by initialization dependency and usage frequency.
 //
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
 func flushHarvestedReservesToRouterFromFile(filePath string) error {
-	// Database setup for pair count (dependency order: open→query→close)
 	db, err := sql.Open("sqlite3", "uniswap_pairs.db")
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	// Retrieve exact pair count for buffer sizing
 	var totalPairs int
 	if err := db.QueryRow("SELECT COUNT(*) FROM pools").Scan(&totalPairs); err != nil {
 		return err
@@ -966,7 +899,6 @@ func flushHarvestedReservesToRouterFromFile(filePath string) error {
 		return fmt.Errorf("no pairs found in database")
 	}
 
-	// File system initialization (dependency order: open→stat for size calculation)
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -978,18 +910,15 @@ func flushHarvestedReservesToRouterFromFile(filePath string) error {
 		return err
 	}
 
-	// LogView structure initialization for router communication (usage frequency order)
 	var logView types.LogView
 
-	// Address buffer preparation with Ethereum formatting (hot path setup)
 	addressBuffer := make([]byte, 42)
 	addressBuffer[0], addressBuffer[1] = '0', 'x' // Ethereum address prefix
 
-	// Sync event data buffer allocation with Uniswap V2 format (hot path setup)
 	dataBuffer := make([]byte, 130)
 	dataBuffer[0], dataBuffer[1] = '0', 'x' // Event data prefix
 
-	// Reserve data pre-initialization using 64-bit pattern fills (memory layout order)
+	// Reserve data pre-initialization using 64-bit pattern fills
 	zeros1 := (*[4]uint64)(unsafe.Pointer(&dataBuffer[34])) // Reserve0 data region
 	zeros2 := (*[4]uint64)(unsafe.Pointer(&dataBuffer[98])) // Reserve1 data region
 	for i := 0; i < 4; i++ {
@@ -997,81 +926,68 @@ func flushHarvestedReservesToRouterFromFile(filePath string) error {
 		zeros2[i] = 0x3030303030303030 // Ensures consistent zero-padding format
 	}
 
-	// LogView buffer binding for zero-copy router communication
-	logView.Addr = addressBuffer // Bind address buffer for contract identification
-	logView.Data = dataBuffer    // Bind data buffer for reserve value transmission
+	logView.Addr = addressBuffer
+	logView.Data = dataBuffer
 
-	// Processing state initialization (access frequency order)
-	blockHeights := make([]uint64, totalPairs+1) // Array index corresponds to pair ID (accessed frequently)
-	processedEvents := 0                         // Progress counter (incremented every record)
+	blockHeights := make([]uint64, totalPairs+1)
+	processedEvents := 0
 
-	// Backwards file reading infrastructure (buffer size calculations)
+	// Backwards file reading infrastructure
 	const bufferSize = 8192
-	readBuffer := make([]byte, bufferSize)       // Read buffer for file chunks
-	workingBuffer := make([]byte, bufferSize<<1) // Combined buffer for chunk+leftover processing
-	lineBuffer := make([]byte, bufferSize)       // Leftover line data storage
-	lineBufferUsed := 0                          // Track leftover data length
-	currentPosition := stat.Size()               // Start from end of file
+	readBuffer := make([]byte, bufferSize)
+	workingBuffer := make([]byte, bufferSize<<1)
+	lineBuffer := make([]byte, bufferSize)
+	lineBufferUsed := 0
+	currentPosition := stat.Size()
 
 	// Backwards streaming loop with chunk-based processing
 	for currentPosition > 0 {
-		// Calculate optimal read size for current chunk (dependency order)
 		readSize := bufferSize
 		if currentPosition < bufferSize {
-			readSize = int(currentPosition) // Handle final chunk at beginning of file
+			readSize = int(currentPosition)
 		}
-		currentPosition -= int64(readSize) // Update position for next iteration
+		currentPosition -= int64(readSize)
 
-		// Perform positioned file read for current chunk
 		_, err := file.ReadAt(readBuffer[:readSize], currentPosition)
 		if err != nil {
 			return err
 		}
 
-		// Chunk combination with leftover line data (buffer management order)
 		var processingData []byte
 		if lineBufferUsed > 0 {
-			// Combine buffers: current chunk + leftover from previous iteration
-			copy(workingBuffer, readBuffer[:readSize])                  // Copy current chunk
-			copy(workingBuffer[readSize:], lineBuffer[:lineBufferUsed]) // Append leftover data
-			processingData = workingBuffer[:readSize+lineBufferUsed]    // Create combined slice
-			lineBufferUsed = 0                                          // Reset line buffer for next iteration
+			copy(workingBuffer, readBuffer[:readSize])
+			copy(workingBuffer[readSize:], lineBuffer[:lineBufferUsed])
+			processingData = workingBuffer[:readSize+lineBufferUsed]
+			lineBufferUsed = 0
 		} else {
-			// Direct processing: no leftover data from previous iteration
-			processingData = readBuffer[:readSize] // Process current chunk directly
+			processingData = readBuffer[:readSize]
 		}
 
 		// Backwards line extraction with newline boundary detection
-		endPosition := len(processingData) // Start scanning from end of data
+		endPosition := len(processingData)
 		for scanIndex := len(processingData) - 1; scanIndex >= 0; scanIndex-- {
 			if processingData[scanIndex] == '\n' {
-				// Found newline: extract complete line for processing
 				if scanIndex+1 < endPosition {
-					lineData := processingData[scanIndex+1 : endPosition] // Extract line content
+					lineData := processingData[scanIndex+1 : endPosition]
 					if len(lineData) > 0 {
-						// Process complete line with router integration
 						fileOffset := currentPosition + int64(scanIndex+1)
 						processLine(lineData, &processedEvents, fileOffset, blockHeights, addressBuffer, dataBuffer, &logView)
 					}
 				}
-				endPosition = scanIndex // Update end position for next line extraction
+				endPosition = scanIndex
 			}
 		}
 
-		// Partial line preservation for next iteration
 		if endPosition > 0 {
-			copy(lineBuffer, processingData[:endPosition]) // Preserve partial line
-			lineBufferUsed = endPosition                   // Track preserved data length
+			copy(lineBuffer, processingData[:endPosition])
+			lineBufferUsed = endPosition
 		}
 	}
 
-	// Final line processing for file beginning
 	if lineBufferUsed > 0 {
-		// Process final line with zero file offset (beginning of file)
 		processLine(lineBuffer[:lineBufferUsed], &processedEvents, 0, blockHeights, addressBuffer, dataBuffer, &logView)
 	}
 
-	// Completion reporting and resource cleanup
 	debug.DropMessage("HARVEST", utils.Itoa(processedEvents)+" reserve states loaded into router")
 	return nil
 }
@@ -1081,7 +997,6 @@ func flushHarvestedReservesToRouterFromFile(filePath string) error {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // CheckHarvestingRequirement determines if harvesting is needed by comparing block heights.
-// Variables ordered by usage: client used for request, endpoint used for connection, then response processing.
 //
 //go:norace
 //go:nocheckptr
@@ -1089,11 +1004,9 @@ func flushHarvestedReservesToRouterFromFile(filePath string) error {
 //go:inline
 //go:registerparams
 func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
-	// HTTP client setup (used immediately for request)
 	client := &http.Client{Timeout: 10 * time.Second, Transport: buildHTTPTransport()}
 	rpcEndpoint := "https://" + constants.HarvesterHost + constants.HarvesterPath
 
-	// Request creation and execution (dependency order)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
@@ -1109,7 +1022,6 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 	}
 	defer response.Body.Close()
 
-	// Response processing (buffer size based on expected response)
 	var buf [128]byte
 	n, _ := response.Body.Read(buf[:])
 
@@ -1118,7 +1030,7 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 		return false, 0, 0, err
 	}
 
-	// Block comparison logic with network resilience validation
+	// Validate response format for network resilience
 	if len(blockResponse.Result) > 2 {
 		currentHeight := utils.ParseHexU64([]byte(blockResponse.Result[2:]))
 		lastProcessed := LoadMetadata()
@@ -1129,7 +1041,6 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 }
 
 // CheckHarvestingRequirementFromBlock determines if harvesting is needed using provided last block.
-// Variables ordered identically to CheckHarvestingRequirement for consistency.
 //
 //go:norace
 //go:nocheckptr
@@ -1137,11 +1048,9 @@ func CheckHarvestingRequirement() (bool, uint64, uint64, error) {
 //go:inline
 //go:registerparams
 func CheckHarvestingRequirementFromBlock(lastProcessedBlock uint64) (bool, uint64, uint64, error) {
-	// HTTP client setup (used immediately for request)
 	client := &http.Client{Timeout: 10 * time.Second, Transport: buildHTTPTransport()}
 	rpcEndpoint := "https://" + constants.HarvesterHost + constants.HarvesterPath
 
-	// Request creation and execution (dependency order)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
@@ -1157,7 +1066,6 @@ func CheckHarvestingRequirementFromBlock(lastProcessedBlock uint64) (bool, uint6
 	}
 	defer response.Body.Close()
 
-	// Response processing (buffer size based on expected response)
 	var buf [128]byte
 	n, _ := response.Body.Read(buf[:])
 
@@ -1166,7 +1074,7 @@ func CheckHarvestingRequirementFromBlock(lastProcessedBlock uint64) (bool, uint6
 		return false, 0, 0, err
 	}
 
-	// Block comparison with network resilience validation
+	// Validate response format for network resilience
 	if len(blockResponse.Result) > 2 {
 		currentHeight := utils.ParseHexU64([]byte(blockResponse.Result[2:]))
 		return lastProcessedBlock < currentHeight, lastProcessedBlock, currentHeight, nil
@@ -1176,7 +1084,6 @@ func CheckHarvestingRequirementFromBlock(lastProcessedBlock uint64) (bool, uint6
 }
 
 // ExecuteHarvesting starts the harvesting process with default connection settings.
-// Simple wrapper for consistency with connection-specific version.
 //
 //go:norace
 //go:nocheckptr
@@ -1188,7 +1095,6 @@ func ExecuteHarvesting() error {
 }
 
 // ExecuteHarvestingWithConnections starts the harvesting process with specified connection count.
-// Error handling order: execute first, then save metadata only on success.
 //
 //go:norace
 //go:nocheckptr
@@ -1200,14 +1106,12 @@ func ExecuteHarvestingWithConnections(connectionCount int) error {
 
 	err := harvester.executeHarvesting()
 	if err == nil {
-		// Save metadata only after successful harvesting
-		saveMetadata(harvester.syncTarget)
+		saveMetadata(harvester.syncTarget) // Save metadata only after successful harvesting
 	}
 	return err
 }
 
 // ExecuteHarvestingToTemp performs temp harvesting and returns the last processed block.
-// Processing order: execute→cleanup→return target (does not update metadata file).
 //
 //go:norace
 //go:nocheckptr
@@ -1226,7 +1130,6 @@ func ExecuteHarvestingToTemp(connectionCount int) (uint64, error) {
 }
 
 // FlushHarvestedReservesToRouter performs backwards streaming CSV ingestion for router state initialization.
-// Simple wrapper for the main file with standard path.
 //
 //go:norace
 //go:nocheckptr
@@ -1238,7 +1141,6 @@ func FlushHarvestedReservesToRouter() error {
 }
 
 // FlushHarvestedReservesToRouterFromTemp performs the same operation but reads from the temp file.
-// Simple wrapper for the main function with temp path.
 //
 //go:norace
 //go:nocheckptr
