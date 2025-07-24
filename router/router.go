@@ -528,7 +528,6 @@ func LookupPairByAddress(address40HexChars []byte) TradingPairID {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage) {
