@@ -995,11 +995,21 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 
 // launchArbitrageWorker initializes and operates a processing core for arbitrage detection.
 //
+// launchArbitrageWorker initializes and operates a processing core for arbitrage detection.
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 //go:norace
 //go:nocheckptr
 //go:inline
 //go:registerparams
 func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairWorkloadShard, initWaitGroup *sync.WaitGroup) {
+	//═══════════════════════════════════════════════════════════════════════════════════════
+	// PHASE 1: PURE LOCAL ALLOCATION (NO GLOBAL VISIBILITY)
+	//═══════════════════════════════════════════════════════════════════════════════════════
+
 	// Lock this goroutine to the current OS thread for consistent NUMA locality
 	runtime.LockOSThread()
 
@@ -1027,16 +1037,40 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 		// nextHandle: zero value is fine
 	}
 
-	// Register this engine in the global core array for message routing
-	coreEngines[coreID] = engine
-	coreRings[coreID] = ring24.New(constants.DefaultRingSize)
+	// Create ring buffer locally (no global visibility yet)
+	ring := ring24.New(constants.DefaultRingSize)
 
 	// Perform zero-fragmentation initialization of all queue structures
 	initializeArbitrageQueues(engine, allShards)
 
+	//═══════════════════════════════════════════════════════════════════════════════════════
+	// PHASE 2: MEMORY OPTIMIZATION BEFORE GOING LIVE
+	//═══════════════════════════════════════════════════════════════════════════════════════
+
 	// Clean up initialization variables immediately after use
-	allShards = nil
 	shardInput = nil
+	allShards = nil
+
+	// Optional: Force garbage collection for clean state before production
+	runtime.GC()
+
+	//═══════════════════════════════════════════════════════════════════════════════════════
+	// PHASE 3: ATOMIC GLOBAL REGISTRATION + HOT PATH PRE-CACHING
+	//═══════════════════════════════════════════════════════════════════════════════════════
+
+	// Register this engine and ring in the global arrays for message routing
+	// This is the moment the core becomes globally visible
+	coreEngines[coreID] = engine
+	coreRings[coreID] = ring
+
+	// Cache the ring buffer reference immediately after registration
+	// This eliminates array lookups and bounds checking in hot loops
+	// CRITICAL: Must happen before signaling ready to avoid race conditions
+	hotRing := coreRings[coreID]
+
+	//═══════════════════════════════════════════════════════════════════════════════════════
+	// PHASE 4: SIGNAL COMPLETE READINESS
+	//═══════════════════════════════════════════════════════════════════════════════════════
 
 	// Log successful core initialization with concise format
 	debug.DropMessage("CORE", "Core "+utils.Itoa(coreID)+" ready")
@@ -1044,13 +1078,16 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	// Signal that this core's initialization is complete
 	initWaitGroup.Done()
 
+	//═══════════════════════════════════════════════════════════════════════════════════════
+	// PHASE 5: CLEANUP INITIALIZATION ARTIFACTS
+	//═══════════════════════════════════════════════════════════════════════════════════════
+
 	// Clean up synchronization variables after use
 	initWaitGroup = nil
 
-	// Cache the ring buffer reference for this core to avoid repeated array lookups
-	// in the hot loops. This micro-optimization eliminates bounds checking and
-	// pointer arithmetic on every message processing cycle.
-	ring := coreRings[coreID]
+	//═══════════════════════════════════════════════════════════════════════════════════════
+	// PHASE 6: COOPERATIVE PRE-PRODUCTION PHASE
+	//═══════════════════════════════════════════════════════════════════════════════════════
 
 gcCooperativeSpin:
 	for {
@@ -1066,7 +1103,7 @@ gcCooperativeSpin:
 
 		// Process any available events during the GC phase
 		// This maintains system responsiveness while GC operations complete
-		if p := ring.Pop(); p != nil {
+		if p := hotRing.Pop(); p != nil {
 			processArbitrageUpdate(engine, (*PriceUpdateMessage)(unsafe.Pointer(p)))
 		}
 
@@ -1075,10 +1112,14 @@ gcCooperativeSpin:
 		runtime.Gosched()
 	}
 
+	//═══════════════════════════════════════════════════════════════════════════════════════
+	// PHASE 7: PURE PRODUCTION HOT SPINNING
+	//═══════════════════════════════════════════════════════════════════════════════════════
+
 	for {
 		// Process events without any yielding, blocking, or scheduler cooperation
 		// This maximizes CPU utilization and minimizes latency for arbitrage detection
-		if p := ring.Pop(); p != nil {
+		if p := hotRing.Pop(); p != nil {
 			processArbitrageUpdate(engine, (*PriceUpdateMessage)(unsafe.Pointer(p)))
 		}
 		// Pure hot spin - no runtime.Gosched(), no blocking, maximum performance
