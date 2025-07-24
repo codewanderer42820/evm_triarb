@@ -799,13 +799,13 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 	}
 
 	// Pre-allocate all structures with exact capacities
-	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard, len(edgeCounts))
 	temporaryEdges := make(map[TradingPairID][]CycleEdge, len(edgeCounts))
+	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard, len(edgeCounts))
 
 	for pairID, edgeCount := range edgeCounts {
+		temporaryEdges[pairID] = make([]CycleEdge, edgeCount)
 		shardCount := shardCounts[pairID]
 		pairWorkloadShards[pairID] = make([]PairWorkloadShard, shardCount)
-		temporaryEdges[pairID] = make([]CycleEdge, edgeCount)
 	}
 
 	// Populate edges using direct indexing to avoid reallocations
@@ -887,9 +887,9 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 
 	// Allocate all arrays with exact sizes
 	engine.cycleStates = make([]ArbitrageCycleState, totalCycles)
-	engine.sharedArena = make([]pooledquantumqueue.Entry, totalCycles)
 	engine.priorityQueues = make([]pooledquantumqueue.PooledQuantumQueue, totalQueues)
 	engine.cycleFanoutTable = make([][]CycleFanoutEntry, totalFanoutSlots)
+	engine.sharedArena = make([]pooledquantumqueue.Entry, totalCycles)
 
 	// Create deterministic ordering and pre-allocate fanout slices
 	allPairsList := make([]TradingPairID, totalFanoutSlots)
