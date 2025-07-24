@@ -337,7 +337,6 @@ func (a PackedAddress) isEqual(b PackedAddress) bool {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
 //go:registerparams
 func emitArbitrageOpportunity(newTick float64, cycle *ArbitrageCycleState, update *PriceUpdateMessage, engine *ArbitrageEngine) {
