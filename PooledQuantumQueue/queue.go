@@ -5,14 +5,14 @@
 // Component: Zero-Allocation Priority Queue with External Memory Management
 //
 // Description:
-//   Priority queue implementation that operates on externally-managed memory pools. Multiple
-//   queue instances can share a single large allocation, enabling optimal cache locality and
-//   eliminating per-queue memory overhead in multi-queue systems.
+//   Fixed-capacity priority queue with constant-time operations using hierarchical bitmap indexing.
+//   Operates on externally-managed memory pools, enabling multiple queue instances to share a
+//   single large allocation for optimal cache locality and reduced memory overhead.
 //
 // Features:
+//   - Three-level bitmap hierarchy for efficient minimum finding
 //   - Shared memory pools reduce total allocation overhead
-//   - Improved cache locality when related queues share memory
-//   - Zero internal allocations - all memory provided externally
+//   - Hardware CLZ instructions enable rapid priority scanning
 //   - Handle-based indirection enables flexible memory management
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -29,16 +29,16 @@ import (
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const (
-	// GroupCount defines top-level groups in the bitmap hierarchy.
-	// Determines the coarsest granularity of priority scanning.
+	// GroupCount defines the number of top-level summary groups in the bitmap hierarchy.
+	// Each group summarizes 64 lanes of priority information.
 	GroupCount = 64
 
-	// LaneCount specifies lanes per group for medium granularity.
-	// Each lane represents 64 individual priority buckets.
+	// LaneCount specifies lanes per group in the middle hierarchy level.
+	// Each lane summarizes 64 individual priority buckets.
 	LaneCount = 64
 
-	// BucketCount calculates total addressable priority levels.
-	// Supports 262,144 distinct priorities (64 × 64 × 64).
+	// BucketCount represents total addressable priority levels.
+	// Calculated as: GroupCount × LaneCount × 64 = 262,144 unique priorities.
 	BucketCount = GroupCount * LaneCount * LaneCount
 )
 
@@ -51,26 +51,21 @@ const (
 // be allocated from a separate handle management system.
 type Handle uint64
 
-// nilIdx marks invalid handles and empty links.
-// Uses maximum uint64 value as sentinel.
+// nilIdx serves as a sentinel value indicating no link or invalid handle.
+// Uses maximum uint64 value to distinguish from valid indices.
 const nilIdx Handle = ^Handle(0)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // SHARED MEMORY ENTRY
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Entry represents a queue element within the shared memory pool.
-// This structure defines the fundamental unit of the external allocation.
+// Entry represents a single queue element within the shared memory pool.
+// The 32-byte size ensures optimal memory alignment and cache utilization.
 //
-// Memory Requirements:
-//   - 32-byte alignment ensures optimal cache line usage
-//   - All pool entries must be pre-initialized before use
-//   - Initialization prevents segmentation faults from garbage memory
-//
-// Field Organization:
-//   - Tick: Primary key for priority ordering (-1 indicates unlinked)
+// Field Layout:
+//   - Tick: Priority value or -1 when free
 //   - Data: User payload for compact value storage
-//   - Prev/Next: Doubly-linked list maintenance
+//   - Next/Prev: Doubly-linked list pointers for constant-time operations
 //
 //go:notinheap
 //go:align 32
@@ -85,42 +80,46 @@ type Entry struct {
 // BITMAP HIERARCHY
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// groupBlock maintains lane summaries for efficient minimum detection.
-// Structure identical to other quantum queue variants for consistency.
+// groupBlock implements the middle level of the three-tier bitmap hierarchy.
+// Each group tracks 64 lanes, with each lane tracking 64 buckets.
+//
+// Bitmap Organization:
+//   - l1Summary: Single 64-bit mask indicating which lanes contain entries
+//   - l2: Array of 64 lane masks, each indicating occupied buckets
+//   - Padding ensures exclusive cache line ownership
 //
 //go:notinheap
 //go:align 64
 type groupBlock struct {
 	l1Summary uint64            // 8B - Active lanes mask
 	l2        [LaneCount]uint64 // 512B - Per-lane bucket masks
-	_         [56]byte          // 56B - Pad to 64-byte boundary
+	_         [56]byte          // 56B - Cache line padding
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // MAIN QUEUE STRUCTURE
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// PooledQuantumQueue provides priority queue operations on shared memory.
-// Designed for systems where multiple queues share a common memory pool.
+// PooledQuantumQueue implements a static-capacity priority queue with hierarchical bitmap indexing.
+// Operates on externally-managed memory pools for optimal resource utilization in multi-queue systems.
 //
-// Critical Design Point:
-//
-//	Unlike self-contained queues, this implementation requires proper
-//	pool initialization. Failure to initialize pool entries results
-//	in undefined behavior including segmentation faults.
+// Memory Layout:
+//   - Hot metadata (summary, size, arena) fits in first cache line
+//   - Large arrays (buckets, groups) are cache-aligned
+//   - Padding prevents false sharing between sections
 //
 //go:notinheap
 //go:align 64
 type PooledQuantumQueue struct {
-	// Hot path metadata (24 bytes)
-	summary uint64  // 8B - Active groups mask
+	// Hot path metadata (24 bytes) - accessed on every operation
+	summary uint64  // 8B - Global active groups mask
 	size    int     // 8B - Current entry count
 	arena   uintptr // 8B - Base pointer to shared pool
 
 	// Padding to cache line boundary (40 bytes)
 	_ [40]byte // 40B - Cache isolation
 
-	// Large data structures
+	// Large data structures - accessed based on operation type
 	buckets [BucketCount]Handle    // Per-tick chain heads
 	groups  [GroupCount]groupBlock // Hierarchical summaries
 }
@@ -129,27 +128,14 @@ type PooledQuantumQueue struct {
 // INITIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// New creates a queue using the provided memory pool.
+// New creates an initialized queue using the provided memory pool.
 // The pool must be properly initialized before calling this function.
 //
-// Pool Initialization Pattern:
-//
-//	```
-//	pool := make([]Entry, poolSize)
-//	for i := range pool {
-//	    pool[i].Tick = -1     // Mark unlinked
-//	    pool[i].Prev = nilIdx // Clear prev
-//	    pool[i].Next = nilIdx // Clear next
-//	    pool[i].Data = 0      // Clear data
-//	}
-//	q := New(unsafe.Pointer(&pool[0]))
-//	```
-//
-// Safety Requirements:
-//   - Pool must be aligned for Entry structure
-//   - All entries must be initialized to unlinked state
-//   - Pool must remain valid for queue lifetime
-//   - Multiple queues can share the same pool safely
+// Pool Initialization Requirements:
+//  1. All entries must be marked as unlinked (Tick = -1)
+//  2. All link pointers must be cleared (Next/Prev = nilIdx)
+//  3. Pool must remain valid for queue lifetime
+//  4. Multiple queues can share the same pool safely
 //
 //go:norace
 //go:nocheckptr
@@ -159,7 +145,8 @@ type PooledQuantumQueue struct {
 func New(arena unsafe.Pointer) *PooledQuantumQueue {
 	q := &PooledQuantumQueue{arena: uintptr(arena)}
 
-	// Initialize all buckets to empty state
+	// Initialize all priority buckets as empty
+	// Empty buckets have nilIdx as their head pointer
 	for i := range q.buckets {
 		q.buckets[i] = nilIdx
 	}
@@ -179,7 +166,7 @@ func New(arena unsafe.Pointer) *PooledQuantumQueue {
 //	address = arena_base + (handle × sizeof(Entry))
 //	Optimized using shift for 32-byte Entry size
 //
-// Safety Notes:
+// Safety Requirements:
 //   - No bounds checking for maximum speed
 //   - Caller must ensure handle validity
 //   - Invalid handles cause memory corruption
@@ -198,8 +185,8 @@ func (q *PooledQuantumQueue) entry(h Handle) *Entry {
 // QUERY OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Size returns the current number of entries.
-// Maintained incrementally during insertions and removals.
+// Size returns the current number of entries in the queue.
+// This is maintained incrementally for constant-time access.
 //
 //go:norace
 //go:nocheckptr
@@ -211,7 +198,7 @@ func (q *PooledQuantumQueue) Size() int {
 }
 
 // Empty checks if the queue contains any entries.
-// Provides boolean interface for queue state queries.
+// Provides a convenient boolean interface for queue state.
 //
 //go:norace
 //go:nocheckptr
@@ -226,12 +213,15 @@ func (q *PooledQuantumQueue) Empty() bool {
 // INTERNAL OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// unlink removes an entry and maintains bitmap consistency.
-// Updates the hierarchical bitmap structure when buckets become empty.
+// unlink removes an entry from its bucket and maintains bitmap consistency.
+// This operation handles all the complexity of bitmap hierarchy updates.
 //
-// Preconditions:
-//   - Entry must be currently linked (Tick >= 0)
-//   - Handle must be valid for the pool
+// Algorithm:
+//  1. Remove node from doubly-linked bucket chain
+//  2. If bucket becomes empty, clear its bit in lane mask
+//  3. If lane becomes empty, clear its bit in group summary
+//  4. If group becomes empty, clear its bit in global summary
+//  5. Mark entry as unlinked for reuse
 //
 //go:norace
 //go:nocheckptr
@@ -242,31 +232,33 @@ func (q *PooledQuantumQueue) unlink(h Handle) {
 	entry := q.entry(h)
 	b := Handle(entry.Tick)
 
-	// Update doubly-linked list structure
+	// Remove from doubly-linked chain
 	if entry.Prev != nilIdx {
 		q.entry(entry.Prev).Next = entry.Next
 	} else {
-		q.buckets[b] = entry.Next
+		q.buckets[b] = entry.Next // Update bucket head
 	}
-
 	if entry.Next != nilIdx {
 		q.entry(entry.Next).Prev = entry.Prev
 	}
 
-	// Maintain bitmap hierarchy if bucket becomes empty
+	// Update hierarchical bitmap summaries if bucket is now empty
 	if q.buckets[b] == nilIdx {
 		// Decompose tick into hierarchical indices
-		g := uint64(entry.Tick) >> 12       // Group index
-		l := (uint64(entry.Tick) >> 6) & 63 // Lane index
-		bb := uint64(entry.Tick) & 63       // Bucket index
+		g := uint64(entry.Tick) >> 12       // Group index (top 6 bits)
+		l := (uint64(entry.Tick) >> 6) & 63 // Lane index (middle 6 bits)
+		bb := uint64(entry.Tick) & 63       // Bucket index (bottom 6 bits)
 
 		gb := &q.groups[g]
-		gb.l2[l] &^= 1 << (63 - bb) // Clear bucket bit
+		// Clear bucket bit in lane mask
+		gb.l2[l] &^= 1 << (63 - bb)
 
-		if gb.l2[l] == 0 { // Lane became empty
-			gb.l1Summary &^= 1 << (63 - l) // Clear lane bit
-			if gb.l1Summary == 0 {         // Group became empty
-				q.summary &^= 1 << (63 - g) // Clear group bit
+		if gb.l2[l] == 0 { // Lane now empty
+			// Clear lane bit in group summary
+			gb.l1Summary &^= 1 << (63 - l)
+			if gb.l1Summary == 0 { // Group now empty
+				// Clear group bit in global summary
+				q.summary &^= 1 << (63 - g)
 			}
 		}
 	}
@@ -279,11 +271,13 @@ func (q *PooledQuantumQueue) unlink(h Handle) {
 }
 
 // linkAtHead inserts an entry at the head of its priority bucket.
-// Updates bitmap hierarchy to reflect the new entry.
+// Uses LIFO ordering within buckets for cache efficiency.
 //
-// Preconditions:
-//   - Entry must be unlinked (Tick = -1)
-//   - Handle must be valid for the pool
+// Algorithm:
+//  1. Insert node at head of bucket's doubly-linked list
+//  2. Set bucket bit in lane mask
+//  3. Set lane bit in group summary
+//  4. Set group bit in global summary
 //
 //go:norace
 //go:nocheckptr
@@ -303,7 +297,7 @@ func (q *PooledQuantumQueue) linkAtHead(h Handle, tick int64) {
 	}
 	q.buckets[b] = h
 
-	// Update hierarchical bitmap
+	// Update hierarchical bitmap summaries
 	g := uint64(tick) >> 12       // Group index
 	l := (uint64(tick) >> 6) & 63 // Lane index
 	bb := uint64(tick) & 63       // Bucket index
@@ -320,15 +314,13 @@ func (q *PooledQuantumQueue) linkAtHead(h Handle, tick int64) {
 // PUBLIC OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Push inserts or updates an entry in the queue.
-// Handles must be allocated and managed externally by the caller.
+// Push inserts or updates an entry at the specified priority level.
+// Efficiently handles both new insertions and priority updates.
 //
-// Handle Management:
+// Optimization:
 //
-//	The caller is responsible for:
-//	- Allocating handles from the shared pool
-//	- Ensuring handles are not used in multiple queues simultaneously
-//	- Properly initializing entries before first use
+//	Same-priority updates only modify data without touching links.
+//	This common case avoids expensive bitmap maintenance.
 //
 //go:norace
 //go:nocheckptr
@@ -338,7 +330,7 @@ func (q *PooledQuantumQueue) linkAtHead(h Handle, tick int64) {
 func (q *PooledQuantumQueue) Push(tick int64, h Handle, val uint64) {
 	entry := q.entry(h)
 
-	// Hot path: update data for same priority
+	// Hot path: same priority update
 	if entry.Tick == tick {
 		entry.Data = val
 		return
@@ -346,18 +338,25 @@ func (q *PooledQuantumQueue) Push(tick int64, h Handle, val uint64) {
 
 	// Cold path: relocate to new priority
 	if entry.Tick >= 0 {
-		q.unlink(h)
+		q.unlink(h) // Remove from current position
 	}
 	q.linkAtHead(h, tick)
 	entry.Data = val
 }
 
-// PeepMin returns the minimum entry without removal.
-// Uses hierarchical bitmap traversal with CLZ operations.
+// PeepMin returns the minimum entry without removing it.
+// Uses CLZ (Count Leading Zeros) instructions for rapid scanning.
+//
+// Algorithm:
+//  1. Find first set bit in global summary (leftmost = minimum)
+//  2. Find first set bit in selected group's lane summary
+//  3. Find first set bit in selected lane's bucket mask
+//  4. Combine indices to locate minimum bucket
+//  5. Return head entry from that bucket
 //
 // Safety Requirements:
 //   - Queue must not be empty
-//   - Undefined behavior on empty queue
+//   - Undefined behavior if called on empty queue
 //
 //go:norace
 //go:nocheckptr
@@ -365,23 +364,23 @@ func (q *PooledQuantumQueue) Push(tick int64, h Handle, val uint64) {
 //go:inline
 //go:registerparams
 func (q *PooledQuantumQueue) PeepMin() (Handle, int64, uint64) {
-	// Find minimum via CLZ bitmap traversal
-	g := bits.LeadingZeros64(q.summary)
+	// Find minimum through hierarchical bitmap traversal
+	g := bits.LeadingZeros64(q.summary) // Find first group
 	gb := &q.groups[g]
-	l := bits.LeadingZeros64(gb.l1Summary)
-	t := bits.LeadingZeros64(gb.l2[l])
+	l := bits.LeadingZeros64(gb.l1Summary) // Find first lane in group
+	t := bits.LeadingZeros64(gb.l2[l])     // Find first bucket in lane
 
-	// Reconstruct bucket index
+	// Reconstruct bucket index from hierarchical components
 	b := Handle((uint64(g) << 12) | (uint64(l) << 6) | uint64(t))
 	h := q.buckets[b]
 
-	// Return handle and entry data
+	// Return handle and associated data
 	entry := q.entry(h)
 	return h, entry.Tick, entry.Data
 }
 
-// MoveTick relocates an entry to a new priority.
-// Optimized for the case where priority is unchanged.
+// MoveTick efficiently relocates an entry to a new priority.
+// Optimized for the common case where priority doesn't change.
 //
 //go:norace
 //go:nocheckptr
@@ -391,18 +390,18 @@ func (q *PooledQuantumQueue) PeepMin() (Handle, int64, uint64) {
 func (q *PooledQuantumQueue) MoveTick(h Handle, newTick int64) {
 	entry := q.entry(h)
 
-	// No operation if priority unchanged
+	// No-op if priority unchanged
 	if entry.Tick == newTick {
 		return
 	}
 
-	// Relocate entry
+	// Relocate to new priority
 	q.unlink(h)
 	q.linkAtHead(h, newTick)
 }
 
 // UnlinkMin removes the minimum entry from the queue.
-// The handle should typically come from a prior PeepMin call.
+// Typically called after PeepMin to complete extraction.
 //
 //go:norace
 //go:nocheckptr

@@ -29,20 +29,20 @@ import (
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const (
-	// GroupCount defines top-level groups in the three-tier bitmap hierarchy.
-	// Each group summarizes the state of 64 lanes.
+	// GroupCount defines the number of top-level summary groups in the bitmap hierarchy.
+	// Each group summarizes 64 lanes of priority information.
 	GroupCount = 64
 
-	// LaneCount specifies lanes per group in the hierarchy.
-	// Each lane tracks 64 individual priority buckets.
+	// LaneCount specifies lanes per group in the middle hierarchy level.
+	// Each lane summarizes 64 individual priority buckets.
 	LaneCount = 64
 
-	// BucketCount represents the total number of addressable priorities.
-	// Provides 262,144 distinct priority levels (64 × 64 × 64).
+	// BucketCount represents total addressable priority levels.
+	// Calculated as: GroupCount × LaneCount × 64 = 262,144 unique priorities.
 	BucketCount = GroupCount * LaneCount * LaneCount
 
-	// CapItems defines maximum queue capacity.
-	// Limited to 64K entries for efficient 32-bit handle addressing.
+	// CapItems defines the maximum number of entries the queue can hold.
+	// Set to 64K entries for efficient memory usage and addressing.
 	CapItems = 1 << 16
 )
 
@@ -50,15 +50,15 @@ const (
 // TYPE DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Handle represents an index into the queue's arena.
-// 32-bit handles provide sufficient addressing for 64K entries.
+// Handle represents an index into the queue's internal arena.
+// Handles provide stable references to queue entries across operations.
 type Handle uint32
 
-// nilIdx serves as a sentinel value for invalid handles and empty links.
-// Uses maximum uint32 value to distinguish from valid indices.
+// nilIdx serves as a sentinel value indicating no link or invalid handle.
+// Set to maximum uint32 value to distinguish from valid indices.
 const nilIdx Handle = ^Handle(0)
 
-// idx32 provides type consistency for internal indexing operations.
+// idx32 provides a type alias for consistency in internal indexing.
 type idx32 = Handle
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -68,7 +68,7 @@ type idx32 = Handle
 // node represents a memory-efficient queue entry at 32 bytes.
 // Half the size of standard QuantumQueue nodes, allowing two nodes per cache line.
 //
-// Memory Layout:
+// Field Layout:
 //   - tick: Priority value or -1 when free
 //   - data: Compact 64-bit payload (vs 48 bytes in standard variant)
 //   - next/prev: Doubly-linked list pointers with padding for alignment
@@ -88,13 +88,18 @@ type node struct {
 // BITMAP HIERARCHY
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// groupBlock implements the hierarchical bitmap structure for efficient minimum finding.
-// Identical to the standard QuantumQueue implementation for consistency.
+// groupBlock implements the middle level of the three-tier bitmap hierarchy.
+// Each group tracks 64 lanes, with each lane tracking 64 buckets.
+//
+// Bitmap Organization:
+//   - l1Summary: Single 64-bit mask indicating which lanes contain entries
+//   - l2: Array of 64 lane masks, each indicating occupied buckets
+//   - Padding ensures exclusive cache line ownership
 //
 //go:notinheap
 //go:align 64
 type groupBlock struct {
-	l1Summary uint64            // 8B - Active lanes bitmask
+	l1Summary uint64            // 8B - Active lanes mask
 	l2        [LaneCount]uint64 // 512B - Per-lane bucket masks
 	_         [56]byte          // 56B - Cache line padding
 }
@@ -106,34 +111,40 @@ type groupBlock struct {
 // QuantumQueue64 implements a memory-efficient priority queue with compact payloads.
 // Uses smaller memory footprint than standard QuantumQueue while maintaining same performance.
 //
-// Memory Benefits:
-//   - Node size: 32 bytes vs 64 bytes (50% reduction)
-//   - Arena size: 2MB vs 4MB for 64K entries
-//   - Better cache utilization with 2 nodes per cache line
+// Memory Layout:
+//   - Hot metadata (summary, size, freeHead) fits in first cache line
+//   - Large arrays (arena, buckets, groups) are cache-aligned
+//   - Padding prevents false sharing between sections
 //
 //go:notinheap
 //go:align 64
 type QuantumQueue64 struct {
-	// Hot path metadata (16 bytes)
-	summary  uint64 // 8B - Active groups bitmask
+	// Hot path metadata (16 bytes) - accessed on every operation
+	summary  uint64 // 8B - Global active groups mask
 	size     int    // 4B - Current entry count
 	freeHead Handle // 4B - Freelist head
 
 	// Padding to cache line boundary (48 bytes)
 	_ [48]byte // 48B - Cache isolation
 
-	// Large data structures
-	arena   [CapItems]node         // Compact allocation pool
+	// Large data structures - accessed based on operation type
+	arena   [CapItems]node         // Fixed allocation pool
 	buckets [BucketCount]Handle    // Per-tick chain heads
-	groups  [GroupCount]groupBlock // Hierarchical bitmaps
+	groups  [GroupCount]groupBlock // Hierarchical summaries
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // INITIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// New creates a queue with initialized freelist and empty buckets.
-// Follows the same initialization pattern as standard QuantumQueue.
+// New creates an initialized queue with full capacity available.
+// All entries start in the freelist, ready for allocation.
+//
+// Initialization Process:
+//  1. Create freelist chain linking all nodes
+//  2. Mark all nodes as unallocated (tick = -1)
+//  3. Initialize all buckets as empty
+//  4. Clear all bitmap summaries
 //
 //go:norace
 //go:nocheckptr
@@ -143,19 +154,21 @@ type QuantumQueue64 struct {
 func New() *QuantumQueue64 {
 	q := &QuantumQueue64{freeHead: 0}
 
-	// Build freelist chain through all nodes
+	// Initialize freelist as a singly-linked chain
+	// Each node points to the next available slot
 	for i := Handle(0); i < CapItems-1; i++ {
 		q.arena[i].next = i + 1
-		q.arena[i].tick = -1
-		q.arena[i].prev = nilIdx
+		q.arena[i].tick = -1     // Mark as free
+		q.arena[i].prev = nilIdx // No previous in freelist
 	}
 
-	// Terminate freelist
+	// Terminate the freelist at the last entry
 	q.arena[CapItems-1].next = nilIdx
 	q.arena[CapItems-1].tick = -1
 	q.arena[CapItems-1].prev = nilIdx
 
-	// Clear all bucket heads
+	// Initialize all priority buckets as empty
+	// Empty buckets have nilIdx as their head pointer
 	for i := range q.buckets {
 		q.buckets[i] = nilIdx
 	}
@@ -167,8 +180,17 @@ func New() *QuantumQueue64 {
 // HANDLE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Borrow allocates a handle without capacity validation.
-// Assumes caller has verified availability for maximum speed.
+// Borrow allocates a handle from the freelist without capacity checking.
+// This variant assumes the caller has verified capacity availability.
+//
+// Operation:
+//  1. Remove head node from freelist
+//  2. Reset node to clean state
+//  3. Return handle for caller use
+//
+// Safety Requirements:
+//   - Caller must ensure queue has available capacity
+//   - No validation performed for maximum speed
 //
 //go:norace
 //go:nocheckptr
@@ -176,18 +198,24 @@ func New() *QuantumQueue64 {
 //go:inline
 //go:registerparams
 func (q *QuantumQueue64) Borrow() (Handle, error) {
+	// Take the first available node from freelist
 	h := q.freeHead
 	q.freeHead = q.arena[h].next
 
-	// Initialize to clean state
+	// Reset node to clean state
 	n := &q.arena[h]
 	n.tick, n.prev, n.next = -1, nilIdx, nilIdx
 
 	return h, nil
 }
 
-// BorrowSafe provides allocation with exhaustion checking.
-// Safer variant that validates capacity before allocation.
+// BorrowSafe allocates a handle with exhaustion checking.
+// This variant provides safety at the cost of an additional branch.
+//
+// Error Handling:
+//
+//	Returns error when arena is exhausted rather than corrupting state.
+//	Caller should handle capacity exhaustion gracefully.
 //
 //go:norace
 //go:nocheckptr
@@ -195,11 +223,13 @@ func (q *QuantumQueue64) Borrow() (Handle, error) {
 //go:inline
 //go:registerparams
 func (q *QuantumQueue64) BorrowSafe() (Handle, error) {
+	// Check for arena exhaustion
 	h := q.freeHead
 	if h == nilIdx {
 		return nilIdx, errors.New("QuantumQueue64: arena exhausted")
 	}
 
+	// Remove from freelist
 	q.freeHead = q.arena[h].next
 
 	// Reset node state
@@ -213,8 +243,8 @@ func (q *QuantumQueue64) BorrowSafe() (Handle, error) {
 // QUERY OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Size returns the current number of entries.
-// Maintained incrementally for constant-time access.
+// Size returns the current number of entries in the queue.
+// This is maintained incrementally for constant-time access.
 //
 //go:norace
 //go:nocheckptr
@@ -225,8 +255,8 @@ func (q *QuantumQueue64) Size() int {
 	return q.size
 }
 
-// Empty checks if the queue contains entries.
-// Convenience method for state checking.
+// Empty checks if the queue contains any entries.
+// Provides a convenient boolean interface for queue state.
 //
 //go:norace
 //go:nocheckptr
@@ -241,8 +271,15 @@ func (q *QuantumQueue64) Empty() bool {
 // INTERNAL OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// unlink removes an entry and maintains bitmap consistency.
-// Handles the full complexity of hierarchical bitmap updates.
+// unlink removes an entry from its bucket and maintains bitmap consistency.
+// This operation handles all the complexity of bitmap hierarchy updates.
+//
+// Algorithm:
+//  1. Remove node from doubly-linked bucket chain
+//  2. If bucket becomes empty, clear its bit in lane mask
+//  3. If lane becomes empty, clear its bit in group summary
+//  4. If group becomes empty, clear its bit in global summary
+//  5. Return node to freelist for reuse
 //
 //go:norace
 //go:nocheckptr
@@ -253,35 +290,38 @@ func (q *QuantumQueue64) unlink(h Handle) {
 	n := &q.arena[h]
 	b := idx32(n.tick)
 
-	// Update doubly-linked list
+	// Remove from doubly-linked chain
 	if n.prev != nilIdx {
 		q.arena[n.prev].next = n.next
 	} else {
-		q.buckets[b] = n.next
+		q.buckets[b] = n.next // Update bucket head
 	}
 	if n.next != nilIdx {
 		q.arena[n.next].prev = n.prev
 	}
 
-	// Maintain bitmap hierarchy if bucket empty
+	// Update hierarchical bitmap summaries if bucket is now empty
 	if q.buckets[b] == nilIdx {
-		// Extract hierarchical indices
-		g := uint64(n.tick) >> 12       // Group
-		l := (uint64(n.tick) >> 6) & 63 // Lane
-		bb := uint64(n.tick) & 63       // Bucket
+		// Decompose tick into hierarchical indices
+		g := uint64(n.tick) >> 12       // Group index (top 6 bits)
+		l := (uint64(n.tick) >> 6) & 63 // Lane index (middle 6 bits)
+		bb := uint64(n.tick) & 63       // Bucket index (bottom 6 bits)
 
 		gb := &q.groups[g]
-		gb.l2[l] &^= 1 << (63 - bb) // Clear bucket bit
+		// Clear bucket bit in lane mask
+		gb.l2[l] &^= 1 << (63 - bb)
 
-		if gb.l2[l] == 0 { // Lane empty
-			gb.l1Summary &^= 1 << (63 - l) // Clear lane bit
-			if gb.l1Summary == 0 {         // Group empty
-				q.summary &^= 1 << (63 - g) // Clear group bit
+		if gb.l2[l] == 0 { // Lane now empty
+			// Clear lane bit in group summary
+			gb.l1Summary &^= 1 << (63 - l)
+			if gb.l1Summary == 0 { // Group now empty
+				// Clear group bit in global summary
+				q.summary &^= 1 << (63 - g)
 			}
 		}
 	}
 
-	// Return to freelist
+	// Return node to freelist
 	n.next = q.freeHead
 	n.prev = nilIdx
 	n.tick = -1
@@ -289,8 +329,14 @@ func (q *QuantumQueue64) unlink(h Handle) {
 	q.size--
 }
 
-// linkAtHead inserts at bucket head with LIFO ordering.
-// Updates all levels of the bitmap hierarchy.
+// linkAtHead inserts an entry at the head of its priority bucket.
+// Uses LIFO ordering within buckets for cache efficiency.
+//
+// Algorithm:
+//  1. Insert node at head of bucket's doubly-linked list
+//  2. Set bucket bit in lane mask
+//  3. Set lane bit in group summary
+//  4. Set group bit in global summary
 //
 //go:norace
 //go:nocheckptr
@@ -301,7 +347,7 @@ func (q *QuantumQueue64) linkAtHead(h Handle, tick int64) {
 	n := &q.arena[h]
 	b := idx32(uint64(tick))
 
-	// Insert at bucket head
+	// Insert at head of bucket chain
 	n.tick = tick
 	n.prev = nilIdx
 	n.next = q.buckets[b]
@@ -310,7 +356,7 @@ func (q *QuantumQueue64) linkAtHead(h Handle, tick int64) {
 	}
 	q.buckets[b] = h
 
-	// Update bitmap hierarchy
+	// Update hierarchical bitmap summaries
 	g := uint64(tick) >> 12       // Group index
 	l := (uint64(tick) >> 6) & 63 // Lane index
 	bb := uint64(tick) & 63       // Bucket index
@@ -327,13 +373,13 @@ func (q *QuantumQueue64) linkAtHead(h Handle, tick int64) {
 // PUBLIC OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Push inserts or updates an entry with a 64-bit payload.
-// The compact payload enables efficient value storage or pointer indirection.
+// Push inserts or updates an entry at the specified priority level.
+// Efficiently handles both new insertions and priority updates.
 //
-// Payload Options:
-//   - Direct value storage (prices, indices, flags)
-//   - Pointer to larger structures (with appropriate lifetime management)
-//   - Packed data structures (two 32-bit values, etc.)
+// Optimization:
+//
+//	Same-priority updates only modify data without touching links.
+//	This common case avoids expensive bitmap maintenance.
 //
 //go:norace
 //go:nocheckptr
@@ -343,22 +389,33 @@ func (q *QuantumQueue64) linkAtHead(h Handle, tick int64) {
 func (q *QuantumQueue64) Push(tick int64, h Handle, val uint64) {
 	n := &q.arena[h]
 
-	// Fast path for same-priority updates
+	// Hot path: same priority update
 	if n.tick == tick {
 		n.data = val
 		return
 	}
 
-	// Relocate to new priority
+	// Cold path: relocate to new priority
 	if n.tick >= 0 {
-		q.unlink(h)
+		q.unlink(h) // Remove from current position
 	}
 	q.linkAtHead(h, tick)
 	n.data = val
 }
 
-// PeepMin returns the minimum entry using bitmap traversal.
-// Leverages CLZ instructions for rapid hierarchical scanning.
+// PeepMin returns the minimum entry without removing it.
+// Uses CLZ (Count Leading Zeros) instructions for rapid scanning.
+//
+// Algorithm:
+//  1. Find first set bit in global summary (leftmost = minimum)
+//  2. Find first set bit in selected group's lane summary
+//  3. Find first set bit in selected lane's bucket mask
+//  4. Combine indices to locate minimum bucket
+//  5. Return head entry from that bucket
+//
+// Safety Requirements:
+//   - Queue must not be empty
+//   - Undefined behavior if called on empty queue
 //
 //go:norace
 //go:nocheckptr
@@ -366,21 +423,22 @@ func (q *QuantumQueue64) Push(tick int64, h Handle, val uint64) {
 //go:inline
 //go:registerparams
 func (q *QuantumQueue64) PeepMin() (Handle, int64, uint64) {
-	// Hierarchical minimum finding via CLZ
-	g := bits.LeadingZeros64(q.summary)
+	// Find minimum through hierarchical bitmap traversal
+	g := bits.LeadingZeros64(q.summary) // Find first group
 	gb := &q.groups[g]
-	l := bits.LeadingZeros64(gb.l1Summary)
-	t := bits.LeadingZeros64(gb.l2[l])
+	l := bits.LeadingZeros64(gb.l1Summary) // Find first lane in group
+	t := bits.LeadingZeros64(gb.l2[l])     // Find first bucket in lane
 
-	// Reconstruct bucket index
+	// Reconstruct bucket index from hierarchical components
 	b := idx32((uint64(g) << 12) | (uint64(l) << 6) | uint64(t))
 	h := q.buckets[b]
 
+	// Return handle and associated data
 	return h, q.arena[h].tick, q.arena[h].data
 }
 
-// MoveTick relocates an entry to a new priority level.
-// Optimized for the common case of unchanged priority.
+// MoveTick efficiently relocates an entry to a new priority.
+// Optimized for the common case where priority doesn't change.
 //
 //go:norace
 //go:nocheckptr
@@ -390,18 +448,18 @@ func (q *QuantumQueue64) PeepMin() (Handle, int64, uint64) {
 func (q *QuantumQueue64) MoveTick(h Handle, newTick int64) {
 	n := &q.arena[h]
 
-	// Skip if priority unchanged
+	// No-op if priority unchanged
 	if n.tick == newTick {
 		return
 	}
 
-	// Perform relocation
+	// Relocate to new priority
 	q.unlink(h)
 	q.linkAtHead(h, newTick)
 }
 
 // UnlinkMin removes the minimum entry from the queue.
-// Completes the extraction started by PeepMin.
+// Typically called after PeepMin to complete extraction.
 //
 //go:norace
 //go:nocheckptr
