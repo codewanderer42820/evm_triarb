@@ -65,8 +65,8 @@ func BenchmarkPushUnique(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		h := Handle(i % benchHandles)
-		tick := int64(i % BucketCount) // Keep within 0-127 range
+		h := Handle((i % benchHandles) + 1) // FIXED: Use handles 1-based
+		tick := int64(i % BucketCount)      // Keep within 0-127 range
 		q.Push(tick, h, testValue)
 	}
 }
@@ -79,16 +79,16 @@ func BenchmarkPushUpdate(b *testing.B) {
 	const initValue = uint64(0x1111111111111111)
 	const updateValue = uint64(0x2222222222222222)
 
-	// Pre-populate with initial values (use modulo to stay in range)
+	// Pre-populate with initial values (use modulo to stay in range) - FIXED: Use handles 1-based
 	for i := 0; i < benchHandles; i++ {
-		h := Handle(i)
+		h := Handle(i + 1) // FIXED: Start from handle 1
 		tick := int64(i % BucketCount)
 		q.Push(tick, h, initValue)
 	}
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		h := Handle(i % benchHandles)
+		h := Handle((i % benchHandles) + 1) // FIXED: Use handles 1-based
 		tick := int64((i % benchHandles) % BucketCount)
 		q.Push(tick, h, updateValue)
 	}
@@ -99,7 +99,7 @@ func BenchmarkPushSameTickZero(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
-	h := Handle(0)
+	h := Handle(1) // FIXED: Use handle 1 instead of 0
 	const testValue = uint64(0x3333333333333333)
 	b.ResetTimer()
 
@@ -113,7 +113,7 @@ func BenchmarkPushSameTickMax(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
-	h := Handle(0)
+	h := Handle(1) // FIXED: Use handle 1 instead of 0
 	maxTick := int64(BucketCount - 1)
 	const testValue = uint64(0x4444444444444444)
 	b.ResetTimer()
@@ -140,7 +140,7 @@ func BenchmarkPushRandom(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		h := Handle(i % benchHandles)
+		h := Handle((i % benchHandles) + 1) // FIXED: Use handles 1-based
 		q.Push(ticks[i%benchHandles], h, testValue)
 	}
 }
@@ -158,7 +158,7 @@ func BenchmarkPushBursty(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		h := Handle(i % benchHandles)
+		h := Handle((i % benchHandles) + 1) // FIXED: Use handles 1-based
 		var tick int64
 
 		if rand.Float32() < 0.8 {
@@ -193,9 +193,9 @@ func BenchmarkPeepMin(b *testing.B) {
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 
-	// Pre-populate queue
+	// Pre-populate queue - FIXED: Use handles 1-based
 	for i := 0; i < benchHandles; i++ {
-		h := Handle(i)
+		h := Handle(i + 1) // FIXED: Start from handle 1
 		tick := int64(i % BucketCount)
 		q.Push(tick, h, uint64(i))
 	}
@@ -219,7 +219,7 @@ func BenchmarkPeepMinSparse(b *testing.B) {
 	const sparseCount = 50 // Reduced for 128-bucket queue
 
 	for i := 0; i < sparseCount; i++ {
-		h := Handle(i)
+		h := Handle(i + 1) // FIXED: Start from handle 1
 		// Spread entries across tick space for sparsity
 		tick := int64(i * (BucketCount / sparseCount))
 		q.Push(tick, h, uint64(i))
@@ -243,7 +243,7 @@ func BenchmarkPeepMinDense(b *testing.B) {
 	q := New(unsafe.Pointer(&pool[0]))
 
 	for i := 0; i < benchHandles; i++ {
-		h := Handle(i)
+		h := Handle(i + 1) // FIXED: Start from handle 1
 		// Pack entries densely (90% of buckets)
 		tick := int64(i % (BucketCount * 9 / 10))
 		q.Push(tick, h, uint64(i))
@@ -269,7 +269,7 @@ func BenchmarkUnlinkMin_StableBucket(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
-	h := Handle(0)
+	h := Handle(1) // FIXED: Use handle 1 instead of 0
 	const testValue = uint64(0x1234567890ABCDEF)
 	q.Push(64, h, testValue) // Middle of range
 	b.ResetTimer()
@@ -285,7 +285,7 @@ func BenchmarkUnlinkMin_DenseBucket(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
-	hs := [3]Handle{0, 1, 2}
+	hs := [3]Handle{1, 2, 3} // FIXED: Use handles 1, 2, 3 instead of 0, 1, 2
 	const testValue = uint64(0x7777777777777777)
 
 	for i := 0; i < 3; i++ {
@@ -305,7 +305,7 @@ func BenchmarkUnlinkMin_BitmapCollapse(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
-	h := Handle(0)
+	h := Handle(1) // FIXED: Use handle 1 instead of 0
 	const testValue = uint64(0x8888888888888888)
 	b.ResetTimer()
 
@@ -321,7 +321,7 @@ func BenchmarkUnlinkMin_ScatterCollapse(b *testing.B) {
 	pool := make([]Entry, benchPoolSize)
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
-	h := Handle(0)
+	h := Handle(1) // FIXED: Use handle 1 instead of 0
 	const testValue = uint64(0x9999999999999999)
 
 	// Pre-generate random tick sequence for reproducibility
@@ -349,16 +349,16 @@ func BenchmarkMoveTick(b *testing.B) {
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 
-	// Pre-populate with handles
+	// Pre-populate with handles - FIXED: Use handles 1-based
 	for i := 0; i < benchHandles; i++ {
-		h := Handle(i)
+		h := Handle(i + 1) // FIXED: Start from handle 1
 		tick := int64(i % BucketCount)
 		q.Push(tick, h, uint64(i))
 	}
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		h := Handle(i % benchHandles)
+		h := Handle((i % benchHandles) + 1) // FIXED: Use handles 1-based
 		newTick := int64((i + 1) % BucketCount)
 		q.MoveTick(h, newTick)
 	}
@@ -370,16 +370,16 @@ func BenchmarkMoveTickNoop(b *testing.B) {
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 
-	// Pre-populate with handles
+	// Pre-populate with handles - FIXED: Use handles 1-based
 	for i := 0; i < benchHandles; i++ {
-		h := Handle(i)
+		h := Handle(i + 1) // FIXED: Start from handle 1
 		tick := int64(i % BucketCount)
 		q.Push(tick, h, uint64(i))
 	}
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		h := Handle(i % benchHandles)
+		h := Handle((i % benchHandles) + 1) // FIXED: Use handles 1-based
 		currentTick := int64((i % benchHandles) % BucketCount)
 		q.MoveTick(h, currentTick) // Same tick - should be no-op
 	}
@@ -391,9 +391,9 @@ func BenchmarkMoveTickRandom(b *testing.B) {
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 
-	// Pre-populate with handles
+	// Pre-populate with handles - FIXED: Use handles 1-based
 	for i := 0; i < benchHandles; i++ {
-		h := Handle(i)
+		h := Handle(i + 1) // FIXED: Start from handle 1
 		tick := int64(i % BucketCount)
 		q.Push(tick, h, uint64(i))
 	}
@@ -408,7 +408,7 @@ func BenchmarkMoveTickRandom(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		h := Handle(i % benchHandles)
+		h := Handle((i % benchHandles) + 1) // FIXED: Use handles 1-based
 		q.MoveTick(h, destinations[i%benchHandles])
 	}
 }
@@ -429,18 +429,18 @@ func BenchmarkSharedPoolMultiQueue(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		// Round-robin across queues with different handle ranges
+		// Round-robin across queues with different handle ranges - FIXED: Start from 1
 		switch i % 3 {
 		case 0:
-			h := Handle(i%1000 + 1000) // Range 1000-1999
+			h := Handle((i % 1000) + 1001) // Range 1001-2000 (1-based)
 			tick := int64(i % BucketCount)
 			q1.Push(tick, h, testValue)
 		case 1:
-			h := Handle(i%1000 + 2000) // Range 2000-2999
+			h := Handle((i % 1000) + 2001) // Range 2001-3000 (1-based)
 			tick := int64(i % BucketCount)
 			q2.Push(tick, h, testValue)
 		case 2:
-			h := Handle(i%1000 + 3000) // Range 3000-3999
+			h := Handle((i % 1000) + 3001) // Range 3001-4000 (1-based)
 			tick := int64(i % BucketCount)
 			q3.Push(tick, h, testValue)
 		}
@@ -455,10 +455,10 @@ func BenchmarkPoolUtilization(b *testing.B) {
 
 	const testValue = uint64(0xBBBBBBBBBBBBBBBB)
 
-	// Use widely distributed handles across pool
+	// Use widely distributed handles across pool - FIXED: Start from 1
 	handles := make([]Handle, 1000)
 	for i := range handles {
-		handles[i] = Handle(i * (benchPoolSize / 1000))
+		handles[i] = Handle((i * (benchPoolSize / 1000)) + 1) // FIXED: Start from 1
 	}
 
 	b.ResetTimer()
@@ -481,9 +481,9 @@ func BenchmarkMixedOperations(b *testing.B) {
 	q := New(unsafe.Pointer(&pool[0]))
 	const testValue = uint64(0xCCCCCCCCCCCCCCCC)
 
-	// Initialize some entries
+	// Initialize some entries - FIXED: Use handles 1-based
 	for i := 0; i < benchHandles/2; i++ {
-		h := Handle(i)
+		h := Handle(i + 1) // FIXED: Start from handle 1
 		tick := int64(i % BucketCount)
 		q.Push(tick, h, uint64(i))
 	}
@@ -496,7 +496,7 @@ func BenchmarkMixedOperations(b *testing.B) {
 
 		switch {
 		case op < 0.4: // 40% Push
-			h := Handle(i % benchHandles)
+			h := Handle((i % benchHandles) + 1) // FIXED: Use handles 1-based
 			tick := rand.Int63n(BucketCount)
 			q.Push(tick, h, testValue)
 
@@ -534,8 +534,8 @@ func BenchmarkHighContention(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		h := Handle(i % benchHandles)
-		tick := int64(i % contentionRange) // Force contention
+		h := Handle((i % benchHandles) + 1) // FIXED: Use handles 1-based
+		tick := int64(i % contentionRange)  // Force contention
 		q.Push(tick, h, testValue)
 	}
 }

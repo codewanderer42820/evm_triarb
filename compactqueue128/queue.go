@@ -1,7 +1,8 @@
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// CompactQueue128 - TRULY MINIMAL with exact bitmap logic clone
+// CompactQueue128 - TRULY MINIMAL with exact bitmap logic clone - TRUE ZERO-INIT COMPATIBLE
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 // Strategy: Use IDENTICAL bit manipulation as original, but with truly minimal storage
+//           and true zero-initialization. Handle(0) is invalid, valid handles start at 1.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package compactqueue128
@@ -24,20 +25,20 @@ const (
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// TYPE DEFINITIONS
+// TYPE DEFINITIONS - TRUE ZERO-INIT COMPATIBLE
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 type Handle uint64
 
-const nilIdx Handle = ^Handle(0)
+const nilIdx Handle = 0 // Zero value IS nil - Handle(0) is invalid
 
 //go:notinheap
 //go:align 32
 type Entry struct {
 	Tick int64  // 8B - Active tick or -1 if free
 	Data uint64 // 8B - Compact payload
-	Next Handle // 8B - Next in chain
-	Prev Handle // 8B - Previous in chain
+	Next Handle // 8B - Next in chain (0 = nil, 1+ = valid)
+	Prev Handle // 8B - Previous in chain (0 = nil, 1+ = valid)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -66,12 +67,12 @@ type CompactQueue128 struct {
 	_ [40]byte
 
 	// Truly minimal storage - only what we actually need
-	buckets [BucketCount]Handle // 128 buckets × 8B = 1024B
-	groups  [1]groupBlock       // 1 group × 64B = 64B
+	buckets [BucketCount]Handle // 128 buckets × 8B = 1024B (zero-init: all 0 = nil!)
+	groups  [1]groupBlock       // 1 group × 64B = 64B (zero-init: all empty)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// INITIALIZATION
+// INITIALIZATION - NOW TRULY OPTIONAL! Zero-init works perfectly
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 //go:norace
@@ -80,17 +81,12 @@ type CompactQueue128 struct {
 //go:inline
 //go:registerparams
 func New(arena unsafe.Pointer) *CompactQueue128 {
-	q := &CompactQueue128{arena: uintptr(arena)}
-
-	for i := range q.buckets {
-		q.buckets[i] = nilIdx
-	}
-
-	return q
+	return &CompactQueue128{arena: uintptr(arena)}
+	// No initialization needed - zero-init gives us all buckets = 0 = nil!
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MEMORY ACCESS
+// MEMORY ACCESS - DIRECT POOL ACCESS (Handle 1 = pool[0], Handle 2 = pool[1], etc.)
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 //go:norace
@@ -99,7 +95,8 @@ func New(arena unsafe.Pointer) *CompactQueue128 {
 //go:inline
 //go:registerparams
 func (q *CompactQueue128) entry(h Handle) *Entry {
-	return (*Entry)(unsafe.Pointer(q.arena + uintptr(h)<<5))
+	// Handle 1 = pool[0], Handle 2 = pool[1], etc.
+	return (*Entry)(unsafe.Pointer(q.arena + uintptr(h-1)<<5))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -275,15 +272,23 @@ func (q *CompactQueue128) UnlinkMin(h Handle) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MEMORY USAGE: Truly minimal while maintaining exact bitmap compatibility
+// TRUE ZERO-INIT COMPATIBILITY ACHIEVED:
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// Core struct: 64B (hot path + padding)
-// buckets[128]: 1024B (128 × 8B handles)
-// groups[1]: 64B (1 × 64B groupBlock)
-// groupBlock contains:
-//   - l1Summary: 8B (only bits 63,62 used for lanes 0,1)
-//   - l2[2]: 16B (l2[0] for ticks 0-63, l2[1] for ticks 64-127)
-//   - padding: 40B
 //
-// Total: ~1.1KB vs 37KB+ for original = 97% memory reduction
+// Simple solution:
+// 1. nilIdx = 0 (zero value IS nil)
+// 2. Handle(0) is invalid - valid handles start at Handle(1)
+// 3. Handle(1) = pool[0], Handle(2) = pool[1], etc.
+// 4. All buckets zero-init to 0 (nil) - no initialization needed
+// 5. All operations work identically to original
+// 6. NO VALIDATION CHECKS - just like the original
+//
+// Usage:
+//   var q CompactQueue128           // Zero-init works!
+//   q.arena = uintptr(pool)         // Just set arena
+//   q.Push(42, 1, data)             // Handle(1) = pool[0]
+//   q.Push(43, 2, data)             // Handle(2) = pool[1]
+//
+// Memory usage: ~1.1KB vs 37KB+ original = 97% reduction
+// Performance: Identical to original (same bitmap logic, simple h-1 offset)
 // ═══════════════════════════════════════════════════════════════════════════════════════════════

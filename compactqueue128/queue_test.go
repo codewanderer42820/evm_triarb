@@ -25,10 +25,10 @@ import (
 // InitializePool properly initializes a pool to unlinked state.
 func InitializePool(pool []Entry) {
 	for i := range pool {
-		pool[i].Tick = -1     // Mark as unlinked
-		pool[i].Prev = nilIdx // Clear prev pointer
-		pool[i].Next = nilIdx // Clear next pointer
-		pool[i].Data = 0      // Clear data
+		pool[i].Tick = -1 // Mark as unlinked
+		pool[i].Prev = 0  // Clear prev pointer
+		pool[i].Next = 0  // Clear next pointer
+		pool[i].Data = 0  // Clear data
 	}
 }
 
@@ -85,8 +85,8 @@ func TestPoolAccess(t *testing.T) {
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 
-	// Test entry access for various handles
-	for h := Handle(0); h < 10; h++ {
+	// Test entry access for various handles - FIXED: Use handles 1-10 instead of 0-9
+	for h := Handle(1); h <= 10; h++ {
 		entry := q.entry(h)
 
 		// Verify entry is within pool bounds
@@ -99,8 +99,8 @@ func TestPoolAccess(t *testing.T) {
 				h, entryAddr, poolStart, poolEnd)
 		}
 
-		// Verify handle-to-entry mapping
-		expectedEntry := &pool[h]
+		// Verify handle-to-entry mapping - FIXED: Handle h maps to pool[h-1]
+		expectedEntry := &pool[h-1]
 		if entry != expectedEntry {
 			t.Errorf("handle %d maps to wrong entry: got %p, want %p",
 				h, entry, expectedEntry)
@@ -117,7 +117,7 @@ func TestPushAndPeepMin(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
-	h := Handle(0)
+	h := Handle(1) // FIXED: Use handle 1 instead of 0
 
 	// Test basic insertion (use tick within 0-127 range)
 	q.Push(10, h, 0x123456789ABCDEF0)
@@ -179,8 +179,8 @@ func TestPushAndPeepMin(t *testing.T) {
 	pool2 := make([]Entry, testPoolSize)
 	InitializePool(pool2)
 	q2 := New(unsafe.Pointer(&pool2[0]))
-	h0 := Handle(0)
-	hMax := Handle(1)
+	h0 := Handle(1)   // FIXED: Use handle 1 instead of 0
+	hMax := Handle(2) // FIXED: Use handle 2 instead of 1
 
 	q2.Push(0, h0, 0x1111)
 	q2.Push(int64(BucketCount-1), hMax, 0x2222)
@@ -212,7 +212,7 @@ func TestPushTriggersUnlink(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
-	h := Handle(0)
+	h := Handle(1) // FIXED: Use handle 1 instead of 0
 
 	// Insert at initial tick (within 0-127 range)
 	q.Push(42, h, 0xAAAA)
@@ -268,9 +268,9 @@ func TestMultipleSameTickOrdering(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
-	h1 := Handle(0)
-	h2 := Handle(1)
-	h3 := Handle(2)
+	h1 := Handle(1) // FIXED: Use handles 1, 2, 3 instead of 0, 1, 2
+	h2 := Handle(2)
+	h3 := Handle(3)
 
 	// Insert in chronological order
 	q.Push(5, h1, 0x1111)
@@ -311,9 +311,9 @@ func TestPushDifferentTicks(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
-	h1 := Handle(0)
-	h2 := Handle(1)
-	h3 := Handle(2)
+	h1 := Handle(1) // FIXED: Use handles 1, 2, 3 instead of 0, 1, 2
+	h2 := Handle(2)
+	h3 := Handle(3)
 
 	// Insert in reverse priority order (within 0-127 range)
 	q.Push(100, h1, 0x1111)
@@ -353,7 +353,7 @@ func TestMoveTickBehavior(t *testing.T) {
 	pool := make([]Entry, testPoolSize)
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
-	h := Handle(0)
+	h := Handle(1) // FIXED: Use handle 1 instead of 0
 
 	q.Push(20, h, 0xCCCC)
 
@@ -398,10 +398,10 @@ func TestSharedPoolUsage(t *testing.T) {
 	q2 := New(unsafe.Pointer(&pool[0]))
 	q3 := New(unsafe.Pointer(&pool[0]))
 
-	// Use different handle ranges for each queue
-	h1 := Handle(100)
-	h2 := Handle(200)
-	h3 := Handle(300)
+	// Use different handle ranges for each queue - FIXED: Start from 1
+	h1 := Handle(101)
+	h2 := Handle(201)
+	h3 := Handle(301)
 
 	// Independent operations on shared pool
 	q1.Push(10, h1, 0x1111)
@@ -434,10 +434,10 @@ func TestSharedPoolUsage(t *testing.T) {
 			h3Min, tick3, data3, h3, uint64(0x3333))
 	}
 
-	// Verify shared pool entries AND cross-validate queue operations
-	entry1 := &pool[h1]
-	entry2 := &pool[h2]
-	entry3 := &pool[h3]
+	// Verify shared pool entries AND cross-validate queue operations - FIXED: Convert handles to pool indices
+	entry1 := &pool[h1-1]
+	entry2 := &pool[h2-1]
+	entry3 := &pool[h3-1]
 
 	if entry1.Tick != 10 || entry1.Data != 0x1111 {
 		t.Errorf("shared pool entry1 incorrect: tick=%d data=%x",
@@ -485,8 +485,8 @@ func TestPoolBoundaryAccess(t *testing.T) {
 	InitializePool(pool)
 	q := New(unsafe.Pointer(&pool[0]))
 
-	// Test various handle positions within pool (use tick % 128 to stay in bounds)
-	testHandles := []Handle{0, 1, 100, 1000, Handle(testPoolSize - 1)}
+	// Test various handle positions within pool (use tick % 128 to stay in bounds) - FIXED: Use handles 1-based
+	testHandles := []Handle{1, 2, 101, 1001, Handle(testPoolSize)}
 
 	for _, h := range testHandles {
 		// Use handle with tick in valid range
@@ -495,7 +495,7 @@ func TestPoolBoundaryAccess(t *testing.T) {
 
 		// Verify entry access AND operation correctness
 		entry := q.entry(h)
-		expectedEntry := &pool[h]
+		expectedEntry := &pool[h-1] // FIXED: Convert handle to pool index
 
 		if entry != expectedEntry {
 			t.Errorf("handle %d entry mismatch: got %p, want %p",

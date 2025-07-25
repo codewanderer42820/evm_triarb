@@ -75,10 +75,10 @@ func TestQueueStressRandomOperations(t *testing.T) {
 	ref := &stressHeap{}
 	heap.Init(ref)
 
-	// Handle lifecycle management
+	// Handle lifecycle management - FIXED: Start handles from 1
 	availableHandles := make([]Handle, maxHandles)
 	for i := range availableHandles {
-		availableHandles[i] = Handle(i)
+		availableHandles[i] = Handle(i + 1) // FIXED: 1, 2, 3, ... instead of 0, 1, 2, ...
 	}
 	activeHandles := make(map[Handle]bool)
 
@@ -227,20 +227,22 @@ func TestQueueStressRandomOperations(t *testing.T) {
 					t.Logf("  h=%d seq=%d", item.h, item.seq)
 				}
 
-				// Check queue's bucket state directly
-				t.Logf("\n=== QUEUE BUCKET STATE ===")
-				b := Handle(uint64(tickGot))
-				t.Logf("Bucket[%d] head: %d", b, q.buckets[b])
+				// Check queue's bucket state directly - FIXED: Only if tickGot is valid
+				if tickGot >= 0 && tickGot < BucketCount {
+					t.Logf("\n=== QUEUE BUCKET STATE ===")
+					b := Handle(uint64(tickGot))
+					t.Logf("Bucket[%d] head: %d", b, q.buckets[b])
 
-				// Walk the linked list
-				current := q.buckets[b]
-				listPos := 0
-				for current != nilIdx && listPos < 10 { // Prevent infinite loop
-					entry := q.entry(current)
-					t.Logf("  [%d] h=%d tick=%d data=%d next=%d prev=%d",
-						listPos, current, entry.Tick, entry.Data, entry.Next, entry.Prev)
-					current = entry.Next
-					listPos++
+					// Walk the linked list
+					current := q.buckets[b]
+					listPos := 0
+					for current != nilIdx && listPos < 10 { // Prevent infinite loop
+						entry := q.entry(current)
+						t.Logf("  [%d] h=%d tick=%d data=%d next=%d prev=%d",
+							listPos, current, entry.Tick, entry.Data, entry.Next, entry.Prev)
+						current = entry.Next
+						listPos++
+					}
 				}
 
 				t.Fatalf("Mismatch at iteration %d: got (h=%v,tick=%d); want (h=%v,tick=%d)",
@@ -253,10 +255,12 @@ func TestQueueStressRandomOperations(t *testing.T) {
 			delete(debugTick, h)
 
 			// Reset the pool entry to unlinked state when returning handle
-			pool[h].Tick = -1
-			pool[h].Prev = nilIdx
-			pool[h].Next = nilIdx
-			pool[h].Data = 0
+			// FIXED: Convert handle to pool index (h-1) for CompactQueue128
+			poolIndex := h - 1
+			pool[poolIndex].Tick = -1
+			pool[poolIndex].Prev = nilIdx
+			pool[poolIndex].Next = nilIdx
+			pool[poolIndex].Data = 0
 
 			availableHandles = append(availableHandles, h)
 		}
@@ -305,11 +309,12 @@ func TestQueueStressRandomOperations(t *testing.T) {
 		q.UnlinkMin(h)
 		delete(activeHandles, h)
 
-		// Reset pool entry state
-		pool[h].Tick = -1
-		pool[h].Prev = nilIdx
-		pool[h].Next = nilIdx
-		pool[h].Data = 0
+		// Reset pool entry state - FIXED: Convert handle to pool index
+		poolIndex := h - 1
+		pool[poolIndex].Tick = -1
+		pool[poolIndex].Prev = nilIdx
+		pool[poolIndex].Next = nilIdx
+		pool[poolIndex].Data = 0
 
 		availableHandles = append(availableHandles, h)
 	}
@@ -349,7 +354,7 @@ func TestSharedPoolStress(t *testing.T) {
 		queues[i] = New(unsafe.Pointer(&pool[0]))
 	}
 
-	// Partition handle space between queues
+	// Partition handle space between queues - FIXED: Start from 1
 	handlesPerQueue := poolSize / queueCount
 
 	// Track which handles are active in each queue
@@ -364,8 +369,8 @@ func TestSharedPoolStress(t *testing.T) {
 		queueIdx := rng.Intn(queueCount)
 		queue := queues[queueIdx]
 
-		// Use handles from this queue's partition
-		handleBase := Handle(queueIdx * handlesPerQueue)
+		// Use handles from this queue's partition - FIXED: Start from 1
+		handleBase := Handle(queueIdx*handlesPerQueue + 1)
 		h := handleBase + Handle(rng.Intn(handlesPerQueue))
 
 		tick := int64(rng.Intn(BucketCount)) // Keep within 0-127 range
@@ -448,7 +453,8 @@ func TestPoolBoundaryStress(t *testing.T) {
 	activeHandles := make(map[Handle]bool)
 
 	for i := 0; i < operations; i++ {
-		h := Handle(rng.Intn(poolSize))
+		// FIXED: Use handles 1 to poolSize (instead of 0 to poolSize-1)
+		h := Handle(rng.Intn(poolSize) + 1)
 		tick := int64(rng.Intn(BucketCount)) // Keep within 0-127 range
 		val := uint64(rng.Uint64())
 
@@ -472,7 +478,8 @@ func TestPoolBoundaryStress(t *testing.T) {
 
 		case 3: // Verify pool entry directly
 			entry := q.entry(h)
-			poolEntry := &pool[h]
+			poolIndex := h - 1 // FIXED: Convert handle to pool index
+			poolEntry := &pool[poolIndex]
 
 			if entry != poolEntry {
 				t.Fatalf("Entry access mismatch: handle=%d got=%p want=%p",
@@ -483,7 +490,8 @@ func TestPoolBoundaryStress(t *testing.T) {
 		if i%25000 == 0 {
 			expectedActive := 0
 			for h := range activeHandles {
-				if pool[h].Tick >= 0 {
+				poolIndex := h - 1 // FIXED: Convert handle to pool index
+				if pool[poolIndex].Tick >= 0 {
 					expectedActive++
 				}
 			}
@@ -527,7 +535,8 @@ func TestBitmapConsistencyUnderStress(t *testing.T) {
 	handleTracker := make(map[Handle]int64) // Handle -> tick mapping
 
 	for i := 0; i < operations; i++ {
-		h := Handle(rng.Intn(poolSize))
+		// FIXED: Use handles 1 to poolSize (instead of 0 to poolSize-1)
+		h := Handle(rng.Intn(poolSize) + 1)
 		tick := int64(rng.Intn(BucketCount)) // Keep within 0-127 range
 		val := uint64(rng.Uint64())
 
@@ -557,11 +566,12 @@ func TestBitmapConsistencyUnderStress(t *testing.T) {
 				}
 				delete(handleTracker, popH)
 
-				// Reset pool entry state
-				pool[popH].Tick = -1
-				pool[popH].Prev = nilIdx
-				pool[popH].Next = nilIdx
-				pool[popH].Data = 0
+				// Reset pool entry state - FIXED: Convert handle to pool index
+				poolIndex := popH - 1
+				pool[poolIndex].Tick = -1
+				pool[poolIndex].Prev = nilIdx
+				pool[poolIndex].Next = nilIdx
+				pool[poolIndex].Data = 0
 			}
 		}
 
