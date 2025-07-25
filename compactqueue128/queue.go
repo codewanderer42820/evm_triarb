@@ -30,15 +30,18 @@ import (
 
 const (
 	// BucketCount represents total addressable priority levels.
-	// Limited to 128 priorities for minimal memory usage.
+	// Constrained to 128 priorities to enable dramatic memory footprint reduction
+	// while maintaining the essential algorithmic properties of the hierarchical bitmap.
 	BucketCount = 128
 
 	// GroupCount defines the number of top-level summary groups in the bitmap hierarchy.
-	// Maintained for bitmap compatibility, but only group 0 is used.
+	// Preserved at 64 for bitmap compatibility, though only group 0 contains active data.
+	// This sparse utilization strategy reduces memory while preserving addressing logic.
 	GroupCount = 64
 
 	// LaneCount specifies lanes per group in the middle hierarchy level.
-	// Maintained for bitmap compatibility, but only lanes 0-1 are used.
+	// Maintained at 64 for algorithmic consistency, with only lanes 0-1 utilized
+	// to provide 64 buckets per lane × 2 active lanes = 128 total addressable buckets.
 	LaneCount = 64
 )
 
@@ -47,11 +50,13 @@ const (
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // Handle represents an index into the queue's external arena.
-// Zero value (Handle(0)) is invalid - valid handles start at Handle(1).
+// Uses 1-based indexing where Handle(0) represents invalid/null for zero-initialization
+// compatibility. Valid handles begin at Handle(1) mapping to pool[0].
 type Handle uint64
 
 // nilIdx serves as a sentinel value indicating no link or invalid handle.
-// Zero value IS nil for true zero-initialization compatibility.
+// Set to zero to align with Go's zero-value semantics, enabling structures
+// to be valid immediately upon zero-initialization without explicit setup.
 const nilIdx Handle = 0
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -69,6 +74,9 @@ const nilIdx Handle = 0
 //go:notinheap
 //go:align 32
 type Entry struct {
+	// Tick stores internal priority values offset by +1 from user priorities.
+	// This offset scheme enables zero to represent the free state, aligning with
+	// zero-initialization semantics where uninitialized entries are naturally free.
 	Tick int64  // 8B - Internal tick (user_tick + 1) or 0 if free
 	Data uint64 // 8B - Compact payload
 	Next Handle // 8B - Next in chain (0 = nil, 1+ = valid)
@@ -80,7 +88,8 @@ type Entry struct {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // groupBlock implements the middle level of the three-tier bitmap hierarchy.
-// Minimal version that only stores required lanes for 128-priority support.
+// Optimized for memory efficiency by storing only the minimum lanes required
+// for 128-priority support, rather than the full 64-lane capacity.
 //
 // Bitmap Organization:
 //   - l1Summary: Only bits 63,62 used (lanes 0,1)
@@ -90,9 +99,11 @@ type Entry struct {
 //go:notinheap
 //go:align 64
 type groupBlock struct {
-	l1Summary uint64    // 8B - Active lanes mask (only bits 63,62 used)
-	l2        [2]uint64 // 16B - Per-lane bucket masks (only [0],[1] used)
-	_         [40]byte  // 40B - Cache line padding
+	l1Summary uint64 // 8B - Active lanes mask (only bits 63,62 used)
+	// Reduced lane array stores only the two active lanes needed for 128 priorities.
+	// This provides 89% memory reduction per group compared to the full 64-lane variant.
+	l2 [2]uint64 // 16B - Per-lane bucket masks (only [0],[1] used)
+	_  [40]byte  // 40B - Cache line padding
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -118,9 +129,12 @@ type CompactQueue128 struct {
 	// Padding to cache line boundary (40 bytes)
 	_ [40]byte // 40B - Cache isolation
 
-	// Minimal data structures - only what's needed for 128 priorities
+	// Bucket array dimensioned specifically for 128 priorities, achieving
+	// a 2MB+ memory reduction compared to the full-capacity variant.
 	buckets [BucketCount]Handle // 128 buckets × 8B = 1024B (zero-init: all 0 = nil)
-	groups  [1]groupBlock       // 1 group × 64B = 64B (zero-init: all empty)
+	// Single group sufficient for 128 priorities, eliminating 36KB of group storage
+	// compared to the 64-group full-capacity design.
+	groups [1]groupBlock // 1 group × 64B = 64B (zero-init: all empty)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -128,7 +142,8 @@ type CompactQueue128 struct {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // New creates an initialized queue using the provided memory pool.
-// True zero-initialization compatible - no bucket setup required.
+// Leverages zero-initialization semantics to eliminate setup overhead.
+// All buckets initialize to Handle(0) = nilIdx, representing empty buckets.
 //
 // Zero-Init Compatibility:
 //  1. All buckets zero-init to Handle(0) = nilIdx (empty)
@@ -144,7 +159,7 @@ type CompactQueue128 struct {
 //go:registerparams
 func New(arena unsafe.Pointer) *CompactQueue128 {
 	return &CompactQueue128{arena: uintptr(arena)}
-	// No initialization needed - zero-init gives us all buckets = 0 = nil!
+	// Zero-initialization provides valid empty state without explicit setup
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -152,7 +167,8 @@ func New(arena unsafe.Pointer) *CompactQueue128 {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // entry converts a handle to its corresponding entry pointer.
-// Handle(1) = pool[0], Handle(2) = pool[1], etc.
+// Uses offset-based addressing where Handle(1) maps to pool[0], enabling
+// Handle(0) to serve as a natural null sentinel without requiring special cases.
 //
 // Address Calculation:
 //
@@ -170,7 +186,7 @@ func New(arena unsafe.Pointer) *CompactQueue128 {
 //go:inline
 //go:registerparams
 func (q *CompactQueue128) entry(h Handle) *Entry {
-	// Handle 1 = pool[0], Handle 2 = pool[1], etc.
+	// Offset addressing: Handle 1 = pool[0], Handle 2 = pool[1], etc.
 	// Shift by 5 for 32-byte entries (2^5 = 32)
 	return (*Entry)(unsafe.Pointer(q.arena + uintptr(h-1)<<5))
 }
@@ -224,7 +240,8 @@ func (q *CompactQueue128) Empty() bool {
 //go:registerparams
 func (q *CompactQueue128) unlink(h Handle) {
 	entry := q.entry(h)
-	// Convert internal tick back to user tick for bucket indexing
+	// Convert internal tick back to user tick for bucket indexing.
+	// Internal ticks are offset by +1, so user_tick = internal_tick - 1.
 	userTick := entry.Tick - 1
 	b := Handle(userTick)
 
@@ -240,11 +257,15 @@ func (q *CompactQueue128) unlink(h Handle) {
 
 	// Update hierarchical bitmap summaries if bucket is now empty
 	if q.buckets[b] == nilIdx {
-		// Decompose user tick into hierarchical indices
+		// Decompose user tick for compact addressing scheme.
+		// Group index is always 0 since all 128 priorities fit in single group.
+		// Lane index uses bit 6 (values 0 or 1 for lanes 0-1).
+		// Bucket index uses bottom 6 bits (values 0-63 within each lane).
 		g := uint64(userTick) >> 12       // Group index (always 0 for 0-127)
 		l := (uint64(userTick) >> 6) & 63 // Lane index (0 or 1 for 0-127)
 		bb := uint64(userTick) & 63       // Bucket index (bottom 6 bits)
 
+		// Reference the single active group in compact design.
 		gb := &q.groups[g] // Always groups[0]
 		// Clear bucket bit in lane mask
 		gb.l2[l] &^= 1 << (63 - bb)
@@ -259,7 +280,8 @@ func (q *CompactQueue128) unlink(h Handle) {
 		}
 	}
 
-	// Mark entry as unlinked (zero-init compatible)
+	// Mark entry as unlinked using zero-compatible sentinel values.
+	// Tick = 0 represents free state, aligning with zero-initialization semantics.
 	entry.Next = nilIdx
 	entry.Prev = nilIdx
 	entry.Tick = 0 // 0 = free (zero-init state)
@@ -282,7 +304,8 @@ func (q *CompactQueue128) unlink(h Handle) {
 //go:registerparams
 func (q *CompactQueue128) linkAtHead(h Handle, userTick int64) {
 	entry := q.entry(h)
-	// Store internal tick (user + 1) but use user tick for bucket indexing
+	// Store internal tick (user + 1) while using user tick for bucket indexing.
+	// This dual-tick approach enables zero to represent free state internally.
 	internalTick := userTick + 1
 	b := Handle(uint64(userTick))
 
@@ -295,11 +318,13 @@ func (q *CompactQueue128) linkAtHead(h Handle, userTick int64) {
 	}
 	q.buckets[b] = h
 
-	// Update hierarchical bitmap summaries using user tick
+	// Update hierarchical bitmap summaries using compact addressing.
+	// Decomposition optimized for single-group, dual-lane configuration.
 	g := uint64(userTick) >> 12       // Group index (always 0 for 0-127)
 	l := (uint64(userTick) >> 6) & 63 // Lane index (0 or 1 for 0-127)
 	bb := uint64(userTick) & 63       // Bucket index (bottom 6 bits)
 
+	// Reference the single active group in compact design.
 	gb := &q.groups[g]            // Always groups[0]
 	gb.l2[l] |= 1 << (63 - bb)    // Set bucket bit
 	gb.l1Summary |= 1 << (63 - l) // Set lane bit
@@ -327,6 +352,8 @@ func (q *CompactQueue128) linkAtHead(h Handle, userTick int64) {
 //go:registerparams
 func (q *CompactQueue128) Push(userTick int64, h Handle, val uint64) {
 	entry := q.entry(h)
+	// Convert to internal tick for comparison with stored entry state.
+	// Internal tick = user tick + 1 enables zero to represent free entries.
 	internalTick := userTick + 1
 
 	// Hot path: same priority update
@@ -336,6 +363,7 @@ func (q *CompactQueue128) Push(userTick int64, h Handle, val uint64) {
 	}
 
 	// Cold path: relocate to new priority
+	// Check for active state using internal tick > 0 (free state is 0).
 	if entry.Tick > 0 { // Was linked (internal tick > 0 means active)
 		q.unlink(h) // Remove from current position
 	}
@@ -364,7 +392,8 @@ func (q *CompactQueue128) Push(userTick int64, h Handle, val uint64) {
 //go:registerparams
 func (q *CompactQueue128) PeepMin() (Handle, int64, uint64) {
 	// Find minimum through hierarchical bitmap traversal
-	g := bits.LeadingZeros64(q.summary)    // Find first group
+	g := bits.LeadingZeros64(q.summary) // Find first group
+	// Reference the single active group in compact design.
 	gb := &q.groups[g]                     // Always groups[0]
 	l := bits.LeadingZeros64(gb.l1Summary) // Find first lane in group
 	t := bits.LeadingZeros64(gb.l2[l])     // Find first bucket in lane
@@ -373,7 +402,8 @@ func (q *CompactQueue128) PeepMin() (Handle, int64, uint64) {
 	b := Handle((uint64(g) << 12) | (uint64(l) << 6) | uint64(t))
 	h := q.buckets[b]
 
-	// Return handle and user-visible tick (internal - 1)
+	// Convert internal tick back to user-visible tick for API consistency.
+	// User tick = internal tick - 1 reverses the offset applied during storage.
 	entry := q.entry(h)
 	userTick := entry.Tick - 1 // Convert back to user tick
 	return h, userTick, entry.Data
@@ -389,6 +419,7 @@ func (q *CompactQueue128) PeepMin() (Handle, int64, uint64) {
 //go:registerparams
 func (q *CompactQueue128) MoveTick(h Handle, newUserTick int64) {
 	entry := q.entry(h)
+	// Convert to internal tick for comparison with stored entry state.
 	newInternalTick := newUserTick + 1
 
 	// No-op if priority unchanged
