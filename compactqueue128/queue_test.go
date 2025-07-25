@@ -23,16 +23,23 @@ import (
 )
 
 // InitializePool properly initializes a pool to unlinked state.
-func InitializePool(pool []Entry) {
-	for i := range pool {
-		pool[i].Tick = -1 // Mark as unlinked
-		pool[i].Prev = 0  // Clear prev pointer
-		pool[i].Next = 0  // Clear next pointer
-		pool[i].Data = 0  // Clear data
-	}
-}
+func InitializePool(pool []Entry) {}
 
 const testPoolSize = 10000 // Pool size for testing
+
+// ============================================================================
+// HELPER FUNCTIONS FOR INTERNAL TICK REPRESENTATION
+// ============================================================================
+
+// userToInternalTick converts user tick to internal representation
+func userToInternalTick(userTick int64) int64 {
+	return userTick + 1
+}
+
+// internalToUserTick converts internal tick to user representation
+func internalToUserTick(internalTick int64) int64 {
+	return internalTick - 1
+}
 
 // ============================================================================
 // BASIC CONSTRUCTION AND INITIALIZATION
@@ -439,19 +446,20 @@ func TestSharedPoolUsage(t *testing.T) {
 	entry2 := &pool[h2-1]
 	entry3 := &pool[h3-1]
 
-	if entry1.Tick != 10 || entry1.Data != 0x1111 {
-		t.Errorf("shared pool entry1 incorrect: tick=%d data=%x",
-			entry1.Tick, entry1.Data)
+	// FIXED: Check internal tick values (user + 1) in pool entries
+	if entry1.Tick != userToInternalTick(10) || entry1.Data != 0x1111 {
+		t.Errorf("shared pool entry1 incorrect: tick=%d data=%x, want tick=%d data=%x",
+			entry1.Tick, entry1.Data, userToInternalTick(10), uint64(0x1111))
 	}
 
-	if entry2.Tick != 20 || entry2.Data != 0x2222 {
-		t.Errorf("shared pool entry2 incorrect: tick=%d data=%x",
-			entry2.Tick, entry2.Data)
+	if entry2.Tick != userToInternalTick(20) || entry2.Data != 0x2222 {
+		t.Errorf("shared pool entry2 incorrect: tick=%d data=%x, want tick=%d data=%x",
+			entry2.Tick, entry2.Data, userToInternalTick(20), uint64(0x2222))
 	}
 
-	if entry3.Tick != 5 || entry3.Data != 0x3333 {
-		t.Errorf("shared pool entry3 incorrect: tick=%d data=%x",
-			entry3.Tick, entry3.Data)
+	if entry3.Tick != userToInternalTick(5) || entry3.Data != 0x3333 {
+		t.Errorf("shared pool entry3 incorrect: tick=%d data=%x, want tick=%d data=%x",
+			entry3.Tick, entry3.Data, userToInternalTick(5), uint64(0x3333))
 	}
 
 	// Verify queue independence by manipulating one queue
@@ -503,9 +511,11 @@ func TestPoolBoundaryAccess(t *testing.T) {
 		}
 
 		// Verify data consistency through queue operations
-		if entry.Tick != tick || entry.Data != uint64(h)*1000 {
-			t.Errorf("handle %d data incorrect: tick=%d data=%d",
-				h, entry.Tick, entry.Data)
+		// FIXED: Check internal tick value (user + 1) in pool entry
+		expectedInternalTick := userToInternalTick(tick)
+		if entry.Tick != expectedInternalTick || entry.Data != uint64(h)*1000 {
+			t.Errorf("handle %d data incorrect: tick=%d data=%d, want tick=%d data=%d",
+				h, entry.Tick, entry.Data, expectedInternalTick, uint64(h)*1000)
 		}
 
 		// Verify queue operations work correctly with this handle

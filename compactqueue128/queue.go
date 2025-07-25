@@ -62,14 +62,14 @@ const nilIdx Handle = 0
 // The 32-byte size ensures optimal cache alignment and memory efficiency.
 //
 // Field Layout:
-//   - Tick: Priority value or -1 when free
+//   - Tick: Internal priority value (user_tick + 1) or 0 when free
 //   - Data: Compact 64-bit payload for value storage or pointer indirection
 //   - Next/Prev: Doubly-linked list pointers for constant-time operations
 //
 //go:notinheap
 //go:align 32
 type Entry struct {
-	Tick int64  // 8B - Active tick or -1 if free
+	Tick int64  // 8B - Internal tick (user_tick + 1) or 0 if free
 	Data uint64 // 8B - Compact payload
 	Next Handle // 8B - Next in chain (0 = nil, 1+ = valid)
 	Prev Handle // 8B - Previous in chain (0 = nil, 1+ = valid)
@@ -134,7 +134,8 @@ type CompactQueue128 struct {
 //  1. All buckets zero-init to Handle(0) = nilIdx (empty)
 //  2. All bitmap summaries zero-init to 0 (empty)
 //  3. Handle(0) is invalid - valid handles start at Handle(1)
-//  4. No initialization loops needed
+//  4. Entry.Tick = 0 means free, >0 means active
+//  5. No initialization loops needed
 //
 //go:norace
 //go:nocheckptr
@@ -223,7 +224,9 @@ func (q *CompactQueue128) Empty() bool {
 //go:registerparams
 func (q *CompactQueue128) unlink(h Handle) {
 	entry := q.entry(h)
-	b := Handle(entry.Tick)
+	// Convert internal tick back to user tick for bucket indexing
+	userTick := entry.Tick - 1
+	b := Handle(userTick)
 
 	// Remove from doubly-linked chain
 	if entry.Prev != nilIdx {
@@ -237,10 +240,10 @@ func (q *CompactQueue128) unlink(h Handle) {
 
 	// Update hierarchical bitmap summaries if bucket is now empty
 	if q.buckets[b] == nilIdx {
-		// Decompose tick into hierarchical indices
-		g := uint64(entry.Tick) >> 12       // Group index (always 0 for 0-127)
-		l := (uint64(entry.Tick) >> 6) & 63 // Lane index (0 or 1 for 0-127)
-		bb := uint64(entry.Tick) & 63       // Bucket index (bottom 6 bits)
+		// Decompose user tick into hierarchical indices
+		g := uint64(userTick) >> 12       // Group index (always 0 for 0-127)
+		l := (uint64(userTick) >> 6) & 63 // Lane index (0 or 1 for 0-127)
+		bb := uint64(userTick) & 63       // Bucket index (bottom 6 bits)
 
 		gb := &q.groups[g] // Always groups[0]
 		// Clear bucket bit in lane mask
@@ -256,10 +259,10 @@ func (q *CompactQueue128) unlink(h Handle) {
 		}
 	}
 
-	// Mark entry as unlinked
+	// Mark entry as unlinked (zero-init compatible)
 	entry.Next = nilIdx
 	entry.Prev = nilIdx
-	entry.Tick = -1
+	entry.Tick = 0 // 0 = free (zero-init state)
 	q.size--
 }
 
@@ -277,12 +280,14 @@ func (q *CompactQueue128) unlink(h Handle) {
 //go:nosplit
 //go:inline
 //go:registerparams
-func (q *CompactQueue128) linkAtHead(h Handle, tick int64) {
+func (q *CompactQueue128) linkAtHead(h Handle, userTick int64) {
 	entry := q.entry(h)
-	b := Handle(uint64(tick))
+	// Store internal tick (user + 1) but use user tick for bucket indexing
+	internalTick := userTick + 1
+	b := Handle(uint64(userTick))
 
 	// Insert at head of bucket chain
-	entry.Tick = tick
+	entry.Tick = internalTick
 	entry.Prev = nilIdx
 	entry.Next = q.buckets[b]
 	if entry.Next != nilIdx {
@@ -290,10 +295,10 @@ func (q *CompactQueue128) linkAtHead(h Handle, tick int64) {
 	}
 	q.buckets[b] = h
 
-	// Update hierarchical bitmap summaries
-	g := uint64(tick) >> 12       // Group index (always 0 for 0-127)
-	l := (uint64(tick) >> 6) & 63 // Lane index (0 or 1 for 0-127)
-	bb := uint64(tick) & 63       // Bucket index (bottom 6 bits)
+	// Update hierarchical bitmap summaries using user tick
+	g := uint64(userTick) >> 12       // Group index (always 0 for 0-127)
+	l := (uint64(userTick) >> 6) & 63 // Lane index (0 or 1 for 0-127)
+	bb := uint64(userTick) & 63       // Bucket index (bottom 6 bits)
 
 	gb := &q.groups[g]            // Always groups[0]
 	gb.l2[l] |= 1 << (63 - bb)    // Set bucket bit
@@ -320,20 +325,21 @@ func (q *CompactQueue128) linkAtHead(h Handle, tick int64) {
 //go:nosplit
 //go:inline
 //go:registerparams
-func (q *CompactQueue128) Push(tick int64, h Handle, val uint64) {
+func (q *CompactQueue128) Push(userTick int64, h Handle, val uint64) {
 	entry := q.entry(h)
+	internalTick := userTick + 1
 
 	// Hot path: same priority update
-	if entry.Tick == tick {
+	if entry.Tick == internalTick {
 		entry.Data = val
 		return
 	}
 
 	// Cold path: relocate to new priority
-	if entry.Tick >= 0 {
+	if entry.Tick > 0 { // Was linked (internal tick > 0 means active)
 		q.unlink(h) // Remove from current position
 	}
-	q.linkAtHead(h, tick)
+	q.linkAtHead(h, userTick)
 	entry.Data = val
 }
 
@@ -367,9 +373,10 @@ func (q *CompactQueue128) PeepMin() (Handle, int64, uint64) {
 	b := Handle((uint64(g) << 12) | (uint64(l) << 6) | uint64(t))
 	h := q.buckets[b]
 
-	// Return handle and associated data
+	// Return handle and user-visible tick (internal - 1)
 	entry := q.entry(h)
-	return h, entry.Tick, entry.Data
+	userTick := entry.Tick - 1 // Convert back to user tick
+	return h, userTick, entry.Data
 }
 
 // MoveTick efficiently relocates an entry to a new priority.
@@ -380,17 +387,18 @@ func (q *CompactQueue128) PeepMin() (Handle, int64, uint64) {
 //go:nosplit
 //go:inline
 //go:registerparams
-func (q *CompactQueue128) MoveTick(h Handle, newTick int64) {
+func (q *CompactQueue128) MoveTick(h Handle, newUserTick int64) {
 	entry := q.entry(h)
+	newInternalTick := newUserTick + 1
 
 	// No-op if priority unchanged
-	if entry.Tick == newTick {
+	if entry.Tick == newInternalTick {
 		return
 	}
 
 	// Relocate to new priority
 	q.unlink(h)
-	q.linkAtHead(h, newTick)
+	q.linkAtHead(h, newUserTick)
 }
 
 // UnlinkMin removes the minimum entry from the queue.

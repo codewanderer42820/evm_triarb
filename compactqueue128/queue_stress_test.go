@@ -257,7 +257,7 @@ func TestQueueStressRandomOperations(t *testing.T) {
 			// Reset the pool entry to unlinked state when returning handle
 			// FIXED: Convert handle to pool index (h-1) for CompactQueue128
 			poolIndex := h - 1
-			pool[poolIndex].Tick = -1
+			pool[poolIndex].Tick = 0 // FIXED: Use 0 for free state (zero-init compatible)
 			pool[poolIndex].Prev = nilIdx
 			pool[poolIndex].Next = nilIdx
 			pool[poolIndex].Data = 0
@@ -311,7 +311,7 @@ func TestQueueStressRandomOperations(t *testing.T) {
 
 		// Reset pool entry state - FIXED: Convert handle to pool index
 		poolIndex := h - 1
-		pool[poolIndex].Tick = -1
+		pool[poolIndex].Tick = 0 // FIXED: Use 0 for free state (zero-init compatible)
 		pool[poolIndex].Prev = nilIdx
 		pool[poolIndex].Next = nilIdx
 		pool[poolIndex].Data = 0
@@ -491,7 +491,8 @@ func TestPoolBoundaryStress(t *testing.T) {
 			expectedActive := 0
 			for h := range activeHandles {
 				poolIndex := h - 1 // FIXED: Convert handle to pool index
-				if pool[poolIndex].Tick >= 0 {
+				// FIXED: Check for internal tick > 0 (active) instead of >= 0
+				if pool[poolIndex].Tick > 0 {
 					expectedActive++
 				}
 			}
@@ -568,7 +569,7 @@ func TestBitmapConsistencyUnderStress(t *testing.T) {
 
 				// Reset pool entry state - FIXED: Convert handle to pool index
 				poolIndex := popH - 1
-				pool[poolIndex].Tick = -1
+				pool[poolIndex].Tick = 0 // FIXED: Use 0 for free state (zero-init compatible)
 				pool[poolIndex].Prev = nilIdx
 				pool[poolIndex].Next = nilIdx
 				pool[poolIndex].Data = 0
