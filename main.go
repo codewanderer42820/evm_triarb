@@ -37,6 +37,7 @@ import (
 	"main/parser"
 	"main/router"
 	"main/syncharvester"
+	"main/types"
 	"main/utils"
 	"main/ws"
 
@@ -251,9 +252,9 @@ func loadArbitrageCyclesFromFile(filename string) []router.ArbitrageTriangle {
 		}
 
 		cycles[cycleIndex] = router.ArbitrageTriangle{
-			router.TradingPairID(pairIDs[0]),
-			router.TradingPairID(pairIDs[1]),
-			router.TradingPairID(pairIDs[2]),
+			types.TradingPairID(pairIDs[0]),
+			types.TradingPairID(pairIDs[1]),
+			types.TradingPairID(pairIDs[2]),
 		}
 		cycleIndex++
 	}
@@ -294,7 +295,7 @@ func init() {
 	// Register addresses for fast lookup
 	debug.DropMessage("ADDR", "Indexing")
 	for _, pool := range pools {
-		router.RegisterTradingPairAddress([]byte(pool.Address[2:]), router.TradingPairID(pool.ID))
+		router.RegisterTradingPairAddress([]byte(pool.Address[2:]), types.TradingPairID(pool.ID))
 	}
 	debug.DropMessage("ADDR", utils.Itoa(len(pools))+" indexed")
 

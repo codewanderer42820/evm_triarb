@@ -45,7 +45,7 @@ import (
 // ArbitrageTriangle defines a three-pair arbitrage cycle.
 // Example: [ETH/DAI, DAI/USDC, USDC/ETH] forms a complete arbitrage loop.
 // The order matters as it defines the trading direction through the cycle.
-type ArbitrageTriangle [3]TradingPairID
+type ArbitrageTriangle [3]types.TradingPairID
 
 // CycleIndex provides typed access into the cycle state storage arrays.
 // This prevents confusion between different types of indices in the system.
@@ -61,12 +61,12 @@ type CycleIndex uint64
 //
 //go:notinheap
 type PriceUpdateMessage struct {
-	pairID        TradingPairID // 8B - Trading pair that experienced the price change
-	forwardTick   float64       // 8B - Logarithmic price ratio in forward direction
-	reverseTick   float64       // 8B - Same price change in opposite direction (negative of forwardTick)
-	leadingZerosA uint64        // 8B - Leading zero count for reserveA (first token)
-	leadingZerosB uint64        // 8B - Leading zero count for reserveB (second token)
-	_             [16]byte      // 16B - Padding to reach exactly 56 bytes for ring56
+	pairID        types.TradingPairID // 8B - Trading pair that experienced the price change
+	forwardTick   float64             // 8B - Logarithmic price ratio in forward direction
+	reverseTick   float64             // 8B - Same price change in opposite direction (negative of forwardTick)
+	leadingZerosA uint64              // 8B - Leading zero count for reserveA (first token)
+	leadingZerosB uint64              // 8B - Leading zero count for reserveB (second token)
+	_             [16]byte            // 16B - Padding to reach exactly 56 bytes for ring56
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -96,7 +96,7 @@ type ArbitrageCycleState struct {
 	// queue's primary pair - its tick is added externally during profitability calculation.
 	tickValues [3]float64 // 24B - Index corresponds to pair position, one always zero
 
-	pairIDs [3]TradingPairID // 24B - The three trading pairs that form this arbitrage cycle
+	pairIDs [3]types.TradingPairID // 24B - The three trading pairs that form this arbitrage cycle
 
 	// Liquidity assessment through leading zero counts for execution risk evaluation
 	// Each pair's liquidity approximated by hex leading zeros: more zeros = less liquidity
@@ -195,8 +195,8 @@ type PackedAddress struct {
 //go:notinheap
 //go:align 32
 type CycleEdge struct {
-	cyclePairs [3]TradingPairID // 24B - Complete three-pair arbitrage cycle definition
-	edgeIndex  uint64           // 8B - This pair's position (0, 1, or 2) within the cycle
+	cyclePairs [3]types.TradingPairID // 24B - Complete three-pair arbitrage cycle definition
+	edgeIndex  uint64                 // 8B - This pair's position (0, 1, or 2) within the cycle
 }
 
 // PairWorkloadShard groups arbitrage cycles by trading pair for efficient core distribution.
@@ -206,8 +206,8 @@ type CycleEdge struct {
 //go:notinheap
 //go:align 32
 type PairWorkloadShard struct {
-	pairID     TradingPairID // 8B - Trading pair that all cycles in this shard have in common
-	cycleEdges []CycleEdge   // 24B - All arbitrage cycles that include this trading pair
+	pairID     types.TradingPairID // 8B - Trading pair that all cycles in this shard have in common
+	cycleEdges []CycleEdge         // 24B - All arbitrage cycles that include this trading pair
 }
 
 // CryptoRandomGenerator provides deterministic randomness for load balancing.
@@ -234,7 +234,7 @@ type CryptoRandomGenerator struct {
 //go:align 64
 var (
 	// CACHE LINE GROUP 1: Address lookup (accessed together in hot path)
-	addressToPairMap  [constants.AddressTableCapacity]TradingPairID
+	addressToPairMap  [constants.AddressTableCapacity]types.TradingPairID
 	packedAddressKeys [constants.AddressTableCapacity]PackedAddress
 
 	// CACHE LINE GROUP 2: Core routing (accessed after address lookup)
@@ -248,7 +248,7 @@ var (
 
 	// COLD: Only accessed during initialization
 	coreEngines        [constants.MaxSupportedCores]*ArbitrageEngine
-	pairWorkloadShards map[TradingPairID][]PairWorkloadShard
+	pairWorkloadShards map[types.TradingPairID][]PairWorkloadShard
 )
 
 // Initialize the GC completion channel during package initialization
@@ -502,7 +502,7 @@ func DispatchPriceUpdate(logView *types.LogView) {
 //go:nosplit
 //go:inline
 //go:registerparams
-func LookupPairByAddress(address40HexChars []byte) TradingPairID {
+func LookupPairByAddress(address40HexChars []byte) types.TradingPairID {
 	// Convert the hex address string to an optimized packed representation for comparison
 	key := packEthereumAddress(address40HexChars)
 
@@ -657,7 +657,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 //go:nosplit
 //go:inline
 //go:registerparams
-func RegisterTradingPairAddress(address40HexChars []byte, pairID TradingPairID) {
+func RegisterTradingPairAddress(address40HexChars []byte, pairID types.TradingPairID) {
 	// Convert the hex address to packed format for efficient storage and comparison
 	key := packEthereumAddress(address40HexChars)
 
@@ -709,7 +709,7 @@ func RegisterTradingPairAddress(address40HexChars []byte, pairID TradingPairID) 
 //go:nosplit
 //go:inline
 //go:registerparams
-func RegisterPairToCoreRouting(pairID TradingPairID, coreID uint8) {
+func RegisterPairToCoreRouting(pairID types.TradingPairID, coreID uint8) {
 	// Add this core to the bitmask of cores that should receive updates for this pair
 	// Multiple cores can process the same pair for load balancing and redundancy
 	pairToCoreRouting[pairID] |= 1 << coreID
@@ -780,7 +780,7 @@ func (rng *CryptoRandomGenerator) generateRandomInt(upperBound int) int {
 //go:nosplit
 //go:inline
 //go:registerparams
-func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
+func shuffleCycleEdges(cycleEdges []CycleEdge, pairID types.TradingPairID) {
 	// Skip shuffling if there's nothing to shuffle or only one element
 	if len(cycleEdges) <= 1 {
 		return
@@ -809,7 +809,7 @@ func shuffleCycleEdges(cycleEdges []CycleEdge, pairID TradingPairID) {
 //go:registerparams
 func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 	// Count edges per pair through complete traversal
-	edgeCounts := make(map[TradingPairID]int)
+	edgeCounts := make(map[types.TradingPairID]int)
 	for _, triangle := range arbitrageTriangles {
 		for i := 0; i < 3; i++ {
 			edgeCounts[triangle[i]]++
@@ -817,15 +817,15 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 	}
 
 	// Calculate shard requirements per pair
-	shardCounts := make(map[TradingPairID]int)
+	shardCounts := make(map[types.TradingPairID]int)
 	for pairID, edgeCount := range edgeCounts {
 		shardCount := (edgeCount + constants.MaxCyclesPerShard - 1) / constants.MaxCyclesPerShard
 		shardCounts[pairID] = shardCount
 	}
 
 	// Pre-allocate all structures with exact capacities
-	temporaryEdges := make(map[TradingPairID][]CycleEdge, len(edgeCounts))
-	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard, len(edgeCounts))
+	temporaryEdges := make(map[types.TradingPairID][]CycleEdge, len(edgeCounts))
+	pairWorkloadShards = make(map[types.TradingPairID][]PairWorkloadShard, len(edgeCounts))
 
 	for pairID, edgeCount := range edgeCounts {
 		temporaryEdges[pairID] = make([]CycleEdge, edgeCount)
@@ -834,7 +834,7 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 	}
 
 	// Populate edges using direct indexing to avoid reallocations
-	edgeIndices := make(map[TradingPairID]int, len(edgeCounts))
+	edgeIndices := make(map[types.TradingPairID]int, len(edgeCounts))
 	for _, triangle := range arbitrageTriangles {
 		for i := 0; i < 3; i++ {
 			pairID := triangle[i]
@@ -879,9 +879,9 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 	}
 
 	// Count total cycles and identify all pairs through complete traversal
-	pairsWithQueuesSet := make(map[TradingPairID]struct{})
+	pairsWithQueuesSet := make(map[types.TradingPairID]struct{})
 	totalCycles := 0
-	allPairsSet := make(map[TradingPairID]struct{})
+	allPairsSet := make(map[types.TradingPairID]struct{})
 
 	for _, shard := range workloadShards {
 		pairsWithQueuesSet[shard.pairID] = struct{}{}
@@ -898,7 +898,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 	totalFanoutSlots := len(allPairsSet)
 
 	// Calculate exact fanout entries per slot
-	fanoutCounts := make(map[TradingPairID]int)
+	fanoutCounts := make(map[types.TradingPairID]int)
 	for _, shard := range workloadShards {
 		for _, cycleEdge := range shard.cycleEdges {
 			otherPair1 := cycleEdge.cyclePairs[(cycleEdge.edgeIndex+1)%3]
@@ -916,7 +916,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 	engine.sharedArena = make([]pooledquantumqueue.Entry, totalCycles)
 
 	// Create deterministic ordering and pre-allocate fanout slices
-	allPairsList := make([]TradingPairID, totalFanoutSlots)
+	allPairsList := make([]types.TradingPairID, totalFanoutSlots)
 	pairIdx := 0
 	for pairID := range allPairsSet {
 		allPairsList[pairIdx] = pairID
@@ -946,7 +946,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 	}
 
 	// Create deterministic ordering for queue assignment
-	pairsWithQueuesList := make([]TradingPairID, totalQueues)
+	pairsWithQueuesList := make([]types.TradingPairID, totalQueues)
 	queueIdx := 0
 	for pairID := range pairsWithQueuesSet {
 		pairsWithQueuesList[queueIdx] = pairID
@@ -959,7 +959,7 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 
 	// Populate cycles and fanout tables using direct indexing
 	cycleStateIdx := 0
-	fanoutIndices := make(map[TradingPairID]int, totalFanoutSlots)
+	fanoutIndices := make(map[types.TradingPairID]int, totalFanoutSlots)
 
 	for _, shard := range workloadShards {
 		queueIndex, _ := engine.pairToQueueLookup.Get(uint32(shard.pairID))

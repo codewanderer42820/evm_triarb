@@ -40,11 +40,11 @@ import (
 
 // TestPairID constants for predictable testing
 const (
-	TestPairETH_DAI  TradingPairID = 1001
-	TestPairDAI_USDC TradingPairID = 1002
-	TestPairUSDC_ETH TradingPairID = 1003
-	TestPairWBTC_ETH TradingPairID = 1004
-	TestPairUNI_ETH  TradingPairID = 1005
+	TestPairETH_DAI  types.TradingPairID = 1001
+	TestPairDAI_USDC types.TradingPairID = 1002
+	TestPairUSDC_ETH types.TradingPairID = 1003
+	TestPairWBTC_ETH types.TradingPairID = 1004
+	TestPairUNI_ETH  types.TradingPairID = 1005
 )
 
 // Test addresses - valid Ethereum addresses for testing
@@ -70,9 +70,9 @@ func testSetup(_ *testing.T) func() {
 	coreEngines = [constants.MaxSupportedCores]*ArbitrageEngine{}
 	coreRings = [constants.MaxSupportedCores]*ring56.Ring{}
 	pairToCoreRouting = [constants.PairRoutingTableCapacity]uint64{}
-	addressToPairMap = [constants.AddressTableCapacity]TradingPairID{}
+	addressToPairMap = [constants.AddressTableCapacity]types.TradingPairID{}
 	packedAddressKeys = [constants.AddressTableCapacity]PackedAddress{}
-	pairWorkloadShards = make(map[TradingPairID][]PairWorkloadShard)
+	pairWorkloadShards = make(map[types.TradingPairID][]PairWorkloadShard)
 
 	// Reset control system
 	control.ResetPollCounter()
@@ -211,7 +211,7 @@ func TestAddressHashCollisionHandling(t *testing.T) {
 
 	// Register addresses one by one and verify each step
 	for i, addr := range collisionAddresses {
-		intendedPairID := TradingPairID(2000 + i)
+		intendedPairID := types.TradingPairID(2000 + i)
 
 		// Register the address
 		RegisterTradingPairAddress([]byte(addr[2:]), intendedPairID)
@@ -234,7 +234,7 @@ func TestAddressHashCollisionHandling(t *testing.T) {
 	}
 
 	// Test that different addresses don't return the same pair ID
-	returnedPairIDs := make(map[TradingPairID]string)
+	returnedPairIDs := make(map[types.TradingPairID]string)
 	for _, addr := range collisionAddresses {
 		pairID := LookupPairByAddress([]byte(addr[2:]))
 		if pairID != 0 {
@@ -557,7 +557,7 @@ func TestProcessArbitrageUpdate(t *testing.T) {
 	// Initialize cycle states
 	engine.cycleStates = make([]ArbitrageCycleState, 1)
 	engine.cycleStates[0] = ArbitrageCycleState{
-		pairIDs:    [3]TradingPairID{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH},
+		pairIDs:    [3]types.TradingPairID{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH},
 		tickValues: [3]float64{0, 1.5, -2.0}, // Main pair (index 0) should be zero
 	}
 
@@ -649,7 +649,7 @@ func TestSparseFanoutTable(t *testing.T) {
 	}
 
 	// Verify fanout table size (all unique pairs across all triangles)
-	uniquePairs := map[TradingPairID]bool{
+	uniquePairs := map[types.TradingPairID]bool{
 		TestPairETH_DAI:  true,
 		TestPairDAI_USDC: true,
 		TestPairUSDC_ETH: true,
@@ -712,7 +712,7 @@ func TestCycleFanoutMapping(t *testing.T) {
 	buildWorkloadShards(triangles)
 
 	// Verify each pair appears in fanout mapping
-	expectedPairs := []TradingPairID{
+	expectedPairs := []types.TradingPairID{
 		TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH,
 		TestPairWBTC_ETH, TestPairUNI_ETH,
 	}
@@ -740,7 +740,7 @@ func TestCycleFanoutMapping(t *testing.T) {
 	initializeArbitrageQueues(engine, allShards)
 
 	// Count unique cycles (each cycle should only be counted once)
-	uniqueCycles := make(map[[3]TradingPairID]bool)
+	uniqueCycles := make(map[[3]types.TradingPairID]bool)
 	for _, cycleState := range engine.cycleStates {
 		uniqueCycles[cycleState.pairIDs] = true
 	}
@@ -821,7 +821,7 @@ func TestExtractedCycleManagement(t *testing.T) {
 	engine.cycleStates = make([]ArbitrageCycleState, 3)
 	for i := range engine.cycleStates {
 		engine.cycleStates[i] = ArbitrageCycleState{
-			pairIDs:    [3]TradingPairID{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH},
+			pairIDs:    [3]types.TradingPairID{TestPairETH_DAI, TestPairDAI_USDC, TestPairUSDC_ETH},
 			tickValues: [3]float64{0, float64(i), -float64(i + 1)}, // Varying profitability
 		}
 		// Add to queue with different priorities
