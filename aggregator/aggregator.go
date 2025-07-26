@@ -41,20 +41,6 @@ const (
 	MaxBundleSize = 32                // Maximum opportunities per execution bundle
 )
 
-type TradingPairID uint64
-
-// ArbitrageOpportunity represents a profitable three-pair arbitrage cycle.
-// Exactly 56 bytes for ring56 compatibility with cache-optimized field ordering.
-//
-//go:notinheap
-type ArbitrageOpportunity struct {
-	totalProfitability float64          // 8B - Logarithmic profit calculation for the complete cycle
-	leadingZeroCount   uint64           // 8B - Liquidity assessment via hex leading zeros
-	cyclePairs         [3]TradingPairID // 24B - Three trading pairs forming arbitrage cycle
-	isReverseDirection bool             // 1B - Execution direction flag for optimal trading path
-	_                  [15]byte         // 15B - Padding to reach exactly 56 bytes for ring56
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // AGGREGATOR STATE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
