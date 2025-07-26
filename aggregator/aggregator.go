@@ -34,11 +34,11 @@ import (
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const (
-	TableCapacity             = 1 << 16  // 65536 hash table slots
-	TableMask                = TableCapacity - 1  // 65535 mask for hash indexing
-	MaxStrata                = 96        // Liquidity strata count (hex leading zeros 0-95)
-	BitmapWords              = 1 << 10   // 1024 uint64 words for occupancy bitmap
-	MaxBundleSize            = 32        // Maximum opportunities per execution bundle
+	TableCapacity = 1 << 16           // 65536 hash table slots
+	TableMask     = TableCapacity - 1 // 65535 mask for hash indexing
+	MaxStrata     = 96                // Liquidity strata count (hex leading zeros 0-95)
+	BitmapWords   = 1 << 10           // 1024 uint64 words for occupancy bitmap
+	MaxBundleSize = 32                // Maximum opportunities per execution bundle
 )
 
 type TradingPairID uint64
@@ -48,11 +48,11 @@ type TradingPairID uint64
 //
 //go:notinheap
 type ArbitrageOpportunity struct {
-	totalProfitability float64              // 8B - Logarithmic profit calculation for the complete cycle
-	leadingZeroCount   uint64               // 8B - Liquidity assessment via hex leading zeros
-	cyclePairs         [3]TradingPairID     // 24B - Three trading pairs forming arbitrage cycle
-	isReverseDirection bool                 // 1B - Execution direction flag for optimal trading path
-	_                  [15]byte             // 15B - Padding to reach exactly 56 bytes for ring56
+	totalProfitability float64          // 8B - Logarithmic profit calculation for the complete cycle
+	leadingZeroCount   uint64           // 8B - Liquidity assessment via hex leading zeros
+	cyclePairs         [3]TradingPairID // 24B - Three trading pairs forming arbitrage cycle
+	isReverseDirection bool             // 1B - Execution direction flag for optimal trading path
+	_                  [15]byte         // 15B - Padding to reach exactly 56 bytes for ring56
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -117,32 +117,32 @@ var FinalizationThreshold uint64
 //go:inline
 func (agg *AggregatorState) processOpportunity(opp *ArbitrageOpportunity) {
 	// Compute deterministic hash from cycle pairs for deduplication
-	h := uint16((uint64(opp.cyclePairs[0]) ^ 
-		uint64(opp.cyclePairs[1]) ^ 
+	h := uint16((uint64(opp.cyclePairs[0]) ^
+		uint64(opp.cyclePairs[1]) ^
 		uint64(opp.cyclePairs[2])) & TableMask)
-	
+
 	// Calculate bitmap position and create bit mask for occupancy tracking
 	w := h >> 6
 	b := h & 63
 	mask := uint64(1) << b
 	wasOccupied := (agg.occupied[w] & mask) >> b
-	
+
 	// Store opportunity in hash table and mark slot as occupied
 	agg.opportunities[h] = *opp
 	agg.occupied[w] |= mask
-	
+
 	// Transform profitability to priority queue tick value for ordering
 	tick := int64((opp.totalProfitability + 192.0) * 126.0 / 384.0)
 	queue := &agg.queues[opp.leadingZeroCount]
 	handle := compactqueue128.Handle(h)
-	
+
 	if wasOccupied != 0 {
 		// UPDATE PATH: Existing opportunity, adjust priority in queue
 		queue.MoveTick(handle, tick)
 	} else {
 		// INSERT PATH: New opportunity, add to queue and track stratum activity
 		queue.Push(tick, handle, uint64(h))
-		
+
 		// Stratum activity tracking with branchless first-opportunity detection
 		size := uint64(queue.Size())
 		isFirst := (uint64(int64(size-1)) >> 63) & 1
@@ -166,23 +166,23 @@ func (agg *AggregatorState) extractOpportunityBundle() {
 		if agg.stratumTracker.Empty() {
 			break
 		}
-		
+
 		// Extract best liquidity stratum (lowest leading zero count)
 		_, _, stratumID := agg.stratumTracker.PeepMin()
 		queue := &agg.queues[stratumID]
-		
+
 		if queue.Empty() {
 			// Remove empty stratum from tracker and continue
 			th, _, _ := agg.stratumTracker.PeepMin()
 			agg.stratumTracker.UnlinkMin(th)
 			continue
 		}
-		
+
 		// Extract most profitable opportunity from this stratum
 		oh, _, _ := queue.PeepMin()
 		// TODO: Add agg.opportunities[oh] to execution bundle
 		queue.UnlinkMin(oh)
-		
+
 		// Clean up empty stratum from tracker
 		if queue.Empty() {
 			th, _, _ := agg.stratumTracker.PeepMin()
@@ -200,18 +200,18 @@ func (agg *AggregatorState) extractOpportunityBundle() {
 //go:inline
 func (agg *AggregatorState) reset() {
 	agg.nextHandle = 0
-	
+
 	// Clear occupancy bitmap using direct iteration
 	for i := 0; i < BitmapWords; i++ {
 		agg.occupied[i] = 0
 	}
-	
+
 	// Clear opportunities array using unsafe bulk memory operations
 	oppPtr := (*[TableCapacity * 7]uint64)(unsafe.Pointer(&agg.opportunities[0]))
 	for i := 0; i < TableCapacity*7; i++ {
 		oppPtr[i] = 0
 	}
-	
+
 	// Clear priority queues using bulk memory zeroing
 	for i := 0; i < MaxStrata; i++ {
 		qPtr := (*[24]uint64)(unsafe.Pointer(&agg.queues[i]))
@@ -219,7 +219,7 @@ func (agg *AggregatorState) reset() {
 			qPtr[j] = 0
 		}
 	}
-	
+
 	// Clear stratum tracker using bulk memory operations
 	tPtr := (*[24]uint64)(unsafe.Pointer(&agg.stratumTracker))
 	for i := 0; i < 24; i++ {
@@ -250,18 +250,18 @@ func InitializeAggregatorSystem() {
 	// Measure 1,000,000 iterations of the exact polling loop
 	const benchmarkIterations = 1000000
 	start := time.Now()
-	
+
 	for iteration := 0; iteration < benchmarkIterations; iteration++ {
 		dataCount := uint64(0)
 		for i := 0; i < coreCount; i++ {
 			p := benchmarkRings[i].Pop()
-			hasData := uint64(uintptr(unsafe.Pointer(p)) >> 63) ^ 1
+			hasData := uint64(uintptr(unsafe.Pointer(p))>>63) ^ 1
 			dataCount += hasData
 		}
 	}
-	
+
 	elapsed := time.Since(start)
-	
+
 	// Calculate threshold for 1ms timing: iterations_per_ms / cores
 	// elapsed.Milliseconds() gives total ms, benchmarkIterations/elapsed_ms gives iterations/ms
 	iterationsPerMs := benchmarkIterations / int(elapsed.Milliseconds())
@@ -269,9 +269,9 @@ func InitializeAggregatorSystem() {
 	if FinalizationThreshold < 100 {
 		FinalizationThreshold = 100 // Minimum safety threshold
 	}
-	
+
 	Aggregator.gcComplete = make(chan struct{})
-	
+
 	go func() {
 		// Lock to OS thread for consistent NUMA performance characteristics
 		runtime.LockOSThread()
@@ -284,7 +284,7 @@ func InitializeAggregatorSystem() {
 		// Set up shared memory arena for all priority queue operations
 		arenaPtr := unsafe.Pointer(&Aggregator.sharedArena[0])
 		Aggregator.stratumTracker = *compactqueue128.New(arenaPtr)
-		
+
 		// Initialize all liquidity stratum priority queues
 		for i := range Aggregator.queues {
 			Aggregator.queues[i] = *compactqueue128.New(arenaPtr)
@@ -292,6 +292,7 @@ func InitializeAggregatorSystem() {
 
 		// COOPERATIVE INITIALIZATION DRAIN PHASE
 		// Continue processing until GC operations complete and all rings are empty
+	cooperativeDrainSpin:
 		for {
 			allEmpty := true
 			for i := 0; i < coreCount; i++ {
@@ -299,11 +300,11 @@ func InitializeAggregatorSystem() {
 					allEmpty = false
 				}
 			}
-			
+
 			if allEmpty {
 				select {
 				case <-Aggregator.gcComplete:
-					break
+					break cooperativeDrainSpin
 				default:
 				}
 			}
@@ -319,9 +320,9 @@ func InitializeAggregatorSystem() {
 			// Poll all router core ring buffers for new opportunities
 			for i := 0; i < coreCount; i++ {
 				p := Aggregator.coreRings[i].Pop()
-				hasData := uint64(uintptr(unsafe.Pointer(p)) >> 63) ^ 1
+				hasData := uint64(uintptr(unsafe.Pointer(p))>>63) ^ 1
 				dataCount += hasData
-				
+
 				if hasData != 0 {
 					opp := (*ArbitrageOpportunity)(unsafe.Pointer(p))
 					Aggregator.processOpportunity(opp)
@@ -332,7 +333,7 @@ func InitializeAggregatorSystem() {
 			hasData := (dataCount - 1) >> 63
 			emptySpins = (emptySpins + 1) & hasData
 			shouldFinalize := ((emptySpins - FinalizationThreshold) >> 63) ^ 1
-			
+
 			if shouldFinalize != 0 {
 				Aggregator.extractOpportunityBundle()
 				Aggregator.reset()
