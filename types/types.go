@@ -105,7 +105,7 @@ type ArbitrageOpportunity struct {
 	//
 	// Storage Format: [primaryPair, secondaryPair, tertiaryPair]
 	// Hash Computation: XOR(pair0, pair1, pair2) & mask for O(1) deduplication
-	cyclePairs [3]TradingPairID // 24 bytes - Three trading pairs forming arbitrage cycle
+	CyclePairs [3]TradingPairID // 24 bytes - Three trading pairs forming arbitrage cycle
 
 	// Liquidity assessment derived from reserve leading zero analysis during price parsing.
 	// Leading zero count provides instant liquidity approximation without additional on-chain queries,
@@ -123,7 +123,7 @@ type ArbitrageOpportunity struct {
 	// Aggregator Integration:
 	//   Used for stratum selection in dual-layer priority system, ensuring liquidity-first
 	//   opportunity extraction for optimal execution success probability.
-	leadingZeroCount uint64 // 8 bytes - Liquidity tier classification for execution risk management
+	LeadingZeroCount uint64 // 8 bytes - Liquidity tier classification for execution risk management
 
 	// Total profitability calculation representing aggregate logarithmic profit across complete cycle.
 	// Value computed by router cores as sum of individual pair logarithmic price ratios,
@@ -143,7 +143,7 @@ type ArbitrageOpportunity struct {
 	//   Transformed to priority queue coordinates via linear scaling for efficient sorting.
 	//   Within-stratum ordering ensures most profitable opportunities selected first while
 	//   maintaining liquidity-based execution risk management.
-	totalProfitability float64 // 8 bytes - Logarithmic profit calculation for priority ordering
+	TotalProfitability float64 // 8 bytes - Logarithmic profit calculation for priority ordering
 
 	// Execution direction optimization flag indicating optimal trading sequence direction.
 	// Direction determination performed by router cores based on comparative profitability
@@ -162,7 +162,7 @@ type ArbitrageOpportunity struct {
 	// Execution Planning:
 	//   Flag preserved through aggregation pipeline to execution systems for
 	//   optimal transaction construction and gas consumption minimization.
-	isReverseDirection bool // 1 byte - Optimal execution direction for profit maximization
+	IsReverseDirection bool // 1 byte - Optimal execution direction for profit maximization
 
 	// Memory padding to achieve precise 56-byte structure size for ring56 compatibility.
 	// Ring56 protocol requires exact message size alignment for optimal performance and

@@ -42,10 +42,6 @@ import (
 // CORE TYPE DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// TradingPairID uniquely identifies a Uniswap V2 trading pair contract.
-// Each pair represents a market between two tokens (e.g., ETH/DAI, USDC/WETH).
-type TradingPairID uint64
-
 // ArbitrageTriangle defines a three-pair arbitrage cycle.
 // Example: [ETH/DAI, DAI/USDC, USDC/ETH] forms a complete arbitrage loop.
 // The order matters as it defines the trading direction through the cycle.

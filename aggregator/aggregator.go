@@ -59,6 +59,15 @@ const (
 	// - MEV extraction efficiency (diminishing returns beyond 32 opportunities)
 	// - Block inclusion probability (larger bundles face higher inclusion risk)
 	MaxBundleSize = 32 // Maximum opportunities per execution bundle for gas optimization
+
+	// Finalization timing constants
+	TargetFinalizationTime   = 1 * time.Millisecond // Target time for consistent finalization timing
+	MinFinalizationThreshold = 100                  // Minimum threshold for system stability
+
+	// Profitability quantization for priority queue mapping (used in every opportunity)
+	ProfitabilityClampingBound = 192.0                                                    // Input range limit: [-192, +192]
+	MaxPriorityTick            = 127                                                      // Maximum priority tick value
+	ProfitabilityScale         = (MaxPriorityTick - 1) / (2 * ProfitabilityClampingBound) // Scale factor: 126 / 384
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -140,7 +149,7 @@ var Aggregator AggregatorState
 
 // Adaptive finalization threshold calculated empirically at system startup.
 // Threshold value determined through runtime performance measurement to achieve
-// consistent 1-millisecond finalization timing across diverse hardware configurations.
+// consistent TargetFinalizationTime timing across diverse hardware configurations.
 // Value automatically scales inversely with core count to maintain timing consistency.
 var FinalizationThreshold uint64
 
@@ -172,9 +181,9 @@ func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) 
 	// Compute cycle hash using XOR operation for order-independent deduplication.
 	// XOR ensures identical cycles produce identical hashes regardless of pair ordering,
 	// enabling efficient cycle identification and replacement-based collision handling.
-	h := uint16((uint64(opp.cyclePairs[0]) ^
-		uint64(opp.cyclePairs[1]) ^
-		uint64(opp.cyclePairs[2])) & TableMask)
+	h := uint16((uint64(opp.CyclePairs[0]) ^
+		uint64(opp.CyclePairs[1]) ^
+		uint64(opp.CyclePairs[2])) & TableMask)
 
 	// Calculate bitmap position using bit manipulation for efficient occupancy tracking.
 	// Bitmap organization: 64 slots per uint64 word, requiring word and bit index calculation.
@@ -190,11 +199,10 @@ func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) 
 	agg.occupied[w] |= mask
 
 	// Transform profitability to priority queue tick using linear scaling.
-	// Transformation maps [-192, +192] profitability range to priority queue coordinates.
-	// Formula: tick = (profitability + 192) × 126 ÷ 384
-	// Constants chosen to maximize priority resolution within queue capacity limits.
-	tick := int64((opp.totalProfitability + 192.0) * 126.0 / 384.0)
-	queue := &agg.queues[opp.leadingZeroCount]
+	// Formula: tick = (profitability + bound) × scale
+	// Matches router.go quantization pattern for consistency.
+	tick := int64((opp.TotalProfitability + ProfitabilityClampingBound) * ProfitabilityScale)
+	queue := &agg.queues[opp.LeadingZeroCount]
 	handle := compactqueue128.Handle(h)
 
 	if wasOccupied != 0 {
@@ -222,8 +230,8 @@ func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) 
 		// Operations scaled by isFirst flag to execute only for first opportunities.
 		trackerHandle := compactqueue128.Handle(agg.nextHandle)
 		agg.nextHandle += isFirst
-		stratumTick := int64(opp.leadingZeroCount) * int64(isFirst)
-		stratumData := opp.leadingZeroCount * isFirst
+		stratumTick := int64(opp.LeadingZeroCount) * int64(isFirst)
+		stratumData := opp.LeadingZeroCount * isFirst
 		agg.stratumTracker.Push(stratumTick, trackerHandle, stratumData)
 	}
 }
@@ -330,13 +338,21 @@ func (agg *AggregatorState) reset() {
 		oppPtr[i] = 0
 	}
 
+	// Clear shared memory arena used by all priority queues.
+	// Arena reset ensures clean entry allocation state for subsequent processing cycles.
+	// Entry structure size: 32 bytes = 4 uint64 words.
+	arenaPtr := (*[TableCapacity * 4]uint64)(unsafe.Pointer(&agg.sharedArena[0]))
+	for i := 0; i < TableCapacity*4; i++ {
+		arenaPtr[i] = 0
+	}
+
 	// Clear priority queue state using memory layout exploitation.
-	// CompactQueue128 structure size: 192 bytes = 24 uint64 words.
+	// CompactQueue128 structure size: 1,152 bytes = 144 uint64 words.
 	// Bulk clearing maintains queue initialization state for subsequent
 	// operation without requiring complex reinitialization procedures.
 	for i := 0; i < MaxStrata; i++ {
-		qPtr := (*[24]uint64)(unsafe.Pointer(&agg.queues[i]))
-		for j := 0; j < 24; j++ {
+		qPtr := (*[144]uint64)(unsafe.Pointer(&agg.queues[i]))
+		for j := 0; j < 144; j++ {
 			qPtr[j] = 0
 		}
 	}
@@ -344,8 +360,8 @@ func (agg *AggregatorState) reset() {
 	// Clear meta-queue state using identical memory layout operations.
 	// Consistent clearing approach across all queue structures ensures
 	// uniform performance characteristics and predictable reset timing.
-	tPtr := (*[24]uint64)(unsafe.Pointer(&agg.stratumTracker))
-	for i := 0; i < 24; i++ {
+	tPtr := (*[144]uint64)(unsafe.Pointer(&agg.stratumTracker))
+	for i := 0; i < 144; i++ {
 		tPtr[i] = 0
 	}
 }
@@ -381,7 +397,7 @@ func InitializeAggregatorSystem() {
 
 	// Empirical performance measurement for adaptive timing calibration.
 	// Benchmark measures actual main loop performance under realistic conditions
-	// to calculate accurate finalization thresholds for consistent 1ms timing.
+	// to calculate accurate finalization thresholds for consistent timing.
 	benchmarkRings := make([]ring56.Ring, coreCount)
 	for i := 0; i < coreCount; i++ {
 		benchmarkRings[i] = *ring56.New(constants.DefaultRingSize)
@@ -405,12 +421,12 @@ func InitializeAggregatorSystem() {
 	elapsed := time.Since(start)
 
 	// Calculate adaptive finalization threshold for consistent timing.
-	// Threshold calculation ensures 1-millisecond finalization timing regardless
+	// Threshold calculation ensures TargetFinalizationTime timing regardless
 	// of hardware performance variations or core count differences.
-	iterationsPerMs := benchmarkIterations / int(elapsed.Milliseconds())
+	iterationsPerMs := benchmarkIterations / int(elapsed/TargetFinalizationTime)
 	FinalizationThreshold = uint64(iterationsPerMs / coreCount)
-	if FinalizationThreshold < 100 {
-		FinalizationThreshold = 100 // Minimum threshold for system stability
+	if FinalizationThreshold < MinFinalizationThreshold {
+		FinalizationThreshold = MinFinalizationThreshold
 	}
 
 	// Initialize coordination channel for multi-phase startup synchronization.
