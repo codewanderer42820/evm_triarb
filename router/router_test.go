@@ -59,20 +59,11 @@ var (
 // testSetup initializes clean test environment
 func testSetup(_ *testing.T) func() {
 	// Save original state for restoration
-	originalCoreEngines := coreEngines
-	originalCoreRings := coreRings
-	originalPairToCoreRouting := pairToCoreRouting
-	originalAddressToPairMap := addressToPairMap
-	originalPackedAddressKeys := packedAddressKeys
-	originalPairWorkloadShards := pairWorkloadShards
+	originalRouter := Router
 
-	// Reset global state
-	coreEngines = [constants.MaxSupportedCores]*ArbitrageEngine{}
-	coreRings = [constants.MaxSupportedCores]*ring56.Ring{}
-	pairToCoreRouting = [constants.PairRoutingTableCapacity]uint64{}
-	addressToPairMap = [constants.AddressTableCapacity]types.TradingPairID{}
-	packedAddressKeys = [constants.AddressTableCapacity]PackedAddress{}
-	pairWorkloadShards = make(map[types.TradingPairID][]PairWorkloadShard)
+	// Reset Router state
+	Router = RouterState{}
+	Router.gcComplete = make(chan struct{})
 
 	// Reset control system
 	control.ResetPollCounter()
@@ -85,12 +76,7 @@ func testSetup(_ *testing.T) func() {
 		time.Sleep(50 * time.Millisecond) // Allow graceful shutdown
 
 		// Restore original state
-		coreEngines = originalCoreEngines
-		coreRings = originalCoreRings
-		pairToCoreRouting = originalPairToCoreRouting
-		addressToPairMap = originalAddressToPairMap
-		packedAddressKeys = originalPackedAddressKeys
-		pairWorkloadShards = originalPairWorkloadShards
+		Router = originalRouter
 
 		// Reset control system
 		control.ResetPollCounter()
@@ -113,7 +99,7 @@ func createTestLogView(address, data string) *types.LogView {
 func waitForCoreReady(coreID int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if coreEngines[coreID] != nil && coreRings[coreID] != nil {
+		if Router.coreEngines[coreID] != nil && Router.coreRings[coreID] != nil {
 			time.Sleep(10 * time.Millisecond) // Allow full initialization
 			return true
 		}
@@ -293,7 +279,7 @@ func TestDispatchPriceUpdateBasic(t *testing.T) {
 	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
 
 	// Initialize minimal core setup
-	coreRings[0] = ring56.New(constants.DefaultRingSize)
+	Router.coreRings[0] = ring56.New(constants.DefaultRingSize)
 
 	// Create test log with valid Uniswap V2 Sync event data
 	// Format: 0x + 64 chars (reserve0) + 64 chars (reserve1)
@@ -308,7 +294,7 @@ func TestDispatchPriceUpdateBasic(t *testing.T) {
 
 	// Verify message was queued
 	time.Sleep(10 * time.Millisecond) // Allow processing
-	messagePtr := coreRings[0].Pop()
+	messagePtr := Router.coreRings[0].Pop()
 	if messagePtr == nil {
 		t.Fatal("No message received in core ring")
 	}
@@ -333,7 +319,7 @@ func TestDispatchPriceUpdateMultiCore(t *testing.T) {
 	// Setup multiple cores
 	numCores := 4
 	for i := 0; i < numCores; i++ {
-		coreRings[i] = ring56.New(constants.DefaultRingSize)
+		Router.coreRings[i] = ring56.New(constants.DefaultRingSize)
 		RegisterPairToCoreRouting(TestPairETH_DAI, uint8(i))
 	}
 
@@ -353,7 +339,7 @@ func TestDispatchPriceUpdateMultiCore(t *testing.T) {
 	// Verify all cores received the message
 	time.Sleep(10 * time.Millisecond)
 	for i := 0; i < numCores; i++ {
-		messagePtr := coreRings[i].Pop()
+		messagePtr := Router.coreRings[i].Pop()
 		if messagePtr == nil {
 			t.Errorf("Core %d did not receive message", i)
 			continue
@@ -371,7 +357,7 @@ func TestDispatchPriceUpdateUnknownAddress(t *testing.T) {
 	defer cleanup()
 
 	// Setup core but don't register the address
-	coreRings[0] = ring56.New(constants.DefaultRingSize)
+	Router.coreRings[0] = ring56.New(constants.DefaultRingSize)
 
 	// Create test event for unregistered address
 	syncData := "0x" +
@@ -386,7 +372,7 @@ func TestDispatchPriceUpdateUnknownAddress(t *testing.T) {
 
 	// Verify no message was sent (unknown address should be ignored)
 	time.Sleep(10 * time.Millisecond)
-	messagePtr := coreRings[0].Pop()
+	messagePtr := Router.coreRings[0].Pop()
 	if messagePtr != nil {
 		t.Error("Message should not be sent for unknown address")
 	}
@@ -399,7 +385,7 @@ func TestDispatchPriceUpdateInvalidData(t *testing.T) {
 	// Register test pair and setup core
 	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
 	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
-	coreRings[0] = ring56.New(constants.DefaultRingSize)
+	Router.coreRings[0] = ring56.New(constants.DefaultRingSize)
 
 	// Test cases for legitimate on-chain scenarios that should be handled gracefully
 	testCases := []struct {
@@ -423,7 +409,7 @@ func TestDispatchPriceUpdateInvalidData(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Clear any existing messages
-			for coreRings[0].Pop() != nil {
+			for Router.coreRings[0].Pop() != nil {
 			}
 
 			logView := createTestLogView(TestAddressETH_DAI, tc.data)
@@ -433,7 +419,7 @@ func TestDispatchPriceUpdateInvalidData(t *testing.T) {
 
 			time.Sleep(10 * time.Millisecond)
 
-			messagePtr := coreRings[0].Pop()
+			messagePtr := Router.coreRings[0].Pop()
 			if messagePtr == nil {
 				t.Errorf("Should generate message for legitimate case %s", tc.name)
 				return
@@ -465,7 +451,7 @@ func TestDispatchPriceUpdateMalformedDataPanic(t *testing.T) {
 	// Register test pair and setup core
 	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
 	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
-	coreRings[0] = ring56.New(constants.DefaultRingSize)
+	Router.coreRings[0] = ring56.New(constants.DefaultRingSize)
 
 	// Test that malformed data causes expected panic (performance-critical code should fail fast on bad input)
 	t.Run("Malformed data should panic (by design)", func(t *testing.T) {
@@ -718,7 +704,7 @@ func TestCycleFanoutMapping(t *testing.T) {
 	}
 
 	for _, pairID := range expectedPairs {
-		if shards, exists := pairWorkloadShards[pairID]; !exists || len(shards) == 0 {
+		if shards, exists := Router.pairWorkloadShards[pairID]; !exists || len(shards) == 0 {
 			t.Errorf("Pair %d not found in workload shards", pairID)
 		}
 	}
@@ -732,7 +718,7 @@ func TestCycleFanoutMapping(t *testing.T) {
 
 	// Collect all shards
 	var allShards []PairWorkloadShard
-	for _, shardList := range pairWorkloadShards {
+	for _, shardList := range Router.pairWorkloadShards {
 		allShards = append(allShards, shardList...)
 	}
 
@@ -952,7 +938,7 @@ func TestShutdownWithActiveTraffic(t *testing.T) {
 	// Setup system with registered addresses
 	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
 	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
-	coreRings[0] = ring56.New(constants.DefaultRingSize)
+	Router.coreRings[0] = ring56.New(constants.DefaultRingSize)
 
 	// Create traffic generator
 	trafficDone := make(chan bool)
@@ -1065,7 +1051,7 @@ func TestHighVolumeStressTest(t *testing.T) {
 	// Setup single pair to avoid complexity
 	RegisterTradingPairAddress([]byte(TestAddressETH_DAI[2:]), TestPairETH_DAI)
 	RegisterPairToCoreRouting(TestPairETH_DAI, 0)
-	coreRings[0] = ring56.New(constants.DefaultRingSize)
+	Router.coreRings[0] = ring56.New(constants.DefaultRingSize)
 
 	// Fixed sync data pattern - no dynamic generation
 	syncData := "0x" +
@@ -1079,7 +1065,7 @@ func TestHighVolumeStressTest(t *testing.T) {
 		DispatchPriceUpdate(logView)
 
 		// Clear ring buffer to prevent overflow
-		coreRings[0].Pop()
+		Router.coreRings[0].Pop()
 	}
 
 	t.Logf("Successfully processed %d price updates", updateCount)
