@@ -519,7 +519,7 @@ func InitializeAggregatorSystem() {
 	}()
 }
 
-// signalGCComplete notifies all system components of initialization completion.
+// SignalGCComplete notifies all system components of initialization completion.
 // Signal coordination enables synchronized transition to operational processing
 // across all concurrent goroutines participating in system initialization.
 //
@@ -527,6 +527,6 @@ func InitializeAggregatorSystem() {
 //   - Called after all initialization operations complete successfully
 //   - Triggers transition from cooperative to high-performance processing modes
 //   - Ensures consistent system state before operational activation
-func signalGCComplete() {
+func SignalGCComplete() {
 	close(Aggregator.gcComplete)
 }
