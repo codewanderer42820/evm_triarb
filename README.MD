@@ -4,3 +4,5 @@ The deed is done.
 
 
 HELP
+
+putting on clothes bags packed ready to adventure
