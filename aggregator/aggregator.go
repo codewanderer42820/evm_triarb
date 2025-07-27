@@ -284,6 +284,12 @@ func (agg *AggregatorState) extractOpportunityBundle() {
 		// integration into execution bundle construction process.
 		oh, _, _ := queue.PeepMin()
 		// Integration point: agg.opportunities[oh] contains opportunity data for execution
+		opportunity := &agg.opportunities[oh]
+
+		// TODO: Send opportunity to execution system
+		// Format: types.ArbitrageOpportunity with cycle pairs, profitability, and liquidity data
+		_ = opportunity // Placeholder to prevent unused variable error
+
 		queue.UnlinkMin(oh)
 
 		// Remove stratum from meta-queue tracking when depleted.
@@ -425,9 +431,6 @@ func InitializeAggregatorSystem() {
 	// of hardware performance variations or core count differences.
 	iterationsPerMs := benchmarkIterations / int(elapsed/TargetFinalizationTime)
 	FinalizationThreshold = uint64(iterationsPerMs / coreCount)
-	if FinalizationThreshold < MinFinalizationThreshold {
-		FinalizationThreshold = MinFinalizationThreshold
-	}
 
 	// Initialize coordination channel for multi-phase startup synchronization.
 	// Channel enables coordinated transition between initialization and operational
