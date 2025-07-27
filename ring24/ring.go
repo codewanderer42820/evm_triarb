@@ -243,3 +243,15 @@ func (r *Ring) PopWait() *[24]byte {
 		}
 	}
 }
+
+// IsReady returns true if the ring buffer is ready for use.
+// This indicates the ring was properly created via New() and can accept operations.
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+//go:registerparams
+func (r *Ring) IsReady() bool {
+	return r.mask != 0
+}
