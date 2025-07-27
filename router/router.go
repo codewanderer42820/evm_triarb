@@ -582,6 +582,10 @@ func LookupPairByAddress(address40HexChars []byte) types.TradingPairID {
 //go:inline
 //go:registerparams
 func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage) {
+	// Two lookups, both are predictable Robin Hood accesses
+	queueIndex, hasQueue := engine.pairToQueueLookup.Get(uint32(update.pairID))
+	fanoutIndex, hasFanout := engine.pairToFanoutIndex.Get(uint32(update.pairID))
+
 	// Select tick based on core direction - predictable per core
 	var currentTick float64
 	if engine.isReverseDirection {
@@ -589,10 +593,6 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 	} else {
 		currentTick = update.forwardTick
 	}
-
-	// Two lookups, both are predictable Robin Hood accesses
-	queueIndex, hasQueue := engine.pairToQueueLookup.Get(uint32(update.pairID))
-	fanoutIndex, hasFanout := engine.pairToFanoutIndex.Get(uint32(update.pairID))
 
 	// Process queue if exists (predictable branch - consistent per pair)
 	if hasQueue {
