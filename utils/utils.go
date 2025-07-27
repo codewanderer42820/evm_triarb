@@ -62,6 +62,7 @@ func Load128(b []byte) (uint64, uint64) {
 // LoadBE64 performs 8-byte load from memory as big-endian uint64.
 // Used for network protocols and cryptographic operations requiring
 // big-endian byte order regardless of host architecture.
+// Go compiler optimizes this pattern to a single BSWAP instruction.
 //
 //go:norace
 //go:nocheckptr
