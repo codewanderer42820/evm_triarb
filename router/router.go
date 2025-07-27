@@ -222,38 +222,62 @@ type CryptoRandomGenerator struct {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// GLOBAL STATE VARIABLES
+// ROUTER STATE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Global state management with cache line isolation and access frequency optimization.
-// Variables grouped by access patterns and aligned to prevent false sharing between
-// different functional areas. Each block represents a distinct cache line boundary
-// to maximize memory bandwidth utilization and minimize inter-core contention.
+// RouterState encapsulates all system state for arbitrage routing and core management.
+// Memory layout optimized for cache efficiency with fields ordered by access frequency
+// in the primary processing loop. Each cache line group contains related data accessed
+// together during event processing to minimize cache misses.
+//
+// Access Pattern Optimization:
+//   - Fields ordered by exact hot path sequence for optimal prefetching
+//   - All arrays are 64-byte aligned and won't fragment cache lines
+//   - Cold initialization data isolated to prevent false sharing
 //
 //go:notinheap
 //go:align 64
-var (
-	// CACHE LINE GROUP 1: Address lookup (accessed together in hot path)
+type RouterState struct {
+	// CACHE LINE GROUP 1: Address lookup (FIRST in hot path - accessed together)
+	// Nuclear hot - accessed every time we process an event for address resolution
 	addressToPairMap  [constants.AddressTableCapacity]types.TradingPairID
 	packedAddressKeys [constants.AddressTableCapacity]PackedAddress
 
-	// CACHE LINE GROUP 2: Core routing (accessed after address lookup)
+	// CACHE LINE GROUP 2: Core routing (SECOND in hot path)
+	// Extremely hot - accessed immediately after successful address resolution
 	pairToCoreRouting [constants.PairRoutingTableCapacity]uint64
 
-	// CACHE LINE GROUP 3: Ring buffers (NUCLEAR HOT - accessed after routing)
+	// CACHE LINE GROUP 3: Ring buffers (THIRD in hot path - tight delivery loop)
+	// Nuclear hot - accessed in message delivery loop, potentially multiple times per event
 	coreRings [constants.MaxSupportedCores]*ring56.Ring
 
-	// CACHE LINE GROUP 4: Synchronization (accessed during phase transitions)
+	// CACHE LINE GROUP 4: Core engines (accessed during initialization and management)
+	// Warm - accessed during system setup and core management operations
+	coreEngines [constants.MaxSupportedCores]*ArbitrageEngine
+
+	// CACHE LINE GROUP 5: Synchronization (accessed during phase transitions)
+	// Cold - only used during initialization coordination
 	gcComplete chan struct{} // Channel used for two-stage initialization coordination
 
 	// COLD: Only accessed during initialization
-	coreEngines        [constants.MaxSupportedCores]*ArbitrageEngine
 	pairWorkloadShards map[types.TradingPairID][]PairWorkloadShard
-)
+}
 
-// Initialize the GC completion channel during package initialization
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// GLOBAL STATE AND RUNTIME CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Primary router instance with optimized memory layout and cache alignment.
+// Single global instance eliminates pointer indirection and enables direct
+// memory access in performance-critical code paths.
+//
+//go:notinheap
+//go:align 64
+var Router RouterState
+
+// Initialize the router state during package initialization
 func init() {
-	gcComplete = make(chan struct{})
+	Router.gcComplete = make(chan struct{})
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -467,7 +491,7 @@ func DispatchPriceUpdate(logView *types.LogView) {
 
 	// Distribute the price update message to all CPU cores that process this trading pair
 	// We use guaranteed delivery to ensure no core misses important price updates
-	coreAssignments := pairToCoreRouting[pairID]          // Get bitmask of target cores
+	coreAssignments := Router.pairToCoreRouting[pairID]   // Get bitmask of target cores
 	messageBytes := (*[56]byte)(unsafe.Pointer(&message)) // Convert to 56-byte array for ring56
 
 	// Continue delivery attempts until all cores have received the message
@@ -481,7 +505,7 @@ func DispatchPriceUpdate(logView *types.LogView) {
 			coreID := bits.TrailingZeros64(currentAssignments)
 
 			// Try to push the message to this core's lock-free ring buffer
-			if !coreRings[coreID].Push(messageBytes) {
+			if !Router.coreRings[coreID].Push(messageBytes) {
 				// Ring buffer was full, mark this core for retry in next round
 				failedCores |= 1 << coreID
 			}
@@ -513,8 +537,8 @@ func LookupPairByAddress(address40HexChars []byte) types.TradingPairID {
 	// Robin Hood hash table lookup with early termination
 	for {
 		// Get the current entry at this table position
-		currentPairID := addressToPairMap[i]
-		currentKey := packedAddressKeys[i]
+		currentPairID := Router.addressToPairMap[i]
+		currentKey := Router.packedAddressKeys[i]
 
 		// Compare all three 64-bit words of the packed address simultaneously
 		// If keyDiff is zero, all words match and we found our target address
@@ -667,32 +691,32 @@ func RegisterTradingPairAddress(address40HexChars []byte, pairID types.TradingPa
 
 	// Robin Hood hash table insertion with displacement
 	for {
-		currentPairID := addressToPairMap[i]
+		currentPairID := Router.addressToPairMap[i]
 
 		// If we find an empty slot, insert our entry here
 		if currentPairID == 0 {
-			packedAddressKeys[i] = key
-			addressToPairMap[i] = pairID
+			Router.packedAddressKeys[i] = key
+			Router.addressToPairMap[i] = pairID
 			return
 		}
 
 		// If we find an existing entry with the same key, update it
-		if packedAddressKeys[i].isEqual(key) {
-			addressToPairMap[i] = pairID // Update existing entry
+		if Router.packedAddressKeys[i].isEqual(key) {
+			Router.addressToPairMap[i] = pairID // Update existing entry
 			return
 		}
 
 		// Robin Hood displacement: check if we should displace the current entry
 		// If the current entry has traveled less distance than us, we displace it
-		currentKey := packedAddressKeys[i]
+		currentKey := Router.packedAddressKeys[i]
 		currentKeyHash := hashPackedAddressToIndex(currentKey)
 		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & uint64(constants.AddressTableMask)
 
 		if currentDist < dist {
 			// Displace the current entry (it's closer to its ideal position than we are)
 			// Swap our entry with the current entry and continue inserting the displaced entry
-			key, packedAddressKeys[i] = packedAddressKeys[i], key
-			pairID, addressToPairMap[i] = addressToPairMap[i], pairID
+			key, Router.packedAddressKeys[i] = Router.packedAddressKeys[i], key
+			pairID, Router.addressToPairMap[i] = Router.addressToPairMap[i], pairID
 			dist = currentDist
 		}
 
@@ -712,7 +736,7 @@ func RegisterTradingPairAddress(address40HexChars []byte, pairID types.TradingPa
 func RegisterPairToCoreRouting(pairID types.TradingPairID, coreID uint8) {
 	// Add this core to the bitmask of cores that should receive updates for this pair
 	// Multiple cores can process the same pair for load balancing and redundancy
-	pairToCoreRouting[pairID] |= 1 << coreID
+	Router.pairToCoreRouting[pairID] |= 1 << coreID
 }
 
 // newCryptoRandomGenerator creates deterministic random number generators for load balancing.
@@ -825,12 +849,12 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 
 	// Pre-allocate all structures with exact capacities
 	temporaryEdges := make(map[types.TradingPairID][]CycleEdge, len(edgeCounts))
-	pairWorkloadShards = make(map[types.TradingPairID][]PairWorkloadShard, len(edgeCounts))
+	Router.pairWorkloadShards = make(map[types.TradingPairID][]PairWorkloadShard, len(edgeCounts))
 
 	for pairID, edgeCount := range edgeCounts {
 		temporaryEdges[pairID] = make([]CycleEdge, edgeCount)
 		shardCount := shardCounts[pairID]
-		pairWorkloadShards[pairID] = make([]PairWorkloadShard, shardCount)
+		Router.pairWorkloadShards[pairID] = make([]PairWorkloadShard, shardCount)
 	}
 
 	// Populate edges using direct indexing to avoid reallocations
@@ -858,7 +882,7 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 				endOffset = len(cycleEdges)
 			}
 
-			pairWorkloadShards[pairID][shardIdx] = PairWorkloadShard{
+			Router.pairWorkloadShards[pairID][shardIdx] = PairWorkloadShard{
 				pairID:     pairID,
 				cycleEdges: cycleEdges[offset:endOffset],
 			}
@@ -1088,13 +1112,13 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 
 	// Register this engine and ring in the global arrays for message routing
 	// This is the moment the core becomes globally visible
-	coreEngines[coreID] = engine
-	coreRings[coreID] = ring
+	Router.coreEngines[coreID] = engine
+	Router.coreRings[coreID] = ring
 
 	// Cache the ring buffer reference immediately after registration
 	// This eliminates array lookups and bounds checking in hot loops
 	// CRITICAL: Must happen before signaling ready to avoid race conditions
-	hotRing := coreRings[coreID]
+	hotRing := Router.coreRings[coreID]
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 4: SIGNAL COMPLETE READINESS
@@ -1122,7 +1146,7 @@ gcCooperativeSpin:
 		// Check if main.go has completed all GC operations and memory optimization
 		// Non-blocking select ensures we don't stall event processing
 		select {
-		case <-gcComplete:
+		case <-Router.gcComplete:
 			// GC phase complete - transition to hot spinning mode
 			break gcCooperativeSpin
 		default:
@@ -1175,7 +1199,7 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 
 	// Count exact total shards for perfect channel sizing
 	totalShards := 0
-	for _, shardBuckets := range pairWorkloadShards {
+	for _, shardBuckets := range Router.pairWorkloadShards {
 		totalShards += len(shardBuckets)
 	}
 
@@ -1197,7 +1221,7 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 
 	// Distribute workload shards across all available CPU cores
 	currentCore := 0
-	for _, shardBuckets := range pairWorkloadShards {
+	for _, shardBuckets := range Router.pairWorkloadShards {
 		for _, shard := range shardBuckets {
 			forwardCore := currentCore % forwardCoreCount
 			reverseCore := forwardCore + forwardCoreCount
@@ -1210,7 +1234,7 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 			routingMask := uint64(1<<forwardCore | 1<<reverseCore)
 			for _, cycleEdge := range shard.cycleEdges {
 				for _, pairID := range cycleEdge.cyclePairs {
-					pairToCoreRouting[pairID] |= routingMask
+					Router.pairToCoreRouting[pairID] |= routingMask
 				}
 			}
 			currentCore++
@@ -1226,7 +1250,7 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 	initWaitGroup.Wait()
 
 	// Clean up global workload data structures immediately after distribution
-	pairWorkloadShards = nil
+	Router.pairWorkloadShards = nil
 
 	debug.DropMessage("CORES", utils.Itoa(coreCount)+" cores ready")
 }
@@ -1240,5 +1264,5 @@ func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 //go:inline
 //go:registerparams
 func SignalGCComplete() {
-	close(gcComplete)
+	close(Router.gcComplete)
 }
