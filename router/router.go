@@ -584,7 +584,7 @@ func LookupPairByAddress(address40HexChars []byte) types.TradingPairID {
 func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage) {
 	// Two lookups, both are predictable Robin Hood accesses
 	queueIndex, hasQueue := engine.pairToQueueLookup.Get(uint32(update.pairID))
-	fanoutIndex, hasFanout := engine.pairToFanoutIndex.Get(uint32(update.pairID))
+	fanoutIndex, _ := engine.pairToFanoutIndex.Get(uint32(update.pairID))
 
 	// Select tick based on core direction - predictable per core
 	var currentTick float64
@@ -647,29 +647,30 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 		}
 	}
 
-	// Only process fanout if this pair has fanout entries
-	if hasFanout {
-		for _, fanoutEntry := range engine.cycleFanoutTable[fanoutIndex] {
-			// Get the specific cycle that needs updating
-			cycle := &engine.cycleStates[fanoutEntry.cycleIndex]
+	// Process fanout entries for cycle state updates
+	// All pairs receive fanout indices during initialization, with empty slices allocated
+	// for pairs without actual fanout requirements. Empty slice iteration incurs zero
+	// computational overhead while eliminating branch prediction penalties in hot path.
+	for _, fanoutEntry := range engine.cycleFanoutTable[fanoutIndex] {
+		// Get the specific cycle that needs updating
+		cycle := &engine.cycleStates[fanoutEntry.cycleIndex]
 
-			// Update the tick value for this pair's position within the cycle
-			// This is NOT the main pair position, so we store the actual tick value
-			cycle.tickValues[fanoutEntry.edgeIndex] = currentTick
+		// Update the tick value for this pair's position within the cycle
+		// This is NOT the main pair position, so we store the actual tick value
+		cycle.tickValues[fanoutEntry.edgeIndex] = currentTick
 
-			// Update liquidity tracking for this pair within the cycle
-			// Store leading zero counts for instant liquidity assessment
-			cycle.leadingZerosA[fanoutEntry.edgeIndex] = update.leadingZerosA
-			cycle.leadingZerosB[fanoutEntry.edgeIndex] = update.leadingZerosB
+		// Update liquidity tracking for this pair within the cycle
+		// Store leading zero counts for instant liquidity assessment
+		cycle.leadingZerosA[fanoutEntry.edgeIndex] = update.leadingZerosA
+		cycle.leadingZerosB[fanoutEntry.edgeIndex] = update.leadingZerosB
 
-			// Recalculate the cycle's priority based on its new total profitability
-			// Note: One of these tick values is always zero (the main pair's position)
-			tickSum := cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
-			newPriority := int64((tickSum + constants.TickClampingBound) * constants.QuantizationScale)
+		// Recalculate the cycle's priority based on its new total profitability
+		// Note: One of these tick values is always zero (the main pair's position)
+		tickSum := cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
+		newPriority := int64((tickSum + constants.TickClampingBound) * constants.QuantizationScale)
 
-			// Update the cycle's position in its priority queue to reflect new profitability
-			engine.priorityQueues[fanoutEntry.queueIndex].MoveTick(fanoutEntry.queueHandle, newPriority)
-		}
+		// Update the cycle's position in its priority queue to reflect new profitability
+		engine.priorityQueues[fanoutEntry.queueIndex].MoveTick(fanoutEntry.queueHandle, newPriority)
 	}
 }
 
