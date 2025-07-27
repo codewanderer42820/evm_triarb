@@ -61,8 +61,7 @@ const (
 	MaxBundleSize = 32 // Maximum opportunities per execution bundle for gas optimization
 
 	// Finalization timing constants
-	TargetFinalizationTime   = 1 * time.Millisecond // Target time for consistent finalization timing
-	MinFinalizationThreshold = 100                  // Minimum threshold for system stability
+	TargetFinalizationTime = 1 * time.Millisecond // Target time for consistent finalization timing
 
 	// Profitability quantization for priority queue mapping (used in every opportunity)
 	ProfitabilityClampingBound = 192.0                                                    // Input range limit: [-192, +192]
