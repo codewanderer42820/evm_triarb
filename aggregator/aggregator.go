@@ -73,29 +73,31 @@ const (
 // AGGREGATOR STATE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// AggregatorState encapsulates all system state for arbitrage opportunity aggregation.
+// AggregatorState encapsulates core system state for arbitrage opportunity aggregation.
 // Memory layout optimized for cache efficiency with fields ordered by access frequency
-// in the primary processing loop. Each cache line group contains related data accessed
-// together during opportunity processing to minimize cache misses.
+// in the primary processing loop. Only persistent state remains in struct.
 //
 // Access Pattern Optimization:
-//   - Cache line grouping based on empirical access frequency measurement
-//   - Hot path data placed in early cache lines for predictable prefetching
-//   - Cold initialization data isolated to prevent false sharing
+//   - Hot path data (coreRings) in first cache line
+//   - Opportunity processing data (occupied, opportunities) grouped together
+//   - Queue management data (queues, stratumTracker) grouped together
+//   - Shared memory arena isolated for queue operations
 //
 //go:notinheap
 //go:align 64
 type AggregatorState struct {
+	// ═══════════════════════════════════════════════════════════════════════════════════════════════
+	// CACHE LINE 1: HOT PATH - ACCESSED EVERY ITERATION
+	// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
 	// Primary communication interface accessed every processing iteration.
 	// Ring buffers provide lock-free message passing between router cores and aggregator.
 	// Frequency: Accessed once per core per iteration regardless of data availability.
 	coreRings [constants.MaxSupportedCores]ring56.Ring
 
-	// Shared memory arena for all priority queue operations and data storage.
-	// All CompactQueue128 instances allocate entries from this unified memory pool
-	// to ensure cache locality and minimize memory fragmentation during operation.
-	// Frequency: Accessed during every queue operation (Push, Pop, MoveTick).
-	sharedArena [TableCapacity]compactqueue128.Entry
+	// ═══════════════════════════════════════════════════════════════════════════════════════════════
+	// CACHE LINE 2: OPPORTUNITY PROCESSING - ACCESSED WHEN DATA AVAILABLE
+	// ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 	// Hash table occupancy tracking for efficient slot management and bulk operations.
 	// Bitmap enables rapid occupancy testing and provides efficient bulk reset capability
@@ -109,6 +111,10 @@ type AggregatorState struct {
 	// Frequency: Accessed once per opportunity for storage and retrieval operations.
 	opportunities [TableCapacity]types.ArbitrageOpportunity
 
+	// ═══════════════════════════════════════════════════════════════════════════════════════════════
+	// CACHE LINE 3: QUEUE MANAGEMENT - ACCESSED PER OPPORTUNITY AND EXTRACTION
+	// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
 	// Liquidity-stratified priority queues for dual-layer opportunity ordering.
 	// Each queue contains opportunities within a specific liquidity tier, ordered by profitability.
 	// Queue selection by leading zero count ensures execution risk assessment precedence.
@@ -121,21 +127,36 @@ type AggregatorState struct {
 	// Frequency: Accessed during new opportunity insertion and bundle extraction phases.
 	stratumTracker compactqueue128.CompactQueue128
 
+	// ═══════════════════════════════════════════════════════════════════════════════════════════════
+	// CACHE LINE 4: SHARED MEMORY ARENA - ACCESSED DURING QUEUE OPERATIONS
+	// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+	// Shared memory arena for all priority queue operations and data storage.
+	// All CompactQueue128 instances allocate entries from this unified memory pool
+	// to ensure cache locality and minimize memory fragmentation during operation.
+	// Frequency: Accessed during every queue operation (Push, Pop, MoveTick).
+	sharedArena [TableCapacity]compactqueue128.Entry
+
+	// ═══════════════════════════════════════════════════════════════════════════════════════════════
+	// CACHE LINE 5: COLD PATH - INFREQUENT ACCESS
+	// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
 	// Sequential handle allocator for queue entry management.
 	// Provides unique identifiers for queue entries to enable efficient priority updates
 	// and entry lifecycle management across queue operations.
 	// Frequency: Accessed only during new stratum activation (subset of new opportunities).
-	nextHandle uint64
+	nextHandle compactqueue128.Handle
 
 	// Initialization coordination channel for two-phase system startup.
-	// Enables synchronized transition from initialization to operational phases across
-	// multiple goroutines without race conditions or premature activation.
-	// Frequency: Accessed only during system startup and shutdown sequences.
-	gcComplete chan struct{}
+	// Enables coordinated transition between initialization and operational
+	// phases across multiple concurrent goroutines without race conditions.
+	// Cold - only used during initialization coordination
+	gcComplete chan struct{} // 8B - Channel used for two-stage initialization coordination
+	_          [48]byte      // 48B - Padding to reach cache line boundary (8 + 8 + 48 = 64)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// GLOBAL STATE AND RUNTIME CONFIGURATION
+// GLOBAL STATE AND FUNCTION-LOCAL VARIABLES
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 // Primary aggregator instance with optimized memory layout and cache alignment.
@@ -146,11 +167,54 @@ type AggregatorState struct {
 //go:align 64
 var Aggregator AggregatorState
 
-// Adaptive finalization threshold calculated empirically at system startup.
-// Threshold value determined through runtime performance measurement to achieve
-// consistent TargetFinalizationTime timing across diverse hardware configurations.
-// Value automatically scales inversely with core count to maintain timing consistency.
-var FinalizationThreshold uint64
+// Initialize the aggregator state during package initialization
+func init() {
+	Aggregator.gcComplete = make(chan struct{})
+}
+
+// SpinUntilAllCoreRingsPopulated spins hot until all core rings are initialized and populated.
+// This function blocks the router from proceeding until all destination rings are ready.
+// Returns pointers to the populated core rings once all entries are non-nil.
+//
+// Design rationale:
+//   - Hot spinning provides minimum latency for startup coordination
+//   - Validation ensures no nil rings before router begins message dispatch
+//   - Pointer return avoids copying large ring structures
+//
+//go:norace
+//go:nocheckptr
+//go:nosplit
+//go:inline
+func SpinUntilAllCoreRingsPopulated(expectedCoreCount int) [constants.MaxSupportedCores]*ring56.Ring {
+	for {
+		i := 0
+
+		// Check all expected cores for ring readiness
+		// Use IsReady() method to check if ring has been properly set up
+		// An unready ring will return false, ready rings return true
+		for ; i < expectedCoreCount; i++ {
+			if !Aggregator.coreRings[i].IsReady() {
+				break // Found unready ring, exit inner loop
+			}
+		}
+
+		// If i == expectedCoreCount, all cores were checked without breaking (all ready)
+		// If i < expectedCoreCount, we broke early (found unready ring)
+		if i == expectedCoreCount {
+			break // All rings are ready, exit outer loop
+		}
+
+		// Hot spin - no yielding for minimum latency coordination
+		// This is startup-only code, so CPU usage is acceptable
+	}
+
+	// All cores are populated, build and return pointers to the rings
+	var ringPointers [constants.MaxSupportedCores]*ring56.Ring
+	for i := 0; i < constants.MaxSupportedCores; i++ {
+		ringPointers[i] = &Aggregator.coreRings[i]
+	}
+	return ringPointers
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // CORE OPPORTUNITY PROCESSING
@@ -227,8 +291,9 @@ func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) 
 
 		// Handle allocation and stratum tracking with conditional execution.
 		// Operations scaled by isFirst flag to execute only for first opportunities.
-		trackerHandle := compactqueue128.Handle(agg.nextHandle)
-		agg.nextHandle += isFirst
+		nextHandle := agg.nextHandle
+		agg.nextHandle += compactqueue128.Handle(isFirst)
+		trackerHandle := nextHandle
 		stratumTick := int64(opp.LeadingZeroCount) * int64(isFirst)
 		stratumData := opp.LeadingZeroCount * isFirst
 		agg.stratumTracker.Push(stratumTick, trackerHandle, stratumData)
@@ -306,11 +371,10 @@ func (agg *AggregatorState) extractOpportunityBundle() {
 // efficiently while maintaining cache-friendly access patterns for subsequent operations.
 //
 // Reset Operations:
-//  1. Handle allocator reinitialization for clean queue management
-//  2. Occupancy bitmap bulk clearing using direct iteration
-//  3. Opportunity storage bulk zeroing using unsafe pointer arithmetic
-//  4. Priority queue state clearing via memory layout exploitation
-//  5. Meta-queue state clearing using identical memory operations
+//  1. Occupancy bitmap bulk clearing using direct iteration
+//  2. Opportunity storage bulk zeroing using unsafe pointer arithmetic
+//  3. Priority queue state clearing via memory layout exploitation
+//  4. Meta-queue state clearing using identical memory operations
 //
 // Performance Optimization:
 //   - Bulk memory operations minimize system call overhead
@@ -322,11 +386,6 @@ func (agg *AggregatorState) extractOpportunityBundle() {
 //go:nosplit
 //go:inline
 func (agg *AggregatorState) reset() {
-	// Reinitialize handle allocator for clean queue entry management.
-	// Sequential allocation provides predictable memory access patterns
-	// and eliminates fragmentation in subsequent processing cycles.
-	agg.nextHandle = 0
-
 	// Clear occupancy bitmap using direct iteration for optimal cache utilization.
 	// Linear access pattern ensures efficient cache line utilization and
 	// predictable memory bandwidth consumption during bulk clearing operations.
@@ -409,8 +468,8 @@ func InitializeAggregatorSystem() {
 	}
 
 	// Execute 1,000,000 iterations of exact polling loop for timing measurement.
-	// Benchmark replicates operational conditions to ensure measurement accuracy
-	// and representative performance characteristics under production workloads.
+	// Benchmark runs for at least 1ms to establish bare minimum workload baseline
+	// that represents typical empty-spin conditions during low activity periods.
 	const benchmarkIterations = 1000000
 	start := time.Now()
 
@@ -429,9 +488,9 @@ func InitializeAggregatorSystem() {
 	// Threshold calculation ensures TargetFinalizationTime timing regardless
 	// of hardware performance variations or core count differences.
 	iterationsPerMs := benchmarkIterations / int(elapsed/TargetFinalizationTime)
-	FinalizationThreshold = uint64(iterationsPerMs / coreCount)
+	finalizationThreshold := uint64(iterationsPerMs / coreCount)
 
-	// Initialize coordination channel for multi-phase startup synchronization.
+	// Initialize global coordination channel for multi-phase startup synchronization.
 	// Channel enables coordinated transition between initialization and operational
 	// phases across multiple concurrent goroutines without race conditions.
 	Aggregator.gcComplete = make(chan struct{})
@@ -462,6 +521,9 @@ func InitializeAggregatorSystem() {
 			Aggregator.queues[i] = *compactqueue128.New(arenaPtr)
 		}
 
+		// Reset counter for handle allocation
+		Aggregator.nextHandle = 0
+
 		// Cooperative initialization coordination with systematic state draining.
 		// Coordination phase ensures all system components reach operational
 		// readiness before processing activation to prevent race conditions.
@@ -487,6 +549,7 @@ func InitializeAggregatorSystem() {
 		// Primary operational loop with optimized opportunity processing.
 		// Loop implements adaptive block finalization, efficient opportunity ingestion,
 		// and automatic state management for continuous high-frequency operation.
+		// All finalization-related variables are now local to this function.
 		emptySpins := uint64(0)
 		for {
 			dataCount := uint64(0)
@@ -510,7 +573,7 @@ func InitializeAggregatorSystem() {
 			// preventing premature finalization during active trading periods.
 			hasData := (dataCount - 1) >> 63
 			emptySpins = (emptySpins + 1) & hasData
-			shouldFinalize := ((emptySpins - FinalizationThreshold) >> 63) ^ 1
+			shouldFinalize := ((emptySpins - finalizationThreshold) >> 63) ^ 1
 
 			if shouldFinalize != 0 {
 				Aggregator.extractOpportunityBundle()
