@@ -62,7 +62,7 @@ func testSetup(_ *testing.T) func() {
 	originalRouter := Router
 
 	// Reset Router state
-	Router = RouterState{}
+	Router = ArbitrageRouter{}
 	Router.gcComplete = make(chan struct{})
 
 	// Reset control system

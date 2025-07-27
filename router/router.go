@@ -222,22 +222,22 @@ type CryptoRandomGenerator struct {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ROUTER STATE MANAGEMENT
+// ARBITRAGE ROUTER STATE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// RouterState encapsulates all system state for arbitrage routing and core management.
+// ArbitrageRouter encapsulates all system state for arbitrage event routing and core management.
 // Memory layout optimized for cache efficiency with fields ordered by access frequency
 // in the primary processing loop. Each cache line group contains related data accessed
 // together during event processing to minimize cache misses.
 //
 // Access Pattern Optimization:
-//   - Fields ordered by exact hot path sequence for optimal prefetching
+//   - Fields ordered by exact hot path access sequence for optimal prefetching
 //   - All arrays are 64-byte aligned and won't fragment cache lines
 //   - Cold initialization data isolated to prevent false sharing
 //
 //go:notinheap
 //go:align 64
-type RouterState struct {
+type ArbitrageRouter struct {
 	// CACHE LINE GROUP 1: Address lookup (FIRST in hot path - accessed together)
 	// Nuclear hot - accessed every time we process an event for address resolution
 	addressToPairMap  [constants.AddressTableCapacity]types.TradingPairID
@@ -257,7 +257,8 @@ type RouterState struct {
 
 	// CACHE LINE GROUP 5: Synchronization (accessed during phase transitions)
 	// Cold - only used during initialization coordination
-	gcComplete chan struct{} // Channel used for two-stage initialization coordination
+	gcComplete chan struct{} // 8B - Channel used for two-stage initialization coordination
+	_          [56]byte      // 56B - Padding to reach cache line boundary (8 + 56 = 64)
 
 	// COLD: Only accessed during initialization
 	pairWorkloadShards map[types.TradingPairID][]PairWorkloadShard
@@ -267,13 +268,13 @@ type RouterState struct {
 // GLOBAL STATE AND RUNTIME CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-// Primary router instance with optimized memory layout and cache alignment.
+// Primary arbitrage router instance with optimized memory layout and cache alignment.
 // Single global instance eliminates pointer indirection and enables direct
 // memory access in performance-critical code paths.
 //
 //go:notinheap
 //go:align 64
-var Router RouterState
+var Router ArbitrageRouter
 
 // Initialize the router state during package initialization
 func init() {
