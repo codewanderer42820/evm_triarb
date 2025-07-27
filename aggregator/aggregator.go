@@ -42,16 +42,21 @@ const (
 	TableCapacity = 1 << 16           // 65,536 hash table slots for opportunity storage
 	TableMask     = TableCapacity - 1 // 65,535 bitmask for hash table indexing operations
 
+	// Occupancy bitmap for efficient hash table slot tracking.
+	// Bitmap organized as 1,024 uint64 words, each covering 64 hash table slots.
+	// This arrangement provides cache-efficient occupancy testing and bulk reset operations.
+	BitmapWords = 1 << 10 // 1,024 uint64 words for hash table occupancy tracking
+
+	// Profitability quantization for priority queue mapping (used in every opportunity)
+	ProfitabilityClampingBound = 192.0                                                    // Input range limit: [-192, +192]
+	MaxPriorityTick            = 127                                                      // Maximum priority tick value
+	ProfitabilityScale         = (MaxPriorityTick - 1) / (2 * ProfitabilityClampingBound) // Scale factor: 126 / 384
+
 	// Liquidity stratification system based on reserve leading zero analysis.
 	// Maximum of 96 strata covers the theoretical range of leading zeros in uint256 values
 	// (3 pairs × 32 hex characters = 96), though practical reserves use uint112 precision.
 	// Each stratum represents a distinct liquidity tier for execution risk assessment.
 	MaxStrata = 96 // Liquidity tier count covering full theoretical hex leading zero range
-
-	// Occupancy bitmap for efficient hash table slot tracking.
-	// Bitmap organized as 1,024 uint64 words, each covering 64 hash table slots.
-	// This arrangement provides cache-efficient occupancy testing and bulk reset operations.
-	BitmapWords = 1 << 10 // 1,024 uint64 words for hash table occupancy tracking
 
 	// Execution bundle size limit balancing transaction efficiency with gas constraints.
 	// Bundle size of 32 opportunities represents optimal balance between:
@@ -62,11 +67,6 @@ const (
 
 	// Finalization timing constants
 	TargetFinalizationTime = 1 * time.Millisecond // Target time for consistent finalization timing
-
-	// Profitability quantization for priority queue mapping (used in every opportunity)
-	ProfitabilityClampingBound = 192.0                                                    // Input range limit: [-192, +192]
-	MaxPriorityTick            = 127                                                      // Maximum priority tick value
-	ProfitabilityScale         = (MaxPriorityTick - 1) / (2 * ProfitabilityClampingBound) // Scale factor: 126 / 384
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
