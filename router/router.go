@@ -139,7 +139,8 @@ type ExtractedCycle struct {
 // Each core operates independently on its assigned subset of trading pairs.
 // This design enables parallel processing while avoiding lock contention.
 //
-// Fields are ordered by access frequency and cache line optimization:
+// Fields are ordered by access frequency and cache line optimization following
+// actual hot path execution sequence:
 //
 //go:notinheap
 //go:align 64
@@ -150,17 +151,18 @@ type ArbitrageEngine struct {
 	// CACHE LINE 2: Secondary lookup table (64B)
 	pairToFanoutIndex localidx.Hash // 64B - Nuclear hot: used in every update
 
-	// CACHE LINE 3: Core processing control and arrays (64B)
+	// CACHE LINE 3: Core processing control and queue operations (64B)
 	isReverseDirection bool                                    // 1B - Nuclear hot: read first in every update
 	_                  [7]byte                                 // 7B - Alignment padding
-	priorityQueues     []pooledquantumqueue.PooledQuantumQueue // 24B - Extremely hot: queue operations
-	cycleStates        []ArbitrageCycleState                   // 24B - Extremely hot: tick calculations
+	priorityQueues     []pooledquantumqueue.PooledQuantumQueue // 24B - Step 1: queue selection
+	sharedArena        []pooledquantumqueue.Entry              // 24B - Step 1: queue operations (used with priorityQueues)
 	_                  [8]byte                                 // 8B - Cache line padding
 
-	// CACHE LINE 4: Fanout processing and shared memory (64B)
-	cycleFanoutTable [][]CycleFanoutEntry       // 24B - Extremely hot: fanout loops
-	sharedArena      []pooledquantumqueue.Entry // 24B - Extremely hot: all queue memory operations
-	_                [16]byte                   // 16B - Cache line padding
+	// CACHE LINE 4: Cycle processing and fanout operations (64B)
+	cycleStates      []ArbitrageCycleState // 24B - Step 2: cycle state updates
+	cycleFanoutTable [][]CycleFanoutEntry  // 24B - Step 2: fanout processing
+	AggregatorRing   *ring56.Ring          // 8B - Occasional: profitable opportunities only (EXPORTED)
+	_                [8]byte               // 8B - Cache line padding
 
 	// CACHE LINE 5+: Extraction buffer (1024B = 16 cache lines)
 	extractedCycles [32]ExtractedCycle // 1024B - Warm: only used for profitable cycles
