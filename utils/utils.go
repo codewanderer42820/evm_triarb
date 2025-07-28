@@ -506,9 +506,18 @@ func ParseHexU64(b []byte) uint64 {
 // Optimized specifically for Ethereum's 160-bit addresses using SIMD operations
 // to process 8 hex characters (4 bytes) per iteration.
 //
+// Algorithm:
+//  1. Load 8 ASCII hex characters as single 64-bit value
+//  2. Convert all characters to nibbles in parallel using bit manipulation
+//  3. Compact nibbles using SIMD-style bit operations
+//  4. Store resulting 4 bytes directly in little-endian order
+//
 // Input requirements:
 //   - Exactly 40 hex characters (no 0x prefix)
-//   - No validation - assumes valid input for maximum performance
+//   - Valid hex characters only (0-9, a-f, A-F)
+//   - No validation performed - garbage in, garbage out
+//
+// Returns: 20-byte Ethereum address
 //
 //go:norace
 //go:nocheckptr
@@ -521,33 +530,44 @@ func ParseEthereumAddress(b []byte) [20]byte {
 
 	// Process 40 hex chars as 5 groups of 8 chars
 	for byteIdx < 20 {
-		// Load 8 hex characters as 64-bit value
-		chunk := Load64(b[byteIdx*2:])
+		// Load 8 hex characters as single 64-bit value
+		// Shift left by 1 to convert byte index to character index
+		chunk := Load64(b[byteIdx<<1:])
 
-		// Parallel ASCII to nibble conversion
-		chunk |= 0x2020202020202020                            // Force lowercase
-		letterMask := (chunk & 0x4040404040404040) >> 6        // Detect letters
-		chunk = chunk - 0x3030303030303030 - (letterMask * 39) // Convert to nibbles
+		// Parallel ASCII to nibble conversion using bit manipulation
+		// Force lowercase: 'A' (0x41) becomes 'a' (0x61) by setting bit 5
+		chunk |= 0x2020202020202020
 
-		// SIMD nibble compaction with proper byte ordering
+		// Detect letters vs digits: letters have bit 6 set after lowercase conversion
+		// This produces 0x40 for letters, 0x00 for digits
+		letterMask := (chunk & 0x4040404040404040) >> 6
+
+		// Convert ASCII to nibbles:
+		// - Digits: '0' (0x30) - 0x30 = 0x00, '9' (0x39) - 0x30 = 0x09
+		// - Letters: 'a' (0x61) - 0x30 - 39 = 0x0A, 'f' (0x66) - 0x30 - 39 = 0x0F
+		chunk = chunk - 0x3030303030303030 - (letterMask * 39)
+
+		// SIMD-style nibble compaction using three stages of bit manipulation
+		// This algorithm preserves byte order for direct little-endian storage
+
+		// Stage 1: Gather alternating nibbles (positions 0,2,4,6)
 		extracted := chunk & 0x000F000F000F000F
-		chunk ^= extracted
-		chunk |= extracted << 12
+		chunk ^= extracted       // Clear original positions
+		chunk |= extracted << 12 // Move to new positions
 
+		// Stage 2: Gather alternating bytes (positions 1,3)
 		extracted = chunk & 0xFF000000FF000000
-		chunk ^= extracted
-		chunk |= extracted >> 24
+		chunk ^= extracted      // Clear original positions
+		chunk |= extracted >> 8 // Compact to right
 
-		extracted = chunk & 0x000000000000FFFF
-		chunk ^= extracted
-		chunk |= extracted << 48
+		// Stage 3: Gather final 16-bit groups
+		extracted = chunk & 0x0000000000FFFF00
+		chunk ^= extracted       // Clear original positions
+		chunk |= extracted << 16 // Move to final position
 
-		// Extract 4 compacted bytes with correct endianness
-		packed := chunk >> 32
-		result[byteIdx] = byte(packed >> 24)
-		result[byteIdx+1] = byte(packed >> 16)
-		result[byteIdx+2] = byte(packed >> 8)
-		result[byteIdx+3] = byte(packed)
+		// Store 4 compacted bytes directly as little-endian uint32
+		// The nibble compaction produces bytes in the correct order for direct storage
+		*(*uint32)(unsafe.Pointer(&result[byteIdx])) = uint32(chunk >> 24)
 
 		byteIdx += 4
 	}
