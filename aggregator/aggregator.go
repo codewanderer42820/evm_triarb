@@ -54,7 +54,7 @@ type AggregatorState struct {
 	// Primary communication interface accessed every processing iteration.
 	// Ring buffers provide lock-free message passing between router cores and aggregator.
 	// Frequency: Accessed once per core per iteration regardless of data availability.
-	coreRings [constants.RouterMaxSupportedCores]ring56.Ring
+	coreRings [constants.AggregatorMaxSupportedCores]ring56.Ring
 
 	// ═══════════════════════════════════════════════════════════════════════════════════════════════
 	// CACHE LINE 2: OPPORTUNITY PROCESSING - ACCESSED WHEN DATA AVAILABLE
@@ -146,7 +146,7 @@ func init() {
 //go:nocheckptr
 //go:nosplit
 //go:inline
-func SpinUntilAllCoreRingsPopulated(expectedCoreCount int) [constants.RouterMaxSupportedCores]*ring56.Ring {
+func SpinUntilAllCoreRingsPopulated(expectedCoreCount int) [constants.AggregatorMaxSupportedCores]*ring56.Ring {
 	for {
 		i := 0
 
@@ -170,8 +170,8 @@ func SpinUntilAllCoreRingsPopulated(expectedCoreCount int) [constants.RouterMaxS
 	}
 
 	// All cores are populated, build and return pointers to the rings
-	var ringPointers [constants.RouterMaxSupportedCores]*ring56.Ring
-	for i := 0; i < constants.RouterMaxSupportedCores; i++ {
+	var ringPointers [constants.AggregatorMaxSupportedCores]*ring56.Ring
+	for i := 0; i < constants.AggregatorMaxSupportedCores; i++ {
 		ringPointers[i] = &Aggregator.coreRings[i]
 	}
 	return ringPointers
@@ -415,8 +415,8 @@ func InitializeAggregatorSystem() {
 	// Core count calculation reserves system cores for OS operations while
 	// maximizing utilization for arbitrage processing workloads.
 	coreCount := runtime.NumCPU() - 4
-	if coreCount > constants.RouterMaxSupportedCores {
-		coreCount = constants.RouterMaxSupportedCores
+	if coreCount > constants.AggregatorMaxSupportedCores {
+		coreCount = constants.AggregatorMaxSupportedCores
 	}
 	coreCount &^= 1 // Ensure even count for forward/reverse core pairing
 

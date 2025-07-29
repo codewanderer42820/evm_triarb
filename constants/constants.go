@@ -136,6 +136,10 @@ const (
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const (
+	// Multi-core communication infrastructure for opportunity collection from router cores.
+	// Ring buffer array size must match router core count to enable direct core-to-aggregator messaging.
+	AggregatorMaxSupportedCores = RouterMaxSupportedCores // Maximum cores supported by aggregator (matches router capacity)
+
 	// Opportunity hash table configuration optimized for arbitrage cycle storage and retrieval.
 	// Power-of-2 table size enables efficient modulo operations via bitmasking for fast indexing.
 	// Capacity chosen to handle expected cycle diversity while maintaining cache-friendly access patterns.
