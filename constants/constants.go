@@ -8,75 +8,19 @@
 //   Defines system-wide constants and runtime parameters optimized for arbitrage detection.
 //   Includes cache-aligned lookup tables and deployment profiles for different hardware.
 //
-// Features:
-//   - Core limits: CPU scaling parameters
-//   - Memory: Cache sizes and buffers
-//   - Networking: WebSocket configuration
-//   - Timing: Virtual clock calibration
+// Organization:
+//   - WebSocket Protocol: Connection and frame handling
+//   - Parser: JSON field detection and event processing
+//   - Deduper: Event deduplication and filtering
+//   - Router: Core arbitrage detection and event routing
+//   - Aggregator: Opportunity collection and bundle extraction
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 package constants
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// RUNTIME CRITICAL CONSTANTS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-const (
-	// Cache alignment for optimal memory access
-	CacheLineSize = 64
-
-	// Tick quantization for arbitrage calculations (used in every price update)
-	TickClampingBound = 128.0
-	MaxQuantizedTick  = 262_143
-	QuantizationScale = (MaxQuantizedTick - 1) / (2 * TickClampingBound)
-
-	// Address parsing constants (used in every event)
-	AddressHexStart = 2
-	AddressHexEnd   = 42
-)
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CORE SYSTEM LIMITS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-const (
-	MaxSupportedCores   = 64
-	DefaultRingSize     = 1 << 14
-	DefaultLocalIdxSize = 1 << 16
-	MaxCyclesPerShard   = 1 << 18
-)
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ADDRESS RESOLUTION TABLES
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-const (
-	AddressTableCapacity     = 1 << 21
-	AddressTableMask         = AddressTableCapacity - 1
-	PairRoutingTableCapacity = 1 << 21
-)
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// MEMORY MANAGEMENT
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-const (
-	RingBits = 18
-	MaxReorg = 256
-)
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ACTIVE TIMING CONFIGURATION
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-const (
-	ActivePollRate   = uint64(3_200_000_000) // Apple M4 Pro optimized
-	ActiveCooldownMs = uint64(500)           // Balanced setting
-)
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// WEBSOCKET PROTOCOL
+// WEBSOCKET PROTOCOL CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const (
@@ -90,20 +34,13 @@ const (
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// HARVESTER ENDPOINTS
+// HARVESTER ENDPOINTS AND PROCESSING
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const (
-	HarvesterDialAddr = "mainnet.infura.io:443"
-	HarvesterPath     = "/v3/a2a3139d2ab24d59bed2dc3643664126"
-	HarvesterHost     = "mainnet.infura.io"
-)
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// HARVESTER PROCESSING
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-const (
+	HarvesterDialAddr        = "mainnet.infura.io:443"
+	HarvesterPath            = "/v3/a2a3139d2ab24d59bed2dc3643664126"
+	HarvesterHost            = "mainnet.infura.io"
 	HarvesterDeploymentBlock = uint64(10000835)
 	HarvesterOutputPath      = "uniswap_v2.csv"
 	HarvesterTempPath        = "uniswap_v2.csv.tmp"
@@ -113,24 +50,104 @@ const (
 	MinBatchSize             = uint64(1)
 	MaxLogSliceSize          = 1_000_000
 	DefaultConnections       = 2
+	ResponseBufferSize       = 8 * 1024 * 1024
+	CSVBufferSize            = 1024 * 1024
+	ReadBufferSize           = 64 * 1024
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// BUFFER SIZES
+// PARSER CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const (
-	ResponseBufferSize     = 8 * 1024 * 1024
-	CSVBufferSize          = 1024 * 1024
-	ReadBufferSize         = 64 * 1024
+	// Address parsing constants (used in every event)
+	AddressHexStart = 2
+	AddressHexEnd   = 42
+)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// DEDUPER CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+const (
+	// Memory management for reorg protection
+	RingBits = 18
+	MaxReorg = 256
+)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ROUTER CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+const (
+	// Core system limits
+	MaxSupportedCores   = 64
+	DefaultRingSize     = 1 << 14
+	DefaultLocalIdxSize = 1 << 16
+	MaxCyclesPerShard   = 1 << 18
+
+	// Address resolution tables
+	AddressTableCapacity     = 1 << 21
+	AddressTableMask         = AddressTableCapacity - 1
+	PairRoutingTableCapacity = 1 << 21
+
+	// Router tick quantization for arbitrage calculations (used in every price update)
+	RouterTickClampingBound = 128.0
+	RouterMaxQuantizedTick  = 262_143
+	RouterQuantizationScale = (RouterMaxQuantizedTick - 1) / (2 * RouterTickClampingBound)
+
+	// Channel buffer sizing
 	ShardChannelBufferSize = 1 << 10
 )
 
+// Legacy aliases removed - all components now use explicit prefixed constants
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// TIMING PROFILES
+// AGGREGATOR CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const (
+	// Hash table configuration optimized for arbitrage cycle storage and retrieval.
+	// Table size chosen as power of 2 to enable efficient modulo operations via bitmasking.
+	// Capacity of 65,536 slots provides sufficient space for expected cycle diversity
+	// while maintaining cache-friendly memory access patterns.
+	AggregatorTableCapacity = 1 << 16                     // 65,536 hash table slots for opportunity storage
+	AggregatorTableMask     = AggregatorTableCapacity - 1 // 65,535 bitmask for hash table indexing operations
+
+	// Occupancy bitmap for efficient hash table slot tracking.
+	// Bitmap organized as 1,024 uint64 words, each covering 64 hash table slots.
+	// This arrangement provides cache-efficient occupancy testing and bulk reset operations.
+	AggregatorBitmapWords = 1 << 10 // 1,024 uint64 words for hash table occupancy tracking
+
+	// Aggregator profitability quantization for priority queue mapping (used in every opportunity)
+	AggregatorProfitabilityClampingBound = 192.0                                                                        // Input range limit: [-192, +192]
+	AggregatorMaxPriorityTick            = 127                                                                          // Maximum priority tick value
+	AggregatorProfitabilityScale         = (AggregatorMaxPriorityTick - 1) / (2 * AggregatorProfitabilityClampingBound) // Scale factor: 126 / 384
+
+	// Liquidity stratification system based on reserve leading zero analysis.
+	// Maximum of 96 strata covers the theoretical range of leading zeros in uint256 values
+	// (3 pairs × 32 hex characters = 96), though practical reserves use uint112 precision.
+	// Each stratum represents a distinct liquidity tier for execution risk assessment.
+	AggregatorMaxStrata = 96 // Liquidity tier count covering full theoretical hex leading zero range
+
+	// Execution bundle size limit balancing transaction efficiency with gas constraints.
+	// Bundle size of 32 opportunities represents optimal balance between:
+	// - Transaction gas limit utilization (approximately 12M gas per bundle)
+	// - MEV extraction efficiency (diminishing returns beyond 32 opportunities)
+	// - Block inclusion probability (larger bundles face higher inclusion risk)
+	AggregatorMaxBundleSize = 32 // Maximum opportunities per execution bundle for gas optimization
+)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// TIMING PROFILES AND ACTIVE CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+const (
+	// Active timing configuration
+	ActivePollRate   = uint64(3_200_000_000) // Apple M4 Pro optimized
+	ActiveCooldownMs = uint64(500)           // Balanced setting
+
+	// Timing profiles for different hardware configurations
 	PollRateConservative = uint64(2_000_000_000)
 	PollRateTypical      = uint64(3_500_000_000)
 	PollRateAggressive   = uint64(4_500_000_000)

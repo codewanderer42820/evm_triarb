@@ -35,36 +35,6 @@ import (
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const (
-	// Hash table configuration optimized for arbitrage cycle storage and retrieval.
-	// Table size chosen as power of 2 to enable efficient modulo operations via bitmasking.
-	// Capacity of 65,536 slots provides sufficient space for expected cycle diversity
-	// while maintaining cache-friendly memory access patterns.
-	TableCapacity = 1 << 16           // 65,536 hash table slots for opportunity storage
-	TableMask     = TableCapacity - 1 // 65,535 bitmask for hash table indexing operations
-
-	// Occupancy bitmap for efficient hash table slot tracking.
-	// Bitmap organized as 1,024 uint64 words, each covering 64 hash table slots.
-	// This arrangement provides cache-efficient occupancy testing and bulk reset operations.
-	BitmapWords = 1 << 10 // 1,024 uint64 words for hash table occupancy tracking
-
-	// Profitability quantization for priority queue mapping (used in every opportunity)
-	ProfitabilityClampingBound = 192.0                                                    // Input range limit: [-192, +192]
-	MaxPriorityTick            = 127                                                      // Maximum priority tick value
-	ProfitabilityScale         = (MaxPriorityTick - 1) / (2 * ProfitabilityClampingBound) // Scale factor: 126 / 384
-
-	// Liquidity stratification system based on reserve leading zero analysis.
-	// Maximum of 96 strata covers the theoretical range of leading zeros in uint256 values
-	// (3 pairs × 32 hex characters = 96), though practical reserves use uint112 precision.
-	// Each stratum represents a distinct liquidity tier for execution risk assessment.
-	MaxStrata = 96 // Liquidity tier count covering full theoretical hex leading zero range
-
-	// Execution bundle size limit balancing transaction efficiency with gas constraints.
-	// Bundle size of 32 opportunities represents optimal balance between:
-	// - Transaction gas limit utilization (approximately 12M gas per bundle)
-	// - MEV extraction efficiency (diminishing returns beyond 32 opportunities)
-	// - Block inclusion probability (larger bundles face higher inclusion risk)
-	MaxBundleSize = 32 // Maximum opportunities per execution bundle for gas optimization
-
 	// Finalization timing constants
 	TargetFinalizationTime = 1 * time.Millisecond // Target time for consistent finalization timing
 )
@@ -103,13 +73,13 @@ type AggregatorState struct {
 	// Bitmap enables rapid occupancy testing and provides efficient bulk reset capability
 	// during block finalization. Each bit represents one hash table slot.
 	// Frequency: Accessed twice per opportunity (read for collision detection, write for marking).
-	occupied [BitmapWords]uint64
+	occupied [constants.AggregatorBitmapWords]uint64
 
 	// Primary opportunity storage indexed by cycle hash for deduplication.
 	// Hash table stores unique arbitrage cycles with collision handling via replacement.
 	// Replacement strategy prioritizes most recent opportunity data for execution relevance.
 	// Frequency: Accessed once per opportunity for storage and retrieval operations.
-	opportunities [TableCapacity]types.ArbitrageOpportunity
+	opportunities [constants.AggregatorTableCapacity]types.ArbitrageOpportunity
 
 	// ═══════════════════════════════════════════════════════════════════════════════════════════════
 	// CACHE LINE 3: QUEUE MANAGEMENT - ACCESSED PER OPPORTUNITY AND EXTRACTION
@@ -119,7 +89,7 @@ type AggregatorState struct {
 	// Each queue contains opportunities within a specific liquidity tier, ordered by profitability.
 	// Queue selection by leading zero count ensures execution risk assessment precedence.
 	// Frequency: Accessed once per opportunity for queue selection and priority operations.
-	queues [MaxStrata]compactqueue128.CompactQueue128
+	queues [constants.AggregatorMaxStrata]compactqueue128.CompactQueue128
 
 	// Meta-queue tracking active liquidity strata for efficient bundle extraction.
 	// Maintains sorted list of strata containing opportunities, enabling rapid identification
@@ -135,7 +105,7 @@ type AggregatorState struct {
 	// All CompactQueue128 instances allocate entries from this unified memory pool
 	// to ensure cache locality and minimize memory fragmentation during operation.
 	// Frequency: Accessed during every queue operation (Push, Pop, MoveTick).
-	sharedArena [TableCapacity]compactqueue128.Entry
+	sharedArena [constants.AggregatorTableCapacity]compactqueue128.Entry
 
 	// ═══════════════════════════════════════════════════════════════════════════════════════════════
 	// CACHE LINE 5: COLD PATH - INFREQUENT ACCESS
@@ -246,7 +216,7 @@ func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) 
 	// enabling efficient cycle identification and replacement-based collision handling.
 	h := uint16((uint64(opp.CyclePairs[0]) ^
 		uint64(opp.CyclePairs[1]) ^
-		uint64(opp.CyclePairs[2])) & TableMask)
+		uint64(opp.CyclePairs[2])) & constants.AggregatorTableMask)
 
 	// Calculate bitmap position using bit manipulation for efficient occupancy tracking.
 	// Bitmap organization: 64 slots per uint64 word, requiring word and bit index calculation.
@@ -264,7 +234,7 @@ func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) 
 	// Transform profitability to priority queue tick using linear scaling.
 	// Formula: tick = (profitability + bound) × scale
 	// Matches router.go quantization pattern for consistency.
-	tick := int64((opp.TotalProfitability + ProfitabilityClampingBound) * ProfitabilityScale)
+	tick := int64((opp.TotalProfitability + constants.AggregatorProfitabilityClampingBound) * constants.AggregatorProfitabilityScale)
 	queue := &agg.queues[opp.LeadingZeroCount]
 	handle := compactqueue128.Handle(h)
 
@@ -320,7 +290,7 @@ func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) 
 //go:nosplit
 //go:inline
 func (agg *AggregatorState) extractOpportunityBundle() {
-	for bundleCount := 0; bundleCount < MaxBundleSize; bundleCount++ {
+	for bundleCount := 0; bundleCount < constants.AggregatorMaxBundleSize; bundleCount++ {
 		// Terminate extraction when no active strata remain.
 		// Empty meta-queue indicates all opportunities have been extracted
 		// or no profitable opportunities are currently available.
@@ -389,7 +359,7 @@ func (agg *AggregatorState) reset() {
 	// Clear occupancy bitmap using direct iteration for optimal cache utilization.
 	// Linear access pattern ensures efficient cache line utilization and
 	// predictable memory bandwidth consumption during bulk clearing operations.
-	for i := 0; i < BitmapWords; i++ {
+	for i := 0; i < constants.AggregatorBitmapWords; i++ {
 		agg.occupied[i] = 0
 	}
 
@@ -397,16 +367,16 @@ func (agg *AggregatorState) reset() {
 	// Memory layout exploitation: ArbitrageOpportunity = 56 bytes = 7 uint64 words.
 	// Bulk clearing via uint64 array access eliminates per-struct overhead
 	// and maximizes memory bandwidth utilization for clearing operations.
-	oppPtr := (*[TableCapacity * 7]uint64)(unsafe.Pointer(&agg.opportunities[0]))
-	for i := 0; i < TableCapacity*7; i++ {
+	oppPtr := (*[constants.AggregatorTableCapacity * 7]uint64)(unsafe.Pointer(&agg.opportunities[0]))
+	for i := 0; i < constants.AggregatorTableCapacity*7; i++ {
 		oppPtr[i] = 0
 	}
 
 	// Clear shared memory arena used by all priority queues.
 	// Arena reset ensures clean entry allocation state for subsequent processing cycles.
 	// Entry structure size: 32 bytes = 4 uint64 words.
-	arenaPtr := (*[TableCapacity * 4]uint64)(unsafe.Pointer(&agg.sharedArena[0]))
-	for i := 0; i < TableCapacity*4; i++ {
+	arenaPtr := (*[constants.AggregatorTableCapacity * 4]uint64)(unsafe.Pointer(&agg.sharedArena[0]))
+	for i := 0; i < constants.AggregatorTableCapacity*4; i++ {
 		arenaPtr[i] = 0
 	}
 
@@ -414,7 +384,7 @@ func (agg *AggregatorState) reset() {
 	// CompactQueue128 structure size: 1,152 bytes = 144 uint64 words.
 	// Bulk clearing maintains queue initialization state for subsequent
 	// operation without requiring complex reinitialization procedures.
-	for i := 0; i < MaxStrata; i++ {
+	for i := 0; i < constants.AggregatorMaxStrata; i++ {
 		qPtr := (*[144]uint64)(unsafe.Pointer(&agg.queues[i]))
 		for j := 0; j < 144; j++ {
 			qPtr[j] = 0

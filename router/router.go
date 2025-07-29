@@ -468,10 +468,10 @@ func DispatchPriceUpdate(logView *types.LogView) {
 	var message PriceUpdateMessage
 	if err != nil {
 		// Fallback path for unexpected calculation failures
-		// Generate deterministic pseudo-random tick to prevent systematic biases
-		addrHash := utils.Mix64(uint64(pairID))           // Create hash from pair ID
-		randBits := addrHash & 0x1FFF                     // Extract 13 bits (0-8191 range)
-		placeholder := 50.2 + float64(randBits)*0.0015625 // Scale to reasonable tick range
+		// Generate deterministic pseudo-random tick using router constants to prevent systematic biases
+		addrHash := utils.Mix64(uint64(pairID))                                              // Create hash from pair ID
+		randBits := addrHash & 0x1FFF                                                        // Extract 13 bits (0-8191 range)
+		placeholder := constants.RouterTickClampingBound*0.392 + float64(randBits)*0.0015625 // Scale to reasonable tick range using router bound
 
 		message = PriceUpdateMessage{
 			pairID:        pairID,
@@ -667,7 +667,7 @@ func processArbitrageUpdate(engine *ArbitrageEngine, update *PriceUpdateMessage)
 		// Recalculate the cycle's priority based on its new total profitability
 		// Note: One of these tick values is always zero (the main pair's position)
 		tickSum := cycle.tickValues[0] + cycle.tickValues[1] + cycle.tickValues[2]
-		newPriority := int64((tickSum + constants.TickClampingBound) * constants.QuantizationScale)
+		newPriority := int64((tickSum + constants.RouterTickClampingBound) * constants.RouterQuantizationScale)
 
 		// Update the cycle's position in its priority queue to reflect new profitability
 		engine.priorityQueues[fanoutEntry.queueIndex].MoveTick(fanoutEntry.queueHandle, newPriority)
@@ -1008,10 +1008,11 @@ func initializeArbitrageQueues(engine *ArbitrageEngine, workloadShards []PairWor
 			engine.cycleStates[cycleStateIdx].leadingZerosA[cycleEdge.edgeIndex] = 0
 			engine.cycleStates[cycleStateIdx].leadingZerosB[cycleEdge.edgeIndex] = 0
 
-			// Enqueue cycle with initial priority
+			// Enqueue cycle with initial priority using router constants
 			cycleHash := utils.Mix64(uint64(cycleStateIdx))
 			randBits := cycleHash & 0xFFFF
-			initPriority := int64(196608 + randBits)
+			// Use router quantization constants for consistent priority calculation
+			initPriority := int64((constants.RouterTickClampingBound + float64(randBits)*0.001953125) * constants.RouterQuantizationScale)
 			queue.Push(initPriority, handle, uint64(cycleStateIdx))
 
 			// Configure fanout entries
