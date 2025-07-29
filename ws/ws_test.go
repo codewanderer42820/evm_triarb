@@ -365,9 +365,9 @@ func TestProcessorInitialization(t *testing.T) {
 	})
 
 	t.Run("buffer_size_validation", func(t *testing.T) {
-		if len(processor.buffer) != constants.BufferSize {
+		if len(processor.buffer) != constants.WsBufferSize {
 			t.Errorf("Buffer size mismatch: expected %d, got %d",
-				constants.BufferSize, len(processor.buffer))
+				constants.WsBufferSize, len(processor.buffer))
 		}
 
 		// Note: //go:align directives may not guarantee alignment on all platforms
@@ -770,7 +770,7 @@ func TestSpinUntilCompleteMessage(t *testing.T) {
 				conn.setReadData(frame)
 
 				result, err := SpinUntilCompleteMessage(conn)
-				if err != nil && tc.length < constants.BufferSize {
+				if err != nil && tc.length < constants.WsBufferSize {
 					t.Errorf("Failed for %s: %v", tc.description, err)
 				}
 
@@ -1238,7 +1238,7 @@ func TestSpinUntilCompleteMessage(t *testing.T) {
 			// Create header for frame larger than buffer
 			frame := []byte{0x82, 127} // Binary frame, 64-bit length
 			lenBytes := make([]byte, 8)
-			binary.BigEndian.PutUint64(lenBytes, uint64(constants.BufferSize)+1)
+			binary.BigEndian.PutUint64(lenBytes, uint64(constants.WsBufferSize)+1)
 			frame = append(frame, lenBytes...)
 
 			conn := newMockConn()
@@ -1252,8 +1252,8 @@ func TestSpinUntilCompleteMessage(t *testing.T) {
 
 		t.Run("message_too_large_accumulated", func(t *testing.T) {
 			// Create fragments that exceed buffer when combined
-			size1 := constants.BufferSize / 2
-			size2 := constants.BufferSize/2 + 1000
+			size1 := constants.WsBufferSize / 2
+			size2 := constants.WsBufferSize/2 + 1000
 
 			frag1 := createWebSocketFrame(0x1, make([]byte, size1), false, false)
 			frag2 := createWebSocketFrame(0x0, make([]byte, size2), true, false)
@@ -1339,7 +1339,7 @@ func TestSpinUntilCompleteMessage(t *testing.T) {
 	t.Run("boundary_conditions", func(t *testing.T) {
 		t.Run("exact_buffer_size", func(t *testing.T) {
 			// Create payload exactly at buffer limit
-			payload := make([]byte, constants.BufferSize-10) // Leave room for header
+			payload := make([]byte, constants.WsBufferSize-10) // Leave room for header
 			for i := range payload {
 				payload[i] = byte(i & 0xFF)
 			}
@@ -1360,7 +1360,7 @@ func TestSpinUntilCompleteMessage(t *testing.T) {
 
 		t.Run("message_near_buffer_end", func(t *testing.T) {
 			// Test behavior when message end approaches buffer size
-			size := constants.BufferSize - constants.MaxFrameHeaderSize - 100
+			size := constants.WsBufferSize - constants.WsMaxFrameHeaderSize - 100
 			payload := make([]byte, size)
 
 			frame := createWebSocketFrame(0x2, payload, true, false)
@@ -1867,7 +1867,7 @@ func TestMemorySafety(t *testing.T) {
 			// Try to create a frame larger than buffer
 			frame := []byte{0x82, 127} // Binary frame, 64-bit length
 			lenBytes := make([]byte, 8)
-			binary.BigEndian.PutUint64(lenBytes, uint64(constants.BufferSize)+1000)
+			binary.BigEndian.PutUint64(lenBytes, uint64(constants.WsBufferSize)+1000)
 			frame = append(frame, lenBytes...)
 
 			conn := newMockConn()
@@ -1881,7 +1881,7 @@ func TestMemorySafety(t *testing.T) {
 
 		t.Run("accumulated_overflow", func(t *testing.T) {
 			// Create fragments that together exceed buffer
-			chunk := constants.BufferSize / 10
+			chunk := constants.WsBufferSize / 10
 			fragments := 11 // This will exceed buffer
 
 			conn := newMockConn()
@@ -2101,7 +2101,7 @@ func TestProtocolCompliance(t *testing.T) {
 				conn.setReadData(frame)
 
 				result, err := SpinUntilCompleteMessage(conn)
-				if err != nil && tc.length < constants.BufferSize {
+				if err != nil && tc.length < constants.WsBufferSize {
 					t.Errorf("Failed for %s: %v", tc.description, err)
 				}
 

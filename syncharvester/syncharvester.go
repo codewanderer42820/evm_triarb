@@ -313,21 +313,21 @@ func newSynchronizationHarvester(connectionCount int, outputPath string) *Synchr
 
 	// Initialize batch sizes to optimal defaults
 	for i := range harvester.batchSizes {
-		harvester.batchSizes[i] = constants.OptimalBatchSize
+		harvester.batchSizes[i] = constants.HarvesterOptimalBatchSize
 	}
 
 	// Initialize global buffers
 	responseBuffers = make([][]byte, connectionCount)
-	processedLogs = make([]ProcessedReserveEntry, constants.MaxLogSliceSize)
+	processedLogs = make([]ProcessedReserveEntry, constants.HarvesterMaxLogSliceSize)
 	csvOutputBuffers = make([][]byte, connectionCount)
 	csvStringBuilders = make([]strings.Builder, connectionCount)
 
 	// Create shared HTTP transport for connection pooling efficiency
 	sharedTransport := buildHTTPTransport()
 	for i := 0; i < connectionCount; i++ {
-		responseBuffers[i] = make([]byte, constants.ResponseBufferSize)
-		csvOutputBuffers[i] = make([]byte, constants.CSVBufferSize)
-		csvStringBuilders[i].Grow(constants.CSVBufferSize)
+		responseBuffers[i] = make([]byte, constants.HarvesterResponseBufferSize)
+		csvOutputBuffers[i] = make([]byte, constants.HarvesterCSVBufferSize)
+		csvStringBuilders[i].Grow(constants.HarvesterCSVBufferSize)
 		harvester.httpClients[i] = &http.Client{
 			Timeout:   30 * time.Second,
 			Transport: sharedTransport,
@@ -489,7 +489,7 @@ func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock ui
 	builder.WriteString(`","toBlock":"0x`)
 	builder.WriteString(toHex)
 	builder.WriteString(`","topics":["`)
-	builder.WriteString(constants.SyncEventSignature)
+	builder.WriteString(constants.HarvesterSyncEventSignature)
 	builder.WriteString(`"]}],"id":1}`)
 
 	requestJSON := builder.String()
@@ -519,7 +519,7 @@ func (harvester *SynchronizationHarvester) extractLogBatch(fromBlock, toBlock ui
 	maxReadSize := (len(responseBuffer) - 1024) &^ 63 // Cache line alignment
 
 	for totalBytes < maxReadSize {
-		readSize := constants.ReadBufferSize &^ 15 // 16-byte alignment
+		readSize := constants.HarvesterReadBufferSize &^ 15 // 16-byte alignment
 		if totalBytes+readSize > maxReadSize {
 			readSize = (maxReadSize - totalBytes) &^ 15
 		}
@@ -616,7 +616,7 @@ func (harvester *SynchronizationHarvester) writeCSVRecord(address, blockHeight, 
 	currentBufferSize := harvester.csvBufferSizes[connectionID]
 	newBufferSize := currentBufferSize + len(csvRecord)
 
-	threshold := constants.CSVBufferSize - (constants.CSVBufferSize >> 3) // 87.5% threshold
+	threshold := constants.HarvesterCSVBufferSize - (constants.HarvesterCSVBufferSize >> 3) // 87.5% threshold
 	if newBufferSize >= threshold {
 		harvester.flushCSVBuffer(connectionID)
 		currentBufferSize = 0
@@ -781,8 +781,8 @@ func (harvester *SynchronizationHarvester) harvestSector(fromBlock, toBlock uint
 			// Handle "too many results" error by reducing batch size
 			if strings.Contains(err.Error(), "more than 10000 results") {
 				harvester.batchSizes[connectionID] = harvester.batchSizes[connectionID] >> 1
-				if harvester.batchSizes[connectionID] < constants.MinBatchSize {
-					harvester.batchSizes[connectionID] = constants.MinBatchSize
+				if harvester.batchSizes[connectionID] < constants.HarvesterMinBatchSize {
+					harvester.batchSizes[connectionID] = constants.HarvesterMinBatchSize
 				}
 				harvester.consecutiveSuccesses[connectionID] = 0
 				continue
@@ -1093,7 +1093,7 @@ func CheckHarvestingRequirementFromBlock(lastProcessedBlock uint64) (bool, uint6
 //go:inline
 //go:registerparams
 func ExecuteHarvesting() error {
-	return ExecuteHarvestingWithConnections(constants.DefaultConnections)
+	return ExecuteHarvestingWithConnections(constants.HarvesterDefaultConnections)
 }
 
 // ExecuteHarvestingWithConnections starts the harvesting process with specified connection count.

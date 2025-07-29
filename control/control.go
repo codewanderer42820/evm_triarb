@@ -76,7 +76,7 @@ func SignalActivity() {
 func PollCooldown() {
 	pollCounter++
 	elapsed := pollCounter - lastActivityCount
-	stillActive := uint32(((constants.CooldownPolls - elapsed) >> 63) ^ 1)
+	stillActive := uint32(((constants.ControlCooldownPolls - elapsed) >> 63) ^ 1)
 	activityFlag &= stillActive
 }
 
@@ -168,7 +168,7 @@ func IsShuttingDown() bool {
 func GetCooldownProgress() uint8 {
 	inactiveBonus := uint64((activityFlag ^ 1) * 100)
 	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
-	rawProgress := (elapsed * 100) / constants.CooldownPolls
+	rawProgress := (elapsed * 100) / constants.ControlCooldownPolls
 	overflow := rawProgress - 100
 	clampMask := uint64(int64(overflow) >> 63)
 	clampedProgress := rawProgress - (overflow &^ clampMask)
@@ -184,7 +184,7 @@ func GetCooldownProgress() uint8 {
 //go:registerparams
 func GetCooldownRemaining() uint64 {
 	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
-	remaining := constants.CooldownPolls - elapsed
+	remaining := constants.ControlCooldownPolls - elapsed
 	return remaining &^ uint64(int64(remaining)>>63)
 }
 
@@ -197,7 +197,7 @@ func GetCooldownRemaining() uint64 {
 //go:registerparams
 func IsWithinCooldown() bool {
 	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
-	withinWindow := uint32(((constants.CooldownPolls - elapsed) >> 63) ^ 1)
+	withinWindow := uint32(((constants.ControlCooldownPolls - elapsed) >> 63) ^ 1)
 	return (activityFlag & withinWindow) == 1
 }
 
@@ -210,7 +210,7 @@ func IsWithinCooldown() bool {
 //go:registerparams
 func GetSystemState() uint32 {
 	elapsed := (pollCounter - lastActivityCount) & 0x7FFFFFFFFFFFFFFF
-	withinCooldown := uint32(((constants.CooldownPolls - elapsed) >> 63) ^ 1)
+	withinCooldown := uint32(((constants.ControlCooldownPolls - elapsed) >> 63) ^ 1)
 	return activityFlag | (shutdownFlag << 1) | (withinCooldown << 2)
 }
 

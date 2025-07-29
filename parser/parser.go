@@ -91,7 +91,7 @@ func HandleFrame(p []byte) {
 
 		// Process each field based on its 8-byte tag signature
 		switch tag {
-		case constants.KeyAddress:
+		case constants.ParserKeyAddress:
 			// Extract contract address (42 characters including 0x prefix)
 			// Address identifies which Uniswap pair generated this event
 			start := i + utils.SkipToQuote(p[i:], 10, 1) + 1
@@ -99,12 +99,12 @@ func HandleFrame(p []byte) {
 			v.Addr = p[start:end]
 			i = end + 1
 
-		case constants.KeyBlockHash:
+		case constants.ParserKeyBlockHash:
 			// Skip block hash field (80 bytes) - not needed for price updates
 			// Block hash provides transaction finality but isn't used in arbitrage detection
 			i += 80
 
-		case constants.KeyBlockNumber:
+		case constants.ParserKeyBlockNumber:
 			// Extract block number for temporal ordering and deduplication
 			// Block numbers ensure we process events in blockchain order
 			start := i + utils.SkipToQuote(p[i:], 14, 1) + 1
@@ -112,12 +112,12 @@ func HandleFrame(p []byte) {
 			v.BlkNum = p[start:end]
 			i = end + 1
 
-		case constants.KeyBlockTimestamp:
+		case constants.ParserKeyBlockTimestamp:
 			// Skip Infura-specific timestamp field (29 bytes)
 			// This field is specific to certain node providers and not standard
 			i += 29
 
-		case constants.KeyData:
+		case constants.ParserKeyData:
 			// Extract event data containing Uniswap reserve values
 			// Data field contains the actual price information we need
 			start := i + utils.SkipToQuote(p[i:], 7, 1) + 1
@@ -131,7 +131,7 @@ func HandleFrame(p []byte) {
 				return // Data field too large, likely corrupted
 			}
 
-		case constants.KeyLogIndex:
+		case constants.ParserKeyLogIndex:
 			// Extract log index for intra-block event ordering
 			// Multiple events can occur in the same transaction
 			start := i + utils.SkipToQuote(p[i:], 11, 1) + 1
@@ -139,12 +139,12 @@ func HandleFrame(p []byte) {
 			v.LogIdx = p[start:end]
 			i = end + 1
 
-		case constants.KeyRemoved:
+		case constants.ParserKeyRemoved:
 			// Skip chain reorganization flag (14 bytes)
 			// Removed events indicate the log was reverted in a chain reorg
 			i += 14
 
-		case constants.KeyTopics:
+		case constants.ParserKeyTopics:
 			// Extract topics array containing event signature
 			// First topic identifies the event type (must be Sync event)
 			start := i + utils.SkipToOpeningBracket(p[i:], 9, 1) + 1
@@ -157,7 +157,7 @@ func HandleFrame(p []byte) {
 
 				// Validate Sync event signature at byte offset 3
 				// Only process Uniswap V2 Sync events, ignore all others
-				if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != constants.SigSyncPrefix {
+				if len(v.Topics) < 11 || *(*[8]byte)(unsafe.Pointer(&v.Topics[3])) != constants.ParserSigSyncPrefix {
 					return
 				}
 				i = end + 1
@@ -165,7 +165,7 @@ func HandleFrame(p []byte) {
 				return // Topics array too large or malformed
 			}
 
-		case constants.KeyTransaction:
+		case constants.ParserKeyTransaction:
 			// Handle transaction field with conditional processing
 			// Long transactions include full hash, short ones just the index
 			if len(p)-i >= 86 {

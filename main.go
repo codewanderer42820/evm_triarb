@@ -456,7 +456,7 @@ func main() {
 			blocksBehind := targetBlock - lastBlock
 			debug.DropMessage("SYNC", "Temp "+utils.Itoa(int(blocksBehind))+" behind")
 
-			newLastProcessed, err := syncharvester.ExecuteHarvestingToTemp(constants.DefaultConnections)
+			newLastProcessed, err := syncharvester.ExecuteHarvestingToTemp(constants.HarvesterDefaultConnections)
 			if err != nil {
 				debug.DropMessage("SYNC", "Temp error: "+err.Error())
 				continue
@@ -488,8 +488,8 @@ func main() {
 
 		// Configure TCP socket options
 		tcpConn.SetNoDelay(true)
-		tcpConn.SetReadBuffer(constants.MaxFrameSize)
-		tcpConn.SetWriteBuffer(constants.MaxFrameSize)
+		tcpConn.SetReadBuffer(constants.WsMaxFrameSize)
+		tcpConn.SetWriteBuffer(constants.WsMaxFrameSize)
 
 		// Apply socket-level optimizations using RawConn
 		rawSysConn, err := tcpConn.SyscallConn()
@@ -504,11 +504,11 @@ func main() {
 					debug.DropMessage("SOCK", "NODELAY error: "+err.Error())
 				}
 
-				if err := syscall.SetsockoptInt(fdInt, syscall.SOL_SOCKET, syscall.SO_RCVBUF, constants.MaxFrameSize); err != nil {
+				if err := syscall.SetsockoptInt(fdInt, syscall.SOL_SOCKET, syscall.SO_RCVBUF, constants.WsMaxFrameSize); err != nil {
 					debug.DropMessage("SOCK", "RCVBUF error: "+err.Error())
 				}
 
-				if err := syscall.SetsockoptInt(fdInt, syscall.SOL_SOCKET, syscall.SO_SNDBUF, constants.MaxFrameSize); err != nil {
+				if err := syscall.SetsockoptInt(fdInt, syscall.SOL_SOCKET, syscall.SO_SNDBUF, constants.WsMaxFrameSize); err != nil {
 					debug.DropMessage("SOCK", "SNDBUF error: "+err.Error())
 				}
 

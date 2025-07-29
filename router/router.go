@@ -242,20 +242,20 @@ type CryptoRandomGenerator struct {
 type ArbitrageRouter struct {
 	// CACHE LINE GROUP 1: Address lookup (FIRST in hot path - accessed together)
 	// Nuclear hot - accessed every time we process an event for address resolution
-	addressToPairMap  [constants.AddressTableCapacity]types.TradingPairID
-	packedAddressKeys [constants.AddressTableCapacity]PackedAddress
+	addressToPairMap  [constants.RouterAddressTableCapacity]types.TradingPairID
+	packedAddressKeys [constants.RouterAddressTableCapacity]PackedAddress
 
 	// CACHE LINE GROUP 2: Core routing (SECOND in hot path)
 	// Extremely hot - accessed immediately after successful address resolution
-	pairToCoreRouting [constants.PairRoutingTableCapacity]uint64
+	pairToCoreRouting [constants.RouterPairRoutingTableCapacity]uint64
 
 	// CACHE LINE GROUP 3: Ring buffers (THIRD in hot path - tight delivery loop)
 	// Nuclear hot - accessed in message delivery loop, potentially multiple times per event
-	coreRings [constants.MaxSupportedCores]*ring56.Ring
+	coreRings [constants.RouterMaxSupportedCores]*ring56.Ring
 
 	// CACHE LINE GROUP 4: Core engines (accessed during initialization and management)
 	// Warm - accessed during system setup and core management operations
-	coreEngines [constants.MaxSupportedCores]*ArbitrageEngine
+	coreEngines [constants.RouterMaxSupportedCores]*ArbitrageEngine
 
 	// CACHE LINE GROUP 5: Synchronization (accessed during phase transitions)
 	// Cold - only used during initialization coordination
@@ -340,7 +340,7 @@ func hashAddressToIndex(address40HexChars []byte) uint64 {
 	hash64 := utils.ParseHexU64(address40HexChars[12:28])
 
 	// Mask the hash to fit within the hash table bounds
-	return hash64 & uint64(constants.AddressTableMask)
+	return hash64 & uint64(constants.RouterAddressTableMask)
 }
 
 // hashPackedAddressToIndex computes hash values from stored PackedAddress structures.
@@ -353,7 +353,7 @@ func hashAddressToIndex(address40HexChars []byte) uint64 {
 func hashPackedAddressToIndex(key PackedAddress) uint64 {
 	// Use the third word as the hash value since it contains the address suffix
 	// Mask it to fit within the hash table bounds
-	return key.words[2] & uint64(constants.AddressTableMask)
+	return key.words[2] & uint64(constants.RouterAddressTableMask)
 }
 
 // isEqual performs efficient comparison between PackedAddress structures.
@@ -420,7 +420,7 @@ func emitArbitrageOpportunity(currentTick float64, cycle *ArbitrageCycleState, u
 //go:registerparams
 func DispatchPriceUpdate(logView *types.LogView) {
 	// Convert the Ethereum contract address from the log event to our internal trading pair ID
-	pairID := LookupPairByAddress(logView.Addr[constants.AddressHexStart:constants.AddressHexEnd])
+	pairID := LookupPairByAddress(logView.Addr[constants.ParserAddressHexStart:constants.ParserAddressHexEnd])
 	if pairID == 0 {
 		// This address is not registered in our system, so ignore this event
 		return
@@ -562,7 +562,7 @@ func LookupPairByAddress(address40HexChars []byte) types.TradingPairID {
 		// Robin Hood early termination check
 		// If the current entry has traveled less distance than us, our key cannot be in the table
 		currentKeyHash := hashPackedAddressToIndex(currentKey)
-		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & uint64(constants.AddressTableMask)
+		currentDist := (i + uint64(constants.RouterAddressTableCapacity) - currentKeyHash) & uint64(constants.RouterAddressTableMask)
 		if currentDist < dist {
 			// The current entry is closer to its ideal position than we are to ours
 			// This violates the Robin Hood invariant, so our key is not present
@@ -570,7 +570,7 @@ func LookupPairByAddress(address40HexChars []byte) types.TradingPairID {
 		}
 
 		// Continue probing to the next slot in the hash table
-		i = (i + 1) & uint64(constants.AddressTableMask)
+		i = (i + 1) & uint64(constants.RouterAddressTableMask)
 		dist++ // Increment our probe distance
 	}
 }
@@ -714,7 +714,7 @@ func RegisterTradingPairAddress(address40HexChars []byte, pairID types.TradingPa
 		// If the current entry has traveled less distance than us, we displace it
 		currentKey := Router.packedAddressKeys[i]
 		currentKeyHash := hashPackedAddressToIndex(currentKey)
-		currentDist := (i + uint64(constants.AddressTableCapacity) - currentKeyHash) & uint64(constants.AddressTableMask)
+		currentDist := (i + uint64(constants.RouterAddressTableCapacity) - currentKeyHash) & uint64(constants.RouterAddressTableMask)
 
 		if currentDist < dist {
 			// Displace the current entry (it's closer to its ideal position than we are)
@@ -725,7 +725,7 @@ func RegisterTradingPairAddress(address40HexChars []byte, pairID types.TradingPa
 		}
 
 		// Move to the next slot and increment our distance
-		i = (i + 1) & uint64(constants.AddressTableMask)
+		i = (i + 1) & uint64(constants.RouterAddressTableMask)
 		dist++
 	}
 }
@@ -847,7 +847,7 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 	// Calculate shard requirements per pair
 	shardCounts := make(map[types.TradingPairID]int)
 	for pairID, edgeCount := range edgeCounts {
-		shardCount := (edgeCount + constants.MaxCyclesPerShard - 1) / constants.MaxCyclesPerShard
+		shardCount := (edgeCount + constants.RouterMaxCyclesPerShard - 1) / constants.RouterMaxCyclesPerShard
 		shardCounts[pairID] = shardCount
 	}
 
@@ -880,8 +880,8 @@ func buildWorkloadShards(arbitrageTriangles []ArbitrageTriangle) {
 		shuffleCycleEdges(cycleEdges, pairID)
 
 		shardIdx := 0
-		for offset := 0; offset < len(cycleEdges); offset += constants.MaxCyclesPerShard {
-			endOffset := offset + constants.MaxCyclesPerShard
+		for offset := 0; offset < len(cycleEdges); offset += constants.RouterMaxCyclesPerShard {
+			endOffset := offset + constants.RouterMaxCyclesPerShard
 			if endOffset > len(cycleEdges) {
 				endOffset = len(cycleEdges)
 			}
@@ -1082,8 +1082,8 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	// Initialize the core processing engine with exact memory allocations
 	// This prevents any memory fragmentation during the operational phase
 	engine := &ArbitrageEngine{
-		pairToQueueLookup:  localidx.New(constants.DefaultLocalIdxSize),
-		pairToFanoutIndex:  localidx.New(constants.DefaultLocalIdxSize << 1), // Use shift for doubling
+		pairToQueueLookup:  localidx.New(constants.RouterDefaultLocalIdxSize),
+		pairToFanoutIndex:  localidx.New(constants.RouterDefaultLocalIdxSize << 1), // Use shift for doubling
 		isReverseDirection: coreID >= forwardCoreCount,
 		// Skip padding fields in initialization
 		// priorityQueues: will be set in initializeArbitrageQueues
@@ -1095,7 +1095,7 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	}
 
 	// Create ring56 buffer locally (no global visibility yet)
-	ring := ring56.New(constants.DefaultRingSize)
+	ring := ring56.New(constants.RouterDefaultRingSize)
 
 	// Perform zero-fragmentation initialization of all queue structures
 	initializeArbitrageQueues(engine, allShards)
@@ -1193,8 +1193,8 @@ gcCooperativeSpin:
 func InitializeArbitrageSystem(arbitrageTriangles []ArbitrageTriangle) {
 	// Determine the optimal number of CPU cores to use for arbitrage processing
 	coreCount := runtime.NumCPU() - 4
-	if coreCount > constants.MaxSupportedCores {
-		coreCount = constants.MaxSupportedCores
+	if coreCount > constants.RouterMaxSupportedCores {
+		coreCount = constants.RouterMaxSupportedCores
 	}
 	coreCount &^= 1                    // Ensure even number for paired forward/reverse processing
 	forwardCoreCount := coreCount >> 1 // Half the cores handle forward direction arbitrage

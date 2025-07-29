@@ -78,7 +78,7 @@ type WebSocketProcessor struct {
 	// Main message buffer for accumulating WebSocket frames
 	// Aligned to page boundaries for optimal memory access
 	//go:align 16384
-	buffer [constants.BufferSize]byte
+	buffer [constants.WsBufferSize]byte
 
 	// Pre-built protocol frames for connection establishment
 	upgradeRequest [256]byte
@@ -148,7 +148,7 @@ func Handshake(conn net.Conn) error {
 	}
 
 	// Read HTTP response
-	var buf [constants.HandshakeBufferSize]byte
+	var buf [constants.WsHandshakeBufferSize]byte
 	total := 0
 
 	// Continue reading until header terminator or limit exceeded
@@ -209,7 +209,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 
 	for {
 		// Verify buffer capacity before reading frame header
-		if msgEnd > constants.BufferSize-constants.MaxFrameHeaderSize {
+		if msgEnd > constants.WsBufferSize-constants.WsMaxFrameHeaderSize {
 			return nil, errMessageTooLarge
 		}
 
@@ -248,7 +248,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		}
 
 		// Validate frame size against buffer capacity
-		if payloadLen >= uint64(constants.BufferSize) {
+		if payloadLen >= uint64(constants.WsBufferSize) {
 			return nil, errFrameTooLarge
 		}
 
@@ -273,7 +273,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		}
 
 		// Verify complete message will fit in buffer
-		if uint64(msgEnd)+payloadLen > uint64(constants.BufferSize) {
+		if uint64(msgEnd)+payloadLen > uint64(constants.WsBufferSize) {
 			return nil, errMessageTooLarge
 		}
 
@@ -284,8 +284,8 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		remaining := payloadLen
 		for remaining > 0 {
 			toRead := remaining
-			if toRead > uint64(constants.BufferSize-msgEnd) {
-				toRead = uint64(constants.BufferSize - msgEnd)
+			if toRead > uint64(constants.WsBufferSize-msgEnd) {
+				toRead = uint64(constants.WsBufferSize - msgEnd)
 			}
 			if toRead > 65536 {
 				toRead = 65536
@@ -303,7 +303,7 @@ func SpinUntilCompleteMessage(conn net.Conn) ([]byte, error) {
 		// Return complete message if this was the final frame
 		if isLastFrame {
 			// Perform final bounds validation
-			if msgEnd > constants.BufferSize {
+			if msgEnd > constants.WsBufferSize {
 				return nil, errBoundsViolation
 			}
 			return processor.buffer[:msgEnd], nil

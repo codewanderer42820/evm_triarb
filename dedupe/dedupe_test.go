@@ -35,7 +35,7 @@ import (
 // ============================================================================
 
 const (
-	testCacheSize = 1 << constants.RingBits
+	testCacheSize = 1 << constants.DedupeRingBits
 	testDataSize  = 10000
 )
 
@@ -131,11 +131,11 @@ func TestDeduper_StalenessDetection(t *testing.T) {
 	}{
 		// Within reorg window - should be duplicate
 		{"Same block", 1000, 1000, false},
-		{"Within reorg window", 1000, 1000 + constants.MaxReorg - 1, false},
-		{"At reorg boundary", 1000, 1000 + constants.MaxReorg, false},
+		{"Within reorg window", 1000, 1000 + constants.DedupeMaxReorg - 1, false},
+		{"At reorg boundary", 1000, 1000 + constants.DedupeMaxReorg, false},
 		// Beyond reorg window - should be accepted as new
-		{"Just beyond reorg", 1000, 1000 + constants.MaxReorg + 1, true},
-		{"Well beyond reorg", 1000, 1000 + constants.MaxReorg + 100, true},
+		{"Just beyond reorg", 1000, 1000 + constants.DedupeMaxReorg + 1, true},
+		{"Well beyond reorg", 1000, 1000 + constants.DedupeMaxReorg + 100, true},
 	}
 
 	for _, tc := range testCases {
@@ -185,7 +185,7 @@ func TestDeduper_EdgeCases(t *testing.T) {
 
 		// Verify seenAt was set to 1 (not 0)
 		key := uint64(0)
-		index := utils.Mix64(key) & ((1 << constants.RingBits) - 1)
+		index := utils.Mix64(key) & ((1 << constants.DedupeRingBits) - 1)
 		if d.entries[index].seenAt != 1 {
 			t.Errorf("seenAt should be 1 when currentBlock=0, got %d", d.entries[index].seenAt)
 		}
@@ -251,7 +251,7 @@ func TestDeduper_CollisionHandling(t *testing.T) {
 	// Start with a known entry
 	collision1 = struct{ block, tx, log uint32 }{1000, 5, 2}
 	key1 := uint64(collision1.block)<<32 | uint64(collision1.tx)<<16 | uint64(collision1.log)
-	index1 := utils.Mix64(key1) & ((1 << constants.RingBits) - 1)
+	index1 := utils.Mix64(key1) & ((1 << constants.DedupeRingBits) - 1)
 
 	// Find a colliding entry
 	found := false
@@ -259,7 +259,7 @@ func TestDeduper_CollisionHandling(t *testing.T) {
 		for tx := uint32(0); tx < 100 && !found; tx++ {
 			for log := uint32(0); log < 10 && !found; log++ {
 				key2 := uint64(b)<<32 | uint64(tx)<<16 | uint64(log)
-				index2 := utils.Mix64(key2) & ((1 << constants.RingBits) - 1)
+				index2 := utils.Mix64(key2) & ((1 << constants.DedupeRingBits) - 1)
 				if index1 == index2 && (b != collision1.block || tx != collision1.tx || log != collision1.log) {
 					collision2 = struct{ block, tx, log uint32 }{b, tx, log}
 					found = true
@@ -461,7 +461,7 @@ func TestDeduper_ReorganizationHandling(t *testing.T) {
 	}
 
 	// Simulate reorg beyond MaxReorg threshold
-	currentBlock = reorgBlock + constants.MaxReorg + 10
+	currentBlock = reorgBlock + constants.DedupeMaxReorg + 10
 
 	// Old events should now be considered stale and accepted
 	for block := uint32(1000); block < 1010; block++ {
@@ -590,7 +590,7 @@ func TestDeduper_HashDistribution(t *testing.T) {
 	for i := 0; i < numSamples; i++ {
 		block := uint32(i)
 		key := uint64(block)<<32 | uint64(i%1000)<<16 | uint64(i%10)
-		index := utils.Mix64(key) & ((1 << constants.RingBits) - 1)
+		index := utils.Mix64(key) & ((1 << constants.DedupeRingBits) - 1)
 		buckets[index%256]++
 	}
 
@@ -747,7 +747,7 @@ func ExampleDeduper_Check() {
 	println("Second check:", isNew) // false - duplicate
 
 	// Same event after reorganization threshold
-	currentBlock = block + constants.MaxReorg + 1
+	currentBlock = block + constants.DedupeMaxReorg + 1
 	isNew = d.Check(block, tx, log, topicHi, topicLo, currentBlock)
 	println("After reorg threshold:", isNew) // true - stale entry
 }
@@ -771,7 +771,7 @@ func FuzzDeduper_Check(f *testing.F) {
 
 		// Second check with same parameters should return false (duplicate)
 		result2 := d.Check(block, tx, log, topicHi, topicLo, currentBlock)
-		if result2 && currentBlock <= block+constants.MaxReorg {
+		if result2 && currentBlock <= block+constants.DedupeMaxReorg {
 			t.Errorf("Second check should detect duplicate: block=%d, current=%d", block, currentBlock)
 		}
 

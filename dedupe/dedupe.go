@@ -78,7 +78,7 @@ type dedupeEntry struct {
 type Deduper struct {
 	// Fixed-size array provides zero-allocation operation and predictable memory layout.
 	// Power-of-2 size enables fast modulo via bit masking for index calculation.
-	entries [1 << constants.RingBits]dedupeEntry
+	entries [1 << constants.DedupeRingBits]dedupeEntry
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -121,7 +121,7 @@ func (d *Deduper) Check(
 
 	// Mix the key for better hash distribution and compute cache index.
 	// Bit masking with (size-1) performs fast modulo for power-of-2 sizes.
-	index := utils.Mix64(key) & ((1 << constants.RingBits) - 1)
+	index := utils.Mix64(key) & ((1 << constants.DedupeRingBits) - 1)
 	entry := &d.entries[index]
 
 	// STEP 2: PARALLEL COMPARISON
@@ -143,7 +143,7 @@ func (d *Deduper) Check(
 	// Handle blockchain reorganizations by invalidating old entries.
 	// Entries older than MaxReorg blocks might be from orphaned chain segments.
 	isStale := currentBlock > entry.seenAt &&
-		(currentBlock-entry.seenAt) > constants.MaxReorg
+		(currentBlock-entry.seenAt) > constants.DedupeMaxReorg
 
 	// STEP 4: DUPLICATE DETERMINATION
 	// An entry is duplicate only if:

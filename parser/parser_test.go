@@ -847,7 +847,7 @@ func TestUnsafeOperations(t *testing.T) {
 		// Test tag extraction at different positions
 		for i := 0; i <= len(data)-8; i++ {
 			tag := *(*[8]byte)(unsafe.Pointer(&data[i]))
-			if tag == constants.KeyAddress {
+			if tag == constants.ParserKeyAddress {
 				t.Logf("Found address tag at position %d", i)
 				break
 			}
@@ -862,7 +862,7 @@ func TestUnsafeOperations(t *testing.T) {
 		if len(topics) >= 11 {
 			sigCheck := *(*[8]byte)(unsafe.Pointer(&topics[3]))
 			sigStr := string(topics[3:11])
-			t.Logf("Signature check at offset 3: %s (matches: %v)", sigStr, sigCheck == constants.SigSyncPrefix)
+			t.Logf("Signature check at offset 3: %s (matches: %v)", sigStr, sigCheck == constants.ParserSigSyncPrefix)
 		}
 	})
 }

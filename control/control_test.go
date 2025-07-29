@@ -183,7 +183,7 @@ func TestControl_PollCooldown_Branchless(t *testing.T) {
 		SignalActivity()
 
 		// Poll within cooldown period
-		for i := uint64(0); i < constants.CooldownPolls/2; i++ {
+		for i := uint64(0); i < constants.ControlCooldownPolls/2; i++ {
 			PollCooldown()
 			if activityFlag != 1 {
 				t.Errorf("Activity flag cleared too early at poll %d", i)
@@ -197,7 +197,7 @@ func TestControl_PollCooldown_Branchless(t *testing.T) {
 		SignalActivity()
 
 		// Advance exactly to cooldown threshold
-		for i := uint64(0); i < constants.CooldownPolls; i++ {
+		for i := uint64(0); i < constants.ControlCooldownPolls; i++ {
 			PollCooldown()
 		}
 
@@ -214,7 +214,7 @@ func TestControl_PollCooldown_Branchless(t *testing.T) {
 		SignalActivity()
 
 		// Advance to one poll before expiry
-		for i := uint64(0); i < constants.CooldownPolls; i++ {
+		for i := uint64(0); i < constants.ControlCooldownPolls; i++ {
 			PollCooldown()
 		}
 
@@ -238,17 +238,17 @@ func TestControl_BranchlessCorrectness(t *testing.T) {
 		name     string
 	}{
 		{0, 1, "zero_elapsed"},
-		{constants.CooldownPolls / 2, 1, "half_cooldown"},
-		{constants.CooldownPolls - 1, 1, "almost_expired"},
-		{constants.CooldownPolls, 1, "at_threshold"},
-		{constants.CooldownPolls + 1, 0, "just_expired"},
-		{constants.CooldownPolls * 2, 0, "well_expired"},
+		{constants.ControlCooldownPolls / 2, 1, "half_cooldown"},
+		{constants.ControlCooldownPolls - 1, 1, "almost_expired"},
+		{constants.ControlCooldownPolls, 1, "at_threshold"},
+		{constants.ControlCooldownPolls + 1, 0, "just_expired"},
+		{constants.ControlCooldownPolls * 2, 0, "well_expired"},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Manually compute the branchless result
-			stillActive := uint32(((constants.CooldownPolls - tc.elapsed) >> 63) ^ 1)
+			stillActive := uint32(((constants.ControlCooldownPolls - tc.elapsed) >> 63) ^ 1)
 
 			if stillActive != tc.expected {
 				t.Errorf("Branchless logic failed for elapsed=%d: got %d, want %d",
@@ -383,7 +383,7 @@ func TestControl_GetCooldownProgress(t *testing.T) {
 		SignalActivity()
 
 		// Advance halfway
-		for i := uint64(0); i < constants.CooldownPolls/2; i++ {
+		for i := uint64(0); i < constants.ControlCooldownPolls/2; i++ {
 			PollCooldown()
 		}
 
@@ -399,7 +399,7 @@ func TestControl_GetCooldownProgress(t *testing.T) {
 		SignalActivity()
 
 		// Advance past cooldown
-		for i := uint64(0); i < constants.CooldownPolls*2; i++ {
+		for i := uint64(0); i < constants.ControlCooldownPolls*2; i++ {
 			PollCooldown()
 		}
 
@@ -416,7 +416,7 @@ func TestControl_GetCooldownRemaining(t *testing.T) {
 		SignalActivity()
 
 		remaining := GetCooldownRemaining()
-		if remaining != constants.CooldownPolls {
+		if remaining != constants.ControlCooldownPolls {
 			t.Errorf("Should have full cooldown remaining, got %d", remaining)
 		}
 	})
@@ -429,7 +429,7 @@ func TestControl_GetCooldownRemaining(t *testing.T) {
 		advanceVirtualTime(used)
 
 		remaining := GetCooldownRemaining()
-		expected := constants.CooldownPolls - used
+		expected := constants.ControlCooldownPolls - used
 		if remaining != expected {
 			t.Errorf("Should have %d remaining, got %d", expected, remaining)
 		}
@@ -439,7 +439,7 @@ func TestControl_GetCooldownRemaining(t *testing.T) {
 		resetState()
 		SignalActivity()
 
-		advanceVirtualTime(constants.CooldownPolls + 100)
+		advanceVirtualTime(constants.ControlCooldownPolls + 100)
 
 		remaining := GetCooldownRemaining()
 		if remaining != 0 {
@@ -465,7 +465,7 @@ func TestControl_IsWithinCooldown(t *testing.T) {
 		}
 
 		// Still active near end
-		advanceVirtualTime(constants.CooldownPolls - 10)
+		advanceVirtualTime(constants.ControlCooldownPolls - 10)
 		if !IsWithinCooldown() {
 			t.Error("Should remain within cooldown until cooldown expires")
 		}
@@ -475,7 +475,7 @@ func TestControl_IsWithinCooldown(t *testing.T) {
 		resetState()
 		SignalActivity()
 
-		advanceVirtualTime(constants.CooldownPolls + 10)
+		advanceVirtualTime(constants.ControlCooldownPolls + 10)
 		if IsWithinCooldown() {
 			t.Error("Should not be within cooldown after cooldown expires")
 		}
@@ -527,7 +527,7 @@ func TestControl_GetSystemState(t *testing.T) {
 		SignalActivity()
 
 		// Advance past cooldown
-		advanceVirtualTime(constants.CooldownPolls + 100)
+		advanceVirtualTime(constants.ControlCooldownPolls + 100)
 
 		state := GetSystemState()
 		// Bit 0: activityFlag (1), Bit 1: shutdownFlag (0), Bit 2: cooldown (0)
@@ -618,7 +618,7 @@ func TestControl_EdgeCases(t *testing.T) {
 		if GetActivityAge() != 0 {
 			t.Error("Age should be 0 immediately after signal")
 		}
-		if GetCooldownRemaining() != constants.CooldownPolls {
+		if GetCooldownRemaining() != constants.ControlCooldownPolls {
 			t.Error("Should have full cooldown remaining")
 		}
 	})
@@ -728,7 +728,7 @@ func TestControl_CompleteWorkflow(t *testing.T) {
 	}
 
 	// Phase 3: Idle period
-	idlePolls := constants.CooldownPolls + 1000
+	idlePolls := constants.ControlCooldownPolls + 1000
 	for i := uint64(0); i < idlePolls; i++ {
 		PollCooldown()
 	}
