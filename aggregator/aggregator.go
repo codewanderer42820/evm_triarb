@@ -129,6 +129,11 @@ type AggregatorState struct {
 var Aggregator AggregatorState
 
 // Initialize the aggregator state during package initialization
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func init() {
 	Aggregator.gcComplete = make(chan struct{})
 }
@@ -144,8 +149,8 @@ func init() {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
+//go:registerparams
 func SpinUntilAllCoreRingsPopulated(expectedCoreCount int) [constants.AggregatorMaxSupportedCores]*ring56.Ring {
 	for {
 		i := 0
@@ -199,8 +204,8 @@ func SpinUntilAllCoreRingsPopulated(expectedCoreCount int) [constants.Aggregator
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
+//go:registerparams
 func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) {
 	// Compute cycle hash using XOR operation for order-independent deduplication.
 	// XOR ensures identical cycles produce identical hashes regardless of pair ordering,
@@ -278,8 +283,8 @@ func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) 
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
+//go:registerparams
 func (agg *AggregatorState) extractOpportunityBundle() {
 	for bundleCount := 0; bundleCount < constants.AggregatorMaxBundleSize; bundleCount++ {
 		// Terminate extraction when no active strata remain.
@@ -344,8 +349,8 @@ func (agg *AggregatorState) extractOpportunityBundle() {
 //
 //go:norace
 //go:nocheckptr
-//go:nosplit
 //go:inline
+//go:registerparams
 func (agg *AggregatorState) reset() {
 	// Clear occupancy bitmap using direct iteration for optimal cache utilization.
 	// Linear access pattern ensures efficient cache line utilization and
@@ -410,6 +415,11 @@ func (agg *AggregatorState) reset() {
 //   - Runtime measurement of actual loop performance for timing accuracy
 //   - Adaptive threshold calculation based on empirical hardware characteristics
 //   - Core count scaling for consistent timing across diverse configurations
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func InitializeAggregatorSystem() {
 	// Determine optimal core allocation using router allocation strategy.
 	// Core count calculation reserves system cores for OS operations while
@@ -553,6 +563,11 @@ func InitializeAggregatorSystem() {
 //   - Called after all initialization operations complete successfully
 //   - Triggers transition from cooperative to high-performance processing modes
 //   - Ensures consistent system state before operational activation
+//
+//go:norace
+//go:nocheckptr
+//go:inline
+//go:registerparams
 func SignalGCComplete() {
 	close(Aggregator.gcComplete)
 }
