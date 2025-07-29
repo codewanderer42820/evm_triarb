@@ -510,7 +510,7 @@ func ParseHexU64(b []byte) uint64 {
 //  1. Load 8 ASCII characters as single 64-bit value
 //  2. Convert all characters to nibbles in parallel
 //  3. Compact nibbles using bit manipulation
-//  4. Store resulting 4 bytes directly in little-endian order
+//  4. Store resulting 4 bytes directly as uint32
 //
 // Input requirements:
 //   - Exactly 40 hex characters (no 0x prefix)
@@ -549,12 +549,12 @@ func ParseEthereumAddress(b []byte) [20]byte {
 		chunk ^= extracted
 		chunk |= extracted >> 8
 
-		// Step 3: Gather final 16-bit groups with adjusted mask
+		// Step 3: Gather final 16-bit groups
 		extracted = chunk & 0x0000000000FFFF00
 		chunk ^= extracted
 		chunk |= extracted << 16
 
-		// Store 4 compacted bytes directly as little-endian uint32
+		// Store 4 compacted bytes after shifting to correct position
 		*(*uint32)(unsafe.Pointer(&result[byteIdx])) = uint32(chunk >> 24)
 
 		byteIdx += 4
