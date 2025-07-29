@@ -99,7 +99,18 @@ type AggregatorState struct {
 	sharedArena [constants.AggregatorTableCapacity]compactqueue128.Entry
 
 	// ═══════════════════════════════════════════════════════════════════════════════════════════════
-	// CACHE LINE 5: COLD PATH - INFREQUENT ACCESS
+	// CACHE LINE 5: SYNCHRONIZATION - ACCESSED DURING PHASE TRANSITIONS
+	// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+	// Initialization coordination channel for two-phase system startup.
+	// Enables coordinated transition between initialization and operational
+	// phases across multiple concurrent goroutines without race conditions.
+	// Cold - only used during initialization coordination
+	gcComplete chan struct{} // 8B - Channel used for two-stage initialization coordination
+	_          [56]byte      // 56B - Padding to reach cache line boundary (8 + 56 = 64)
+
+	// ═══════════════════════════════════════════════════════════════════════════════════════════════
+	// CACHE LINE 6: COLD PATH - INFREQUENT ACCESS
 	// ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 	// Sequential handle allocator for queue entry management.
@@ -107,13 +118,6 @@ type AggregatorState struct {
 	// and entry lifecycle management across queue operations.
 	// Frequency: Accessed only during new stratum activation (subset of new opportunities).
 	nextHandle compactqueue128.Handle
-
-	// Initialization coordination channel for two-phase system startup.
-	// Enables coordinated transition between initialization and operational
-	// phases across multiple concurrent goroutines without race conditions.
-	// Cold - only used during initialization coordination
-	gcComplete chan struct{} // 8B - Channel used for two-stage initialization coordination
-	_          [48]byte      // 48B - Padding to reach cache line boundary (8 + 8 + 48 = 64)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
