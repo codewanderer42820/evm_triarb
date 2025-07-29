@@ -54,7 +54,7 @@ type AggregatorState struct {
 	// Primary communication interface accessed every processing iteration.
 	// Ring buffers provide lock-free message passing between router cores and aggregator.
 	// Frequency: Accessed once per core per iteration regardless of data availability.
-	coreRings [constants.AggregatorMaxSupportedCores]ring56.Ring
+	coreRings [constants.RouterMaxSupportedCores]ring56.Ring
 
 	// ═══════════════════════════════════════════════════════════════════════════════════════════════
 	// CACHE LINE 2: OPPORTUNITY PROCESSING - ACCESSED WHEN DATA AVAILABLE
@@ -64,13 +64,13 @@ type AggregatorState struct {
 	// Bitmap enables rapid occupancy testing and provides efficient bulk reset capability
 	// during block finalization. Each bit represents one hash table slot.
 	// Frequency: Accessed twice per opportunity (read for collision detection, write for marking).
-	occupied [constants.AggregatorAggregatorBitmapWords]uint64
+	occupied [constants.AggregatorBitmapWords]uint64
 
 	// Primary opportunity storage indexed by cycle hash for deduplication.
 	// Hash table stores unique arbitrage cycles with collision handling via replacement.
 	// Replacement strategy prioritizes most recent opportunity data for execution relevance.
 	// Frequency: Accessed once per opportunity for storage and retrieval operations.
-	opportunities [constants.AggregatorAggregatorTableCapacity]types.ArbitrageOpportunity
+	opportunities [constants.AggregatorTableCapacity]types.ArbitrageOpportunity
 
 	// ═══════════════════════════════════════════════════════════════════════════════════════════════
 	// CACHE LINE 3: QUEUE MANAGEMENT - ACCESSED PER OPPORTUNITY AND EXTRACTION
@@ -80,7 +80,7 @@ type AggregatorState struct {
 	// Each queue contains opportunities within a specific liquidity tier, ordered by profitability.
 	// Queue selection by leading zero count ensures execution risk assessment precedence.
 	// Frequency: Accessed once per opportunity for queue selection and priority operations.
-	queues [constants.AggregatorAggregatorMaxStrata]compactqueue128.CompactQueue128
+	queues [constants.AggregatorMaxStrata]compactqueue128.CompactQueue128
 
 	// Meta-queue tracking active liquidity strata for efficient bundle extraction.
 	// Maintains sorted list of strata containing opportunities, enabling rapid identification
@@ -96,7 +96,7 @@ type AggregatorState struct {
 	// All CompactQueue128 instances allocate entries from this unified memory pool
 	// to ensure cache locality and minimize memory fragmentation during operation.
 	// Frequency: Accessed during every queue operation (Push, Pop, MoveTick).
-	sharedArena [constants.AggregatorAggregatorTableCapacity]compactqueue128.Entry
+	sharedArena [constants.AggregatorTableCapacity]compactqueue128.Entry
 
 	// ═══════════════════════════════════════════════════════════════════════════════════════════════
 	// CACHE LINE 5: COLD PATH - INFREQUENT ACCESS
@@ -146,7 +146,7 @@ func init() {
 //go:nocheckptr
 //go:nosplit
 //go:inline
-func SpinUntilAllCoreRingsPopulated(expectedCoreCount int) [constants.AggregatorMaxSupportedCores]*ring56.Ring {
+func SpinUntilAllCoreRingsPopulated(expectedCoreCount int) [constants.RouterMaxSupportedCores]*ring56.Ring {
 	for {
 		i := 0
 
@@ -170,8 +170,8 @@ func SpinUntilAllCoreRingsPopulated(expectedCoreCount int) [constants.Aggregator
 	}
 
 	// All cores are populated, build and return pointers to the rings
-	var ringPointers [constants.AggregatorMaxSupportedCores]*ring56.Ring
-	for i := 0; i < constants.AggregatorMaxSupportedCores; i++ {
+	var ringPointers [constants.RouterMaxSupportedCores]*ring56.Ring
+	for i := 0; i < constants.RouterMaxSupportedCores; i++ {
 		ringPointers[i] = &Aggregator.coreRings[i]
 	}
 	return ringPointers
@@ -207,7 +207,7 @@ func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) 
 	// enabling efficient cycle identification and replacement-based collision handling.
 	h := uint16((uint64(opp.CyclePairs[0]) ^
 		uint64(opp.CyclePairs[1]) ^
-		uint64(opp.CyclePairs[2])) & constants.AggregatorAggregatorTableMask)
+		uint64(opp.CyclePairs[2])) & constants.AggregatorTableMask)
 
 	// Calculate bitmap position using bit manipulation for efficient occupancy tracking.
 	// Bitmap organization: 64 slots per uint64 word, requiring word and bit index calculation.
@@ -225,7 +225,7 @@ func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) 
 	// Transform profitability to priority queue tick using linear scaling.
 	// Formula: tick = (profitability + bound) × scale
 	// Matches router.go quantization pattern for consistency.
-	tick := int64((opp.TotalProfitability + constants.AggregatorAggregatorProfitabilityClampingBound) * constants.AggregatorAggregatorProfitabilityScale)
+	tick := int64((opp.TotalProfitability + constants.AggregatorProfitabilityClampingBound) * constants.AggregatorProfitabilityScale)
 	queue := &agg.queues[opp.LeadingZeroCount]
 	handle := compactqueue128.Handle(h)
 
@@ -281,7 +281,7 @@ func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) 
 //go:nosplit
 //go:inline
 func (agg *AggregatorState) extractOpportunityBundle() {
-	for bundleCount := 0; bundleCount < constants.AggregatorAggregatorMaxBundleSize; bundleCount++ {
+	for bundleCount := 0; bundleCount < constants.AggregatorMaxBundleSize; bundleCount++ {
 		// Terminate extraction when no active strata remain.
 		// Empty meta-queue indicates all opportunities have been extracted
 		// or no profitable opportunities are currently available.
@@ -350,7 +350,7 @@ func (agg *AggregatorState) reset() {
 	// Clear occupancy bitmap using direct iteration for optimal cache utilization.
 	// Linear access pattern ensures efficient cache line utilization and
 	// predictable memory bandwidth consumption during bulk clearing operations.
-	for i := 0; i < constants.AggregatorAggregatorBitmapWords; i++ {
+	for i := 0; i < constants.AggregatorBitmapWords; i++ {
 		agg.occupied[i] = 0
 	}
 
@@ -358,16 +358,16 @@ func (agg *AggregatorState) reset() {
 	// Memory layout exploitation: ArbitrageOpportunity = 56 bytes = 7 uint64 words.
 	// Bulk clearing via uint64 array access eliminates per-struct overhead
 	// and maximizes memory bandwidth utilization for clearing operations.
-	oppPtr := (*[constants.AggregatorAggregatorTableCapacity * 7]uint64)(unsafe.Pointer(&agg.opportunities[0]))
-	for i := 0; i < constants.AggregatorAggregatorTableCapacity*7; i++ {
+	oppPtr := (*[constants.AggregatorTableCapacity * 7]uint64)(unsafe.Pointer(&agg.opportunities[0]))
+	for i := 0; i < constants.AggregatorTableCapacity*7; i++ {
 		oppPtr[i] = 0
 	}
 
 	// Clear shared memory arena used by all priority queues.
 	// Arena reset ensures clean entry allocation state for subsequent processing cycles.
 	// Entry structure size: 32 bytes = 4 uint64 words.
-	arenaPtr := (*[constants.AggregatorAggregatorTableCapacity * 4]uint64)(unsafe.Pointer(&agg.sharedArena[0]))
-	for i := 0; i < constants.AggregatorAggregatorTableCapacity*4; i++ {
+	arenaPtr := (*[constants.AggregatorTableCapacity * 4]uint64)(unsafe.Pointer(&agg.sharedArena[0]))
+	for i := 0; i < constants.AggregatorTableCapacity*4; i++ {
 		arenaPtr[i] = 0
 	}
 
@@ -375,7 +375,7 @@ func (agg *AggregatorState) reset() {
 	// CompactQueue128 structure size: 1,152 bytes = 144 uint64 words.
 	// Bulk clearing maintains queue initialization state for subsequent
 	// operation without requiring complex reinitialization procedures.
-	for i := 0; i < constants.AggregatorAggregatorMaxStrata; i++ {
+	for i := 0; i < constants.AggregatorMaxStrata; i++ {
 		qPtr := (*[144]uint64)(unsafe.Pointer(&agg.queues[i]))
 		for j := 0; j < 144; j++ {
 			qPtr[j] = 0
@@ -415,8 +415,8 @@ func InitializeAggregatorSystem() {
 	// Core count calculation reserves system cores for OS operations while
 	// maximizing utilization for arbitrage processing workloads.
 	coreCount := runtime.NumCPU() - 4
-	if coreCount > constants.AggregatorMaxSupportedCores {
-		coreCount = constants.AggregatorMaxSupportedCores
+	if coreCount > constants.RouterMaxSupportedCores {
+		coreCount = constants.RouterMaxSupportedCores
 	}
 	coreCount &^= 1 // Ensure even count for forward/reverse core pairing
 
@@ -425,7 +425,7 @@ func InitializeAggregatorSystem() {
 	// to calculate accurate finalization thresholds for consistent timing.
 	benchmarkRings := make([]ring56.Ring, coreCount)
 	for i := 0; i < coreCount; i++ {
-		benchmarkRings[i] = *ring56.New(constants.AggregatorDefaultRingSize)
+		benchmarkRings[i] = *ring56.New(constants.RouterDefaultRingSize)
 	}
 
 	// Execute 1,000,000 iterations of exact polling loop for timing measurement.
@@ -446,9 +446,9 @@ func InitializeAggregatorSystem() {
 	elapsed := time.Since(start)
 
 	// Calculate adaptive finalization threshold for consistent timing.
-	// Threshold calculation ensures TargetFinalizationTime timing regardless
+	// Threshold calculation ensures AggregatorTargetFinalizationTime timing regardless
 	// of hardware performance variations or core count differences.
-	iterationsPerMs := benchmarkIterations / int(elapsed/TargetFinalizationTime)
+	iterationsPerMs := benchmarkIterations / int(elapsed/constants.AggregatorTargetFinalizationTime)
 	finalizationThreshold := uint64(iterationsPerMs / coreCount)
 
 	// Initialize global coordination channel for multi-phase startup synchronization.
@@ -466,7 +466,7 @@ func InitializeAggregatorSystem() {
 		// Ring buffer configuration matches router core expectations for message
 		// size and capacity to ensure efficient lock-free communication.
 		for i := 0; i < coreCount; i++ {
-			Aggregator.coreRings[i] = *ring56.New(constants.AggregatorDefaultRingSize)
+			Aggregator.coreRings[i] = *ring56.New(constants.RouterDefaultRingSize)
 		}
 
 		// Configure shared memory arena for unified queue memory management.
