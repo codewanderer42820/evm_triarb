@@ -28,6 +28,7 @@ import (
 	"main/constants"
 	"main/ring56"
 	"main/types"
+	"main/utils"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -167,9 +168,9 @@ func SpinUntilAllCoreRingsPopulated(expectedCoreCount int) [constants.Aggregator
 
 // processOpportunity ingests and prioritizes arbitrage opportunities using hash deduplication.
 func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) {
-	// Compute cycle hash using XOR operation for order-independent deduplication
-	h := uint16((uint64(opp.CyclePairs[0]) ^
-		uint64(opp.CyclePairs[1]) ^
+	// Compute cycle hash: XOR for order-independence, Mix64 for distribution with sequential IDs
+	h := uint16(utils.Mix64(uint64(opp.CyclePairs[0])^
+		uint64(opp.CyclePairs[1])^
 		uint64(opp.CyclePairs[2])) & constants.AggregatorTableMask)
 
 	// Calculate bitmap position for occupancy tracking
