@@ -159,26 +159,25 @@ func SpinUntilAllCoreRingsPopulated(expectedCoreCount int) [constants.Aggregator
 	for {
 		i := 0
 
-		// Check all expected cores for ring readiness
-		// Use IsReady() method to check if ring has been properly set up
-		// An unready ring will return false, ready rings return true
+		// Check all expected cores for ring initialization completion
+		// Ring initialization is done by router cores during their startup phase
 		for ; i < expectedCoreCount; i++ {
 			if !Aggregator.coreRings[i].IsReady() {
-				break // Found unready ring, exit inner loop
+				break // Found uninitialized ring, exit inner loop
 			}
 		}
 
-		// If i == expectedCoreCount, all cores were checked without breaking (all ready)
-		// If i < expectedCoreCount, we broke early (found unready ring)
+		// If i == expectedCoreCount, all cores were checked without breaking (all initialized)
+		// If i < expectedCoreCount, we broke early (found uninitialized ring)
 		if i == expectedCoreCount {
-			break // All rings are ready, exit outer loop
+			break // All rings are initialized, exit outer loop
 		}
 
 		// Hot spin - no yielding for minimum latency coordination
 		// This is startup-only code, so CPU usage is acceptable
 	}
 
-	// All cores are populated, build and return pointers to the rings
+	// All cores are initialized, build and return pointers to the rings
 	var ringPointers [constants.AggregatorMaxSupportedCores]*ring56.Ring
 	for i := 0; i < constants.AggregatorMaxSupportedCores; i++ {
 		ringPointers[i] = &Aggregator.coreRings[i]
