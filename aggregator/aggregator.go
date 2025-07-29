@@ -133,51 +133,31 @@ type AggregatorState struct {
 var Aggregator AggregatorState
 
 // Initialize the aggregator state during package initialization
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
 func init() {
 	Aggregator.gcComplete = make(chan struct{})
 }
 
-// SpinUntilAllCoreRingsPopulated spins hot until all core rings are initialized and populated.
-// This function blocks the router from proceeding until all destination rings are ready.
-// Returns pointers to the populated core rings once all entries are non-nil.
-//
-// Design rationale:
-//   - Hot spinning provides minimum latency for startup coordination
-//   - Validation ensures no nil rings before router begins message dispatch
-//   - Pointer return avoids copying large ring structures
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
+// SpinUntilAllCoreRingsPopulated spins hot until all core rings are initialized.
+// Blocks until all expected rings are ready for message dispatch.
 func SpinUntilAllCoreRingsPopulated(expectedCoreCount int) [constants.AggregatorMaxSupportedCores]*ring56.Ring {
 	for {
 		i := 0
 
-		// Check all expected cores for ring initialization completion
-		// Ring initialization is done by router cores during their startup phase
+		// Check all expected cores for ring initialization
 		for ; i < expectedCoreCount; i++ {
 			if !Aggregator.coreRings[i].IsReady() {
-				break // Found uninitialized ring, exit inner loop
+				break
 			}
 		}
 
-		// If i == expectedCoreCount, all cores were checked without breaking (all initialized)
-		// If i < expectedCoreCount, we broke early (found uninitialized ring)
 		if i == expectedCoreCount {
-			break // All rings are initialized, exit outer loop
+			break
 		}
 
 		// Hot spin - no yielding for minimum latency coordination
-		// This is startup-only code, so CPU usage is acceptable
 	}
 
-	// All cores are initialized, build and return pointers to the rings
+	// Build and return pointers to all rings
 	var ringPointers [constants.AggregatorMaxSupportedCores]*ring56.Ring
 	for i := 0; i < constants.AggregatorMaxSupportedCores; i++ {
 		ringPointers[i] = &Aggregator.coreRings[i]
@@ -185,81 +165,38 @@ func SpinUntilAllCoreRingsPopulated(expectedCoreCount int) [constants.Aggregator
 	return ringPointers
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CORE OPPORTUNITY PROCESSING
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-// processOpportunity implements the primary opportunity ingestion and prioritization logic.
-// Handles hash table deduplication, dual-layer queue management, and stratum tracking
-// with optimized memory access patterns and branchless arithmetic for consistent performance.
-//
-// Processing Flow:
-//  1. Compute deterministic hash from cycle pairs for deduplication
-//  2. Check hash table occupancy and update opportunity storage
-//  3. Transform profitability to priority queue tick value
-//  4. Execute queue update (existing) or insertion (new) path
-//  5. Manage stratum activity tracking for new opportunities
-//
-// Performance Characteristics:
-//   - O(1) hash table operations with collision handling via replacement
-//   - O(log n) priority queue operations with shared memory allocation
-//   - Branchless arithmetic for predictable execution timing
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
+// processOpportunity ingests and prioritizes arbitrage opportunities using hash deduplication.
 func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) {
-	// Compute cycle hash using XOR operation for order-independent deduplication.
-	// XOR ensures identical cycles produce identical hashes regardless of pair ordering,
-	// enabling efficient cycle identification and replacement-based collision handling.
+	// Compute cycle hash using XOR operation for order-independent deduplication
 	h := uint16((uint64(opp.CyclePairs[0]) ^
 		uint64(opp.CyclePairs[1]) ^
 		uint64(opp.CyclePairs[2])) & constants.AggregatorTableMask)
 
-	// Calculate bitmap position using bit manipulation for efficient occupancy tracking.
-	// Bitmap organization: 64 slots per uint64 word, requiring word and bit index calculation.
-	w := h >> 6                                  // Word index: hash ÷ 64
-	b := h & 63                                  // Bit index: hash mod 64
-	mask := uint64(1) << b                       // Bit mask for specific slot
-	wasOccupied := (agg.occupied[w] & mask) >> b // Extract occupancy status
+	// Calculate bitmap position for occupancy tracking
+	w := h >> 6
+	b := h & 63
+	mask := uint64(1) << b
+	wasOccupied := (agg.occupied[w] & mask) >> b
 
-	// Update hash table with current opportunity data and mark slot as occupied.
-	// Replacement strategy ensures most recent opportunity data is preserved
-	// for execution relevance and price accuracy.
+	// Update hash table with current opportunity data
 	agg.opportunities[h] = *opp
 	agg.occupied[w] |= mask
 
-	// Transform profitability to priority queue tick using linear scaling.
-	// Formula: tick = (profitability + bound) × scale
-	// Matches router.go quantization pattern for consistency.
+	// Transform profitability to priority queue tick
 	tick := int64((opp.TotalProfitability + constants.AggregatorProfitabilityClampingBound) * constants.AggregatorProfitabilityScale)
 	queue := &agg.queues[opp.LeadingZeroCount]
 	handle := compactqueue128.Handle(h)
 
 	if wasOccupied != 0 {
-		// Update path: Existing opportunity requires priority adjustment in queue.
-		// MoveTick operation maintains queue ordering while updating opportunity priority
-		// based on latest profitability calculation from router cores.
+		// Update existing opportunity priority
 		queue.MoveTick(handle, tick)
 	} else {
-		// Insertion path: New opportunity requires queue insertion and stratum tracking.
-		// Queue insertion maintains priority ordering within liquidity tier.
+		// Insert new opportunity and track stratum activity
 		queue.Push(tick, handle, uint64(h))
 
-		// Stratum activity management using branchless first-opportunity detection.
-		// Tracks whether this is the first opportunity in its liquidity stratum
-		// for efficient meta-queue management during bundle extraction.
 		size := uint64(queue.Size())
-
-		// Branchless first-opportunity detection using arithmetic right shift.
-		// Expression: (size-1) >> 63 produces 0 for size≥1, but for size=1:
-		// (1-1) = 0, and 0-1 = 0xFFFFFFFFFFFFFFFF (max uint64)
-		// Right shift of max uint64 by 63 positions yields 1
 		isFirst := (uint64(int64(size-1)) >> 63) & 1
 
-		// Handle allocation and stratum tracking with conditional execution.
-		// Operations scaled by isFirst flag to execute only for first opportunities.
 		nextHandle := agg.nextHandle
 		agg.nextHandle += compactqueue128.Handle(isFirst)
 		trackerHandle := nextHandle
@@ -270,64 +207,30 @@ func (agg *AggregatorState) processOpportunity(opp *types.ArbitrageOpportunity) 
 }
 
 // extractOpportunityBundle constructs execution bundles from highest-priority opportunities.
-// Implements liquidity-first extraction strategy: selects highest-liquidity strata first,
-// then extracts most profitable opportunities within each stratum until bundle capacity reached.
-//
-// Extraction Strategy:
-//  1. Identify active liquidity strata via meta-queue traversal
-//  2. Extract most profitable opportunity from highest-liquidity stratum
-//  3. Remove empty strata from tracking to maintain extraction efficiency
-//  4. Repeat until bundle capacity reached or no opportunities remain
-//
-// Bundle Composition Optimization:
-//   - Prioritizes execution certainty through liquidity-first selection
-//   - Maximizes profitability within liquidity constraints
-//   - Maintains bundle size limits for gas efficiency and inclusion probability
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
+// Extracts from highest-liquidity strata first, then by profitability within each stratum.
 func (agg *AggregatorState) extractOpportunityBundle() {
 	for bundleCount := 0; bundleCount < constants.AggregatorMaxBundleSize; bundleCount++ {
-		// Terminate extraction when no active strata remain.
-		// Empty meta-queue indicates all opportunities have been extracted
-		// or no profitable opportunities are currently available.
 		if agg.stratumTracker.Empty() {
 			break
 		}
 
-		// Identify highest-liquidity stratum (lowest leading zero count).
-		// Meta-queue maintains strata sorted by liquidity tier for optimal
-		// execution risk management and slippage minimization.
 		_, _, stratumID := agg.stratumTracker.PeepMin()
 		queue := &agg.queues[stratumID]
 
-		// Handle empty stratum cleanup during extraction process.
-		// Empty strata can occur due to opportunity expiration or previous extraction,
-		// requiring removal from meta-queue to maintain extraction efficiency.
 		if queue.Empty() {
 			th, _, _ := agg.stratumTracker.PeepMin()
 			agg.stratumTracker.UnlinkMin(th)
 			continue
 		}
 
-		// Extract most profitable opportunity from current liquidity stratum.
-		// Opportunity data retrieved from hash table using queue handle for
-		// integration into execution bundle construction process.
 		oh, _, _ := queue.PeepMin()
-		// Integration point: agg.opportunities[oh] contains opportunity data for execution
 		opportunity := &agg.opportunities[oh]
 
 		// TODO: Send opportunity to execution system
-		// Format: types.ArbitrageOpportunity with cycle pairs, profitability, and liquidity data
-		_ = opportunity // Placeholder to prevent unused variable error
+		_ = opportunity
 
 		queue.UnlinkMin(oh)
 
-		// Remove stratum from meta-queue tracking when depleted.
-		// Cleanup maintains meta-queue accuracy and prevents unnecessary
-		// iteration over empty strata in subsequent extraction cycles.
 		if queue.Empty() {
 			th, _, _ := agg.stratumTracker.PeepMin()
 			agg.stratumTracker.UnlinkMin(th)
@@ -335,54 +238,26 @@ func (agg *AggregatorState) extractOpportunityBundle() {
 	}
 }
 
-// reset performs comprehensive system state cleanup for next processing cycle.
-// Implements optimized bulk memory operations to clear all aggregation state
-// efficiently while maintaining cache-friendly access patterns for subsequent operations.
-//
-// Reset Operations:
-//  1. Occupancy bitmap bulk clearing using direct iteration
-//  2. Opportunity storage bulk zeroing using unsafe pointer arithmetic
-//  3. Priority queue state clearing via memory layout exploitation
-//  4. Meta-queue state clearing using identical memory operations
-//
-// Performance Optimization:
-//   - Bulk memory operations minimize system call overhead
-//   - Sequential access patterns optimize cache utilization
-//   - Unsafe operations eliminate bounds checking for maximum throughput
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
+// reset clears all aggregation state for next processing cycle using bulk memory operations.
 func (agg *AggregatorState) reset() {
-	// Clear occupancy bitmap using direct iteration for optimal cache utilization.
-	// Linear access pattern ensures efficient cache line utilization and
-	// predictable memory bandwidth consumption during bulk clearing operations.
+	// Clear occupancy bitmap
 	for i := 0; i < constants.AggregatorBitmapWords; i++ {
 		agg.occupied[i] = 0
 	}
 
-	// Clear opportunity storage using unsafe bulk memory operations.
-	// Memory layout exploitation: ArbitrageOpportunity = 56 bytes = 7 uint64 words.
-	// Bulk clearing via uint64 array access eliminates per-struct overhead
-	// and maximizes memory bandwidth utilization for clearing operations.
+	// Clear opportunity storage
 	oppPtr := (*[constants.AggregatorTableCapacity * 7]uint64)(unsafe.Pointer(&agg.opportunities[0]))
 	for i := 0; i < constants.AggregatorTableCapacity*7; i++ {
 		oppPtr[i] = 0
 	}
 
-	// Clear shared memory arena used by all priority queues.
-	// Arena reset ensures clean entry allocation state for subsequent processing cycles.
-	// Entry structure size: 32 bytes = 4 uint64 words.
+	// Clear shared memory arena
 	arenaPtr := (*[constants.AggregatorTableCapacity * 4]uint64)(unsafe.Pointer(&agg.sharedArena[0]))
 	for i := 0; i < constants.AggregatorTableCapacity*4; i++ {
 		arenaPtr[i] = 0
 	}
 
-	// Clear priority queue state using memory layout exploitation.
-	// CompactQueue128 structure size: 1,152 bytes = 144 uint64 words.
-	// Bulk clearing maintains queue initialization state for subsequent
-	// operation without requiring complex reinitialization procedures.
+	// Clear priority queues
 	for i := 0; i < constants.AggregatorMaxStrata; i++ {
 		qPtr := (*[144]uint64)(unsafe.Pointer(&agg.queues[i]))
 		for j := 0; j < 144; j++ {
@@ -390,60 +265,29 @@ func (agg *AggregatorState) reset() {
 		}
 	}
 
-	// Clear meta-queue state using identical memory layout operations.
-	// Consistent clearing approach across all queue structures ensures
-	// uniform performance characteristics and predictable reset timing.
+	// Clear meta-queue
 	tPtr := (*[144]uint64)(unsafe.Pointer(&agg.stratumTracker))
 	for i := 0; i < 144; i++ {
 		tPtr[i] = 0
 	}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// SYSTEM INITIALIZATION AND LIFECYCLE MANAGEMENT
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
 // InitializeAggregatorSystem orchestrates complete system initialization with empirical
-// performance calibration and multi-phase startup coordination. Implements adaptive
-// configuration based on hardware capabilities and core count optimization.
-//
-// Initialization Phases:
-//  1. Hardware capability assessment and core count determination
-//  2. Empirical performance measurement for timing calibration
-//  3. Memory structure initialization with shared arena allocation
-//  4. Cooperative initialization coordination with router systems
-//  5. Transition to operational processing with optimized hot loops
-//
-// Performance Calibration:
-//   - Runtime measurement of actual loop performance for timing accuracy
-//   - Adaptive threshold calculation based on empirical hardware characteristics
-//   - Core count scaling for consistent timing across diverse configurations
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
+// performance calibration and multi-phase startup coordination.
 func InitializeAggregatorSystem() {
-	// Determine optimal core allocation using router allocation strategy.
-	// Core count calculation reserves system cores for OS operations while
-	// maximizing utilization for arbitrage processing workloads.
+	// Determine optimal core allocation
 	coreCount := runtime.NumCPU() - 4
 	if coreCount > constants.AggregatorMaxSupportedCores {
 		coreCount = constants.AggregatorMaxSupportedCores
 	}
-	coreCount &^= 1 // Ensure even count for forward/reverse core pairing
+	coreCount &^= 1
 
-	// Empirical performance measurement for adaptive timing calibration.
-	// Benchmark measures actual main loop performance under realistic conditions
-	// to calculate accurate finalization thresholds for consistent timing.
+	// Empirical performance measurement for timing calibration
 	benchmarkRings := make([]ring56.Ring, coreCount)
 	for i := 0; i < coreCount; i++ {
 		benchmarkRings[i] = *ring56.New(constants.RouterDefaultRingSize)
 	}
 
-	// Execute 1,000,000 iterations of exact polling loop for timing measurement.
-	// Benchmark runs for at least 1ms to establish bare minimum workload baseline
-	// that represents typical empty-spin conditions during low activity periods.
 	const benchmarkIterations = 1000000
 	start := time.Now()
 
@@ -457,50 +301,30 @@ func InitializeAggregatorSystem() {
 	}
 
 	elapsed := time.Since(start)
-
-	// Calculate adaptive finalization threshold for consistent timing.
-	// Threshold calculation ensures AggregatorTargetFinalizationTime timing regardless
-	// of hardware performance variations or core count differences.
 	iterationsPerMs := benchmarkIterations / int(elapsed/constants.AggregatorTargetFinalizationTime)
 	finalizationThreshold := uint64(iterationsPerMs / coreCount)
 
-	// Initialize global coordination channel for multi-phase startup synchronization.
-	// Channel enables coordinated transition between initialization and operational
-	// phases across multiple concurrent goroutines without race conditions.
 	Aggregator.gcComplete = make(chan struct{})
 
 	go func() {
-		// Establish OS thread affinity for consistent NUMA performance characteristics.
-		// Thread locking eliminates scheduler-induced performance variability and
-		// ensures predictable memory access patterns for cache optimization.
 		runtime.LockOSThread()
 
-		// Initialize inter-core communication infrastructure with optimized ring buffers.
-		// Ring buffer configuration matches router core expectations for message
-		// size and capacity to ensure efficient lock-free communication.
+		// Initialize ring buffers
 		for i := 0; i < coreCount; i++ {
 			Aggregator.coreRings[i] = *ring56.New(constants.RouterDefaultRingSize)
 		}
 
-		// Configure shared memory arena for unified queue memory management.
-		// Shared arena eliminates memory fragmentation and ensures cache locality
-		// across all priority queue operations for optimal performance.
+		// Configure shared memory arena
 		arenaPtr := unsafe.Pointer(&Aggregator.sharedArena[0])
 		Aggregator.stratumTracker = *compactqueue128.New(arenaPtr)
 
-		// Initialize liquidity-stratified priority queue system.
-		// Queue initialization establishes memory layout for efficient
-		// dual-layer priority sorting and bundle extraction operations.
+		// Initialize priority queues
 		for i := range Aggregator.queues {
 			Aggregator.queues[i] = *compactqueue128.New(arenaPtr)
 		}
 
-		// Reset counter for handle allocation
 		Aggregator.nextHandle = 0
 
-		// Cooperative initialization coordination with systematic state draining.
-		// Coordination phase ensures all system components reach operational
-		// readiness before processing activation to prevent race conditions.
 	cooperativeDrainSpin:
 		for {
 			allEmpty := true
@@ -520,17 +344,11 @@ func InitializeAggregatorSystem() {
 			runtime.Gosched()
 		}
 
-		// Primary operational loop with optimized opportunity processing.
-		// Loop implements adaptive block finalization, efficient opportunity ingestion,
-		// and automatic state management for continuous high-frequency operation.
-		// All finalization-related variables are now local to this function.
+		// Primary operational loop
 		emptySpins := uint64(0)
 		for {
 			dataCount := uint64(0)
 
-			// Poll all router core communication channels for opportunity data.
-			// Polling strategy balances latency minimization with CPU efficiency
-			// through direct ring buffer access without blocking operations.
 			for i := 0; i < coreCount; i++ {
 				p := Aggregator.coreRings[i].Pop()
 				hasData := uint64(uintptr(unsafe.Pointer(p))>>63) ^ 1
@@ -542,9 +360,6 @@ func InitializeAggregatorSystem() {
 				}
 			}
 
-			// Adaptive block finalization using branchless empty iteration counting.
-			// Finalization detection enables timely opportunity extraction while
-			// preventing premature finalization during active trading periods.
 			hasData := (dataCount - 1) >> 63
 			emptySpins = (emptySpins + 1) & hasData
 			shouldFinalize := ((emptySpins - finalizationThreshold) >> 63) ^ 1
@@ -558,19 +373,7 @@ func InitializeAggregatorSystem() {
 	}()
 }
 
-// SignalGCComplete notifies all system components of initialization completion.
-// Signal coordination enables synchronized transition to operational processing
-// across all concurrent goroutines participating in system initialization.
-//
-// Coordination Protocol:
-//   - Called after all initialization operations complete successfully
-//   - Triggers transition from cooperative to high-performance processing modes
-//   - Ensures consistent system state before operational activation
-//
-//go:norace
-//go:nocheckptr
-//go:inline
-//go:registerparams
+// SignalGCComplete signals all system components that initialization is complete.
 func SignalGCComplete() {
 	close(Aggregator.gcComplete)
 }
