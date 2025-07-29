@@ -496,10 +496,7 @@ func ParseHexU64(b []byte) uint64 {
 	chunk2 |= extracted << 48
 
 	// Combine both chunks with appropriate shift
-	secondValue := chunk2 >> 32
-	result = (result << (remaining2 * 4)) | secondValue
-
-	return result
+	return (result << (remaining2 << 2)) | (chunk2 >> 32)
 }
 
 // ParseEthereumAddress converts 40-character hex string to 20-byte Ethereum address.
