@@ -129,8 +129,6 @@ const (
 	RouterShardChannelBufferSize = 1 << 10 // 1,024 entry buffer for workload shard distribution channels
 )
 
-// Legacy aliases removed - all components now use explicit prefixed constants
-
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // AGGREGATOR CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
