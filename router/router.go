@@ -1094,8 +1094,8 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 		// nextHandle: zero value is fine
 	}
 
-	// Create ring56 buffer locally (no global visibility yet)
-	ring := ring56.New(constants.RouterDefaultRingSize)
+	// Dereference and copy the object directly so it owns it locally on stack
+	ownedRing := *ring56.New(constants.RouterDefaultRingSize)
 
 	// Perform zero-fragmentation initialization of all queue structures
 	initializeArbitrageQueues(engine, allShards)
@@ -1118,12 +1118,12 @@ func launchArbitrageWorker(coreID, forwardCoreCount int, shardInput <-chan PairW
 	// Register this engine and ring in the global arrays for message routing
 	// This is the moment the core becomes globally visible
 	Router.coreEngines[coreID] = engine
-	Router.coreRings[coreID] = ring
+	Router.coreRings[coreID] = &ownedRing
 
 	// Cache the ring buffer reference immediately after registration
 	// This eliminates array lookups and bounds checking in hot loops
 	// CRITICAL: Must happen before signaling ready to avoid race conditions
-	hotRing := Router.coreRings[coreID]
+	hotRing := &ownedRing
 
 	//═══════════════════════════════════════════════════════════════════════════════════════
 	// PHASE 4: SIGNAL COMPLETE READINESS
