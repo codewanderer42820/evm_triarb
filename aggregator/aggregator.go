@@ -258,10 +258,15 @@ func (agg *AggregatorState) reset() {
 		arenaPtr[i] = 0
 	}
 
-	// Clear priority queues
+	// Clear priority queues (preserve arena field at index 2)
 	for i := 0; i < constants.AggregatorMaxStrata; i++ {
 		qPtr := (*[144]uint64)(unsafe.Pointer(&agg.queues[i]))
-		for j := 0; j < 144; j++ {
+		// Clear fields 0-1 (summary, size)
+		qPtr[0] = 0
+		qPtr[1] = 0
+		// Skip index 2 (arena field)
+		// Clear remaining fields 3-143
+		for j := 3; j < 144; j++ {
 			qPtr[j] = 0
 		}
 	}
