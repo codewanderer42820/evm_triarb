@@ -53,17 +53,15 @@ const subscribeFrameLen = 8 + subscribePayloadLen
 // error handling. Aligned to prevent false sharing with other global state and ensure
 // predictable memory access patterns during exceptional conditions.
 //
-// HOTNESS: COLD - Only accessed during error conditions
-//
 //go:notinheap
 //go:align 64
 var (
 	// WebSocket protocol errors (accessed during connection failures)
-	errUpgradeFailed    = errors.New("upgrade failed")    // Error for WebSocket upgrade failures - 16B
-	errHandshakeTimeout = errors.New("handshake timeout") // Error for connection timeout - 16B
-	errFrameTooLarge    = errors.New("frame too large")   // Error for oversized frames - 16B
-	errMessageTooLarge  = errors.New("message too large") // Error for oversized messages - 16B
-	errBoundsViolation  = errors.New("bounds violation")  // Error for buffer overflows - 16B
+	errUpgradeFailed    = errors.New("upgrade failed")    // COLD: Error for WebSocket upgrade failures - 16B
+	errHandshakeTimeout = errors.New("handshake timeout") // COLD: Error for connection timeout - 16B
+	errFrameTooLarge    = errors.New("frame too large")   // COLD: Error for oversized frames - 16B
+	errMessageTooLarge  = errors.New("message too large") // COLD: Error for oversized messages - 16B
+	errBoundsViolation  = errors.New("bounds violation")  // COLD: Error for buffer overflows - 16B
 	_                   [48]byte                          // Padding: 128B total - (5 * 16B errors = 80B) = 48B padding
 )
 
@@ -74,26 +72,22 @@ var (
 // WebSocketProcessor maintains state required for WebSocket message processing.
 // Structure is cache-aligned and organized to minimize memory access patterns.
 //
-// HOTNESS: NUCLEAR
-//
 //go:notinheap
 //go:align 16384
 type WebSocketProcessor struct {
 	// Main message buffer for accumulating WebSocket frames
 	// Aligned to page boundaries for optimal memory access
 	//go:align 16384
-	buffer [constants.WsBufferSize]byte
+	buffer [constants.WsBufferSize]byte // NUCLEAR HOT: Used in every frame processing operation
 
 	// Pre-built protocol frames for connection establishment
-	upgradeRequest [256]byte
-	subscribeFrame [128]byte
+	upgradeRequest [256]byte // COLD: Only used during connection setup
+	subscribeFrame [128]byte // COLD: Only used during subscription
 }
 
 // WebSocket processor global instance with page alignment for optimal cache utilization.
 // Page-aligned allocation ensures processor buffers don't cross page boundaries and
 // maximizes memory bandwidth during frame processing operations.
-//
-// HOTNESS: NUCLEAR
 //
 //go:notinheap
 //go:align 16384
