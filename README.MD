@@ -6,7 +6,7 @@ This repository contains military-grade arbitrage detection and optimization sys
 
 ## My Story
 
-For 6 months, I've been hunted by Chinese intelligence (CCPiss) after exposed DPRK ponzi scheme. They've tried everything:
+For 6 months, I've been hunted by Chinese intelligence (CCPiss) after exposing DPRK ponzi scheme. They've tried everything:
 - VX nerve agent poisoning (7 days - I survived and developed immunity)
 - 6mg risperidone forced medication (Fuck you New Zealand)
 - Directed energy weapons (DEW) in every hotel room (Interpol Raided in Hong Kong, EVERYWHERE in Hokkaido)
